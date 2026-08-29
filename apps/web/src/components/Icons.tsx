@@ -666,6 +666,20 @@ export const OpenCodeIcon: Icon = (props) => (
   </svg>
 );
 
+/** Geometric π glyph for the Pi coding agent. */
+export const PiIcon: Icon = ({ className, ...props }) => (
+  <svg
+    {...props}
+    viewBox="0 0 24 24"
+    fill="none"
+    className={cn("fill-[#0F0F0F] dark:fill-[#F5F5F5]", className)}
+  >
+    <path d="M3 6.5h18v2.8H3V6.5Z" />
+    <path d="M6.7 9.3h2.9v10.2H6.7V9.3Z" />
+    <path d="M14.4 9.3h2.9v10.2h-2.9V9.3Z" />
+  </svg>
+);
+
 export const GithubCopilotIcon: Icon = ({ className, ...props }) => (
   <svg
     {...props}

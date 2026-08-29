@@ -59,6 +59,16 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
+  if (props.provider === "pi") {
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Path fill={mono} d="M3 6.5h18v2.8H3V6.5Z" />
+        <Path fill={mono} d="M6.7 9.3h2.9v10.2H6.7V9.3Z" />
+        <Path fill={mono} d="M14.4 9.3h2.9v10.2h-2.9V9.3Z" />
+      </Svg>
+    );
+  }
+
   // codex (and unknown drivers)
   return (
     <Svg width={size} height={size} viewBox="0 0 256 260" fill="none">

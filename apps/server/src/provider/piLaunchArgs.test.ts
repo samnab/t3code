@@ -1,0 +1,91 @@
+import { describe, expect, it } from "@effect/vitest";
+
+import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./piLaunchArgs.ts";
+
+describe("resolvePiLaunchArgs", () => {
+  it("accepts empty arguments", () => {
+    expect(resolvePiLaunchArgs("")).toEqual({ ok: true, args: [] });
+  });
+
+  it("rejects T3-controlled built-ins", () => {
+    for (const arg of ["--mode rpc", "--resume x", "--session abc", "--no-session", "--version"]) {
+      const resolved = resolvePiLaunchArgs(arg);
+      expect(resolved.ok).toBe(false);
+      if (!resolved.ok) {
+        expect(resolved.message).toMatch(/controlled by T3 Code/);
+      }
+    }
+  });
+
+  it("rejects positional prompts and single-dash flags", () => {
+    const positional = resolvePiLaunchArgs("hello world");
+    expect(positional.ok).toBe(false);
+
+    const dashFlag = resolvePiLaunchArgs("-x");
+    expect(dashFlag.ok).toBe(false);
+  });
+
+  it("splits equals-form built-in arguments into two tokens", () => {
+    const resolved = resolvePiLaunchArgs("--model=zai/glm-5 --no-skills");
+    expect(resolved).toEqual({ ok: true, args: ["--model", "zai/glm-5", "--no-skills"] });
+  });
+
+  it("requires a value for value-taking arguments", () => {
+    const resolved = resolvePiLaunchArgs("--model");
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.message).toMatch(/requires a value/);
+    }
+  });
+
+  it("leaves unknown equals-form extension flags untouched", () => {
+    const resolved = resolvePiLaunchArgs("--ext-flag=1");
+    expect(resolved).toEqual({ ok: true, args: ["--ext-flag=1"] });
+  });
+});
+
+describe("buildPiRpcLaunch", () => {
+  it("always requests rpc mode and keeps user arguments", () => {
+    const launch = buildPiRpcLaunch({
+      launchArgs: ["--no-skills"],
+      environment: {},
+    });
+    expect(launch.args).toEqual(["--mode", "rpc", "--no-skills"]);
+  });
+
+  it("marks ephemeral processes as session-less", () => {
+    const launch = buildPiRpcLaunch({ launchArgs: [], environment: {}, ephemeral: true });
+    expect(launch.args).toEqual(["--mode", "rpc", "--no-session"]);
+  });
+
+  it("appends background restrictions after user arguments", () => {
+    const launch = buildPiRpcLaunch({
+      launchArgs: ["--tools", "bash"],
+      environment: {},
+      ephemeral: true,
+      disableExtensions: true,
+      disableTools: true,
+    });
+    // Restrictions follow user args so a configured --tools cannot re-enable
+    // unattended background code.
+    expect(launch.args).toEqual([
+      "--mode",
+      "rpc",
+      "--no-session",
+      "--tools",
+      "bash",
+      "--no-extensions",
+      "--no-tools",
+    ]);
+  });
+
+  it("strips T3-owned session credentials from the child environment", () => {
+    const launch = buildPiRpcLaunch({
+      launchArgs: [],
+      environment: { PATH: "/usr/bin", T3_MCP_URL: "http://loopback", T3_MCP_BEARER: "secret" },
+    });
+    expect(launch.env.PATH).toBe("/usr/bin");
+    expect(launch.env.T3_MCP_URL).toBeUndefined();
+    expect(launch.env.T3_MCP_BEARER).toBeUndefined();
+  });
+});
