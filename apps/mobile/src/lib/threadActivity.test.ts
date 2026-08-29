@@ -16,6 +16,7 @@ import {
   buildPendingUserInputAnswers,
   buildThreadFeed,
   derivePendingApprovals,
+  derivePendingUserInputs,
   deriveThreadFeedPresentation,
   isPendingUserInputOptionSelected,
   setPendingUserInputCustomAnswer,
@@ -140,6 +141,44 @@ describe("pending user input answers", () => {
         "  Orders  ",
       ),
     ).toBe(false);
+  });
+});
+
+describe("pending user input requests", () => {
+  it("keeps free-form prompts without preset options", () => {
+    const activity = makeActivity({
+      id: EventId.make("user-input-free-form"),
+      kind: "user-input.requested",
+      summary: "User input requested",
+      createdAt: "2026-08-24T00:00:00.000Z",
+      payload: {
+        requestId: "req-user-input-free-form",
+        questions: [
+          {
+            id: "value",
+            header: "input",
+            question: "Enter a value",
+            options: [],
+          },
+        ],
+      },
+    });
+
+    expect(derivePendingUserInputs([activity])).toEqual([
+      {
+        requestId: "req-user-input-free-form",
+        createdAt: "2026-08-24T00:00:00.000Z",
+        questions: [
+          {
+            id: "value",
+            header: "input",
+            question: "Enter a value",
+            options: [],
+            multiSelect: false,
+          },
+        ],
+      },
+    ]);
   });
 });
 

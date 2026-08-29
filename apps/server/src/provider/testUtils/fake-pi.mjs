@@ -146,7 +146,7 @@ const handle = (req) => {
     case "extension_ui_response":
       if (String(req.id).startsWith("ui-")) {
         uiResponses += 1;
-        if (uiResponses === 3) {
+        if (uiResponses === 4) {
           isStreaming = false;
           send({ type: "agent_settled" });
         }
@@ -173,14 +173,34 @@ const handle = (req) => {
       if (message === "UI_ROUNDTRIP") {
         isStreaming = true;
         send({ type: "agent_start" });
-        for (const method of ["select", "input", "editor"]) {
-          send({
-            type: "extension_ui_request",
-            id: `ui-${method}`,
-            method,
-            message: `${method} question`,
-          });
-        }
+        send({
+          type: "extension_ui_request",
+          id: "ui-select",
+          method: "select",
+          title: "Choose access",
+          options: ["Allow", "Deny"],
+        });
+        send({
+          type: "extension_ui_request",
+          id: "ui-input",
+          method: "input",
+          title: "Enter a value",
+          placeholder: "Type a value",
+        });
+        send({
+          type: "extension_ui_request",
+          id: "ui-editor",
+          method: "editor",
+          title: "Edit the value",
+          prefill: "Starting value",
+        });
+        send({
+          type: "extension_ui_request",
+          id: "ui-confirm",
+          method: "confirm",
+          title: "Confirm action",
+          message: "Continue with the extension?",
+        });
         return;
       }
       if (message.includes("INTERLEAVE")) {

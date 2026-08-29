@@ -420,7 +420,7 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
-  it.live("forwards select, input, and editor answers by the emitted request id", () =>
+  it.live("preserves native extension UI details and response ids", () =>
     Effect.gen(function* () {
       const fixture = makeFixture();
       const adapter = yield* makeTestAdapter(
@@ -434,10 +434,21 @@ describe("PiAdapter", () => {
       });
       yield* adapter.sendTurn({ threadId: THREAD_ID, input: "UI_ROUNDTRIP" });
 
-      for (const [method, answer] of [
-        ["select", "Allow"],
-        ["input", "typed value"],
-        ["editor", "edited value"],
+      for (const [method, expectedQuestion, answer] of [
+        [
+          "select",
+          {
+            header: "select",
+            question: "Choose access",
+            options: [
+              { label: "Allow", description: "Allow" },
+              { label: "Deny", description: "Deny" },
+            ],
+          },
+          "Deny",
+        ],
+        ["input", { header: "input", question: "Enter a value", options: [] }, "typed value"],
+        ["editor", { header: "editor", question: "Edit the value", options: [] }, "edited value"],
       ] as const) {
         const requested = yield* collector.waitFor(
           (event) =>
@@ -446,9 +457,25 @@ describe("PiAdapter", () => {
         if (requested.type !== "user-input.requested" || requested.requestId === undefined) {
           throw new Error("Expected user input.");
         }
+        expect(requested.payload.questions[0]).toMatchObject(expectedQuestion);
         const requestId = ApprovalRequestId.make(requested.requestId);
         yield* adapter.respondToUserInput(THREAD_ID, requestId, { [requestId]: answer });
       }
+
+      const confirm = yield* collector.waitFor(
+        (event) =>
+          event.type === "request.opened" &&
+          event.payload.requestType === "exec_command_approval" &&
+          event.payload.detail === "Continue with the extension?",
+      );
+      if (confirm.type !== "request.opened" || confirm.requestId === undefined) {
+        throw new Error("Expected confirmation request.");
+      }
+      yield* adapter.respondToRequest(
+        THREAD_ID,
+        ApprovalRequestId.make(confirm.requestId),
+        "accept",
+      );
 
       yield* collector.waitFor(
         (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
@@ -457,7 +484,7 @@ describe("PiAdapter", () => {
         (line) => line.type === "extension_ui_response",
       );
       expect(responses).toEqual([
-        { type: "extension_ui_response", id: "ui-select", cancelled: false, value: "Allow" },
+        { type: "extension_ui_response", id: "ui-select", cancelled: false, value: "Deny" },
         {
           type: "extension_ui_response",
           id: "ui-input",
@@ -470,6 +497,7 @@ describe("PiAdapter", () => {
           cancelled: false,
           value: "edited value",
         },
+        { type: "extension_ui_response", id: "ui-confirm", confirmed: true },
       ]);
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),

@@ -452,6 +452,16 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         });
         return;
       }
+      const rawOptions = recordField(event, "options");
+      const options =
+        method === "select" && Array.isArray(rawOptions)
+          ? rawOptions
+              .filter(
+                (option): option is string =>
+                  typeof option === "string" && option.trim().length > 0,
+              )
+              .map((option) => ({ label: option, description: option }))
+          : [];
       yield* offerRuntimeEvent({
         ...base,
         requestId,
@@ -461,8 +471,11 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             {
               id: requestId,
               header: method,
-              question: recordString(event, "message") ?? "Pi extension input requested.",
-              options: [],
+              question:
+                recordString(event, "title") ??
+                recordString(event, "message") ??
+                "Pi extension input requested.",
+              options,
             },
           ],
         },
