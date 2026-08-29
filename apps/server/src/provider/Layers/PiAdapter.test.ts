@@ -336,6 +336,57 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
+  it.live("cancels a pending native extension dialog when an interrupted turn settles", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      const { events } = collector;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      const started = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "UI_WAIT_FOR_ABORT" });
+      const opened = yield* collector.waitFor(
+        (event) => event.type === "request.opened" && event.payload.detail === "Keep waiting?",
+      );
+      if (opened.type !== "request.opened" || opened.requestId === undefined) {
+        throw new Error("Expected confirmation request.");
+      }
+      const requestId = ApprovalRequestId.make(opened.requestId);
+
+      // The fake acknowledges abort only after receiving this dialog cancellation.
+      yield* adapter.interruptTurn(THREAD_ID, started.turnId);
+      yield* collector.waitFor(
+        (event) => event.type === "turn.aborted" && payloadOf(event).reason === "interrupted",
+      );
+
+      expect(
+        readLogLines(fixture).filter(
+          (line) => line.type === "extension_ui_response" && line.id === "ui-abort",
+        ),
+      ).toEqual([{ type: "extension_ui_response", id: "ui-abort", cancelled: true }]);
+      const resolved = events.filter(
+        (event) => event.type === "request.resolved" && event.requestId === opened.requestId,
+      );
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0]).toMatchObject({
+        type: "request.resolved",
+        requestId: opened.requestId,
+        payload: { requestType: "unknown", decision: "cancel" },
+      });
+      expect(
+        Exit.isFailure(
+          yield* Effect.exit(adapter.respondToRequest(THREAD_ID, requestId, "cancel")),
+        ),
+      ).toBe(true);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
   it.live("settles a command-only prompt through the idle probe without agent events", () =>
     Effect.gen(function* () {
       const fixture = makeFixture();

@@ -283,6 +283,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         const interrupted = turn.interrupted;
         const failure = interrupted ? null : turn.failure;
         for (const [, pending] of ctx.pendingExtensionUi) {
+          yield* ctx.connection
+            .send({
+              type: "extension_ui_response",
+              id: pending.nativeRequestId,
+              cancelled: true,
+            })
+            .pipe(Effect.ignore);
           const base = yield* makeEventBase(ctx.session);
           yield* offerRuntimeEvent({
             ...base,

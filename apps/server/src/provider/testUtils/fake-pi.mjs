@@ -40,6 +40,8 @@ let buffer = "";
 let interleavedRun = false;
 let isStreaming = false;
 let uiResponses = 0;
+let waitForExtensionCancellation = false;
+let pendingAbortRequest;
 const respond = (id, data) => send({ type: "response", id, success: true, data });
 const reject = (req, error) =>
   send({ type: "response", id: req.id, command: req.type, success: false, error });
@@ -141,9 +143,19 @@ const handle = (req) => {
     case "abort":
       isStreaming = false;
       send({ type: "agent_settled", aborted: true });
+      if (waitForExtensionCancellation) {
+        pendingAbortRequest = req;
+        return;
+      }
       respond(req.id, {});
       return;
     case "extension_ui_response":
+      if (req.id === "ui-abort" && req.cancelled === true && pendingAbortRequest !== undefined) {
+        respond(pendingAbortRequest.id, {});
+        waitForExtensionCancellation = false;
+        pendingAbortRequest = undefined;
+        return;
+      }
       if (String(req.id).startsWith("ui-")) {
         uiResponses += 1;
         if (uiResponses === 4) {
@@ -168,6 +180,19 @@ const handle = (req) => {
       if (message === "WAIT_FOR_ABORT") {
         isStreaming = true;
         send({ type: "agent_start" });
+        return;
+      }
+      if (message === "UI_WAIT_FOR_ABORT") {
+        isStreaming = true;
+        waitForExtensionCancellation = true;
+        send({ type: "agent_start" });
+        send({
+          type: "extension_ui_request",
+          id: "ui-abort",
+          method: "confirm",
+          title: "Confirm action",
+          message: "Keep waiting?",
+        });
         return;
       }
       if (message === "UI_ROUNDTRIP") {
