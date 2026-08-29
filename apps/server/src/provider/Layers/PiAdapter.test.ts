@@ -268,6 +268,93 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
+  it.live("hoists $skill chips into the leading /skill: command", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const events = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "please $research the API" });
+      yield* waitFor(
+        () =>
+          events.some(
+            (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
+          ),
+        "skill-chip turn.completed",
+      );
+      // Pi expands skills only as leading /skill:name commands, so the chip
+      // the composer inserts must be hoisted before the prompt reaches Pi.
+      const prompts = readLogLines(fixture).filter((line) => line.type === "prompt");
+      expect(prompts).toHaveLength(1);
+      expect((prompts[0] as { message?: string } | undefined)?.message).toBe(
+        "/skill:research please the API",
+      );
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("keeps stream items isolated across concurrent sessions", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const events = yield* collectEvents(adapter.streamEvents);
+      const threadA = ThreadId.make("pi-adapter-test-thread-a");
+      const threadB = ThreadId.make("pi-adapter-test-thread-b");
+      yield* adapter.startSession({
+        threadId: threadA,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.startSession({
+        threadId: threadB,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: threadA, input: "INTERLEAVE slow turn" });
+      // A's first delta creates its stream item; B's turn start must not
+      // clear A's in-flight item state.
+      yield* waitFor(
+        () => events.some((event) => event.type === "item.started" && event.threadId === threadA),
+        "A item.started",
+      );
+      yield* adapter.sendTurn({ threadId: threadB, input: "fast turn" });
+      yield* waitFor(
+        () =>
+          events.some(
+            (event) =>
+              event.type === "turn.completed" &&
+              event.threadId === threadA &&
+              payloadOf(event).state === "completed",
+          ),
+        "A turn.completed",
+      );
+      yield* waitFor(
+        () =>
+          events.some(
+            (event) =>
+              event.type === "turn.completed" &&
+              event.threadId === threadB &&
+              payloadOf(event).state === "completed",
+          ),
+        "B turn.completed",
+      );
+      yield* adapter.stopSession(threadA);
+      yield* adapter.stopSession(threadB);
+      const startedItems = events.filter(
+        (event) => event.type === "item.started" && event.threadId === threadA,
+      );
+      expect(startedItems).toHaveLength(1);
+    }).pipe(provideTestEnv),
+  );
+
   it.live("fails a rejected prompt instead of faking success", () =>
     Effect.gen(function* () {
       const fixture = makeFixture();

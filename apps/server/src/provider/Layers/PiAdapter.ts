@@ -68,6 +68,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "../piLaunchArgs.ts";
+import { expandPiSkillReference, parsePiDiscoveredCommands } from "../PiCommands.ts";
 import {
   makePiRpcConnection,
   parsePiModelSlug,
@@ -87,6 +88,12 @@ const PROVIDER = ProviderDriverKind.make("pi");
  * reported. Opaque to the rest of T3; only this adapter decodes it.
  */
 const PI_RESUME_VERSION = 1 as const;
+
+type StreamItemKind = "assistant_message" | "reasoning";
+type ToolItemKind = "command_execution" | "dynamic_tool_call";
+
+/** assistant/reasoning streaming items keyed by `messageId:contentIndex`. */
+type StreamItemsMap = Map<string, { itemId: string; kind: StreamItemKind; started: boolean }>;
 
 interface PiResumeCursor {
   readonly sessionPath: string;
@@ -133,6 +140,9 @@ interface PiSessionContext {
   readonly scope: Scope.Closeable;
   readonly connection: PiRpcConnection;
   readonly pumpFiber: Fiber.Fiber<void, never>;
+  /** Skill names discovered from the live session; `$name` chips hoist to them. */
+  readonly skillNames: ReadonlySet<string>;
+  readonly streamItems: StreamItemsMap;
   session: ProviderSession;
   activeTurn: ActivePiTurn | null;
   readonly pendingExtensionUi: Map<ApprovalRequestId, PendingPiExtensionUi>;
@@ -216,9 +226,6 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       });
 
     // ── event emission ──────────────────────────────────────────
-
-    type StreamItemKind = "assistant_message" | "reasoning";
-    type ToolItemKind = "command_execution" | "dynamic_tool_call";
 
     const emitItem = Effect.fnUntraced(function* (input: {
       readonly ctx: PiSessionContext;
@@ -367,12 +374,6 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
 
     // ── event pump ──────────────────────────────────────────────
 
-    /** assistant/reasoning streaming items keyed by `messageId:contentIndex`. */
-    const streamItems = new Map<
-      string,
-      { itemId: string; kind: StreamItemKind; started: boolean }
-    >();
-
     const toolItemTitle = (event: PiRpcRecord): string => {
       const toolName = recordString(event, "toolName") ?? "tool";
       const args = recordField(event, "args");
@@ -470,7 +471,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       ctx: PiSessionContext,
       turn: ActivePiTurn,
     ) {
-      for (const [, item] of streamItems) {
+      for (const [, item] of ctx.streamItems) {
         if (item.started) {
           yield* emitItem({
             ctx,
@@ -482,7 +483,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           });
         }
       }
-      streamItems.clear();
+      ctx.streamItems.clear();
     });
 
     /**
@@ -517,10 +518,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 const messageId = recordString(delta, "messageId");
                 if (messageId === undefined) return;
                 const key = `${messageId}:${contentIndex}`;
-                let item = streamItems.get(key);
+                let item = ctx.streamItems.get(key);
                 if (item === undefined) {
                   item = { itemId: `msg:${key}`, kind, started: false };
-                  streamItems.set(key, item);
+                  ctx.streamItems.set(key, item);
                 }
                 if (!item.started) {
                   item.started = true;
@@ -681,6 +682,15 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         const stateData = yield* connection
           .request({ type: "get_state" })
           .pipe(Effect.mapError((cause) => adapterError(input.threadId, "get_state", cause)));
+        // Skills drive the `$name` chip hoisting in sendTurn. Commands are
+        // optional so an old binary or a wedged extension cannot fail the
+        // start; chips then pass through verbatim, as they did before.
+        const commandsData = yield* connection
+          .request({ type: "get_commands" })
+          .pipe(Effect.orElseSucceed(() => undefined));
+        const skillNames = new Set(
+          parsePiDiscoveredCommands(commandsData).skills.map((skill) => skill.name),
+        );
         const nativeSessionPath =
           recordString(stateData, "sessionFile") ?? recordString(stateData, "sessionId");
         if (nativeSessionPath === undefined) {
@@ -724,6 +734,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           scope,
           connection,
           pumpFiber,
+          skillNames,
+          streamItems: new Map(),
           session,
           activeTurn: null,
           pendingExtensionUi: new Map(),
@@ -745,8 +757,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       Effect.gen(function* () {
         const selectionModel = String(modelSelection.model);
         if (selectionModel === ctx.session.model) return;
-        // `modelSelection.model` may carry an arbitrary slug; an unusable one
-        // is rejected instead of silently leaving Pi on its default model.
+        // `modelSelection.model` may carry an arbitrary slug (for example a
+        // model picked for another driver on this thread); an unusable one is
+        // ignored and Pi stays on its configured default model.
         const parsed = selectionModel === "default" ? null : parsePiModelSlug(selectionModel);
         if (parsed === null) return;
         yield* ctx.connection
@@ -765,12 +778,15 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             issue: "Pi turns require non-empty input text.",
           });
         }
+        // T3's composer inserts skills as `$name` chips; Pi expands skills
+        // only through leading `/skill:name` commands, so hoist them here.
+        const promptText = expandPiSkillReference(input.input, ctx.skillNames);
         // A sendTurn while a turn is active is a steer: the message queues on
         // Pi's side and lands inside the active run. No new turn starts.
         const activeTurn = ctx.activeTurn;
         if (activeTurn !== null) {
           yield* ctx.connection
-            .send({ type: "prompt", message: input.input, streamingBehavior: "steer" })
+            .send({ type: "prompt", message: promptText, streamingBehavior: "steer" })
             .pipe(Effect.mapError((cause) => adapterError(input.threadId, "steer", cause)));
           activeTurn.settleProbeGeneration += 1;
           return {
@@ -787,12 +803,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           turnId,
           interrupted: false,
           sawAgentActivity: false,
-          mayBeCommandOnly: input.input.trimStart().startsWith("/"),
+          mayBeCommandOnly: promptText.trimStart().startsWith("/"),
           settleProbeGeneration: 0,
           failure: null,
         };
         ctx.activeTurn = turn;
-        streamItems.clear();
+        ctx.streamItems.clear();
         yield* updateSession(ctx, { status: "running", activeTurnId: turnId });
         const base = yield* makeEventBase(ctx.session);
         yield* offerRuntimeEvent({
@@ -806,7 +822,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         // dialogs indefinitely. Rejections arrive later as id-less response
         // records handled by the event pump.
         yield* ctx.connection
-          .send({ type: "prompt", message: input.input })
+          .send({ type: "prompt", message: promptText })
           .pipe(Effect.mapError((cause) => adapterError(input.threadId, "prompt", cause)));
         // A command-only prompt may never emit agent events; arm the settle
         // probe up front. The probe's generation and activity checks keep it

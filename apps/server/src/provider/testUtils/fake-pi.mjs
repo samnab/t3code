@@ -95,6 +95,35 @@ const handle = (req) => {
       }
       respond(req.id, {});
       if (message.startsWith("/only")) return; // command-only: no agent events
+      if (message.includes("INTERLEAVE")) {
+        // Two delta bursts so a second session's turn starts between them.
+        setTimeout(() => {
+          send({ type: "agent_start" });
+          send({
+            type: "message_update",
+            assistantMessageEvent: {
+              type: "text_delta",
+              messageId: "msg-1",
+              contentIndex: 0,
+              delta: "A ",
+            },
+          });
+        }, 50);
+        setTimeout(() => {
+          send({
+            type: "message_update",
+            assistantMessageEvent: {
+              type: "text_delta",
+              messageId: "msg-1",
+              contentIndex: 0,
+              delta: "done",
+            },
+          });
+          send({ type: "message_end", message: { role: "assistant", stopReason: "stop" } });
+          send({ type: "agent_settled" });
+        }, 900);
+        return;
+      }
       const delay = Number(process.env.FAKE_PI_SLOW_PROMPT_MS ?? "10");
       setTimeout(() => {
         const messageId = "msg-1";
