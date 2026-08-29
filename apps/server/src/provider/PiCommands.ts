@@ -13,6 +13,7 @@ import * as Predicate from "effect/Predicate";
 export interface PiDiscoveredCommands {
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
+  readonly extensionCommandNames: ReadonlyArray<string>;
 }
 
 function normalizePiSkillScope(scope: string | undefined): string | undefined {
@@ -26,9 +27,12 @@ function normalizePiSkillScope(scope: string | undefined): string | undefined {
 /** Maps Pi's `get_commands` payload to T3's shared command and skill surfaces. */
 export function parsePiDiscoveredCommands(data: unknown): PiDiscoveredCommands {
   const commands = recordField(data, "commands");
-  if (!Array.isArray(commands)) return { slashCommands: [], skills: [] };
+  if (!Array.isArray(commands)) {
+    return { slashCommands: [], skills: [], extensionCommandNames: [] };
+  }
   const slashCommands: Array<ServerProviderSlashCommand> = [];
   const skills: Array<ServerProviderSkill> = [];
+  const extensionCommandNames: string[] = [];
   for (const command of commands) {
     const commandName = recordString(command, "name");
     if (commandName === undefined || commandName.length === 0) continue;
@@ -68,8 +72,11 @@ export function parsePiDiscoveredCommands(data: unknown): PiDiscoveredCommands {
       name: commandName,
       ...(description === undefined ? {} : { description }),
     });
+    if (recordString(command, "source") === "extension") {
+      extensionCommandNames.push(commandName);
+    }
   }
-  return { slashCommands, skills };
+  return { slashCommands, skills, extensionCommandNames };
 }
 
 /**

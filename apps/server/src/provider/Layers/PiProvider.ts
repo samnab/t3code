@@ -128,6 +128,7 @@ const discoverPiViaRpc = (
     const launch = buildPiRpcLaunch({
       launchArgs,
       environment,
+      // Discovery should not create a durable Pi session.
       ephemeral: true,
     });
     const connection = yield* makePiRpcConnection({
@@ -145,11 +146,13 @@ const discoverPiViaRpc = (
       modelsData,
       recordString(stateData, "thinkingLevel"),
     );
-    const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
+    const { slashCommands, skills, extensionCommandNames } =
+      parsePiDiscoveredCommands(commandsData);
     return {
       models: discoveredModels,
       slashCommands,
       skills,
+      extensionCommandNames,
       authenticated: discoveredModels.length > 0,
     } satisfies PiDiscovery;
   }).pipe(Effect.scoped);

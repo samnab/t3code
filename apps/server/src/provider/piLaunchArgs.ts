@@ -171,14 +171,8 @@ const T3_SESSION_ENV_KEYS = ["T3_MCP_URL", "T3_MCP_BEARER", "T3_PI_RUNTIME_MODE"
 export interface BuildPiRpcLaunchInput {
   readonly launchArgs: ReadonlyArray<string>;
   readonly environment: NodeJS.ProcessEnv;
-  /** Ephemeral one-shot process (discovery, background text generation). */
+  /** Adds `--no-session`; independent of extension and tool loading. */
   readonly ephemeral?: boolean;
-  /**
-   * No user is present on ephemeral background processes to answer an
-   * extension dialog, so extensions and tools are disabled there only.
-   * Real sessions never pass this: the user's extensions and tools must
-   * load exactly as they do in the `pi` TUI.
-   */
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
 }

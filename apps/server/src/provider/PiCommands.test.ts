@@ -6,7 +6,7 @@ describe("parsePiDiscoveredCommands", () => {
   it("maps slash commands and skills from a get_commands payload", () => {
     const parsed = parsePiDiscoveredCommands({
       commands: [
-        { name: "review", description: "Review code" },
+        { name: "review", description: "Review code", source: "extension" },
         {
           name: "skill:research",
           source: "skill",
@@ -16,6 +16,7 @@ describe("parsePiDiscoveredCommands", () => {
       ],
     });
     expect(parsed.slashCommands).toEqual([{ name: "review", description: "Review code" }]);
+    expect(parsed.extensionCommandNames).toEqual(["review"]);
     expect(parsed.skills).toEqual([
       {
         name: "research",
@@ -28,10 +29,15 @@ describe("parsePiDiscoveredCommands", () => {
   });
 
   it("tolerates malformed payloads", () => {
-    expect(parsePiDiscoveredCommands(undefined)).toEqual({ slashCommands: [], skills: [] });
+    expect(parsePiDiscoveredCommands(undefined)).toEqual({
+      slashCommands: [],
+      skills: [],
+      extensionCommandNames: [],
+    });
     expect(parsePiDiscoveredCommands({ commands: "nope" })).toEqual({
       slashCommands: [],
       skills: [],
+      extensionCommandNames: [],
     });
   });
 });

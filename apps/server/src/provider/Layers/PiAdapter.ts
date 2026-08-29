@@ -122,7 +122,7 @@ interface ActivePiTurn {
    * `agent_settled`; an idle probe settles the turn instead.
    */
   sawAgentActivity: boolean;
-  /** Only slash-command prompts can complete without starting an agent run. */
+  /** Only discovered extension commands can complete without starting an agent run. */
   readonly mayBeCommandOnly: boolean;
   /** Invalidates idle snapshots when new work starts after a settle probe. */
   settleProbeGeneration: number;
@@ -142,6 +142,8 @@ interface PiSessionContext {
   readonly pumpFiber: Fiber.Fiber<void, never>;
   /** Skill names discovered from the live session; `$name` chips hoist to them. */
   readonly skillNames: ReadonlySet<string>;
+  /** Extension commands are the only slash commands that bypass agent processing. */
+  readonly extensionCommandNames: ReadonlySet<string>;
   readonly streamItems: StreamItemsMap;
   session: ProviderSession;
   activeTurn: ActivePiTurn | null;
@@ -584,15 +586,23 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 // Id-less response records are the deferred ack of a
                 // fire-and-forget prompt.
                 if (
-                  event["success"] === false &&
-                  turn !== null &&
-                  typeof event["id"] !== "string" &&
-                  recordString(event, "command") === "prompt"
+                  turn === null ||
+                  typeof event["id"] === "string" ||
+                  recordString(event, "command") !== "prompt"
                 ) {
+                  return;
+                }
+                if (event["success"] === false) {
                   turn.failure = {
                     message: recordString(event, "error") ?? "Pi rejected the prompt.",
                   };
                   yield* finalizeTurn(ctx, turn);
+                  return;
+                }
+                // Pi emits success only after an extension command handler has
+                // returned. An idle snapshot before this ack is not terminal.
+                if (event["success"] === true && turn.mayBeCommandOnly) {
+                  yield* scheduleSettleProbe(ctx, turn, false).pipe(Effect.forkIn(ctx.scope));
                 }
                 return;
               }
@@ -649,106 +659,115 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           environment,
         });
         const scope = yield* Scope.make("sequential");
-        const connection = yield* makePiRpcConnection({
-          command: piSettings.binaryPath || "pi",
-          args: launch.args,
-          cwd: input.cwd ?? serverConfig.cwd,
-          env: launch.env,
-        }).pipe(
-          Effect.mapError((cause) => adapterError(input.threadId, "spawn", cause)),
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-          Effect.provideService(Scope.Scope, scope),
-        );
-        const cleanupSpawned = Scope.close(scope, Exit.void).pipe(Effect.ignore);
-        const resume = parseResumeCursor(input.resumeCursor);
-        if (resume !== undefined) {
-          // `switch_session` can be vetoed by a `session_before_switch`
-          // extension handler; proceeding would silently adopt whatever
-          // session is active and write the wrong thread's turns into it.
-          const switchData = yield* connection
-            .request({ type: "switch_session", sessionPath: resume.sessionPath })
-            .pipe(
-              Effect.mapError((cause) => adapterError(input.threadId, "switch_session", cause)),
-            );
-          if (recordField(switchData, "cancelled") === true) {
-            yield* cleanupSpawned;
+        return yield* Effect.gen(function* () {
+          const connection = yield* makePiRpcConnection({
+            command: piSettings.binaryPath || "pi",
+            args: launch.args,
+            cwd: input.cwd ?? serverConfig.cwd,
+            env: launch.env,
+          }).pipe(
+            Effect.mapError((cause) => adapterError(input.threadId, "spawn", cause)),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.provideService(Scope.Scope, scope),
+          );
+          const resume = parseResumeCursor(input.resumeCursor);
+          if (resume !== undefined) {
+            // `switch_session` can be vetoed by a `session_before_switch`
+            // extension handler; proceeding would silently adopt whatever
+            // session is active and write the wrong thread's turns into it.
+            const switchData = yield* connection
+              .request({ type: "switch_session", sessionPath: resume.sessionPath })
+              .pipe(
+                Effect.mapError((cause) => adapterError(input.threadId, "switch_session", cause)),
+              );
+            if (recordField(switchData, "cancelled") === true) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "switch_session",
+                detail: "A Pi extension cancelled the session switch.",
+              });
+            }
+          }
+          const stateData = yield* connection
+            .request({ type: "get_state" })
+            .pipe(Effect.mapError((cause) => adapterError(input.threadId, "get_state", cause)));
+          // Skills drive `$name` hoisting; extension command names identify
+          // the only prompts that can finish without an agent run.
+          const commandsData = yield* connection
+            .request({ type: "get_commands" })
+            .pipe(Effect.orElseSucceed(() => undefined));
+          const discoveredCommands = parsePiDiscoveredCommands(commandsData);
+          const skillNames = new Set(discoveredCommands.skills.map((skill) => skill.name));
+          const extensionCommandNames = new Set(discoveredCommands.extensionCommandNames);
+          const nativeSessionPath =
+            recordString(stateData, "sessionFile") ?? recordString(stateData, "sessionId");
+          if (nativeSessionPath === undefined) {
             return yield* new ProviderAdapterRequestError({
               provider: PROVIDER,
-              method: "switch_session",
-              detail: "A Pi extension cancelled the session switch.",
+              method: "get_state",
+              detail: "get_state returned neither sessionFile nor sessionId.",
             });
           }
-        }
-        const stateData = yield* connection
-          .request({ type: "get_state" })
-          .pipe(Effect.mapError((cause) => adapterError(input.threadId, "get_state", cause)));
-        // Skills drive the `$name` chip hoisting in sendTurn. Commands are
-        // optional so an old binary or a wedged extension cannot fail the
-        // start; chips then pass through verbatim, as they did before.
-        const commandsData = yield* connection
-          .request({ type: "get_commands" })
-          .pipe(Effect.orElseSucceed(() => undefined));
-        const skillNames = new Set(
-          parsePiDiscoveredCommands(commandsData).skills.map((skill) => skill.name),
-        );
-        const nativeSessionPath =
-          recordString(stateData, "sessionFile") ?? recordString(stateData, "sessionId");
-        if (nativeSessionPath === undefined) {
-          yield* cleanupSpawned;
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "get_state",
-            detail: "get_state returned neither sessionFile nor sessionId.",
-          });
-        }
-        let model: string | undefined;
-        if (input.modelSelection !== undefined) {
-          const selectionModel = String(input.modelSelection.model);
-          const parsed = selectionModel === "default" ? null : parsePiModelSlug(selectionModel);
-          if (parsed !== null) {
-            yield* connection
-              .request({ type: "set_model", provider: parsed.provider, modelId: parsed.modelId })
-              .pipe(Effect.mapError((cause) => adapterError(input.threadId, "set_model", cause)));
-            model = selectionModel;
+          let model: string | undefined;
+          if (input.modelSelection !== undefined) {
+            const selectionModel = String(input.modelSelection.model);
+            const parsed = selectionModel === "default" ? null : parsePiModelSlug(selectionModel);
+            if (parsed !== null) {
+              yield* connection
+                .request({ type: "set_model", provider: parsed.provider, modelId: parsed.modelId })
+                .pipe(Effect.mapError((cause) => adapterError(input.threadId, "set_model", cause)));
+              model = selectionModel;
+            }
           }
-        }
-        const now = yield* nowIso;
-        const session: ProviderSession = {
-          provider: PROVIDER,
-          ...(boundInstanceId !== undefined ? { providerInstanceId: boundInstanceId } : {}),
-          status: "ready",
-          runtimeMode: input.runtimeMode,
-          ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
-          ...(model !== undefined ? { model } : {}),
-          threadId: input.threadId,
-          resumeCursor: encodeResumeCursor(nativeSessionPath),
-          createdAt: now,
-          updatedAt: now,
-        };
-        const pumpFiber = yield* pumpEvents({
-          threadId: input.threadId,
-          connection,
-        }).pipe(Effect.forkIn(scope));
-        const ctx: PiSessionContext = {
-          threadId: input.threadId,
-          scope,
-          connection,
-          pumpFiber,
-          skillNames,
-          streamItems: new Map(),
-          session,
-          activeTurn: null,
-          pendingExtensionUi: new Map(),
-          nativeSessionPath,
-        };
-        sessions.set(input.threadId, ctx);
-        const base = yield* makeEventBase(session);
-        yield* offerRuntimeEvent({
-          ...base,
-          type: "session.started",
-          payload: resume !== undefined ? { resume: encodeResumeCursor(nativeSessionPath) } : {},
-        });
-        return session;
+          const now = yield* nowIso;
+          const session: ProviderSession = {
+            provider: PROVIDER,
+            ...(boundInstanceId !== undefined ? { providerInstanceId: boundInstanceId } : {}),
+            status: "ready",
+            runtimeMode: input.runtimeMode,
+            ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+            ...(model !== undefined ? { model } : {}),
+            threadId: input.threadId,
+            resumeCursor: encodeResumeCursor(nativeSessionPath),
+            createdAt: now,
+            updatedAt: now,
+          };
+          const pumpFiber = yield* pumpEvents({
+            threadId: input.threadId,
+            connection,
+          }).pipe(Effect.forkIn(scope));
+          const ctx: PiSessionContext = {
+            threadId: input.threadId,
+            scope,
+            connection,
+            pumpFiber,
+            skillNames,
+            extensionCommandNames,
+            streamItems: new Map(),
+            session,
+            activeTurn: null,
+            pendingExtensionUi: new Map(),
+            nativeSessionPath,
+          };
+          sessions.set(input.threadId, ctx);
+          const base = yield* makeEventBase(session);
+          yield* offerRuntimeEvent({
+            ...base,
+            type: "session.started",
+            payload: resume !== undefined ? { resume: encodeResumeCursor(nativeSessionPath) } : {},
+          });
+          return session;
+        }).pipe(
+          Effect.onExit((exit) =>
+            Exit.isSuccess(exit)
+              ? Effect.void
+              : Effect.gen(function* () {
+                  const ctx = sessions.get(input.threadId);
+                  if (ctx?.scope === scope) sessions.delete(input.threadId);
+                  yield* Scope.close(scope, Exit.void).pipe(Effect.ignore);
+                }),
+          ),
+        );
       });
 
     // ── turns ───────────────────────────────────────────────────
@@ -799,11 +818,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           yield* applyModelSelection(ctx, input.modelSelection);
         }
         const turnId = TurnId.make(yield* nextUuid);
+        const commandName = input.input.trimStart().match(/^\/([^\s]+)/)?.[1];
         const turn: ActivePiTurn = {
           turnId,
           interrupted: false,
           sawAgentActivity: false,
-          mayBeCommandOnly: promptText.trimStart().startsWith("/"),
+          mayBeCommandOnly: commandName !== undefined && ctx.extensionCommandNames.has(commandName),
           settleProbeGeneration: 0,
           failure: null,
         };
@@ -824,12 +844,6 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         yield* ctx.connection
           .send({ type: "prompt", message: promptText })
           .pipe(Effect.mapError((cause) => adapterError(input.threadId, "prompt", cause)));
-        // A command-only prompt may never emit agent events; arm the settle
-        // probe up front. The probe's generation and activity checks keep it
-        // harmless when agent activity follows.
-        if (turn.mayBeCommandOnly) {
-          yield* scheduleSettleProbe(ctx, turn, false).pipe(Effect.forkIn(ctx.scope));
-        }
         return {
           threadId: input.threadId,
           turnId,
@@ -853,7 +867,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const respondToExtensionUi = (
       threadId: ThreadId,
       requestId: ApprovalRequestId,
-      payload: (nativeRequestId: string) => PiRpcRecord,
+      payload: (pending: PendingPiExtensionUi) => PiRpcRecord,
     ) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
@@ -867,7 +881,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         }
         ctx.pendingExtensionUi.delete(requestId);
         yield* ctx.connection
-          .send(payload(pending.nativeRequestId))
+          .send(payload(pending))
           .pipe(Effect.mapError((cause) => adapterError(threadId, "extension_ui_response", cause)));
         return pending;
       });
@@ -878,12 +892,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       decision: ProviderApprovalDecision,
     ) =>
       Effect.gen(function* () {
-        const pending = yield* respondToExtensionUi(threadId, requestId, (nativeRequestId) => {
+        const pending = yield* respondToExtensionUi(threadId, requestId, (request) => {
           const confirmed =
             decision === "accept" || decision === "acceptForSession" || decision === "acceptAlways";
           return {
             type: "extension_ui_response",
-            id: nativeRequestId,
+            id: request.nativeRequestId,
             confirmed,
           };
         });
@@ -903,11 +917,11 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       answers: ProviderUserInputAnswers,
     ) =>
       Effect.gen(function* () {
-        const pending = yield* respondToExtensionUi(threadId, requestId, (nativeRequestId) => {
-          const answer = answers[nativeRequestId];
+        const pending = yield* respondToExtensionUi(threadId, requestId, (request) => {
+          const answer = answers[request.requestId];
           return {
             type: "extension_ui_response",
-            id: nativeRequestId,
+            id: request.nativeRequestId,
             cancelled: answer === undefined,
             ...(answer !== undefined ? { value: answer } : {}),
           };
@@ -946,11 +960,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         yield* stopSessionInternal(ctx);
       });
 
-    const stopAll = Effect.forEach(Array.from(sessions.values()), stopSessionInternal, {
-      discard: true,
-    });
+    const stopAll = () =>
+      Effect.forEach(Array.from(sessions.values()), stopSessionInternal, {
+        discard: true,
+      });
 
-    yield* Effect.addFinalizer(() => Effect.ignore(stopAll));
+    yield* Effect.addFinalizer(() => Effect.ignore(stopAll()));
 
     return {
       provider: PROVIDER,
@@ -966,7 +981,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       hasSession: (threadId) => Effect.sync(() => sessions.has(threadId)),
       readThread,
       rollbackThread,
-      stopAll: () => stopAll,
+      stopAll,
       streamEvents: Stream.fromPubSub(runtimeEventPubSub),
     } satisfies ProviderAdapterShape<ProviderAdapterError>;
   });

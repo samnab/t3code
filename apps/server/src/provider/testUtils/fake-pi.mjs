@@ -4,19 +4,20 @@
  *
  * Behavior is controlled by environment variables:
  *  - FAKE_PI_LOG — append every received record (one JSON per line) here.
+ *  - FAKE_PI_CLOSED — touch this file when the process receives SIGTERM.
  *  - FAKE_PI_SESSION_FILE — sessionFile reported by get_state.
  *  - FAKE_PI_VERSION — version reported for `--version`.
  *  - FAKE_PI_VETO — switch_session responds with { cancelled: true }.
- *  - FAKE_PI_SLOW_PROMPT_MS — delay before agent events for a normal prompt.
+ *  - FAKE_PI_FAIL_COMMAND — return a failed response for this command type.
  *  - FAKE_PI_BUSY — get_state reports isStreaming true.
  */
 import * as NodeFS from "node:fs";
 
 const logPath = process.env.FAKE_PI_LOG;
-const record = (r) => {
-  if (logPath) NodeFS.appendFileSync(logPath, `${JSON.stringify(r)}\n`);
+const record = (value) => {
+  if (logPath) NodeFS.appendFileSync(logPath, `${JSON.stringify(value)}\n`);
 };
-const send = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
+const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
@@ -24,20 +25,77 @@ if (args.includes("--version")) {
   process.exit(0);
 }
 
+const markClosed = () => {
+  const closedPath = process.env.FAKE_PI_CLOSED;
+  if (closedPath) NodeFS.writeFileSync(closedPath, "closed");
+};
+process.on("SIGTERM", () => {
+  markClosed();
+  process.exit(0);
+});
+
 record({ type: "launch", args });
 
 let buffer = "";
+let interleavedRun = false;
+let isStreaming = false;
+let uiResponses = 0;
 const respond = (id, data) => send({ type: "response", id, success: true, data });
+const reject = (req, error) =>
+  send({ type: "response", id: req.id, command: req.type, success: false, error });
+
+const emitAgentRun = () => {
+  isStreaming = true;
+  const messageId = "msg-1";
+  send({ type: "agent_start" });
+  send({
+    type: "message_update",
+    assistantMessageEvent: {
+      type: "text_delta",
+      messageId,
+      contentIndex: 0,
+      delta: "Hello ",
+    },
+  });
+  send({
+    type: "message_update",
+    assistantMessageEvent: {
+      type: "text_delta",
+      messageId,
+      contentIndex: 0,
+      delta: "world",
+    },
+  });
+  send({ type: "message_end", message: { role: "assistant", stopReason: "stop" } });
+  send({
+    type: "tool_execution_start",
+    toolCallId: "t1",
+    toolName: "bash",
+    args: { command: "echo hi" },
+  });
+  send({
+    type: "tool_execution_end",
+    toolCallId: "t1",
+    toolName: "bash",
+    args: { command: "echo hi" },
+  });
+  isStreaming = false;
+  send({ type: "agent_settled" });
+};
 
 const handle = (req) => {
   record(req);
+  if (process.env.FAKE_PI_FAIL_COMMAND === req.type) {
+    reject(req, `fake ${req.type} failure`);
+    return;
+  }
   switch (req.type) {
     case "get_state":
       respond(req.id, {
         sessionFile: process.env.FAKE_PI_SESSION_FILE ?? "/tmp/fake-pi/session.jsonl",
         model: { provider: "zai", id: "glm-5" },
         thinkingLevel: "high",
-        isStreaming: process.env.FAKE_PI_BUSY === "1",
+        isStreaming: process.env.FAKE_PI_BUSY === "1" || isStreaming,
         isCompacting: false,
         pendingMessageCount: 0,
       });
@@ -59,7 +117,9 @@ const handle = (req) => {
     case "get_commands":
       respond(req.id, {
         commands: [
-          { name: "review", description: "Review code" },
+          { name: "review", description: "Review code", source: "extension" },
+          { name: "only", description: "Command-only fixture", source: "extension" },
+          { name: "template", description: "Prompt template fixture", source: "prompt" },
           {
             name: "skill:research",
             source: "skill",
@@ -79,8 +139,18 @@ const handle = (req) => {
       respond(req.id, {});
       return;
     case "abort":
+      isStreaming = false;
       send({ type: "agent_settled", aborted: true });
       respond(req.id, {});
+      return;
+    case "extension_ui_response":
+      if (String(req.id).startsWith("ui-")) {
+        uiResponses += 1;
+        if (uiResponses === 3) {
+          isStreaming = false;
+          send({ type: "agent_settled" });
+        }
+      }
       return;
     case "prompt": {
       const message = String(req.message ?? "");
@@ -93,74 +163,60 @@ const handle = (req) => {
         });
         return;
       }
-      respond(req.id, {});
-      if (message.startsWith("/only")) return; // command-only: no agent events
-      if (message.includes("INTERLEAVE")) {
-        // Two delta bursts so a second session's turn starts between them.
-        setTimeout(() => {
-          send({ type: "agent_start" });
-          send({
-            type: "message_update",
-            assistantMessageEvent: {
-              type: "text_delta",
-              messageId: "msg-1",
-              contentIndex: 0,
-              delta: "A ",
-            },
-          });
-        }, 50);
-        setTimeout(() => {
-          send({
-            type: "message_update",
-            assistantMessageEvent: {
-              type: "text_delta",
-              messageId: "msg-1",
-              contentIndex: 0,
-              delta: "done",
-            },
-          });
-          send({ type: "message_end", message: { role: "assistant", stopReason: "stop" } });
-          send({ type: "agent_settled" });
-        }, 900);
+      send({ type: "response", id: req.id, command: "prompt", success: true });
+      if (message.startsWith("/only")) return;
+      if (message === "WAIT_FOR_ABORT") {
+        isStreaming = true;
+        send({ type: "agent_start" });
         return;
       }
-      const delay = Number(process.env.FAKE_PI_SLOW_PROMPT_MS ?? "10");
-      setTimeout(() => {
-        const messageId = "msg-1";
+      if (message === "UI_ROUNDTRIP") {
+        isStreaming = true;
+        send({ type: "agent_start" });
+        for (const method of ["select", "input", "editor"]) {
+          send({
+            type: "extension_ui_request",
+            id: `ui-${method}`,
+            method,
+            message: `${method} question`,
+          });
+        }
+        return;
+      }
+      if (message.includes("INTERLEAVE")) {
+        isStreaming = true;
+        interleavedRun = true;
         send({ type: "agent_start" });
         send({
           type: "message_update",
           assistantMessageEvent: {
             type: "text_delta",
-            messageId,
+            messageId: "msg-1",
             contentIndex: 0,
-            delta: "Hello ",
+            delta: "A ",
           },
         });
+        return;
+      }
+      if (interleavedRun && req.streamingBehavior === "steer") {
+        interleavedRun = false;
         send({
           type: "message_update",
           assistantMessageEvent: {
             type: "text_delta",
-            messageId,
+            messageId: "msg-1",
             contentIndex: 0,
-            delta: "world",
+            delta: "done",
           },
         });
         send({ type: "message_end", message: { role: "assistant", stopReason: "stop" } });
-        send({
-          type: "tool_execution_start",
-          toolCallId: "t1",
-          toolName: "bash",
-          args: { command: "echo hi" },
-        });
-        send({
-          type: "tool_execution_end",
-          toolCallId: "t1",
-          toolName: "bash",
-          args: { command: "echo hi" },
-        });
+        isStreaming = false;
         send({ type: "agent_settled" });
-      }, delay);
+        return;
+      }
+      // Pi acknowledges accepted prompts before agent_start. setImmediate keeps
+      // that protocol boundary deterministic without a timing delay.
+      setImmediate(emitAgentRun);
       return;
     }
     default:
