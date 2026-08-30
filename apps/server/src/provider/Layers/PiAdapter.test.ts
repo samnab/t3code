@@ -250,31 +250,33 @@ describe("PiAdapter", () => {
         threadId: THREAD_ID,
         input: "SUBAGENT_LIFECYCLE",
       });
-      const completed = yield* collector.waitFor(
-        (event) => event.type === "task.completed" && event.payload.taskId === "sa-1",
-      );
-      const started = collector.events.find(
-        (event) => event.type === "task.started" && event.payload.taskId === "sa-1",
-      );
-
-      expect(started?.type).toBe("task.started");
-      if (started?.type !== "task.started" || completed.type !== "task.completed") {
-        throw new Error("Expected managed subagent task lifecycle.");
+      const started = yield* collector.waitFor((event) => event.type === "task.started");
+      if (started.type !== "task.started") {
+        throw new Error("Expected managed subagent start.");
       }
+      const taskId = started.payload.taskId;
+      const completed = yield* collector.waitFor(
+        (event) => event.type === "task.completed" && event.payload.taskId === taskId,
+      );
+      if (completed.type !== "task.completed") {
+        throw new Error("Expected managed subagent completion.");
+      }
+
+      expect(taskId).toMatch(/^pi:[^:]+:sa-1$/);
       expect(started.turnId).toBe(turn.turnId);
       expect(started.payload).toMatchObject({
-        taskId: "sa-1",
+        taskId,
         taskType: "subagent",
         title: "map auth",
         role: "pi",
         model: "zai/glm-5.3-flash",
         toolUseId: "spawn-1",
-        runHandles: { runId: "sa-1" },
+        runHandles: { runId: taskId },
         timelineBypass: true,
       });
       expect(completed.turnId).toBeUndefined();
       expect(completed.payload).toMatchObject({
-        taskId: "sa-1",
+        taskId,
         status: "completed",
         summary: "Mapped the auth flow.",
         taskType: "subagent",
@@ -282,22 +284,227 @@ describe("PiAdapter", () => {
         role: "pi",
         model: "zai/glm-5.3-flash",
         toolUseId: "spawn-1",
-        runHandles: { runId: "sa-1" },
+        runHandles: { runId: taskId },
         timelineBypass: true,
       });
       expect(
         collector.events.filter(
-          (event) => event.type === "task.completed" && event.payload.taskId === "sa-1",
+          (event) => event.type === "task.completed" && event.payload.taskId === taskId,
         ),
       ).toHaveLength(1);
       expect(
         collector.events.some(
           (event) =>
             (event.type === "task.started" || event.type === "task.completed") &&
-            event.payload.taskId === "forged",
+            event.payload.taskId.endsWith(":forged"),
         ),
       ).toBe(false);
 
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("completes consumed wait and cancel results with authoritative status", () =>
+    Effect.gen(function* () {
+      for (const [input, expectedStatus] of [
+        ["SUBAGENT_WAIT_CONSUMED", "completed"],
+        ["SUBAGENT_WAIT_ERROR_CONSUMED", "failed"],
+        ["SUBAGENT_CANCEL_CONSUMED", "failed"],
+      ] as const) {
+        const fixture = makeFixture();
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input });
+        const started = yield* collector.waitFor((event) => event.type === "task.started");
+        if (started.type !== "task.started") throw new Error("Expected task start.");
+        const completed = yield* collector.waitFor(
+          (event) =>
+            event.type === "task.completed" && event.payload.taskId === started.payload.taskId,
+        );
+        if (completed.type !== "task.completed") throw new Error("Expected task completion.");
+        expect(completed.payload.status).toBe(expectedStatus);
+        expect(completed.payload.summary).toBeUndefined();
+        yield* adapter.stopSession(THREAD_ID);
+      }
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("bounds oversized manager results by Unicode code point before completing", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_OVERSIZED" });
+      const completed = yield* collector.waitFor((event) => event.type === "task.completed");
+      if (completed.type !== "task.completed") throw new Error("Expected task completion.");
+      const summary = completed.payload.summary ?? "";
+      expect(Array.from(summary)).toHaveLength(4_096);
+      expect(summary.endsWith("x")).toBe(true);
+      expect(summary).not.toContain("�");
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("reconciles a terminal result that arrives before spawn registration", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_TERMINAL_RACE" });
+      const completed = yield* collector.waitFor((event) => event.type === "task.completed");
+      const started = collector.events.find((event) => event.type === "task.started");
+      expect(started?.type).toBe("task.started");
+      if (started?.type !== "task.started" || completed.type !== "task.completed") {
+        throw new Error("Expected reconciled task lifecycle.");
+      }
+      expect(completed.payload.taskId).toBe(started.payload.taskId);
+      expect(completed.payload.summary).toBe("Won the registration race.");
+      expect(collector.events.filter((event) => event.type === "task.completed")).toHaveLength(1);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("terminalizes non-running spawn snapshots immediately", () =>
+    Effect.gen(function* () {
+      for (const [input, expectedStatus] of [
+        ["SUBAGENT_SPAWN_DONE", "completed"],
+        ["SUBAGENT_SPAWN_ERROR", "failed"],
+      ] as const) {
+        const fixture = makeFixture();
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input });
+        const started = yield* collector.waitFor((event) => event.type === "task.started");
+        if (started.type !== "task.started") throw new Error("Expected task start.");
+        const completed = yield* collector.waitFor(
+          (event) =>
+            event.type === "task.completed" && event.payload.taskId === started.payload.taskId,
+        );
+        if (completed.type !== "task.completed") throw new Error("Expected task completion.");
+        expect(completed.payload.status).toBe(expectedStatus);
+        yield* adapter.stopSession(THREAD_ID);
+      }
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("namespaces reset native ids by fresh Pi process context", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_LIFECYCLE" });
+      const first = yield* collector.waitFor((event) => event.type === "task.started");
+      if (first.type !== "task.started") throw new Error("Expected first task start.");
+      yield* collector.waitFor(
+        (event) => event.type === "task.completed" && event.payload.taskId === first.payload.taskId,
+      );
+      yield* adapter.stopSession(THREAD_ID);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_LIFECYCLE" });
+      const second = yield* collector.waitFor(
+        (event) => event.type === "task.started" && event.payload.taskId !== first.payload.taskId,
+      );
+      if (second.type !== "task.started") throw new Error("Expected second task start.");
+      expect(first.payload.taskId.endsWith(":sa-1")).toBe(true);
+      expect(second.payload.taskId.endsWith(":sa-1")).toBe(true);
+      expect(second.payload.taskId).not.toBe(first.payload.taskId);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("stops live managed children before closing their Pi process", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_STAYS_RUNNING" });
+      const started = yield* collector.waitFor((event) => event.type === "task.started");
+      if (started.type !== "task.started") throw new Error("Expected task start.");
+      yield* adapter.stopSession(THREAD_ID);
+      const completed = yield* collector.waitFor(
+        (event) =>
+          event.type === "task.completed" && event.payload.taskId === started.payload.taskId,
+      );
+      if (completed.type !== "task.completed") throw new Error("Expected task completion.");
+      expect(completed.payload.status).toBe("stopped");
+      expect(yield* adapter.hasSession(THREAD_ID)).toBe(false);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("stops live managed children before replacing their Pi process", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_STAYS_RUNNING" });
+      const started = yield* collector.waitFor((event) => event.type === "task.started");
+      if (started.type !== "task.started") throw new Error("Expected task start.");
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      const completed = yield* collector.waitFor(
+        (event) =>
+          event.type === "task.completed" && event.payload.taskId === started.payload.taskId,
+      );
+      if (completed.type !== "task.completed") throw new Error("Expected task completion.");
+      expect(completed.payload.status).toBe("stopped");
+      expect(yield* adapter.hasSession(THREAD_ID)).toBe(true);
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
   );

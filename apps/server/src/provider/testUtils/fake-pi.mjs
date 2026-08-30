@@ -85,6 +85,72 @@ const emitAgentRun = () => {
   send({ type: "agent_settled" });
 };
 
+const subagentDetails = (status = "running") => ({
+  id: "sa-1",
+  title: "map auth",
+  cwd: process.cwd(),
+  harness: "pi",
+  model: "zai/glm-5.3-flash",
+  status,
+  trusted_suborch: false,
+});
+
+const emitSubagentSpawnStart = () =>
+  send({
+    type: "tool_execution_start",
+    toolCallId: "spawn-1",
+    toolName: "subagent_spawn",
+    args: { name: "map auth", harness: "pi" },
+  });
+
+const emitSubagentSpawnEnd = (status = "running") =>
+  send({
+    type: "tool_execution_end",
+    toolCallId: "spawn-1",
+    toolName: "subagent_spawn",
+    args: { name: "map auth", harness: "pi" },
+    result: {
+      content: [{ type: "text", text: "Spawned subagent sa-1." }],
+      details: subagentDetails(status),
+    },
+    isError: false,
+  });
+
+const subagentResultEntry = (status, content, id = "sa-1") => ({
+  type: "custom",
+  customType: "subagent-result",
+  data: { id, title: "map auth", status, content },
+});
+
+const emitConsumedSubagentResult = (toolName, status) => {
+  send({
+    type: "tool_execution_start",
+    toolCallId: `${toolName}-1`,
+    toolName,
+    args: { ids: ["sa-1"] },
+  });
+  send({
+    type: "tool_execution_end",
+    toolCallId: `${toolName}-1`,
+    toolName,
+    args: { ids: ["sa-1"] },
+    result: {
+      content: [{ type: "text", text: `${toolName} collected sa-1.` }],
+      details: {
+        results: [
+          {
+            id: "sa-1",
+            title: "map auth",
+            status,
+            ...(toolName === "subagent_wait" ? { collection: "collected" } : {}),
+          },
+        ],
+      },
+    },
+    isError: false,
+  });
+};
+
 const handle = (req) => {
   record(req);
   if (process.env.FAKE_PI_FAIL_COMMAND === req.type) {
@@ -228,69 +294,53 @@ const handle = (req) => {
         });
         return;
       }
-      if (message === "SUBAGENT_LIFECYCLE") {
+      if (message.startsWith("SUBAGENT_")) {
         isStreaming = true;
         send({ type: "agent_start" });
-        send({
-          type: "tool_execution_start",
-          toolCallId: "spawn-1",
-          toolName: "subagent_spawn",
-          args: { name: "map auth", harness: "pi" },
-        });
-        send({
-          type: "tool_execution_end",
-          toolCallId: "spawn-1",
-          toolName: "subagent_spawn",
-          args: { name: "map auth", harness: "pi" },
-          result: {
-            content: [{ type: "text", text: "Spawned subagent sa-1." }],
-            details: {
-              id: "sa-1",
-              title: "map auth",
-              harness: "pi",
-              model: "zai/glm-5.3-flash",
-              status: "running",
-            },
-          },
-          isError: false,
-        });
+        emitSubagentSpawnStart();
+
+        if (message === "SUBAGENT_TERMINAL_RACE") {
+          send({
+            type: "entry_appended",
+            entry: subagentResultEntry("done", "Won the registration race."),
+          });
+          emitSubagentSpawnEnd();
+        } else if (message === "SUBAGENT_SPAWN_DONE") {
+          emitSubagentSpawnEnd("done");
+        } else if (message === "SUBAGENT_SPAWN_ERROR") {
+          emitSubagentSpawnEnd("error");
+        } else {
+          emitSubagentSpawnEnd();
+        }
+
+        if (message === "SUBAGENT_WAIT_CONSUMED") {
+          emitConsumedSubagentResult("subagent_wait", "done");
+        } else if (message === "SUBAGENT_WAIT_ERROR_CONSUMED") {
+          emitConsumedSubagentResult("subagent_wait", "error");
+        } else if (message === "SUBAGENT_CANCEL_CONSUMED") {
+          emitConsumedSubagentResult("subagent_cancel", "error");
+        }
+
         isStreaming = false;
         send({ type: "agent_settled" });
-        setImmediate(() => {
-          send({
-            type: "entry_appended",
-            entry: {
-              type: "custom",
-              customType: "subagent-result",
-              data: { id: "forged", title: "forged", status: "done", content: "ignore me" },
-            },
+        if (message === "SUBAGENT_LIFECYCLE") {
+          setImmediate(() => {
+            send({
+              type: "entry_appended",
+              entry: subagentResultEntry("done", "ignore me", "forged"),
+            });
+            const entry = subagentResultEntry("done", "  Mapped the auth flow.  ");
+            send({ type: "entry_appended", entry });
+            send({ type: "entry_appended", entry });
           });
-          send({
-            type: "entry_appended",
-            entry: {
-              type: "custom",
-              customType: "subagent-result",
-              data: {
-                id: "sa-1",
-                title: "map auth",
-                status: "done",
-                content: "x".repeat(64 * 1_024 + 1),
-              },
-            },
+        } else if (message === "SUBAGENT_OVERSIZED") {
+          setImmediate(() => {
+            send({
+              type: "entry_appended",
+              entry: subagentResultEntry("done", `${"😀".repeat(4_095)}x${" ".repeat(70_000)}`),
+            });
           });
-          const entry = {
-            type: "custom",
-            customType: "subagent-result",
-            data: {
-              id: "sa-1",
-              title: "map auth",
-              status: "done",
-              content: "Mapped the auth flow.",
-            },
-          };
-          send({ type: "entry_appended", entry });
-          send({ type: "entry_appended", entry });
-        });
+        }
         return;
       }
       if (message.includes("INTERLEAVE")) {

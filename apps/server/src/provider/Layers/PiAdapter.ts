@@ -99,14 +99,17 @@ type ToolItemKind = "command_execution" | "dynamic_tool_call";
 const PiSubagentId = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
 const PiSubagentTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
 const PiSubagentLabel = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+const PiSubagentStatus = Schema.Literals(["running", "done", "error"]);
 
 const PiSubagentSpawnDetails = Schema.Struct({
   id: PiSubagentId,
   title: PiSubagentTitle,
+  cwd: Schema.String,
   harness: Schema.Literals(["pi", "claude", "codex"]),
   model: Schema.optional(PiSubagentLabel),
-  status: Schema.Literal("running"),
+  status: PiSubagentStatus,
   parent_id: Schema.optional(PiSubagentId),
+  trusted_suborch: Schema.Boolean,
 });
 const decodePiSubagentSpawnDetails = Schema.decodeUnknownOption(PiSubagentSpawnDetails);
 
@@ -117,10 +120,22 @@ const PiSubagentResultEntry = Schema.Struct({
     id: PiSubagentId,
     title: PiSubagentTitle,
     status: Schema.Literals(["done", "error"]),
-    content: Schema.String.check(Schema.isMaxLength(64 * 1_024)),
+    content: Schema.String,
   }),
 });
 const decodePiSubagentResultEntry = Schema.decodeUnknownOption(PiSubagentResultEntry);
+
+const PiSubagentToolResults = Schema.Struct({
+  results: Schema.Array(
+    Schema.Struct({
+      id: PiSubagentId,
+      title: Schema.optional(PiSubagentTitle),
+      status: Schema.optional(PiSubagentStatus),
+      collection: Schema.optional(Schema.Literals(["still-running", "collected"])),
+    }),
+  ),
+});
+const decodePiSubagentToolResults = Schema.decodeUnknownOption(PiSubagentToolResults);
 
 interface ManagedPiSubagent {
   readonly taskId: RuntimeTaskId;
@@ -129,6 +144,11 @@ interface ManagedPiSubagent {
   readonly model?: string;
   readonly toolUseId: string;
   readonly parentAgentId?: string;
+}
+
+interface PendingPiSubagentTerminal {
+  readonly status: "done" | "error";
+  readonly content: string;
 }
 
 /** assistant/reasoning streaming items keyed by `messageId:contentIndex`. */
@@ -187,7 +207,12 @@ interface PiSessionContext {
   session: ProviderSession;
   activeTurn: ActivePiTurn | null;
   readonly pendingExtensionUi: Map<ApprovalRequestId, PendingPiExtensionUi>;
+  /** Unique to this spawned Pi process; native manager ids reset to sa-1. */
+  readonly processEpoch: string;
+  /** Raw manager id → namespaced T3 run. */
   readonly managedSubagents: Map<string, ManagedPiSubagent>;
+  readonly pendingManagedSpawnToolCalls: Set<string>;
+  readonly pendingManagedTerminals: Map<string, PendingPiSubagentTerminal>;
   nativeSessionPath: string | undefined;
 }
 
@@ -199,6 +224,19 @@ export interface PiAdapterOptions {
 const SETTLE_PROBE_TIMEOUT_MS = 2_000;
 const SETTLE_PROBE_RETRY_DELAY_MILLIS = 100;
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
+const MANAGED_SUBAGENT_SUMMARY_MAX_CODE_POINTS = 4_096;
+const MAX_PENDING_MANAGED_TERMINALS = 64;
+
+function truncateCodePoints(value: string, limit: number) {
+  let codePoints = 0;
+  let end = 0;
+  for (const codePoint of value) {
+    if (codePoints >= limit) break;
+    codePoints += 1;
+    end += codePoint.length;
+  }
+  return value.slice(0, end);
+}
 
 export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions) {
   return Effect.gen(function* () {
@@ -431,9 +469,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       return title === undefined ? toolName : `${toolName}: ${title}`;
     };
 
+    const namespacedManagedSubagentId = (ctx: PiSessionContext, nativeId: string) =>
+      RuntimeTaskId.make(`pi:${ctx.processEpoch}:${nativeId}`);
+
     const managedSubagentLinkage = (run: ManagedPiSubagent) => ({
       taskType: "subagent" as const,
       title: run.title,
+      // The Pi manager has no separate role concept; harness is its best available role value.
       role: run.harness,
       ...(run.model !== undefined ? { model: run.model } : {}),
       toolUseId: run.toolUseId,
@@ -441,6 +483,53 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       runHandles: { runId: run.taskId },
       timelineBypass: true,
     });
+
+    const completeManagedSubagent = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      nativeId: string,
+      status: "completed" | "failed" | "stopped",
+      content?: string,
+    ) {
+      const run = ctx.managedSubagents.get(nativeId);
+      if (run === undefined) return false;
+      ctx.managedSubagents.delete(nativeId);
+      ctx.pendingManagedTerminals.delete(nativeId);
+      const summary =
+        content === undefined
+          ? undefined
+          : truncateCodePoints(content, MANAGED_SUBAGENT_SUMMARY_MAX_CODE_POINTS).trim() ||
+            `${run.title} ${status}`;
+      const base = yield* makeEventBase(ctx.session);
+      yield* offerRuntimeEvent({
+        ...base,
+        type: "task.completed",
+        payload: {
+          taskId: run.taskId,
+          status,
+          ...(summary !== undefined ? { summary } : {}),
+          ...managedSubagentLinkage(run),
+        },
+      });
+      return true;
+    });
+
+    const rememberPendingManagedTerminal = (
+      ctx: PiSessionContext,
+      nativeId: string,
+      terminal: PendingPiSubagentTerminal,
+    ) => {
+      if (
+        ctx.pendingManagedSpawnToolCalls.size === 0 ||
+        ctx.pendingManagedTerminals.has(nativeId)
+      ) {
+        return;
+      }
+      if (ctx.pendingManagedTerminals.size >= MAX_PENDING_MANAGED_TERMINALS) {
+        const oldest = ctx.pendingManagedTerminals.keys().next().value;
+        if (oldest !== undefined) ctx.pendingManagedTerminals.delete(oldest);
+      }
+      ctx.pendingManagedTerminals.set(nativeId, terminal);
+    };
 
     const handleManagedSubagentSpawn = Effect.fnUntraced(function* (
       ctx: PiSessionContext,
@@ -458,12 +547,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       const toolUseId = recordString(event, "toolCallId");
       if (toolUseId === undefined) return;
       const run: ManagedPiSubagent = {
-        taskId: RuntimeTaskId.make(details.id),
+        taskId: namespacedManagedSubagentId(ctx, details.id),
         title: details.title,
         harness: details.harness,
         ...(details.model !== undefined ? { model: details.model } : {}),
         toolUseId,
-        ...(details.parent_id !== undefined ? { parentAgentId: details.parent_id } : {}),
+        ...(details.parent_id !== undefined
+          ? { parentAgentId: namespacedManagedSubagentId(ctx, details.parent_id) }
+          : {}),
       };
       ctx.managedSubagents.set(details.id, run);
       const base = yield* makeEventBase(ctx.session);
@@ -477,6 +568,21 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ...managedSubagentLinkage(run),
         },
       });
+      const pending = ctx.pendingManagedTerminals.get(details.id);
+      if (pending !== undefined) {
+        yield* completeManagedSubagent(
+          ctx,
+          details.id,
+          pending.status === "done" ? "completed" : "failed",
+          pending.content,
+        );
+      } else if (details.status !== "running") {
+        yield* completeManagedSubagent(
+          ctx,
+          details.id,
+          details.status === "done" ? "completed" : "failed",
+        );
+      }
     });
 
     const handleManagedSubagentResult = Effect.fnUntraced(function* (
@@ -486,21 +592,49 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       const decoded = decodePiSubagentResultEntry(recordField(event, "entry"));
       if (Option.isNone(decoded)) return;
       const data = decoded.value.data;
-      const run = ctx.managedSubagents.get(data.id);
-      if (run === undefined) return;
-      const summary = data.content.trim().slice(0, 4_096) || `${run.title} ${data.status}`;
-      const base = yield* makeEventBase(ctx.session);
-      yield* offerRuntimeEvent({
-        ...base,
-        type: "task.completed",
-        payload: {
-          taskId: run.taskId,
-          status: data.status === "done" ? "completed" : "failed",
-          summary,
-          ...managedSubagentLinkage(run),
-        },
+      if (ctx.managedSubagents.has(data.id)) {
+        yield* completeManagedSubagent(
+          ctx,
+          data.id,
+          data.status === "done" ? "completed" : "failed",
+          data.content,
+        );
+        return;
+      }
+      rememberPendingManagedTerminal(ctx, data.id, {
+        status: data.status,
+        content: truncateCodePoints(data.content, MANAGED_SUBAGENT_SUMMARY_MAX_CODE_POINTS),
       });
-      ctx.managedSubagents.delete(data.id);
+    });
+
+    const handleManagedSubagentToolResult = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      event: PiRpcRecord,
+    ) {
+      const toolName = recordString(event, "toolName");
+      if (
+        event["isError"] === true ||
+        (toolName !== "subagent_wait" && toolName !== "subagent_cancel")
+      ) {
+        return;
+      }
+      const result = recordField(event, "result");
+      const decoded = decodePiSubagentToolResults(recordField(result, "details"));
+      if (Option.isNone(decoded)) return;
+      for (const terminal of decoded.value.results) {
+        if (
+          terminal.status === undefined ||
+          terminal.status === "running" ||
+          (toolName === "subagent_wait" && terminal.collection !== "collected")
+        ) {
+          continue;
+        }
+        yield* completeManagedSubagent(
+          ctx,
+          terminal.id,
+          terminal.status === "done" ? "completed" : "failed",
+        );
+      }
     });
 
     const handleToolEvent = Effect.fnUntraced(function* (
@@ -690,18 +824,39 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 }
                 return;
               }
-              case "tool_execution_start":
+              case "tool_execution_start": {
+                const toolCallId = recordString(event, "toolCallId");
+                if (
+                  toolCallId !== undefined &&
+                  recordString(event, "toolName") === "subagent_spawn"
+                ) {
+                  ctx.pendingManagedSpawnToolCalls.add(toolCallId);
+                }
                 if (turn !== null) yield* handleToolEvent(ctx, turn, event, "start");
                 return;
+              }
               case "tool_execution_update":
                 if (turn !== null) yield* handleToolEvent(ctx, turn, event, "update");
                 return;
-              case "tool_execution_end":
-                if (turn !== null) {
-                  yield* handleToolEvent(ctx, turn, event, "end");
-                  yield* handleManagedSubagentSpawn(ctx, turn, event);
+              case "tool_execution_end": {
+                const toolCallId = recordString(event, "toolCallId");
+                if (turn !== null) yield* handleToolEvent(ctx, turn, event, "end");
+                if (recordString(event, "toolName") === "subagent_spawn") {
+                  yield* (
+                    turn === null ? Effect.void : handleManagedSubagentSpawn(ctx, turn, event)
+                  ).pipe(
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        if (toolCallId !== undefined) {
+                          ctx.pendingManagedSpawnToolCalls.delete(toolCallId);
+                        }
+                      }),
+                    ),
+                  );
                 }
+                yield* handleManagedSubagentToolResult(ctx, event);
                 return;
+              }
               case "entry_appended":
                 yield* handleManagedSubagentResult(ctx, event);
                 return;
@@ -771,6 +926,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
 
     const stopSessionInternal = (ctx: PiSessionContext) =>
       Effect.gen(function* () {
+        yield* Effect.forEach(
+          Array.from(ctx.managedSubagents.keys()),
+          (nativeId) => completeManagedSubagent(ctx, nativeId, "stopped").pipe(Effect.ignore),
+          { discard: true },
+        );
+        ctx.managedSubagents.clear();
+        ctx.pendingManagedSpawnToolCalls.clear();
+        ctx.pendingManagedTerminals.clear();
         if (sessions.get(ctx.threadId) === ctx) {
           sessions.delete(ctx.threadId);
         }
@@ -857,7 +1020,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
               model = selectionModel;
             }
           }
-          const now = yield* nowIso;
+          const [now, processEpoch] = yield* Effect.all([nowIso, nextUuid]);
           const session: ProviderSession = {
             provider: PROVIDER,
             ...(boundInstanceId !== undefined ? { providerInstanceId: boundInstanceId } : {}),
@@ -885,7 +1048,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             session,
             activeTurn: null,
             pendingExtensionUi: new Map(),
+            processEpoch,
             managedSubagents: new Map(),
+            pendingManagedSpawnToolCalls: new Set(),
+            pendingManagedTerminals: new Map(),
             nativeSessionPath,
           };
           sessions.set(input.threadId, ctx);
