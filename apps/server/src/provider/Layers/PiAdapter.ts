@@ -46,7 +46,9 @@ import {
   type ProviderUserInputAnswers,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   ThreadId,
+  TrimmedNonEmptyString,
   TurnId,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
@@ -54,7 +56,9 @@ import * as DateTime from "effect/DateTime";
 import * as Exit from "effect/Exit";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -91,6 +95,41 @@ const PI_RESUME_VERSION = 1 as const;
 
 type StreamItemKind = "assistant_message" | "reasoning";
 type ToolItemKind = "command_execution" | "dynamic_tool_call";
+
+const PiSubagentId = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+const PiSubagentTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+const PiSubagentLabel = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+
+const PiSubagentSpawnDetails = Schema.Struct({
+  id: PiSubagentId,
+  title: PiSubagentTitle,
+  harness: Schema.Literals(["pi", "claude", "codex"]),
+  model: Schema.optional(PiSubagentLabel),
+  status: Schema.Literal("running"),
+  parent_id: Schema.optional(PiSubagentId),
+});
+const decodePiSubagentSpawnDetails = Schema.decodeUnknownOption(PiSubagentSpawnDetails);
+
+const PiSubagentResultEntry = Schema.Struct({
+  type: Schema.Literal("custom"),
+  customType: Schema.Literal("subagent-result"),
+  data: Schema.Struct({
+    id: PiSubagentId,
+    title: PiSubagentTitle,
+    status: Schema.Literals(["done", "error"]),
+    content: Schema.String.check(Schema.isMaxLength(64 * 1_024)),
+  }),
+});
+const decodePiSubagentResultEntry = Schema.decodeUnknownOption(PiSubagentResultEntry);
+
+interface ManagedPiSubagent {
+  readonly taskId: RuntimeTaskId;
+  readonly title: string;
+  readonly harness: "pi" | "claude" | "codex";
+  readonly model?: string;
+  readonly toolUseId: string;
+  readonly parentAgentId?: string;
+}
 
 /** assistant/reasoning streaming items keyed by `messageId:contentIndex`. */
 type StreamItemsMap = Map<string, { itemId: string; kind: StreamItemKind; started: boolean }>;
@@ -148,6 +187,7 @@ interface PiSessionContext {
   session: ProviderSession;
   activeTurn: ActivePiTurn | null;
   readonly pendingExtensionUi: Map<ApprovalRequestId, PendingPiExtensionUi>;
+  readonly managedSubagents: Map<string, ManagedPiSubagent>;
   nativeSessionPath: string | undefined;
 }
 
@@ -391,6 +431,78 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       return title === undefined ? toolName : `${toolName}: ${title}`;
     };
 
+    const managedSubagentLinkage = (run: ManagedPiSubagent) => ({
+      taskType: "subagent" as const,
+      title: run.title,
+      role: run.harness,
+      ...(run.model !== undefined ? { model: run.model } : {}),
+      toolUseId: run.toolUseId,
+      ...(run.parentAgentId !== undefined ? { parentAgentId: run.parentAgentId } : {}),
+      runHandles: { runId: run.taskId },
+      timelineBypass: true,
+    });
+
+    const handleManagedSubagentSpawn = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      turn: ActivePiTurn,
+      event: PiRpcRecord,
+    ) {
+      if (recordString(event, "toolName") !== "subagent_spawn" || event["isError"] === true) {
+        return;
+      }
+      const result = recordField(event, "result");
+      const decoded = decodePiSubagentSpawnDetails(recordField(result, "details"));
+      if (Option.isNone(decoded)) return;
+      const details = decoded.value;
+      if (ctx.managedSubagents.has(details.id)) return;
+      const toolUseId = recordString(event, "toolCallId");
+      if (toolUseId === undefined) return;
+      const run: ManagedPiSubagent = {
+        taskId: RuntimeTaskId.make(details.id),
+        title: details.title,
+        harness: details.harness,
+        ...(details.model !== undefined ? { model: details.model } : {}),
+        toolUseId,
+        ...(details.parent_id !== undefined ? { parentAgentId: details.parent_id } : {}),
+      };
+      ctx.managedSubagents.set(details.id, run);
+      const base = yield* makeEventBase(ctx.session);
+      yield* offerRuntimeEvent({
+        ...base,
+        type: "task.started",
+        turnId: turn.turnId,
+        payload: {
+          taskId: run.taskId,
+          description: run.title,
+          ...managedSubagentLinkage(run),
+        },
+      });
+    });
+
+    const handleManagedSubagentResult = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      event: PiRpcRecord,
+    ) {
+      const decoded = decodePiSubagentResultEntry(recordField(event, "entry"));
+      if (Option.isNone(decoded)) return;
+      const data = decoded.value.data;
+      const run = ctx.managedSubagents.get(data.id);
+      if (run === undefined) return;
+      const summary = data.content.trim().slice(0, 4_096) || `${run.title} ${data.status}`;
+      const base = yield* makeEventBase(ctx.session);
+      yield* offerRuntimeEvent({
+        ...base,
+        type: "task.completed",
+        payload: {
+          taskId: run.taskId,
+          status: data.status === "done" ? "completed" : "failed",
+          summary,
+          ...managedSubagentLinkage(run),
+        },
+      });
+      ctx.managedSubagents.delete(data.id);
+    });
+
     const handleToolEvent = Effect.fnUntraced(function* (
       ctx: PiSessionContext,
       turn: ActivePiTurn,
@@ -585,7 +697,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 if (turn !== null) yield* handleToolEvent(ctx, turn, event, "update");
                 return;
               case "tool_execution_end":
-                if (turn !== null) yield* handleToolEvent(ctx, turn, event, "end");
+                if (turn !== null) {
+                  yield* handleToolEvent(ctx, turn, event, "end");
+                  yield* handleManagedSubagentSpawn(ctx, turn, event);
+                }
+                return;
+              case "entry_appended":
+                yield* handleManagedSubagentResult(ctx, event);
                 return;
               case "extension_ui_request":
                 yield* handleExtensionUiRequest(ctx, event);
@@ -767,6 +885,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             session,
             activeTurn: null,
             pendingExtensionUi: new Map(),
+            managedSubagents: new Map(),
             nativeSessionPath,
           };
           sessions.set(input.threadId, ctx);

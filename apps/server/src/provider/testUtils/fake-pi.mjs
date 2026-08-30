@@ -228,6 +228,71 @@ const handle = (req) => {
         });
         return;
       }
+      if (message === "SUBAGENT_LIFECYCLE") {
+        isStreaming = true;
+        send({ type: "agent_start" });
+        send({
+          type: "tool_execution_start",
+          toolCallId: "spawn-1",
+          toolName: "subagent_spawn",
+          args: { name: "map auth", harness: "pi" },
+        });
+        send({
+          type: "tool_execution_end",
+          toolCallId: "spawn-1",
+          toolName: "subagent_spawn",
+          args: { name: "map auth", harness: "pi" },
+          result: {
+            content: [{ type: "text", text: "Spawned subagent sa-1." }],
+            details: {
+              id: "sa-1",
+              title: "map auth",
+              harness: "pi",
+              model: "zai/glm-5.3-flash",
+              status: "running",
+            },
+          },
+          isError: false,
+        });
+        isStreaming = false;
+        send({ type: "agent_settled" });
+        setImmediate(() => {
+          send({
+            type: "entry_appended",
+            entry: {
+              type: "custom",
+              customType: "subagent-result",
+              data: { id: "forged", title: "forged", status: "done", content: "ignore me" },
+            },
+          });
+          send({
+            type: "entry_appended",
+            entry: {
+              type: "custom",
+              customType: "subagent-result",
+              data: {
+                id: "sa-1",
+                title: "map auth",
+                status: "done",
+                content: "x".repeat(64 * 1_024 + 1),
+              },
+            },
+          });
+          const entry = {
+            type: "custom",
+            customType: "subagent-result",
+            data: {
+              id: "sa-1",
+              title: "map auth",
+              status: "done",
+              content: "Mapped the auth flow.",
+            },
+          };
+          send({ type: "entry_appended", entry });
+          send({ type: "entry_appended", entry });
+        });
+        return;
+      }
       if (message.includes("INTERLEAVE")) {
         isStreaming = true;
         interleavedRun = true;

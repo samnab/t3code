@@ -233,6 +233,75 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
+  it.live("projects manager-owned subagent lifecycle through task events", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "SUBAGENT_LIFECYCLE",
+      });
+      const completed = yield* collector.waitFor(
+        (event) => event.type === "task.completed" && event.payload.taskId === "sa-1",
+      );
+      const started = collector.events.find(
+        (event) => event.type === "task.started" && event.payload.taskId === "sa-1",
+      );
+
+      expect(started?.type).toBe("task.started");
+      if (started?.type !== "task.started" || completed.type !== "task.completed") {
+        throw new Error("Expected managed subagent task lifecycle.");
+      }
+      expect(started.turnId).toBe(turn.turnId);
+      expect(started.payload).toMatchObject({
+        taskId: "sa-1",
+        taskType: "subagent",
+        title: "map auth",
+        role: "pi",
+        model: "zai/glm-5.3-flash",
+        toolUseId: "spawn-1",
+        runHandles: { runId: "sa-1" },
+        timelineBypass: true,
+      });
+      expect(completed.turnId).toBeUndefined();
+      expect(completed.payload).toMatchObject({
+        taskId: "sa-1",
+        status: "completed",
+        summary: "Mapped the auth flow.",
+        taskType: "subagent",
+        title: "map auth",
+        role: "pi",
+        model: "zai/glm-5.3-flash",
+        toolUseId: "spawn-1",
+        runHandles: { runId: "sa-1" },
+        timelineBypass: true,
+      });
+      expect(
+        collector.events.filter(
+          (event) => event.type === "task.completed" && event.payload.taskId === "sa-1",
+        ),
+      ).toHaveLength(1);
+      expect(
+        collector.events.some(
+          (event) =>
+            (event.type === "task.started" || event.type === "task.completed") &&
+            event.payload.taskId === "forged",
+        ),
+      ).toBe(false);
+
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
   it.live("resumes the native session through switch_session", () =>
     Effect.gen(function* () {
       const fixture = makeFixture();
