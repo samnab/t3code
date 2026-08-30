@@ -17,12 +17,13 @@ import {
   PositiveInt,
   ProjectId,
   ProviderItemId,
+  RuntimeTaskId,
   ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
   TurnId,
 } from "./baseSchemas.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -33,6 +34,9 @@ export const ORCHESTRATION_WS_METHODS = {
   getArchivedShellSnapshot: "orchestration.getArchivedShellSnapshot",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
+  subagentControlStatus: "orchestration.subagentControlStatus",
+  subagentControlSteer: "orchestration.subagentControlSteer",
+  subagentControlCancel: "orchestration.subagentControlCancel",
 } as const;
 
 export const ProviderApprovalPolicy = Schema.Literals([
@@ -1707,6 +1711,107 @@ export class OrchestrationGetWorkflowScriptError extends Schema.TaggedErrorClass
   }
 }
 
+// ── Subagent control plane ───────────────────────────────────
+
+/**
+ * Per-control availability with an explicit reason when disabled. Rows are
+ * read-only diagnostics; steering and cancellation additionally require the
+ * operate scope.
+ */
+export const SubagentControlAvailability = Schema.Struct({
+  enabled: Schema.Boolean,
+  reason: Schema.optional(TrimmedNonEmptyString),
+});
+export type SubagentControlAvailability = typeof SubagentControlAvailability.Type;
+
+/**
+ * Declared subagent control-plane status for one live provider session.
+ * `supported: false` always carries a reason; controls are then disabled
+ * with per-control reasons.
+ */
+export const SubagentControlPlaneStatus = Schema.Struct({
+  provider: Schema.optional(ProviderDriverKind),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  threadId: Schema.optional(ThreadId),
+  supported: Schema.Boolean,
+  reason: Schema.optional(TrimmedNonEmptyString),
+  managerId: Schema.optional(TrimmedNonEmptyString),
+  protocolVersion: Schema.optional(Schema.Int),
+  controls: Schema.Struct({
+    steer: SubagentControlAvailability,
+    cancel: SubagentControlAvailability,
+  }),
+});
+export type SubagentControlPlaneStatus = typeof SubagentControlPlaneStatus.Type;
+
+export const OrchestrationSubagentControlStatusInput = Schema.Struct({});
+export type OrchestrationSubagentControlStatusInput =
+  typeof OrchestrationSubagentControlStatusInput.Type;
+
+export const OrchestrationSubagentControlStatusResult = Schema.Struct({
+  statuses: Schema.Array(SubagentControlPlaneStatus).check(Schema.isMaxLength(64)),
+});
+export type OrchestrationSubagentControlStatusResult =
+  typeof OrchestrationSubagentControlStatusResult.Type;
+
+const SubagentManagerId = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
+
+export const OrchestrationSubagentControlSteerInput = Schema.Struct({
+  managerId: SubagentManagerId,
+  /** T3's namespaced subagent task id (as surfaced on task.* rows). */
+  runId: RuntimeTaskId,
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(4_000)),
+});
+export type OrchestrationSubagentControlSteerInput =
+  typeof OrchestrationSubagentControlSteerInput.Type;
+
+export const OrchestrationSubagentControlCancelInput = Schema.Struct({
+  managerId: SubagentManagerId,
+  runId: RuntimeTaskId,
+});
+export type OrchestrationSubagentControlCancelInput =
+  typeof OrchestrationSubagentControlCancelInput.Type;
+
+export const OrchestrationSubagentControlActionResult = Schema.Struct({
+  accepted: Schema.Literal(true),
+});
+export type OrchestrationSubagentControlActionResult =
+  typeof OrchestrationSubagentControlActionResult.Type;
+
+const SUBAGENT_CONTROL_ERROR_MESSAGES = {
+  unsupported: "The provider session has no supported subagent manager.",
+  "manager-mismatch": "The requested subagent manager does not own the requested run.",
+  "control-disabled": "The manager does not declare this control capability.",
+  "unknown-manager": "No live provider session declares that subagent manager.",
+  "unknown-run": "The manager does not track an open run with that id.",
+  "manager-rejected": "The subagent manager rejected the control command.",
+  "manager-unreachable": "The provider process is not accepting control commands.",
+  timeout: "The subagent manager did not answer in time.",
+  "routing-failed": "Subagent control routing failed.",
+} as const;
+
+export class SubagentControlError extends Schema.TaggedErrorClass<SubagentControlError>()(
+  "SubagentControlError",
+  {
+    reason: Schema.Literals([
+      "unsupported",
+      "manager-mismatch",
+      "control-disabled",
+      "unknown-manager",
+      "unknown-run",
+      "manager-rejected",
+      "manager-unreachable",
+      "timeout",
+      "routing-failed",
+    ]),
+    detail: Schema.optional(TrimmedNonEmptyString),
+  },
+) {
+  override get message(): string {
+    return SUBAGENT_CONTROL_ERROR_MESSAGES[this.reason];
+  }
+}
+
 export const OrchestrationRpcSchemas = {
   dispatchCommand: {
     input: ClientOrchestrationCommand,
@@ -1739,6 +1844,18 @@ export const OrchestrationRpcSchemas = {
   subscribeShell: {
     input: OrchestrationSubscribeShellInput,
     output: OrchestrationShellStreamItem,
+  },
+  subagentControlStatus: {
+    input: OrchestrationSubagentControlStatusInput,
+    output: OrchestrationSubagentControlStatusResult,
+  },
+  subagentControlSteer: {
+    input: OrchestrationSubagentControlSteerInput,
+    output: OrchestrationSubagentControlActionResult,
+  },
+  subagentControlCancel: {
+    input: OrchestrationSubagentControlCancelInput,
+    output: OrchestrationSubagentControlActionResult,
   },
 } as const;
 

@@ -73,6 +73,7 @@ import {
   OrchestrationGetTurnDiffInput,
   OrchestrationRpcSchemas,
   OrchestrationGetWorkflowScriptError,
+  SubagentControlError,
 } from "./orchestration.ts";
 import {
   ProviderUploadFeedbackError,
@@ -968,6 +969,33 @@ export const WsOrchestrationSubscribeThreadRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationSubagentControlStatusRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.subagentControlStatus,
+  {
+    payload: OrchestrationRpcSchemas.subagentControlStatus.input,
+    success: OrchestrationRpcSchemas.subagentControlStatus.output,
+    error: Schema.Union([SubagentControlError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationSubagentControlSteerRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.subagentControlSteer,
+  {
+    payload: OrchestrationRpcSchemas.subagentControlSteer.input,
+    success: OrchestrationRpcSchemas.subagentControlSteer.output,
+    error: Schema.Union([SubagentControlError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsOrchestrationSubagentControlCancelRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.subagentControlCancel,
+  {
+    payload: OrchestrationRpcSchemas.subagentControlCancel.input,
+    success: OrchestrationRpcSchemas.subagentControlCancel.output,
+    error: Schema.Union([SubagentControlError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: Schema.Struct({}),
   success: TerminalEvent,
@@ -1120,4 +1148,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
+  WsOrchestrationSubagentControlStatusRpc,
+  WsOrchestrationSubagentControlSteerRpc,
+  WsOrchestrationSubagentControlCancelRpc,
 );

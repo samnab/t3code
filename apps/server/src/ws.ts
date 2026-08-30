@@ -86,8 +86,14 @@ import {
   observeRpcStream as instrumentRpcStream,
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
+import * as ProviderAdapterRegistry from "./provider/Services/ProviderAdapterRegistry.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
+import {
+  routeSubagentControlCancel,
+  routeSubagentControlStatus,
+  routeSubagentControlSteer,
+} from "./provider/subagentControlRouter.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -472,6 +478,7 @@ const makeWsRpcLayer = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const providerAdapterRegistry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
       const providerService = yield* ProviderService.ProviderService;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
@@ -1570,6 +1577,24 @@ const makeWsRpcLayer = (
                 afterSnapshot,
               );
             }),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.subagentControlStatus]: () =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.subagentControlStatus,
+            routeSubagentControlStatus(providerAdapterRegistry),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.subagentControlSteer]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.subagentControlSteer,
+            routeSubagentControlSteer(providerAdapterRegistry, input),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.subagentControlCancel]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.subagentControlCancel,
+            routeSubagentControlCancel(providerAdapterRegistry, input),
             { "rpc.aggregate": "orchestration" },
           ),
         [WS_METHODS.serverProbe]: (_input) =>

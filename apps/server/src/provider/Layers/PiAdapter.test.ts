@@ -16,11 +16,18 @@ import {
   ApprovalRequestId,
   PiSettings,
   ProviderDriverKind,
+  RuntimeTaskId,
   type ProviderRuntimeEvent,
   ThreadId,
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
+import type { ProviderAdapterError } from "../Errors.ts";
+import { decodeControlEnvelope } from "../PiSubagentControl.ts";
+import type {
+  ProviderAdapterShape,
+  ProviderSubagentControlPlaneShape,
+} from "../Services/ProviderAdapter.ts";
 import { makePiAdapter } from "./PiAdapter.ts";
 
 const decodePiSettings = Schema.decodeSync(PiSettings);
@@ -53,6 +60,10 @@ const makeFixture = (): Fixture => {
   delete process.env.FAKE_PI_BUSY;
   delete process.env.FAKE_PI_FAIL_COMMAND;
   delete process.env.FAKE_PI_VETO;
+  delete process.env.FAKE_PI_MANAGER;
+  delete process.env.FAKE_PI_MANAGER_ID;
+  delete process.env.FAKE_PI_MANAGER_CAPABILITIES;
+  delete process.env.FAKE_PI_MANAGER_REJECT_FILE;
   return { binaryPath: shimPath, closedPath, logPath, nativeSessionFile };
 };
 
@@ -897,5 +908,261 @@ describe("PiAdapter", () => {
       );
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
+  );
+
+  const requireControlPlane = (
+    adapter: ProviderAdapterShape<ProviderAdapterError>,
+  ): ProviderSubagentControlPlaneShape<ProviderAdapterError> => {
+    const plane = adapter.subagentControlPlane;
+    if (plane === undefined) throw new Error("expected a Pi subagent control plane");
+    return plane;
+  };
+
+  const controlEnvelopes = (fixture: Fixture) =>
+    readLogLines(fixture)
+      .filter(
+        (line) =>
+          line["type"] === "prompt" &&
+          String(line["message"] ?? "").startsWith("/subagent:t3-control "),
+      )
+      .map((line) => decodeControlEnvelope(String(line["message"]).split(" ")[1] ?? ""))
+      .filter((envelope) => envelope !== undefined);
+
+  it.live(
+    "reports an explicit unsupported status and never sends the manager command when it is not registered",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeFixture();
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+        const statuses = yield* requireControlPlane(adapter).status();
+        expect(statuses).toHaveLength(1);
+        const status = statuses[0];
+        expect(status?.supported).toBe(false);
+        expect(status?.reason).toContain("not registered");
+        expect(status?.controls.steer.enabled).toBe(false);
+        expect(status?.controls.cancel.enabled).toBe(false);
+        // The control command must never reach the model as a prompt.
+        expect(controlEnvelopes(fixture)).toHaveLength(0);
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(provideTestEnv),
+  );
+
+  it.live("negotiates declared capabilities and derives per-control availability", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_MANAGER = "1";
+      process.env.FAKE_PI_MANAGER_CAPABILITIES = '{"steering":false}';
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      const statuses = yield* requireControlPlane(adapter).status();
+      expect(statuses).toHaveLength(1);
+      const status = statuses[0];
+      expect(status?.supported).toBe(true);
+      expect(status?.managerId).toBe("fake-manager-1");
+      expect(status?.protocolVersion).toBe(1);
+      expect(status?.controls.steer).toMatchObject({ enabled: false });
+      if (!status?.controls.steer.enabled) {
+        expect(status?.controls.steer.reason).toContain("steering");
+      }
+      expect(status?.controls.cancel.enabled).toBe(true);
+      // Exactly one negotiation envelope was sent, by registration only.
+      const envelopes = controlEnvelopes(fixture);
+      expect(envelopes).toHaveLength(1);
+      expect(envelopes[0]).toMatchObject({ v: 1, op: "negotiate" });
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live(
+    "projects normalized manager runs into task rows idempotently and rejects stale events",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeFixture();
+        process.env.FAKE_PI_MANAGER = "1";
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "MANAGER_RUN_LIFECYCLE" });
+        yield* collector.waitFor(
+          (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
+        );
+        const taskEvents = collector.events.filter(
+          (event) =>
+            event.type === "task.started" ||
+            event.type === "task.updated" ||
+            event.type === "task.completed",
+        );
+        const payloadOfTask = (event: ProviderRuntimeEvent) =>
+          event.payload as {
+            taskId?: string;
+            description?: string;
+            status?: string;
+            summary?: string;
+            taskType?: string;
+            role?: string;
+          };
+        const starts = taskEvents.filter((event) => event.type === "task.started");
+        expect(starts).toHaveLength(2);
+        expect(payloadOfTask(starts[0]!)).toMatchObject({
+          description: "map auth",
+          taskType: "subagent",
+          role: "pi",
+        });
+        expect(payloadOfTask(starts[0]!).taskId).toMatch(/^pi:.+:act-1:sa-1$/);
+        expect(payloadOfTask(starts[1]!).taskId).toMatch(/^pi:.+:act-2:sa-1$/);
+        const updates = taskEvents.filter((event) => event.type === "task.updated");
+        expect(updates).toHaveLength(1);
+        expect(payloadOfTask(updates[0]!)).toMatchObject({ status: "running" });
+        const completions = taskEvents.filter((event) => event.type === "task.completed");
+        expect(completions).toHaveLength(1);
+        expect(payloadOfTask(completions[0]!)).toMatchObject({
+          status: "completed",
+          summary: "Mapped the auth flow.",
+        });
+        // Stale, duplicate-terminal, late-activation, and wrong-owner records
+        // produced no rows at all.
+        expect(taskEvents.some((event) => payloadOfTask(event).taskId?.includes("sa-9"))).toBe(
+          false,
+        );
+        // Stopping the session finalizes the still-open second activation.
+        yield* adapter.stopSession(THREAD_ID);
+        const stopped = collector.events.filter(
+          (event) =>
+            event.type === "task.completed" &&
+            (event.payload as { taskId?: string }).taskId?.includes("act-2"),
+        );
+        expect(stopped).toHaveLength(1);
+        expect((stopped[0]!.payload as { status?: string }).status).toBe("stopped");
+      }).pipe(provideTestEnv),
+  );
+
+  it.live("does not duplicate task rows when manager events and tool events arrive together", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_MANAGER = "1";
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_TOOL_AND_MANAGER" });
+      yield* collector.waitFor(
+        (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
+      );
+      const started = collector.events.filter((event) => event.type === "task.started");
+      expect(started).toHaveLength(1);
+      expect((started[0]!.payload as { taskId?: string }).taskId).toMatch(/^pi:.+:act-1:sa-1$/);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live(
+    "routes owner steer/cancel with correlated envelopes and rejects mismatched managers",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeFixture();
+        process.env.FAKE_PI_MANAGER = "1";
+        // The fake inherits this path at spawn; creating/removing the file is
+        // what toggles rejection while the child is running.
+        const rejectFile = NodePath.join(NodePath.dirname(fixture.logPath), "reject");
+        process.env.FAKE_PI_MANAGER_REJECT_FILE = rejectFile;
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "MANAGER_RUN_OPEN" });
+        const started = yield* collector.waitFor((event) => event.type === "task.started");
+        const taskId = RuntimeTaskId.make((started.payload as { taskId: string }).taskId);
+        const plane = requireControlPlane(adapter);
+        const promptsBeforeMismatch = controlEnvelopes(fixture).length;
+
+        // Another manager id is refused without any prompt leaving the process.
+        const mismatch = yield* Effect.flip(
+          plane.steer({ managerId: "other-manager", runId: taskId, text: "hello" }),
+        );
+        expect(mismatch._tag).toBe("SubagentControlError");
+        if (mismatch._tag === "SubagentControlError") {
+          expect(mismatch.reason).toBe("manager-mismatch");
+        }
+        expect(controlEnvelopes(fixture)).toHaveLength(promptsBeforeMismatch);
+
+        // Untracked run ids fail explicitly.
+        const unknownRun = yield* Effect.flip(
+          plane.cancel({
+            managerId: "fake-manager-1",
+            runId: RuntimeTaskId.make("pi:other-epoch:act-x:sa-x"),
+          }),
+        );
+        if (unknownRun._tag === "SubagentControlError") {
+          expect(unknownRun.reason).toBe("unknown-run");
+        }
+
+        const steer = yield* plane.steer({
+          managerId: "fake-manager-1",
+          runId: taskId,
+          text: "focus on auth",
+        });
+        expect(steer).toEqual({ accepted: true });
+        const cancel = yield* plane.cancel({ managerId: "fake-manager-1", runId: taskId });
+        expect(cancel).toEqual({ accepted: true });
+        const envelopes = controlEnvelopes(fixture);
+        expect(envelopes).toHaveLength(promptsBeforeMismatch + 2);
+        expect(envelopes.at(-2)).toMatchObject({
+          v: 1,
+          op: "steer",
+          managerId: "fake-manager-1",
+          runId: "sa-1",
+          activationId: "act-1",
+          text: "focus on auth",
+        });
+        expect(envelopes.at(-1)).toMatchObject({
+          v: 1,
+          op: "cancel",
+          managerId: "fake-manager-1",
+          runId: "sa-1",
+          activationId: "act-1",
+        });
+
+        // A manager that refuses the command surfaces as manager-rejected.
+        NodeFS.writeFileSync(rejectFile, "reject");
+        const rejected = yield* Effect.flip(
+          plane.steer({ managerId: "fake-manager-1", runId: taskId, text: "again" }),
+        );
+        if (rejected._tag === "SubagentControlError") {
+          expect(rejected.reason).toBe("manager-rejected");
+          expect(rejected.detail).toContain("refused");
+        }
+        NodeFS.rmSync(rejectFile);
+        delete process.env.FAKE_PI_MANAGER_REJECT_FILE;
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(provideTestEnv),
   );
 });

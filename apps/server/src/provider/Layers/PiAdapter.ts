@@ -47,12 +47,18 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
+  SubagentControlError,
+  type OrchestrationSubagentControlCancelInput,
+  type OrchestrationSubagentControlSteerInput,
+  type SubagentControlPlaneStatus,
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Exit from "effect/Exit";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -82,7 +88,26 @@ import {
   type PiRpcConnection,
   type PiRpcRecord,
 } from "../piRpc.ts";
-import type { ProviderAdapterShape, ProviderThreadSnapshot } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterShape,
+  ProviderSubagentControlPlaneShape,
+  ProviderThreadSnapshot,
+} from "../Services/ProviderAdapter.ts";
+import {
+  MANAGER_PROTOCOL_VERSION,
+  MANAGER_RECORD_TYPE,
+  SUBAGENT_MANAGER_COMMAND,
+  type ControlEnvelope,
+  decodeManagerRecord,
+  deriveControlAvailabilities,
+  encodeControlEnvelope,
+  makeManagerRunRegistry,
+  type ManagerRecord,
+  type ManagerRunRegistry,
+  type ManagerRunUpsert,
+  type NegotiatedManagerControl,
+  negotiationFromRecord,
+} from "../PiSubagentControl.ts";
 
 const PROVIDER = ProviderDriverKind.make("pi");
 
@@ -213,6 +238,25 @@ interface PiSessionContext {
   readonly managedSubagents: Map<string, ManagedPiSubagent>;
   readonly pendingManagedSpawnToolCalls: Set<string>;
   readonly pendingManagedTerminals: Map<string, PendingPiSubagentTerminal>;
+  /**
+   * Negotiated subagent manager control plane, or null when the manager
+   * command is absent, negotiation failed, or the protocol mismatches. When
+   * non-null the manager's normalized events are authoritative and the
+   * tool-result projection is suppressed. Assigned after registration: the
+   * event pump routes manager records through this session map entry.
+   */
+  managerControl: NegotiatedManagerControl | null;
+  /** Explicit unsupported/mismatch reason when `managerControl` is null. */
+  managerReason: string | undefined;
+  /** Idempotent run-upsert state machine for the negotiated manager. */
+  managerRegistry: ManagerRunRegistry;
+  /** Namespaced T3 task id → open manager run (steer/cancel lookup). */
+  readonly managerRuns: Map<
+    RuntimeTaskId,
+    { readonly nativeRunId: string; readonly activationId: string }
+  >;
+  /** Correlated manager records awaiting a reply, by envelope id. */
+  readonly pendingManagerRecords: Map<string, Deferred.Deferred<ManagerRecord>>;
   nativeSessionPath: string | undefined;
 }
 
@@ -226,6 +270,14 @@ const SETTLE_PROBE_RETRY_DELAY_MILLIS = 100;
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const MANAGED_SUBAGENT_SUMMARY_MAX_CODE_POINTS = 4_096;
 const MAX_PENDING_MANAGED_TERMINALS = 64;
+/**
+ * The manager command is only ever sent after `get_commands` proved it is
+ * registered, so a present-but-unresponsive manager is the only slow path;
+ * an absent manager costs the session nothing.
+ */
+const MANAGER_NEGOTIATION_TIMEOUT_MS = 5_000;
+const MANAGER_CONTROL_ACK_TIMEOUT_MS = 10_000;
+const MAX_OPEN_MANAGER_RUNS = 256;
 
 function truncateCodePoints(value: string, limit: number) {
   let codePoints = 0;
@@ -536,6 +588,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       turn: ActivePiTurn,
       event: PiRpcRecord,
     ) {
+      // The negotiated manager's normalized events own the task lifecycle;
+      // emitting from the spawn tool result too would create duplicate rows.
+      if (ctx.managerControl !== null) return;
       if (recordString(event, "toolName") !== "subagent_spawn" || event["isError"] === true) {
         return;
       }
@@ -589,6 +644,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       ctx: PiSessionContext,
       event: PiRpcRecord,
     ) {
+      // Summary fallback only: suppressed when manager events are normalized.
+      if (ctx.managerControl !== null) return;
       const decoded = decodePiSubagentResultEntry(recordField(event, "entry"));
       if (Option.isNone(decoded)) return;
       const data = decoded.value.data;
@@ -611,6 +668,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       ctx: PiSessionContext,
       event: PiRpcRecord,
     ) {
+      // Summary fallback only: suppressed when manager events are normalized.
+      if (ctx.managerControl !== null) return;
       const toolName = recordString(event, "toolName");
       if (
         event["isError"] === true ||
@@ -636,6 +695,313 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         );
       }
     });
+
+    // ── subagent manager control plane ─────────────────
+
+    const awaitManagerRecord = (
+      pendingManagerRecords: Map<string, Deferred.Deferred<ManagerRecord>>,
+      correlationId: string,
+      timeoutMs: number,
+    ) =>
+      Effect.gen(function* () {
+        const deferred = yield* Deferred.make<ManagerRecord>();
+        pendingManagerRecords.set(correlationId, deferred);
+        return yield* Deferred.await(deferred).pipe(
+          Effect.timeoutOption(Duration.millis(timeoutMs)),
+          Effect.map(Option.getOrUndefined),
+          Effect.ensuring(Effect.sync(() => pendingManagerRecords.delete(correlationId))),
+        );
+      });
+
+    /**
+     * Negotiate the subagent manager once per native process, after
+     * `get_commands` proved the command is registered. An absent command
+     * never sends a prompt (it would reach the model) and resolves to an
+     * explicit unsupported status instead.
+     */
+    const negotiateManagerControl = (input: {
+      readonly threadId: ThreadId;
+      readonly connection: PiRpcConnection;
+      readonly extensionCommandNames: ReadonlySet<string>;
+      readonly pendingManagerRecords: Map<string, Deferred.Deferred<ManagerRecord>>;
+    }) =>
+      Effect.gen(function* () {
+        if (!input.extensionCommandNames.has(SUBAGENT_MANAGER_COMMAND)) {
+          return {
+            control: null,
+            reason: `Pi subagent manager command '/${SUBAGENT_MANAGER_COMMAND}' is not registered in this Pi process; subagent controls stay read-only.`,
+          };
+        }
+        const correlationId = yield* nextUuid;
+        yield* input.connection
+          .send({
+            type: "prompt",
+            message: `/${SUBAGENT_MANAGER_COMMAND} ${encodeControlEnvelope({
+              v: MANAGER_PROTOCOL_VERSION,
+              op: "negotiate",
+              id: correlationId,
+            })}`,
+          })
+          .pipe(
+            Effect.mapError((cause) => adapterError(input.threadId, "subagent negotiate", cause)),
+          );
+        const record = yield* awaitManagerRecord(
+          input.pendingManagerRecords,
+          correlationId,
+          MANAGER_NEGOTIATION_TIMEOUT_MS,
+        );
+        if (record === undefined) {
+          return { control: null, reason: "Pi subagent manager negotiation timed out." };
+        }
+        if (record.kind !== "negotiation") {
+          return {
+            control: null,
+            reason: "Pi subagent manager sent an unexpected negotiation reply.",
+          };
+        }
+        const parsed = negotiationFromRecord(record);
+        return parsed.ok ? { control: parsed.control } : { control: null, reason: parsed.reason };
+      });
+
+    const managerTaskId = (ctx: PiSessionContext, activationId: string, nativeRunId: string) =>
+      RuntimeTaskId.make(`pi:${ctx.processEpoch}:${activationId}:${nativeRunId}`);
+
+    const managerTaskLinkage = (record: ManagerRunUpsert, taskId: RuntimeTaskId) => ({
+      taskType: "subagent" as const,
+      ...(record.title !== undefined ? { title: record.title } : {}),
+      role: record.harness ?? "pi",
+      ...(record.model !== undefined ? { model: record.model } : {}),
+      runHandles: { runId: taskId },
+      timelineBypass: true,
+    });
+
+    const applyManagerRunUpsert = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      record: ManagerRunUpsert,
+    ) {
+      if (ctx.managerControl === null) return;
+      const applied = ctx.managerRegistry.apply(record);
+      if (!applied.accepted) {
+        yield* Effect.logDebug("Rejected Pi subagent manager run event.", {
+          reason: applied.reason,
+          runId: record.runId,
+        });
+        return;
+      }
+      const taskId = managerTaskId(ctx, record.activationId, record.runId);
+      const base = yield* makeEventBase(ctx.session);
+      if (applied.effect === "start") {
+        if (ctx.managerRuns.size >= MAX_OPEN_MANAGER_RUNS) {
+          const oldest = ctx.managerRuns.keys().next().value;
+          if (oldest !== undefined) ctx.managerRuns.delete(oldest);
+        }
+        ctx.managerRuns.set(taskId, {
+          nativeRunId: record.runId,
+          activationId: record.activationId,
+        });
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "task.started",
+          payload: {
+            taskId,
+            ...(record.title !== undefined ? { description: record.title } : {}),
+            ...managerTaskLinkage(record, taskId),
+          },
+        });
+        return;
+      }
+      if (applied.effect === "update") {
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "task.updated",
+          payload: { taskId, status: "running", ...managerTaskLinkage(record, taskId) },
+        });
+        return;
+      }
+      ctx.managerRuns.delete(taskId);
+      yield* offerRuntimeEvent({
+        ...base,
+        type: "task.completed",
+        payload: {
+          taskId,
+          status:
+            record.status === "done"
+              ? "completed"
+              : record.status === "error"
+                ? "failed"
+                : "stopped",
+          ...(record.summary !== undefined && record.summary.trim().length > 0
+            ? { summary: record.summary }
+            : {}),
+          ...managerTaskLinkage(record, taskId),
+        },
+      });
+    });
+
+    const handleManagerRecord = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      event: PiRpcRecord,
+    ) {
+      const record = decodeManagerRecord(event);
+      if (record === undefined) return;
+      if (record.kind === "run-upsert") {
+        yield* applyManagerRunUpsert(ctx, record);
+        return;
+      }
+      // Negotiation and ack records resolve their awaited correlation.
+      const pending = ctx.pendingManagerRecords.get(record.id);
+      if (pending === undefined) return;
+      ctx.pendingManagerRecords.delete(record.id);
+      yield* Deferred.succeed(pending, record).pipe(Effect.asVoid);
+    });
+
+    const buildControlPlaneStatus = (ctx: PiSessionContext): SubagentControlPlaneStatus => {
+      const control = ctx.managerControl;
+      if (control === null) {
+        const reason = ctx.managerReason ?? "Pi subagent manager is unavailable.";
+        return {
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          supported: false,
+          reason,
+          controls: {
+            steer: { enabled: false, reason },
+            cancel: { enabled: false, reason },
+          },
+        };
+      }
+      const derived = deriveControlAvailabilities(control.capabilities);
+      if (!derived.status.enabled) {
+        const reason = derived.status.reason;
+        return {
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          supported: false,
+          reason,
+          controls: {
+            steer: { enabled: false, reason },
+            cancel: { enabled: false, reason },
+          },
+        };
+      }
+      return {
+        provider: PROVIDER,
+        threadId: ctx.threadId,
+        supported: true,
+        managerId: control.managerId,
+        protocolVersion: control.protocolVersion,
+        controls: { steer: derived.steer, cancel: derived.cancel },
+      };
+    };
+
+    /**
+     * Resolve the session and open run that a manager-owned control targets.
+     * Ownership is by declared manager id: a session whose negotiation named
+     * a different manager is never used.
+     */
+    const requireManagerRun = (managerId: string, runId: RuntimeTaskId) =>
+      Effect.gen(function* () {
+        let ownerSession: PiSessionContext | undefined;
+        for (const ctx of sessions.values()) {
+          if (ctx.managerControl?.managerId !== managerId) continue;
+          ownerSession = ctx;
+          const run = ctx.managerRuns.get(runId);
+          if (run !== undefined) return { ctx, run };
+        }
+        if (ownerSession === undefined) {
+          return yield* new SubagentControlError({
+            reason: "manager-mismatch",
+            detail: `This adapter does not declare subagent manager '${managerId}'.`,
+          });
+        }
+        return yield* new SubagentControlError({
+          reason: "unknown-run",
+          detail: `Manager '${managerId}' does not track an open run '${runId}'.`,
+        });
+      });
+
+    const sendManagerControlCommand = (ctx: PiSessionContext, envelope: ControlEnvelope) =>
+      Effect.gen(function* () {
+        yield* ctx.connection
+          .send({
+            type: "prompt",
+            message: `/${SUBAGENT_MANAGER_COMMAND} ${encodeControlEnvelope(envelope)}`,
+          })
+          .pipe(Effect.mapError(() => new SubagentControlError({ reason: "manager-unreachable" })));
+        const record = yield* awaitManagerRecord(
+          ctx.pendingManagerRecords,
+          envelope.id,
+          MANAGER_CONTROL_ACK_TIMEOUT_MS,
+        );
+        if (record === undefined) {
+          return yield* new SubagentControlError({ reason: "timeout" });
+        }
+        if (record.kind !== "ack") {
+          return yield* new SubagentControlError({
+            reason: "manager-rejected",
+            detail: "Manager replied with a non-acknowledgement record.",
+          });
+        }
+        if (!record.accepted) {
+          return yield* new SubagentControlError({
+            reason: "manager-rejected",
+            ...(record.error !== undefined ? { detail: record.error } : {}),
+          });
+        }
+      });
+
+    const steerManagerRun = (input: OrchestrationSubagentControlSteerInput) =>
+      Effect.gen(function* () {
+        const target = yield* requireManagerRun(input.managerId, input.runId);
+        const control = target.ctx.managerControl;
+        if (control === null) {
+          return yield* new SubagentControlError({ reason: "unsupported" });
+        }
+        const controls = deriveControlAvailabilities(control.capabilities);
+        if (!controls.steer.enabled) {
+          return yield* new SubagentControlError({
+            reason: "control-disabled",
+            ...(controls.steer.reason !== undefined ? { detail: controls.steer.reason } : {}),
+          });
+        }
+        const correlationId = yield* nextUuid;
+        yield* sendManagerControlCommand(target.ctx, {
+          v: MANAGER_PROTOCOL_VERSION,
+          op: "steer",
+          id: correlationId,
+          managerId: control.managerId,
+          runId: target.run.nativeRunId,
+          activationId: target.run.activationId,
+          text: input.text,
+        });
+        return { accepted: true } as const;
+      });
+
+    const cancelManagerRun = (input: OrchestrationSubagentControlCancelInput) =>
+      Effect.gen(function* () {
+        const target = yield* requireManagerRun(input.managerId, input.runId);
+        const control = target.ctx.managerControl;
+        if (control === null) {
+          return yield* new SubagentControlError({ reason: "unsupported" });
+        }
+        const controls = deriveControlAvailabilities(control.capabilities);
+        if (!controls.cancel.enabled) {
+          return yield* new SubagentControlError({
+            reason: "control-disabled",
+            ...(controls.cancel.reason !== undefined ? { detail: controls.cancel.reason } : {}),
+          });
+        }
+        const correlationId = yield* nextUuid;
+        yield* sendManagerControlCommand(target.ctx, {
+          v: MANAGER_PROTOCOL_VERSION,
+          op: "cancel",
+          id: correlationId,
+          managerId: control.managerId,
+          runId: target.run.nativeRunId,
+          activationId: target.run.activationId,
+        });
+        return { accepted: true } as const;
+      });
 
     const handleToolEvent = Effect.fnUntraced(function* (
       ctx: PiSessionContext,
@@ -860,6 +1226,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
               case "entry_appended":
                 yield* handleManagedSubagentResult(ctx, event);
                 return;
+              case MANAGER_RECORD_TYPE:
+                yield* handleManagerRecord(ctx, event);
+                return;
               case "extension_ui_request":
                 yield* handleExtensionUiRequest(ctx, event);
                 return;
@@ -934,6 +1303,19 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         ctx.managedSubagents.clear();
         ctx.pendingManagedSpawnToolCalls.clear();
         ctx.pendingManagedTerminals.clear();
+        // Manager-owned runs are not tool results; finalize them explicitly so
+        // stopping the owning process never leaves rows running forever.
+        if (ctx.managerControl !== null) {
+          for (const taskId of ctx.managerRuns.keys()) {
+            const base = yield* makeEventBase(ctx.session);
+            yield* offerRuntimeEvent({
+              ...base,
+              type: "task.completed",
+              payload: { taskId, status: "stopped" },
+            });
+          }
+        }
+        ctx.managerRuns.clear();
         if (sessions.get(ctx.threadId) === ctx) {
           sessions.delete(ctx.threadId);
         }
@@ -1000,6 +1382,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           const discoveredCommands = parsePiDiscoveredCommands(commandsData);
           const skillNames = new Set(discoveredCommands.skills.map((skill) => skill.name));
           const extensionCommandNames = new Set(discoveredCommands.extensionCommandNames);
+          const pendingManagerRecords = new Map<string, Deferred.Deferred<ManagerRecord>>();
           const nativeSessionPath =
             recordString(stateData, "sessionFile") ?? recordString(stateData, "sessionId");
           if (nativeSessionPath === undefined) {
@@ -1052,9 +1435,25 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             managedSubagents: new Map(),
             pendingManagedSpawnToolCalls: new Set(),
             pendingManagedTerminals: new Map(),
+            managerControl: null,
+            managerReason: undefined,
+            managerRegistry: makeManagerRunRegistry(""),
+            managerRuns: new Map(),
+            pendingManagerRecords,
             nativeSessionPath,
           };
           sessions.set(input.threadId, ctx);
+          // Negotiate only once the pump can route manager records to this
+          // session; the awaited reply is what caches the explicit status.
+          const managerNegotiation = yield* negotiateManagerControl({
+            threadId: input.threadId,
+            connection,
+            extensionCommandNames,
+            pendingManagerRecords,
+          });
+          ctx.managerControl = managerNegotiation.control;
+          ctx.managerReason = managerNegotiation.reason;
+          ctx.managerRegistry = makeManagerRunRegistry(managerNegotiation.control?.managerId ?? "");
           const base = yield* makeEventBase(session);
           yield* offerRuntimeEvent({
             ...base,
@@ -1270,6 +1669,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         discard: true,
       });
 
+    const subagentControlPlane = {
+      status: () =>
+        Effect.sync(() => Array.from(sessions.values(), (ctx) => buildControlPlaneStatus(ctx))),
+      steer: steerManagerRun,
+      cancel: cancelManagerRun,
+    } satisfies ProviderSubagentControlPlaneShape<ProviderAdapterError>;
+
     yield* Effect.addFinalizer(() => Effect.ignore(stopAll()));
 
     return {
@@ -1287,6 +1693,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       readThread,
       rollbackThread,
       stopAll,
+      subagentControlPlane,
       streamEvents: Stream.fromPubSub(runtimeEventPubSub),
     } satisfies ProviderAdapterShape<ProviderAdapterError>;
   });

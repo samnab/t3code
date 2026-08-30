@@ -9,6 +9,9 @@
  */
 import type {
   ApprovalRequestId,
+  OrchestrationSubagentControlActionResult,
+  OrchestrationSubagentControlCancelInput,
+  OrchestrationSubagentControlSteerInput,
   ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderUserInputAnswers,
@@ -18,6 +21,8 @@ import type {
   ProviderSessionStartInput,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
+  SubagentControlError,
+  SubagentControlPlaneStatus,
   ThreadId,
   ProviderTurnStartResult,
   TurnId,
@@ -42,6 +47,23 @@ export interface ProviderThreadTurnSnapshot {
 export interface ProviderThreadSnapshot {
   readonly threadId: ThreadId;
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
+}
+
+/**
+ * Optional owner-routed subagent control plane for adapters backed by a
+ * subagent manager (currently native Pi only). Adapters without one simply
+ * leave the member undefined; unsupported adapters stay read-only with an
+ * explicit reason.
+ */
+export interface ProviderSubagentControlPlaneShape<TError> {
+  /** Declared status per live session managed by this adapter. */
+  readonly status: () => Effect.Effect<ReadonlyArray<SubagentControlPlaneStatus>, TError>;
+  readonly steer: (
+    input: OrchestrationSubagentControlSteerInput,
+  ) => Effect.Effect<OrchestrationSubagentControlActionResult, TError | SubagentControlError>;
+  readonly cancel: (
+    input: OrchestrationSubagentControlCancelInput,
+  ) => Effect.Effect<OrchestrationSubagentControlActionResult, TError | SubagentControlError>;
 }
 
 export interface ProviderAdapterShape<TError> {
@@ -127,6 +149,12 @@ export interface ProviderAdapterShape<TError> {
    * Stop all sessions owned by this adapter.
    */
   readonly stopAll: () => Effect.Effect<void, TError>;
+
+  /**
+   * Owner-routed subagent control plane, when the adapter is backed by a
+   * subagent manager. Routing across adapters is by declared manager id.
+   */
+  readonly subagentControlPlane?: ProviderSubagentControlPlaneShape<TError>;
 
   /**
    * Canonical runtime event stream emitted by this adapter.

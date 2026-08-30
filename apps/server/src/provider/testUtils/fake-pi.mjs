@@ -10,6 +10,12 @@
  *  - FAKE_PI_VETO — switch_session responds with { cancelled: true }.
  *  - FAKE_PI_FAIL_COMMAND — return a failed response for this command type.
  *  - FAKE_PI_BUSY — get_state reports isStreaming true.
+ *  - FAKE_PI_MANAGER — register the T3 subagent manager control command and
+ *    speak the t3.subagent.v1 stdout JSON contract.
+ *  - FAKE_PI_MANAGER_ID — managerId reported during negotiation.
+ *  - FAKE_PI_MANAGER_CAPABILITIES — JSON patch over all-true capability flags.
+ *  - FAKE_PI_MANAGER_REJECT_FILE — when this file exists, ack steer/cancel
+ *    envelopes with accepted:false.
  */
 import * as NodeFS from "node:fs";
 
@@ -94,6 +100,117 @@ const subagentDetails = (status = "running") => ({
   status,
   trusted_suborch: false,
 });
+
+// ── fake T3 subagent manager ──
+
+const MANAGER_COMMAND = "subagent:t3-control";
+const MANAGER_RECORD_TYPE = "t3.subagent.v1";
+const managerId = () => process.env.FAKE_PI_MANAGER_ID ?? "fake-manager-1";
+const managerEnabled = () => process.env.FAKE_PI_MANAGER === "1";
+
+const managerRecord = (value) => send({ type: MANAGER_RECORD_TYPE, ...value });
+
+const negotiatedCapabilities = () => ({
+  normalizedEvents: true,
+  stableActivations: true,
+  ownerRouting: true,
+  steering: true,
+  cancellation: true,
+  reloadRestore: true,
+  scheduling: true,
+  nativeChildProjection: true,
+  deliveryAcknowledgements: true,
+  ...JSON.parse(process.env.FAKE_PI_MANAGER_CAPABILITIES ?? "{}"),
+});
+
+const handleManagerControl = (req, message) => {
+  const arg = message.slice(`/${MANAGER_COMMAND} `.length).trim();
+  let envelope;
+  try {
+    envelope = JSON.parse(Buffer.from(arg, "base64url").toString("utf8"));
+  } catch {
+    return;
+  }
+  if (envelope.op === "negotiate") {
+    managerRecord({
+      kind: "negotiation",
+      id: envelope.id,
+      managerId: managerId(),
+      protocolVersion: 1,
+      capabilities: negotiatedCapabilities(),
+    });
+    return;
+  }
+  if (envelope.op === "steer" || envelope.op === "cancel") {
+    const rejectFile = process.env.FAKE_PI_MANAGER_REJECT_FILE;
+    if (rejectFile !== undefined && NodeFS.existsSync(rejectFile)) {
+      managerRecord({
+        kind: "ack",
+        id: envelope.id,
+        accepted: false,
+        error: `fake manager refused ${envelope.op}`,
+      });
+      return;
+    }
+    managerRecord({ kind: "ack", id: envelope.id, accepted: true });
+  }
+};
+
+const managerUpsert = (fields) =>
+  managerRecord({ kind: "run-upsert", managerId: managerId(), ...fields });
+
+// start(seq1) → update(seq2) → complete(seq3), then rejected stale/duplicate/
+// late-activation/wrong-owner records, then a fresh activation (new row).
+const emitManagerLifecycle = () => {
+  const mid = managerId();
+  const upsert = (fields) => managerRecord({ kind: "run-upsert", managerId: mid, ...fields });
+  upsert({
+    sequence: 1,
+    runId: "sa-1",
+    activationId: "act-1",
+    status: "running",
+    title: "map auth",
+    harness: "pi",
+    model: "zai/glm-5.3-flash",
+  });
+  upsert({
+    sequence: 2,
+    runId: "sa-1",
+    activationId: "act-1",
+    status: "running",
+    title: "map auth",
+  });
+  upsert({
+    sequence: 3,
+    runId: "sa-1",
+    activationId: "act-1",
+    status: "done",
+    summary: "Mapped the auth flow.",
+  });
+  upsert({
+    sequence: 3,
+    runId: "sa-1",
+    activationId: "act-1",
+    status: "done",
+    summary: "duplicate terminal",
+  });
+  upsert({ sequence: 2, runId: "sa-1", activationId: "act-1", status: "running" });
+  upsert({ sequence: 4, runId: "sa-1", activationId: "act-1", status: "running" });
+  upsert({
+    managerId: "rogue-manager",
+    sequence: 9,
+    runId: "sa-9",
+    activationId: "act-9",
+    status: "running",
+  });
+  upsert({
+    sequence: 1,
+    runId: "sa-1",
+    activationId: "act-2",
+    status: "running",
+    title: "map auth, again",
+  });
+};
 
 const emitSubagentSpawnStart = () =>
   send({
@@ -188,6 +305,15 @@ const handle = (req) => {
           { name: "review", description: "Review code", source: "extension" },
           { name: "only", description: "Command-only fixture", source: "extension" },
           { name: "template", description: "Prompt template fixture", source: "prompt" },
+          ...(managerEnabled()
+            ? [
+                {
+                  name: MANAGER_COMMAND,
+                  description: "T3 subagent control plane",
+                  source: "extension",
+                },
+              ]
+            : []),
           {
             name: "skill:research",
             source: "skill",
@@ -232,6 +358,29 @@ const handle = (req) => {
       return;
     case "prompt": {
       const message = String(req.message ?? "");
+      if (managerEnabled() && message.startsWith(`/${MANAGER_COMMAND} `)) {
+        handleManagerControl(req, message);
+        send({ type: "response", id: req.id, command: "prompt", success: true });
+        return;
+      }
+      if (message === "MANAGER_RUN_LIFECYCLE" || message === "MANAGER_RUN_OPEN") {
+        send({ type: "response", id: req.id, command: "prompt", success: true });
+        if (message === "MANAGER_RUN_LIFECYCLE") {
+          emitManagerLifecycle();
+        } else {
+          managerUpsert({
+            sequence: 1,
+            runId: "sa-1",
+            activationId: "act-1",
+            status: "running",
+            title: "map auth",
+            harness: "pi",
+            model: "zai/glm-5.3-flash",
+          });
+        }
+        send({ type: "agent_settled" });
+        return;
+      }
       if (message.includes("REJECT")) {
         send({
           type: "response",
@@ -292,6 +441,26 @@ const handle = (req) => {
           title: "Confirm action",
           message: "Continue with the extension?",
         });
+        return;
+      }
+      if (message === "SUBAGENT_TOOL_AND_MANAGER") {
+        // Tool-result projection AND normalized manager events for the same
+        // run: the manager path must win and the tool path must not duplicate.
+        isStreaming = true;
+        send({ type: "agent_start" });
+        emitSubagentSpawnStart();
+        emitSubagentSpawnEnd();
+        managerUpsert({
+          sequence: 1,
+          runId: "sa-1",
+          activationId: "act-1",
+          status: "running",
+          title: "map auth",
+          harness: "pi",
+          model: "zai/glm-5.3-flash",
+        });
+        isStreaming = false;
+        send({ type: "agent_settled" });
         return;
       }
       if (message.startsWith("SUBAGENT_")) {
