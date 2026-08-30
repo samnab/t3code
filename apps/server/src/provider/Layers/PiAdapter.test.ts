@@ -961,7 +961,8 @@ describe("PiAdapter", () => {
     Effect.gen(function* () {
       const fixture = makeFixture();
       process.env.FAKE_PI_MANAGER = "1";
-      process.env.FAKE_PI_MANAGER_CAPABILITIES = '{"steering":false}';
+      process.env.FAKE_PI_MANAGER_CAPABILITIES =
+        '{"deliveryAcknowledgements":false,"stableActivations":false}';
       const adapter = yield* makeTestAdapter(
         decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
       );
@@ -976,12 +977,20 @@ describe("PiAdapter", () => {
       expect(status?.supported).toBe(true);
       expect(status?.managerId).toBe("fake-manager-1");
       expect(status?.protocolVersion).toBe(1);
-      expect(status?.capabilities).toMatchObject({ steering: false, cancellation: true });
+      expect(status?.capabilities).toMatchObject({
+        deliveryAcknowledgements: false,
+        stableActivations: false,
+        steering: true,
+        cancellation: true,
+      });
       expect(status?.controls.steer).toMatchObject({ enabled: false });
+      expect(status?.controls.cancel).toMatchObject({ enabled: false });
       if (!status?.controls.steer.enabled) {
-        expect(status?.controls.steer.reason).toContain("steering");
+        expect(status?.controls.steer.reason).toContain("deliveryAcknowledgements");
       }
-      expect(status?.controls.cancel.enabled).toBe(true);
+      if (!status?.controls.cancel.enabled) {
+        expect(status?.controls.cancel.reason).toContain("deliveryAcknowledgements");
+      }
       // Exactly one negotiation envelope was sent, by registration only.
       const envelopes = controlEnvelopes(fixture);
       expect(envelopes).toHaveLength(1);
@@ -1171,6 +1180,43 @@ describe("PiAdapter", () => {
         ),
       ).toBe(true);
       yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("stops an evicted manager row once and excludes it from the stop sweep", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_MANAGER = "1";
+      process.env.FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS = "51";
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* collector.waitFor((event) => event.type === "session.started");
+      const firstCompletion = collector.events.find(
+        (event) =>
+          event.type === "task.completed" &&
+          event.payload.taskId.includes(":restore-act-1:restore-1"),
+      );
+      if (firstCompletion?.type !== "task.completed") {
+        throw new Error("Expected the evicted manager run to stop.");
+      }
+      const firstTaskCompletions = () =>
+        collector.events.filter(
+          (event) =>
+            event.type === "task.completed" &&
+            event.payload.taskId === firstCompletion.payload.taskId,
+        );
+      expect(firstTaskCompletions()).toHaveLength(1);
+      expect(firstCompletion.payload.status).toBe("stopped");
+      yield* adapter.stopSession(THREAD_ID);
+      expect(firstTaskCompletions()).toHaveLength(1);
+      expect(collector.events.filter((event) => event.type === "task.completed")).toHaveLength(51);
     }).pipe(provideTestEnv),
   );
 

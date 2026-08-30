@@ -50,15 +50,16 @@ Steer and cancel each require:
 
 - `normalizedEvents`, so T3 has the manager's live activation ID;
 - `ownerRouting`, so the manager can prove it owns the run;
+- `deliveryAcknowledgements`, because T3 waits for an explicit accepted or rejected result;
 - the matching `steering` or `cancellation` capability.
 
-A missing requirement disables the control with a reason naming that capability. In particular, `normalizedEvents: false` leaves the protocol supported but disables both controls. T3 then keeps its tool-result lifecycle fallback.
+A missing requirement disables the control with a reason naming that capability. In particular, `normalizedEvents: false` leaves the protocol supported but disables both controls. T3 then keeps its tool-result lifecycle fallback. `stableActivations` remains reported but does not gate controls because routing uses the current normalized activation ID.
 
 Before steer or cancel, T3 reads the live command registry and renegotiates capabilities. A removed command never reaches the model. A changed manager ID fails ownership validation. A capability removed after extension reload disables the operation before its control envelope is sent.
 
 Unsupported status records always include a non-empty `reason`. Disabled controls also carry the reason used by the adapter.
 
-The initial negotiation remains bounded by the existing five-second timeout. Up to 64 run upserts that arrive before negotiation completes are retained per session and replayed in order after the manager registry activates. The buffer drops its oldest record when full. Stop and process replacement clear it. Open runs and finalized activation history are also bounded.
+The initial negotiation remains bounded by the existing five-second timeout. Up to 64 run upserts that arrive before negotiation completes are retained per session and replayed in order after the manager registry activates. Negotiation remains active until that ordered queue is empty, so live records arriving during replay join the same drain. The buffer drops its oldest record when full. Stop and process replacement clear it. Open runs and finalized activation history are also bounded; evicting the oldest open row emits a stopped completion before removal.
 
 ## Authorization and RPCs
 

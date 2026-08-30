@@ -17,6 +17,7 @@
  *
  * @module provider/PiSubagentControl
  */
+import { TrimmedNonEmptyString } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -86,10 +87,10 @@ const RunUpsertRecordSchema = Schema.Struct({
   runId: ManagerIdString,
   activationId: ManagerIdString,
   status: ManagerStatus,
-  title: Schema.optional(Schema.String.check(Schema.isMaxLength(512))),
+  title: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
   harness: Schema.optional(ManagerHarness),
-  model: Schema.optional(Schema.String.check(Schema.isMaxLength(256))),
-  summary: Schema.optional(Schema.String.check(Schema.isMaxLength(8_192))),
+  model: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  summary: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(8_192))),
 });
 
 const AckRecordSchema = Schema.Struct({
@@ -106,6 +107,11 @@ export type ManagerRecord =
   | typeof NegotiationRecordSchema.Type
   | typeof RunUpsertRecordSchema.Type
   | typeof AckRecordSchema.Type;
+
+export interface ManagerRunReplayState {
+  readonly pendingManagerRunUpserts: ManagerRunUpsert[];
+  managerNegotiating: boolean;
+}
 
 const decodeNegotiation = Schema.decodeUnknownOption(NegotiationRecordSchema);
 const decodeRunUpsert = Schema.decodeUnknownOption(RunUpsertRecordSchema);
@@ -134,6 +140,18 @@ export function decodeManagerRecord(record: unknown): ManagerRecord | undefined 
       return undefined;
   }
 }
+
+export const drainManagerRunReplay = <A, E, R>(
+  state: ManagerRunReplayState,
+  apply: (record: ManagerRunUpsert) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    let record: ManagerRunUpsert | undefined;
+    while ((record = state.pendingManagerRunUpserts.shift()) !== undefined) {
+      yield* apply(record);
+    }
+    state.managerNegotiating = false;
+  });
 
 // ── command envelopes ────────────────────────────────────────
 
@@ -259,9 +277,9 @@ const CONTROL_UNAVAILABLE = (capability: string): string =>
   `Pi subagent manager does not declare the ${capability} capability.`;
 
 /**
- * Steer and cancel each require normalized events, owner routing, and their
- * individual capability. Without normalized lifecycle ownership, T3 cannot
- * truthfully target the manager's live activation.
+ * Steer and cancel require normalized ownership, delivery acknowledgements,
+ * and their individual capability. Stable activation IDs are not required:
+ * routing uses the current activation from the normalized run registry.
  */
 export function deriveControlAvailabilities(
   capabilities: ManagerCapabilities,
@@ -271,9 +289,11 @@ export function deriveControlAvailabilities(
       ? { enabled: false, reason: CONTROL_UNAVAILABLE("normalizedEvents") }
       : !capabilities.ownerRouting
         ? { enabled: false, reason: CONTROL_UNAVAILABLE("ownerRouting") }
-        : declared
-          ? { enabled: true }
-          : { enabled: false, reason: CONTROL_UNAVAILABLE(capability) };
+        : !capabilities.deliveryAcknowledgements
+          ? { enabled: false, reason: CONTROL_UNAVAILABLE("deliveryAcknowledgements") }
+          : declared
+            ? { enabled: true }
+            : { enabled: false, reason: CONTROL_UNAVAILABLE(capability) };
   return {
     steer: routed(capabilities.steering, "steering"),
     cancel: routed(capabilities.cancellation, "cancellation"),
@@ -288,6 +308,8 @@ export type AppliedRunUpsert =
       readonly effect: "start";
       /** Live activation this start replaced, if any. */
       readonly superseded?: string;
+      /** Oldest open run removed to preserve the manager's run bound. */
+      readonly evicted?: { readonly runId: string; readonly activationId: string };
     }
   | { readonly accepted: true; readonly effect: "update" | "complete" }
   | {
@@ -356,9 +378,15 @@ export function makeManagerRunRegistry(managerId: string) {
       // Replacing a live activation settles the old one; the registry reports
       // it so the adapter can stop the old task row before starting the new.
       if (existing !== undefined) rememberFinalized(record.runId, existing);
-      if (runs.size >= MAX_TRACKED_RUNS) {
-        const oldest = runs.keys().next().value;
-        if (oldest !== undefined) runs.delete(oldest);
+      let evicted: { readonly runId: string; readonly activationId: string } | undefined;
+      if (existing === undefined && runs.size >= MAX_TRACKED_RUNS) {
+        const oldestRunId = runs.keys().next().value;
+        const oldestActivationId = oldestRunId === undefined ? undefined : runs.get(oldestRunId);
+        if (oldestRunId !== undefined && oldestActivationId !== undefined) {
+          evicted = { runId: oldestRunId, activationId: oldestActivationId };
+          rememberFinalized(oldestRunId, oldestActivationId);
+          runs.delete(oldestRunId);
+        }
       }
       runs.set(record.runId, record.activationId);
       lastSequence = record.sequence;
@@ -366,6 +394,7 @@ export function makeManagerRunRegistry(managerId: string) {
         accepted: true,
         effect: "start",
         ...(existing !== undefined ? { superseded: existing } : {}),
+        ...(evicted !== undefined ? { evicted } : {}),
       };
     }
     // Terminal event for an activation this bridge never saw running: apply

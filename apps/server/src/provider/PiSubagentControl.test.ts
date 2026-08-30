@@ -10,6 +10,7 @@ import {
   decodeControlEnvelope,
   decodeManagerRecord,
   deriveControlAvailabilities,
+  drainManagerRunReplay,
   encodeControlEnvelope,
   exchangeManagerRecord,
   makeManagerRunRegistry,
@@ -112,6 +113,17 @@ describe("PiSubagentControl", () => {
       expect(decodeManagerRecord(negotiationRecord({ capabilities: incomplete }))).toBeUndefined();
     });
 
+    it("normalizes bounded task linkage strings and rejects whitespace-only values", () => {
+      expect(
+        decodeManagerRecord(
+          runUpsert({ title: "  map auth  ", model: "  sonnet  ", summary: "  done  " }),
+        ),
+      ).toMatchObject({ title: "map auth", model: "sonnet", summary: "done" });
+      expect(decodeManagerRecord(runUpsert({ title: "   " }))).toBeUndefined();
+      expect(decodeManagerRecord(runUpsert({ model: "   " }))).toBeUndefined();
+      expect(decodeManagerRecord(runUpsert({ summary: "   " }))).toBeUndefined();
+    });
+
     it("drops records with foreign types, unsafe ids, or out-of-domain fields", () => {
       expect(
         decodeManagerRecord({ type: "other", kind: "ack", id: "x", accepted: true }),
@@ -185,6 +197,26 @@ describe("PiSubagentControl", () => {
         expect(availabilities.cancel.reason).toContain("normalizedEvents");
       }
     });
+
+    it("requires delivery acknowledgements for both controls", () => {
+      const availabilities = deriveControlAvailabilities({
+        ...ALL_CAPABILITIES,
+        deliveryAcknowledgements: false,
+      });
+      const reason =
+        "Pi subagent manager does not declare the deliveryAcknowledgements capability.";
+      expect(availabilities.steer).toEqual({ enabled: false, reason });
+      expect(availabilities.cancel).toEqual({ enabled: false, reason });
+    });
+
+    it("does not require stable activations when routing evidence is otherwise complete", () => {
+      const availabilities = deriveControlAvailabilities({
+        ...ALL_CAPABILITIES,
+        stableActivations: false,
+      });
+      expect(availabilities.steer.enabled).toBe(true);
+      expect(availabilities.cancel.enabled).toBe(true);
+    });
   });
 
   describe("correlated exchanges", () => {
@@ -235,6 +267,43 @@ describe("PiSubagentControl", () => {
         const record = yield* exchangeManagerRecord(pending, "corr-1", 1, Effect.void);
         expect(record).toBeUndefined();
         expect(pending.size).toBe(0);
+      }),
+    );
+  });
+
+  describe("run replay", () => {
+    it.effect("keeps negotiation active so a live record joins the yielding ordered drain", () =>
+      Effect.gen(function* () {
+        const state = {
+          managerNegotiating: true,
+          pendingManagerRunUpserts: [runUpsert(), runUpsert({ sequence: 2 })],
+        };
+        const firstApplied = yield* Deferred.make<void>();
+        const registry = makeManagerRunRegistry("mgr-1");
+        const applied: number[] = [];
+        const apply = (record: ManagerRunUpsert) =>
+          Effect.gen(function* () {
+            if (registry.apply(record).accepted) applied.push(record.sequence);
+            if (record.sequence === 1) {
+              yield* Deferred.succeed(firstApplied, undefined);
+              yield* Effect.yieldNow;
+            }
+          });
+        const liveRecord = runUpsert({ sequence: 3 });
+        yield* Effect.all(
+          [
+            drainManagerRunReplay(state, apply),
+            Effect.gen(function* () {
+              yield* Deferred.await(firstApplied);
+              if (state.managerNegotiating) state.pendingManagerRunUpserts.push(liveRecord);
+              else yield* apply(liveRecord);
+            }),
+          ],
+          { concurrency: "unbounded" },
+        );
+        expect(applied).toEqual([1, 2, 3]);
+        expect(state.managerNegotiating).toBe(false);
+        expect(state.pendingManagerRunUpserts).toHaveLength(0);
       }),
     );
   });
@@ -331,7 +400,7 @@ describe("PiSubagentControl", () => {
 
     it("bounds tracked runs at the canonical 50-run manager limit", () => {
       const registry = makeManagerRunRegistry("mgr-1");
-      for (let index = 1; index <= 51; index += 1) {
+      for (let index = 1; index <= 50; index += 1) {
         expect(
           registry.apply(
             runUpsert({
@@ -342,6 +411,13 @@ describe("PiSubagentControl", () => {
           ),
         ).toMatchObject({ accepted: true, effect: "start" });
       }
+      expect(
+        registry.apply(runUpsert({ runId: "sa-51", activationId: "act-51", sequence: 51 })),
+      ).toMatchObject({
+        accepted: true,
+        effect: "start",
+        evicted: { runId: "sa-1", activationId: "act-1" },
+      });
       expect(registry.openRuns()).toHaveLength(50);
       expect(registry.findOpenRun("sa-1")).toBeUndefined();
       expect(registry.findOpenRun("sa-51")).toMatchObject({ activationId: "act-51" });

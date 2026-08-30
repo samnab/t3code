@@ -99,6 +99,7 @@ import {
   type ControlEnvelope,
   decodeManagerRecord,
   deriveControlAvailabilities,
+  drainManagerRunReplay,
   encodeControlEnvelope,
   exchangeManagerRecord,
   makeManagerRunRegistry,
@@ -280,8 +281,6 @@ const MAX_PENDING_MANAGED_TERMINALS = 64;
  */
 const MANAGER_NEGOTIATION_TIMEOUT_MS = 5_000;
 const MANAGER_CONTROL_ACK_TIMEOUT_MS = 10_000;
-/** Mirrors the canonical manager's 50-run cap; routing state never outgrows it. */
-const MAX_OPEN_MANAGER_RUNS = 50;
 const MAX_PENDING_MANAGER_RUN_UPSERTS = 64;
 
 function truncateCodePoints(value: string, limit: number) {
@@ -803,9 +802,21 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             payload: { taskId: supersededTaskId, status: "stopped" },
           });
         }
-        if (ctx.managerRuns.size >= MAX_OPEN_MANAGER_RUNS) {
-          const oldest = ctx.managerRuns.keys().next().value;
-          if (oldest !== undefined) ctx.managerRuns.delete(oldest);
+        if (applied.evicted !== undefined) {
+          const evictedTaskId = managerTaskId(
+            ctx,
+            applied.evicted.activationId,
+            applied.evicted.runId,
+          );
+          yield* Effect.gen(function* () {
+            const evictedBase = yield* makeEventBase(ctx.session);
+            yield* offerRuntimeEvent({
+              ...evictedBase,
+              type: "task.completed",
+              payload: { taskId: evictedTaskId, status: "stopped" },
+            });
+          }).pipe(Effect.ignore);
+          ctx.managerRuns.delete(evictedTaskId);
         }
         ctx.managerRuns.set(taskId, {
           nativeRunId: record.runId,
@@ -1542,14 +1553,11 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ctx.managerControl = managerNegotiation.control;
           ctx.managerReason = managerNegotiation.reason;
           ctx.managerRegistry = makeManagerRunRegistry(managerNegotiation.control?.managerId ?? "");
-          ctx.managerNegotiating = false;
           if (managerNegotiation.control === null) {
             ctx.pendingManagerRunUpserts.length = 0;
+            ctx.managerNegotiating = false;
           } else {
-            const pendingRunUpserts = ctx.pendingManagerRunUpserts.splice(0);
-            for (const record of pendingRunUpserts) {
-              yield* applyManagerRunUpsert(ctx, record);
-            }
+            yield* drainManagerRunReplay(ctx, (record) => applyManagerRunUpsert(ctx, record));
           }
           const base = yield* makeEventBase(session);
           yield* offerRuntimeEvent({
