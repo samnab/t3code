@@ -17,6 +17,10 @@
  *
  * @module provider/PiSubagentControl
  */
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { piRecordString as recordString, type PiRpcRecord } from "./piRpc.ts";
@@ -178,6 +182,30 @@ export function decodeControlEnvelope(encoded: string): ControlEnvelope | undefi
   }
 }
 
+// ── correlated exchanges ─────────────────────────────────────
+
+/**
+ * Send a command and await its correlated reply record. The reply Deferred is
+ * registered before the command is sent, so a manager that replies before the
+ * awaiting fiber resumes can never have its record dropped, and cleanup runs
+ * on every exit — send failure, timeout, and interruption included.
+ */
+export const exchangeManagerRecord = <E>(
+  pending: Map<string, Deferred.Deferred<ManagerRecord>>,
+  correlationId: string,
+  timeoutMs: number,
+  send: Effect.Effect<void, E>,
+): Effect.Effect<ManagerRecord | undefined, E> =>
+  Effect.gen(function* () {
+    const deferred = yield* Deferred.make<ManagerRecord>();
+    pending.set(correlationId, deferred);
+    yield* send;
+    return yield* Deferred.await(deferred).pipe(
+      Effect.timeoutOption(Duration.millis(timeoutMs)),
+      Effect.map(Option.getOrUndefined),
+    );
+  }).pipe(Effect.ensuring(Effect.sync(() => pending.delete(correlationId))));
+
 // ── negotiation ──────────────────────────────────────────────
 
 export interface NegotiatedManagerControl {
@@ -220,7 +248,6 @@ export interface ControlAvailability {
 }
 
 export interface ControlAvailabilities {
-  readonly status: ControlAvailability;
   readonly steer: ControlAvailability;
   readonly cancel: ControlAvailability;
 }
@@ -228,6 +255,11 @@ export interface ControlAvailabilities {
 const CONTROL_UNAVAILABLE = (capability: string): string =>
   `Pi subagent manager does not declare the ${capability} capability.`;
 
+/**
+ * Steer and cancel derive independently: each needs owner routing plus its
+ * own capability. A negotiated status stays supported without normalized
+ * events — that capability only decides which source owns the lifecycle.
+ */
 export function deriveControlAvailabilities(
   capabilities: ManagerCapabilities,
 ): ControlAvailabilities {
@@ -238,47 +270,42 @@ export function deriveControlAvailabilities(
         ? { enabled: true }
         : { enabled: false, reason: CONTROL_UNAVAILABLE(capability) };
   return {
-    status: capabilities.normalizedEvents
-      ? { enabled: true }
-      : { enabled: false, reason: CONTROL_UNAVAILABLE("normalizedEvents") },
     steer: routed(capabilities.steering, "steering"),
     cancel: routed(capabilities.cancellation, "cancellation"),
   };
 }
 
-export const disabledControlAvailabilities = (reason: string): ControlAvailabilities => ({
-  status: { enabled: false, reason },
-  steer: { enabled: false, reason },
-  cancel: { enabled: false, reason },
-});
-
 // ── normalized run-upsert state machine ──────────────────────
 
 export type AppliedRunUpsert =
-  | { readonly accepted: true; readonly effect: "start" | "update" | "complete" }
+  | {
+      readonly accepted: true;
+      readonly effect: "start";
+      /** Live activation this start replaced, if any. */
+      readonly superseded?: string;
+    }
+  | { readonly accepted: true; readonly effect: "update" | "complete" }
   | {
       readonly accepted: false;
       readonly reason: "manager-mismatch" | "stale-sequence" | "late-activation";
     };
 
-interface ManagerRunState {
-  readonly activationId: string;
-  lastSequence: number;
-  status: (typeof ManagerStatus.Type)[number];
-  started: boolean;
-}
-
-const MAX_TRACKED_RUNS = 256;
+/** The canonical manager keeps at most 50 runs; tracking never outgrows it. */
+const MAX_TRACKED_RUNS = 50;
 
 /**
  * Idempotent application of normalized run-upserts for one negotiated
- * manager. Events from another manager, sequences that do not advance, and
- * events for an activation that already reached a terminal state are
- * rejected — a reload or root handoff cannot resurrect an old activation.
+ * manager. The manager's event sequence is global and must advance
+ * monotonically across runs; events from another manager, sequences that do
+ * not advance, and events for an activation that already reached a terminal
+ * state are rejected — a reload or root handoff cannot resurrect an old
+ * activation.
  */
 export function makeManagerRunRegistry(managerId: string) {
-  const runs = new Map<string, ManagerRunState>();
+  // Open runs: native runId → live activationId, insertion-ordered.
+  const runs = new Map<string, string>();
   const finalizedActivations = new Map<string, Set<string>>();
+  let lastSequence = 0;
 
   const rememberFinalized = (runId: string, activationId: string) => {
     let finalizedForRun = finalizedActivations.get(runId);
@@ -295,54 +322,46 @@ export function makeManagerRunRegistry(managerId: string) {
 
   const apply = (record: ManagerRunUpsert): AppliedRunUpsert => {
     if (record.managerId !== managerId) return { accepted: false, reason: "manager-mismatch" };
+    if (record.sequence <= lastSequence) return { accepted: false, reason: "stale-sequence" };
     const existing = runs.get(record.runId);
-    if (existing !== undefined && existing.activationId !== record.activationId) {
-      // The tracked activation is being superseded or revisited: whatever the
-      // manager previously had live for this run is settled from now on, so
-      // its late events can never resurrect the old row.
-      rememberFinalized(record.runId, existing.activationId);
-    }
-    if (existing !== undefined && existing.activationId === record.activationId) {
-      if (record.sequence <= existing.lastSequence) {
-        return { accepted: false, reason: "stale-sequence" };
-      }
-      const finalized = finalizedActivations.get(record.runId);
-      if (finalized?.has(record.activationId)) {
+    if (existing !== undefined && existing === record.activationId) {
+      if (finalizedActivations.get(record.runId)?.has(record.activationId)) {
         return { accepted: false, reason: "late-activation" };
       }
-      const effect =
-        record.status === "running" ? (existing.started ? "update" : "start") : "complete";
-      existing.lastSequence = record.sequence;
-      existing.status = record.status;
-      existing.started = true;
+      lastSequence = record.sequence;
       if (record.status !== "running") {
         rememberFinalized(record.runId, record.activationId);
         runs.delete(record.runId);
+        return { accepted: true, effect: "complete" };
       }
-      return { accepted: true, effect };
+      return { accepted: true, effect: "update" };
     }
     // A different activation for this run: only fresh (never finalized)
-    // activations start a new tracked run; events for settled activations
-    // are late and rejected.
+    // activations are applied; events for settled activations are late and
+    // rejected, and they never poison the currently tracked activation.
     if (finalizedActivations.get(record.runId)?.has(record.activationId)) {
       return { accepted: false, reason: "late-activation" };
     }
     if (record.status === "running") {
+      // Replacing a live activation settles the old one; the registry reports
+      // it so the adapter can stop the old task row before starting the new.
+      if (existing !== undefined) rememberFinalized(record.runId, existing);
       if (runs.size >= MAX_TRACKED_RUNS) {
         const oldest = runs.keys().next().value;
         if (oldest !== undefined) runs.delete(oldest);
       }
-      runs.set(record.runId, {
-        activationId: record.activationId,
-        lastSequence: record.sequence,
-        status: record.status,
-        started: true,
-      });
-      return { accepted: true, effect: "start" };
+      runs.set(record.runId, record.activationId);
+      lastSequence = record.sequence;
+      return {
+        accepted: true,
+        effect: "start",
+        ...(existing !== undefined ? { superseded: existing } : {}),
+      };
     }
     // Terminal event for an activation this bridge never saw running: apply
     // it as a complete so the row does not dangle as a zombie.
     rememberFinalized(record.runId, record.activationId);
+    lastSequence = record.sequence;
     return { accepted: true, effect: "complete" };
   };
 
@@ -351,15 +370,15 @@ export function makeManagerRunRegistry(managerId: string) {
     readonly activationId: string;
     readonly status: "running";
   }> =>
-    Array.from(runs.entries(), ([runId, state]) => ({
+    Array.from(runs.entries(), ([runId, activationId]) => ({
       runId,
-      activationId: state.activationId,
+      activationId,
       status: "running" as const,
     }));
 
   const findOpenRun = (runId: string): { activationId: string } | undefined => {
-    const state = runs.get(runId);
-    return state === undefined ? undefined : { activationId: state.activationId };
+    const activationId = runs.get(runId);
+    return activationId === undefined ? undefined : { activationId };
   };
 
   return { apply, openRuns, findOpenRun };

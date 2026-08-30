@@ -24,12 +24,43 @@ import {
 
 const RUN_ID = RuntimeTaskId.make("pi:epoch:act-1:sa-1");
 
+const DECLARED_CAPABILITIES = {
+  normalizedEvents: true,
+  stableActivations: true,
+  ownerRouting: true,
+  steering: true,
+  cancellation: true,
+  reloadRestore: true,
+  scheduling: true,
+  nativeChildProjection: true,
+  deliveryAcknowledgements: true,
+} as const;
+
 interface RecordingPlane extends ProviderSubagentControlPlaneShape<never> {
   readonly events: string[];
 }
 
-const makePlane = (managerId: string): RecordingPlane => {
+interface PlaneOptions {
+  /** Run ids this adapter's session does not track. */
+  readonly unknownRuns?: ReadonlyArray<string>;
+  /** Fail every control with this error. */
+  readonly failWith?: SubagentControlError;
+}
+
+const makePlane = (managerId: string, options: PlaneOptions = {}): RecordingPlane => {
   const events: string[] = [];
+  const control = (op: "steer" | "cancel", input: { managerId: string; runId: string }) =>
+    Effect.gen(function* () {
+      if (options.failWith !== undefined) return yield* options.failWith;
+      if (input.managerId !== managerId) {
+        return yield* new SubagentControlError({ reason: "manager-mismatch" });
+      }
+      if (options.unknownRuns?.includes(input.runId) === true) {
+        return yield* new SubagentControlError({ reason: "unknown-run" });
+      }
+      events.push(`${op}:${input.managerId}:${input.runId}`);
+      return { accepted: true } as const;
+    });
   return {
     events,
     status: () =>
@@ -38,25 +69,12 @@ const makePlane = (managerId: string): RecordingPlane => {
           supported: true,
           managerId,
           protocolVersion: 1,
+          capabilities: { ...DECLARED_CAPABILITIES },
           controls: { steer: { enabled: true }, cancel: { enabled: true } },
         } satisfies SubagentControlPlaneStatus,
       ]),
-    steer: (input) =>
-      Effect.gen(function* () {
-        if (input.managerId !== managerId) {
-          return yield* new SubagentControlError({ reason: "manager-mismatch" });
-        }
-        events.push(`steer:${input.managerId}:${input.runId}`);
-        return { accepted: true } as const;
-      }),
-    cancel: (input) =>
-      Effect.gen(function* () {
-        if (input.managerId !== managerId) {
-          return yield* new SubagentControlError({ reason: "manager-mismatch" });
-        }
-        events.push(`cancel:${input.managerId}:${input.runId}`);
-        return { accepted: true } as const;
-      }),
+    steer: (input) => control("steer", input),
+    cancel: (input) => control("cancel", input),
   };
 };
 
@@ -122,6 +140,7 @@ describe("subagentControlRouter", () => {
       expect(result.statuses).toHaveLength(2);
       const piStatus = result.statuses.find((status) => status.providerInstanceId === "pi-main");
       expect(piStatus).toMatchObject({ supported: true, managerId: "mgr-1" });
+      expect(piStatus?.capabilities).toMatchObject({ steering: true, normalizedEvents: true });
       const claudeStatus = result.statuses.find(
         (status) => status.providerInstanceId === "claude-main",
       );
@@ -168,6 +187,71 @@ describe("subagentControlRouter", () => {
       );
       expect(error).toBeInstanceOf(SubagentControlError);
       expect(error.reason).toBe("unknown-manager");
+    }),
+  );
+
+  it.effect("continues past a same-manager adapter that does not track the run", () =>
+    Effect.gen(function* () {
+      // Two live adapters declare the same manager (for example after a
+      // reload); the first does not track the run and must not hide the
+      // second, which does.
+      const shadowPlane = makePlane("mgr-1", { unknownRuns: [RUN_ID] });
+      const ownerPlane = makePlane("mgr-1");
+      const registry = makeLookup([
+        { id: "pi-a", driver: ProviderDriverKind.make("pi"), plane: shadowPlane },
+        { id: "pi-b", driver: ProviderDriverKind.make("pi"), plane: ownerPlane },
+      ]);
+      const steer = yield* routeSubagentControlSteer(registry, {
+        managerId: "mgr-1",
+        runId: RUN_ID,
+        text: "focus on auth",
+      });
+      expect(steer).toEqual({ accepted: true });
+      expect(shadowPlane.events).toEqual([]);
+      expect(ownerPlane.events).toEqual([`steer:mgr-1:${RUN_ID}`]);
+    }),
+  );
+
+  it.effect("reports unknown-run once every same-manager adapter ran out", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        routeSubagentControlCancel(
+          makeLookup([
+            {
+              id: "pi-a",
+              driver: ProviderDriverKind.make("pi"),
+              plane: makePlane("mgr-1", { unknownRuns: [RUN_ID] }),
+            },
+            {
+              id: "pi-b",
+              driver: ProviderDriverKind.make("pi"),
+              plane: makePlane("mgr-1", { unknownRuns: [RUN_ID] }),
+            },
+          ]),
+          { managerId: "mgr-1", runId: RUN_ID },
+        ),
+      );
+      expect(error).toBeInstanceOf(SubagentControlError);
+      expect(error.reason).toBe("unknown-run");
+    }),
+  );
+
+  it.effect("preserves non-unknown-run failures without walking further", () =>
+    Effect.gen(function* () {
+      const failingPlane = makePlane("mgr-1", {
+        failWith: new SubagentControlError({ reason: "manager-rejected", detail: "refused" }),
+      });
+      const fallbackPlane = makePlane("mgr-1");
+      const registry = makeLookup([
+        { id: "pi-a", driver: ProviderDriverKind.make("pi"), plane: failingPlane },
+        { id: "pi-b", driver: ProviderDriverKind.make("pi"), plane: fallbackPlane },
+      ]);
+      const error = yield* Effect.flip(
+        routeSubagentControlCancel(registry, { managerId: "mgr-1", runId: RUN_ID }),
+      );
+      expect(error).toBeInstanceOf(SubagentControlError);
+      expect(error.reason).toBe("manager-rejected");
+      expect(fallbackPlane.events).toEqual([]);
     }),
   );
 

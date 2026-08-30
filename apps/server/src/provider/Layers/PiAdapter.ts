@@ -58,7 +58,6 @@ import {
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
-import * as Duration from "effect/Duration";
 import * as Exit from "effect/Exit";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -101,6 +100,7 @@ import {
   decodeManagerRecord,
   deriveControlAvailabilities,
   encodeControlEnvelope,
+  exchangeManagerRecord,
   makeManagerRunRegistry,
   type ManagerRecord,
   type ManagerRunRegistry,
@@ -277,7 +277,8 @@ const MAX_PENDING_MANAGED_TERMINALS = 64;
  */
 const MANAGER_NEGOTIATION_TIMEOUT_MS = 5_000;
 const MANAGER_CONTROL_ACK_TIMEOUT_MS = 10_000;
-const MAX_OPEN_MANAGER_RUNS = 256;
+/** Mirrors the canonical manager's 50-run cap; routing state never outgrows it. */
+const MAX_OPEN_MANAGER_RUNS = 50;
 
 function truncateCodePoints(value: string, limit: number) {
   let codePoints = 0;
@@ -588,9 +589,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       turn: ActivePiTurn,
       event: PiRpcRecord,
     ) {
-      // The negotiated manager's normalized events own the task lifecycle;
-      // emitting from the spawn tool result too would create duplicate rows.
-      if (ctx.managerControl !== null) return;
+      // Suppressed only while the manager's normalized events own the
+      // lifecycle; with the capability absent this projection is authoritative.
+      if (managerLifecycleActive(ctx)) return;
       if (recordString(event, "toolName") !== "subagent_spawn" || event["isError"] === true) {
         return;
       }
@@ -644,8 +645,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       ctx: PiSessionContext,
       event: PiRpcRecord,
     ) {
-      // Summary fallback only: suppressed when manager events are normalized.
-      if (ctx.managerControl !== null) return;
+      // Summary fallback only: suppressed while manager events are normalized.
+      if (managerLifecycleActive(ctx)) return;
       const decoded = decodePiSubagentResultEntry(recordField(event, "entry"));
       if (Option.isNone(decoded)) return;
       const data = decoded.value.data;
@@ -668,8 +669,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       ctx: PiSessionContext,
       event: PiRpcRecord,
     ) {
-      // Summary fallback only: suppressed when manager events are normalized.
-      if (ctx.managerControl !== null) return;
+      // Summary fallback only: suppressed while manager events are normalized.
+      if (managerLifecycleActive(ctx)) return;
       const toolName = recordString(event, "toolName");
       if (
         event["isError"] === true ||
@@ -698,20 +699,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
 
     // ── subagent manager control plane ─────────────────
 
-    const awaitManagerRecord = (
-      pendingManagerRecords: Map<string, Deferred.Deferred<ManagerRecord>>,
-      correlationId: string,
-      timeoutMs: number,
-    ) =>
-      Effect.gen(function* () {
-        const deferred = yield* Deferred.make<ManagerRecord>();
-        pendingManagerRecords.set(correlationId, deferred);
-        return yield* Deferred.await(deferred).pipe(
-          Effect.timeoutOption(Duration.millis(timeoutMs)),
-          Effect.map(Option.getOrUndefined),
-          Effect.ensuring(Effect.sync(() => pendingManagerRecords.delete(correlationId))),
-        );
-      });
+    /**
+     * The manager's normalized events own the subagent lifecycle only when
+     * the manager declared that capability; otherwise the pre-existing
+     * tool-result projection keeps running and manager upserts are ignored.
+     */
+    const managerLifecycleActive = (ctx: PiSessionContext) =>
+      ctx.managerControl?.capabilities.normalizedEvents === true;
 
     /**
      * Negotiate the subagent manager once per native process, after
@@ -733,22 +727,24 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           };
         }
         const correlationId = yield* nextUuid;
-        yield* input.connection
-          .send({
-            type: "prompt",
-            message: `/${SUBAGENT_MANAGER_COMMAND} ${encodeControlEnvelope({
-              v: MANAGER_PROTOCOL_VERSION,
-              op: "negotiate",
-              id: correlationId,
-            })}`,
-          })
-          .pipe(
-            Effect.mapError((cause) => adapterError(input.threadId, "subagent negotiate", cause)),
-          );
-        const record = yield* awaitManagerRecord(
+        // The correlation is armed before the prompt leaves the process, so a
+        // synchronous manager reply can never miss its Deferred.
+        const record = yield* exchangeManagerRecord(
           input.pendingManagerRecords,
           correlationId,
           MANAGER_NEGOTIATION_TIMEOUT_MS,
+          input.connection
+            .send({
+              type: "prompt",
+              message: `/${SUBAGENT_MANAGER_COMMAND} ${encodeControlEnvelope({
+                v: MANAGER_PROTOCOL_VERSION,
+                op: "negotiate",
+                id: correlationId,
+              })}`,
+            })
+            .pipe(
+              Effect.mapError((cause) => adapterError(input.threadId, "subagent negotiate", cause)),
+            ),
         );
         if (record === undefined) {
           return { control: null, reason: "Pi subagent manager negotiation timed out." };
@@ -779,7 +775,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       ctx: PiSessionContext,
       record: ManagerRunUpsert,
     ) {
-      if (ctx.managerControl === null) return;
+      if (!managerLifecycleActive(ctx)) return;
       const applied = ctx.managerRegistry.apply(record);
       if (!applied.accepted) {
         yield* Effect.logDebug("Rejected Pi subagent manager run event.", {
@@ -791,6 +787,18 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       const taskId = managerTaskId(ctx, record.activationId, record.runId);
       const base = yield* makeEventBase(ctx.session);
       if (applied.effect === "start") {
+        // A replacement activation must settle the old row first, or the
+        // prior activation's task stays running forever.
+        if (applied.superseded !== undefined) {
+          const supersededTaskId = managerTaskId(ctx, applied.superseded, record.runId);
+          ctx.managerRuns.delete(supersededTaskId);
+          const supersededBase = yield* makeEventBase(ctx.session);
+          yield* offerRuntimeEvent({
+            ...supersededBase,
+            type: "task.completed",
+            payload: { taskId: supersededTaskId, status: "stopped" },
+          });
+        }
         if (ctx.managerRuns.size >= MAX_OPEN_MANAGER_RUNS) {
           const oldest = ctx.managerRuns.keys().next().value;
           if (oldest !== undefined) ctx.managerRuns.delete(oldest);
@@ -870,27 +878,18 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           },
         };
       }
-      const derived = deriveControlAvailabilities(control.capabilities);
-      if (!derived.status.enabled) {
-        const reason = derived.status.reason;
-        return {
-          provider: PROVIDER,
-          threadId: ctx.threadId,
-          supported: false,
-          reason,
-          controls: {
-            steer: { enabled: false, reason },
-            cancel: { enabled: false, reason },
-          },
-        };
-      }
+      // A negotiated manager is supported whenever its protocol matched;
+      // normalizedEvents only decides which source owns the lifecycle.
+      // Steer/cancel derive independently from the declared capabilities.
+      const controls = deriveControlAvailabilities(control.capabilities);
       return {
         provider: PROVIDER,
         threadId: ctx.threadId,
         supported: true,
         managerId: control.managerId,
         protocolVersion: control.protocolVersion,
-        controls: { steer: derived.steer, cancel: derived.cancel },
+        capabilities: control.capabilities,
+        controls: { steer: controls.steer, cancel: controls.cancel },
       };
     };
 
@@ -922,16 +921,20 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
 
     const sendManagerControlCommand = (ctx: PiSessionContext, envelope: ControlEnvelope) =>
       Effect.gen(function* () {
-        yield* ctx.connection
-          .send({
-            type: "prompt",
-            message: `/${SUBAGENT_MANAGER_COMMAND} ${encodeControlEnvelope(envelope)}`,
-          })
-          .pipe(Effect.mapError(() => new SubagentControlError({ reason: "manager-unreachable" })));
-        const record = yield* awaitManagerRecord(
+        // Arm the correlation before sending, mirroring negotiation: a fast
+        // manager ack must never miss its Deferred.
+        const record = yield* exchangeManagerRecord(
           ctx.pendingManagerRecords,
           envelope.id,
           MANAGER_CONTROL_ACK_TIMEOUT_MS,
+          ctx.connection
+            .send({
+              type: "prompt",
+              message: `/${SUBAGENT_MANAGER_COMMAND} ${encodeControlEnvelope(envelope)}`,
+            })
+            .pipe(
+              Effect.mapError(() => new SubagentControlError({ reason: "manager-unreachable" })),
+            ),
         );
         if (record === undefined) {
           return yield* new SubagentControlError({ reason: "timeout" });

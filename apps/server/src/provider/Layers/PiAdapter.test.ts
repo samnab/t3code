@@ -973,6 +973,7 @@ describe("PiAdapter", () => {
       expect(status?.supported).toBe(true);
       expect(status?.managerId).toBe("fake-manager-1");
       expect(status?.protocolVersion).toBe(1);
+      expect(status?.capabilities).toMatchObject({ steering: false, cancellation: true });
       expect(status?.controls.steer).toMatchObject({ enabled: false });
       if (!status?.controls.steer.enabled) {
         expect(status?.controls.steer.reason).toContain("steering");
@@ -1021,37 +1022,114 @@ describe("PiAdapter", () => {
             role?: string;
           };
         const starts = taskEvents.filter((event) => event.type === "task.started");
-        expect(starts).toHaveLength(2);
+        expect(starts).toHaveLength(3);
         expect(payloadOfTask(starts[0]!)).toMatchObject({
           description: "map auth",
           taskType: "subagent",
           role: "pi",
         });
-        expect(payloadOfTask(starts[0]!).taskId).toMatch(/^pi:.+:act-1:sa-1$/);
-        expect(payloadOfTask(starts[1]!).taskId).toMatch(/^pi:.+:act-2:sa-1$/);
+        expect(payloadOfTask(starts[0]!).taskId).toMatch(/:act-1:sa-1$/);
+        expect(payloadOfTask(starts[1]!).taskId).toMatch(/:act-2:sa-1$/);
+        expect(payloadOfTask(starts[2]!).taskId).toMatch(/:act-3:sa-1$/);
         const updates = taskEvents.filter((event) => event.type === "task.updated");
         expect(updates).toHaveLength(1);
         expect(payloadOfTask(updates[0]!)).toMatchObject({ status: "running" });
         const completions = taskEvents.filter((event) => event.type === "task.completed");
-        expect(completions).toHaveLength(1);
+        expect(completions).toHaveLength(2);
         expect(payloadOfTask(completions[0]!)).toMatchObject({
           status: "completed",
           summary: "Mapped the auth flow.",
         });
+        // Supersession: the replaced activation's row is stopped before the
+        // replacement activation starts.
+        const supersededIndex = taskEvents.findIndex(
+          (event) =>
+            event.type === "task.completed" && payloadOfTask(event).taskId?.includes("act-2"),
+        );
+        const replacementIndex = taskEvents.findIndex(
+          (event) =>
+            event.type === "task.started" && payloadOfTask(event).taskId?.includes("act-3"),
+        );
+        expect(supersededIndex).toBeGreaterThanOrEqual(0);
+        expect(replacementIndex).toBeGreaterThan(supersededIndex);
+        expect(payloadOfTask(taskEvents[supersededIndex]!)).toMatchObject({ status: "stopped" });
         // Stale, duplicate-terminal, late-activation, and wrong-owner records
         // produced no rows at all.
         expect(taskEvents.some((event) => payloadOfTask(event).taskId?.includes("sa-9"))).toBe(
           false,
         );
-        // Stopping the session finalizes the still-open second activation.
+        // Stopping the session finalizes the still-open third activation.
         yield* adapter.stopSession(THREAD_ID);
         const stopped = collector.events.filter(
           (event) =>
             event.type === "task.completed" &&
-            (event.payload as { taskId?: string }).taskId?.includes("act-2"),
+            (event.payload as { taskId?: string }).taskId?.includes("act-3"),
         );
         expect(stopped).toHaveLength(1);
         expect((stopped[0]!.payload as { status?: string }).status).toBe("stopped");
+      }).pipe(provideTestEnv),
+  );
+
+  it.live(
+    "keeps the tool-result fallback and a supported status when normalized events are absent",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeFixture();
+        process.env.FAKE_PI_MANAGER = "1";
+        process.env.FAKE_PI_MANAGER_CAPABILITIES = '{"normalizedEvents":false,"steering":false}';
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+
+        // The negotiated protocol is valid, so status stays supported; the
+        // declared capabilities are exposed verbatim and controls derive
+        // independently per capability.
+        const statuses = yield* requireControlPlane(adapter).status();
+        const status = statuses[0];
+        expect(status?.supported).toBe(true);
+        expect(status?.managerId).toBe("fake-manager-1");
+        expect(status?.capabilities).toMatchObject({
+          normalizedEvents: false,
+          steering: false,
+          cancellation: true,
+        });
+        expect(status?.controls.steer.enabled).toBe(false);
+        if (!status?.controls.steer.enabled) {
+          expect(status?.controls.steer.reason).toContain("steering");
+        }
+        expect(status?.controls.cancel.enabled).toBe(true);
+
+        // The pre-existing tool-result projection still owns the lifecycle.
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_LIFECYCLE" });
+        const started = yield* collector.waitFor((event) => event.type === "task.started");
+        if (started.type !== "task.started") throw new Error("Expected fallback task start.");
+        const completed = yield* collector.waitFor(
+          (event) =>
+            event.type === "task.completed" && event.payload.taskId === started.payload.taskId,
+        );
+        if (completed.type !== "task.completed") throw new Error("Expected fallback completion.");
+        expect(started.payload.taskId).toMatch(/^pi:[^:]+:sa-1$/);
+        expect(completed.payload.status).toBe("completed");
+        expect(completed.payload.summary).toBe("Mapped the auth flow.");
+
+        // Manager run-upserts must not project any rows of their own.
+        const tasksBefore = collector.events.filter((event) =>
+          event.type.startsWith("task."),
+        ).length;
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "MANAGER_RUN_LIFECYCLE" });
+        yield* collector.waitFor(
+          (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
+        );
+        expect(collector.events.filter((event) => event.type.startsWith("task.")).length).toBe(
+          tasksBefore,
+        );
+        yield* adapter.stopSession(THREAD_ID);
       }).pipe(provideTestEnv),
   );
 

@@ -20,6 +20,8 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 
 import type { ProviderAdapterError, ProviderUnsupportedError } from "./Errors.ts";
 import type { ProviderSubagentControlPlaneShape } from "./Services/ProviderAdapter.ts";
@@ -56,14 +58,10 @@ const unsupportedStatus = (reason: string): SubagentControlPlaneStatus => ({
   },
 });
 
-const isSubagentControlError = (cause: unknown): cause is SubagentControlError =>
-  typeof cause === "object" &&
-  cause !== null &&
-  "_tag" in cause &&
-  cause._tag === "SubagentControlError";
+const isControlError = Schema.is(SubagentControlError);
 
 const normalizeControlFailure = (cause: unknown): SubagentControlError =>
-  isSubagentControlError(cause)
+  isControlError(cause)
     ? cause
     : new SubagentControlError({
         reason: "routing-failed",
@@ -121,62 +119,75 @@ export const routeSubagentControlStatus = (
     return { statuses };
   });
 
-/** Find the live adapter that declared the requested manager, if any. */
-const findOwnerPlane = (
+/** Find every live adapter whose declared status names the manager. */
+const findOwnerPlanes = (
   registry: SubagentControlAdapterLookup,
   managerId: string,
-): Effect.Effect<
-  | {
-      readonly _tag: "found";
-      readonly plane: ProviderSubagentControlPlaneShape<ProviderAdapterError>;
-    }
-  | { readonly _tag: "unknown-manager" },
-  never
-> =>
+): Effect.Effect<ReadonlyArray<ProviderSubagentControlPlaneShape<ProviderAdapterError>>, never> =>
   Effect.gen(function* () {
     const instanceIds = yield* registry.listInstances().pipe(Effect.orElseSucceed(() => []));
+    const planes: Array<ProviderSubagentControlPlaneShape<ProviderAdapterError>> = [];
     for (const instanceId of instanceIds) {
       const adapter = yield* registry.getByInstance(instanceId).pipe(Effect.option);
-      if (Option.isNone(adapter)) continue;
-      const plane = adapter.value.subagentControlPlane;
+      const plane = Option.isNone(adapter) ? undefined : adapter.value.subagentControlPlane;
       if (plane === undefined) continue;
       const statuses = yield* plane.status().pipe(Effect.option);
       if (
         Option.isSome(statuses) &&
         statuses.value.some((status) => status.supported && status.managerId === managerId)
       ) {
-        return { _tag: "found" as const, plane };
+        planes.push(plane);
       }
     }
-    return { _tag: "unknown-manager" as const };
+    return planes;
+  });
+
+const routeToOwner = (
+  registry: SubagentControlAdapterLookup,
+  managerId: string,
+  attempt: (
+    plane: ProviderSubagentControlPlaneShape<ProviderAdapterError>,
+  ) => Effect.Effect<
+    OrchestrationSubagentControlActionResult,
+    ProviderAdapterError | SubagentControlError
+  >,
+): Effect.Effect<OrchestrationSubagentControlActionResult, SubagentControlError> =>
+  Effect.gen(function* () {
+    const planes = yield* findOwnerPlanes(registry, managerId);
+    if (planes.length === 0) {
+      return yield* new SubagentControlError({
+        reason: "unknown-manager",
+        detail: `No live provider session declares subagent manager '${managerId}'.`,
+      });
+    }
+    // Two live adapters can declare the same manager (for example after a
+    // reload). An adapter whose session does not track the run must not hide
+    // the one that does: keep walking on unknown-run, preserve other errors.
+    let unknownRun: SubagentControlError = new SubagentControlError({
+      reason: "unknown-run",
+      detail: `Manager '${managerId}' does not track the requested run.`,
+    });
+    for (const plane of planes) {
+      const outcome = yield* Effect.result(attempt(plane));
+      if (Result.isSuccess(outcome)) return outcome.success;
+      const error = normalizeControlFailure(outcome.failure);
+      if (error.reason === "unknown-run") {
+        unknownRun = error;
+        continue;
+      }
+      return yield* error;
+    }
+    return yield* unknownRun;
   });
 
 export const routeSubagentControlSteer = (
   registry: SubagentControlAdapterLookup,
   input: OrchestrationSubagentControlSteerInput,
 ): Effect.Effect<OrchestrationSubagentControlActionResult, SubagentControlError> =>
-  Effect.gen(function* () {
-    const owner = yield* findOwnerPlane(registry, input.managerId);
-    if (owner._tag === "unknown-manager") {
-      return yield* new SubagentControlError({
-        reason: "unknown-manager",
-        detail: `No live provider session declares subagent manager '${input.managerId}'.`,
-      });
-    }
-    return yield* owner.plane.steer(input).pipe(Effect.mapError(normalizeControlFailure));
-  });
+  routeToOwner(registry, input.managerId, (plane) => plane.steer(input));
 
 export const routeSubagentControlCancel = (
   registry: SubagentControlAdapterLookup,
   input: OrchestrationSubagentControlCancelInput,
 ): Effect.Effect<OrchestrationSubagentControlActionResult, SubagentControlError> =>
-  Effect.gen(function* () {
-    const owner = yield* findOwnerPlane(registry, input.managerId);
-    if (owner._tag === "unknown-manager") {
-      return yield* new SubagentControlError({
-        reason: "unknown-manager",
-        detail: `No live provider session declares subagent manager '${input.managerId}'.`,
-      });
-    }
-    return yield* owner.plane.cancel(input).pipe(Effect.mapError(normalizeControlFailure));
-  });
+  routeToOwner(registry, input.managerId, (plane) => plane.cancel(input));

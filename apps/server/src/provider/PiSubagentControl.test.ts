@@ -1,15 +1,22 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
 
 import {
   MANAGER_PROTOCOL_VERSION,
+  MANAGER_RECORD_TYPE,
+  type ManagerRecord,
   decodeControlEnvelope,
   decodeManagerRecord,
   deriveControlAvailabilities,
   encodeControlEnvelope,
+  exchangeManagerRecord,
   makeManagerRunRegistry,
   type ManagerRunUpsert,
   negotiationFromRecord,
 } from "./PiSubagentControl.ts";
+import { PiRpcError } from "./piRpc.ts";
 
 const ALL_CAPABILITIES = {
   normalizedEvents: true,
@@ -136,7 +143,6 @@ describe("PiSubagentControl", () => {
   describe("control availability", () => {
     it("enables every control when all capabilities are declared", () => {
       const availabilities = deriveControlAvailabilities(ALL_CAPABILITIES);
-      expect(availabilities.status.enabled).toBe(true);
       expect(availabilities.steer.enabled).toBe(true);
       expect(availabilities.cancel.enabled).toBe(true);
     });
@@ -160,16 +166,66 @@ describe("PiSubagentControl", () => {
       }
     });
 
-    it("disables the status read without normalized events", () => {
+    it("derives steer and cancel independently of normalized events", () => {
       const availabilities = deriveControlAvailabilities({
         ...ALL_CAPABILITIES,
         normalizedEvents: false,
       });
-      expect(availabilities.status.enabled).toBe(false);
-      if (!availabilities.status.enabled) {
-        expect(availabilities.status.reason).toContain("normalizedEvents");
-      }
+      expect(availabilities.steer.enabled).toBe(true);
+      expect(availabilities.cancel.enabled).toBe(true);
     });
+  });
+
+  describe("correlated exchanges", () => {
+    const ackRecord = (id: string): ManagerRecord => ({
+      type: MANAGER_RECORD_TYPE,
+      kind: "ack",
+      id,
+      accepted: true,
+    });
+
+    it.live("resolves a reply that lands before the caller reaches its await", () =>
+      Effect.gen(function* () {
+        const pending = new Map<string, Deferred.Deferred<ManagerRecord>>();
+        const ack = ackRecord("corr-1");
+        // A synchronous manager: the reply is dispatched while `send` runs,
+        // because the correlation Deferred was armed before sending.
+        const send = Effect.suspend(() => {
+          const deferred = pending.get("corr-1");
+          return deferred === undefined
+            ? Effect.void
+            : Deferred.succeed(deferred, ack).pipe(Effect.asVoid);
+        });
+        const record = yield* exchangeManagerRecord(pending, "corr-1", 1_000, send);
+        expect(record).toEqual(ack);
+        expect(pending.size).toBe(0);
+      }),
+    );
+
+    it.live("removes the correlation when the send fails", () =>
+      Effect.gen(function* () {
+        const pending = new Map<string, Deferred.Deferred<ManagerRecord>>();
+        const outcome = yield* Effect.result(
+          exchangeManagerRecord(
+            pending,
+            "corr-1",
+            1_000,
+            Effect.fail(new PiRpcError({ operation: "prompt" })),
+          ),
+        );
+        expect(Result.isFailure(outcome)).toBe(true);
+        expect(pending.size).toBe(0);
+      }),
+    );
+
+    it.live("returns undefined and removes the correlation on timeout", () =>
+      Effect.gen(function* () {
+        const pending = new Map<string, Deferred.Deferred<ManagerRecord>>();
+        const record = yield* exchangeManagerRecord(pending, "corr-1", 1, Effect.void);
+        expect(record).toBeUndefined();
+        expect(pending.size).toBe(0);
+      }),
+    );
   });
 
   describe("run registry", () => {
@@ -213,6 +269,7 @@ describe("PiSubagentControl", () => {
     it("starts a new run for a fresh activation and completes unseen terminal activations", () => {
       const registry = makeManagerRunRegistry("mgr-1");
       registry.apply(runUpsert({ activationId: "act-1" }));
+      // The manager's sequence keeps advancing across activations.
       const second = registry.apply(runUpsert({ activationId: "act-2", sequence: 5 }));
       expect(second).toMatchObject({ accepted: true, effect: "start" });
       expect(registry.findOpenRun("sa-1")).toMatchObject({ activationId: "act-2" });
@@ -223,10 +280,60 @@ describe("PiSubagentControl", () => {
       });
       // Terminal event for an activation never seen running still completes.
       const terminal = registry.apply(
-        runUpsert({ runId: "sa-2", activationId: "act-9", status: "error", sequence: 1 }),
+        runUpsert({ runId: "sa-2", activationId: "act-9", status: "error", sequence: 7 }),
       );
       expect(terminal).toMatchObject({ accepted: true, effect: "complete" });
       expect(registry.openRuns()).toHaveLength(1);
+    });
+
+    it("enforces a manager-global monotonic sequence across runs", () => {
+      const registry = makeManagerRunRegistry("mgr-1");
+      expect(
+        registry.apply(runUpsert({ runId: "sa-1", activationId: "act-1", sequence: 3 })),
+      ).toMatchObject({ accepted: true, effect: "start" });
+      // A second run cannot replay an earlier point in the manager sequence.
+      expect(
+        registry.apply(runUpsert({ runId: "sa-2", activationId: "act-2", sequence: 2 })),
+      ).toMatchObject({ accepted: false, reason: "stale-sequence" });
+      expect(
+        registry.apply(runUpsert({ runId: "sa-2", activationId: "act-2", sequence: 4 })),
+      ).toMatchObject({ accepted: true, effect: "start" });
+    });
+
+    it("reports the superseded activation when a fresh activation replaces a live run", () => {
+      const registry = makeManagerRunRegistry("mgr-1");
+      registry.apply(runUpsert({ activationId: "act-1" }));
+      const replacement = registry.apply(runUpsert({ activationId: "act-2", sequence: 2 }));
+      expect(replacement).toMatchObject({ accepted: true, effect: "start", superseded: "act-1" });
+      expect(registry.findOpenRun("sa-1")).toMatchObject({ activationId: "act-2" });
+      // The old activation is settled for good...
+      expect(registry.apply(runUpsert({ activationId: "act-1", sequence: 3 }))).toMatchObject({
+        accepted: false,
+        reason: "late-activation",
+      });
+      // ...and its late event never poisons the live replacement.
+      expect(registry.apply(runUpsert({ activationId: "act-2", sequence: 4 }))).toMatchObject({
+        accepted: true,
+        effect: "update",
+      });
+    });
+
+    it("bounds tracked runs at the canonical 50-run manager limit", () => {
+      const registry = makeManagerRunRegistry("mgr-1");
+      for (let index = 1; index <= 51; index += 1) {
+        expect(
+          registry.apply(
+            runUpsert({
+              runId: `sa-${index}`,
+              activationId: `act-${index}`,
+              sequence: index,
+            }),
+          ),
+        ).toMatchObject({ accepted: true, effect: "start" });
+      }
+      expect(registry.openRuns()).toHaveLength(50);
+      expect(registry.findOpenRun("sa-1")).toBeUndefined();
+      expect(registry.findOpenRun("sa-51")).toMatchObject({ activationId: "act-51" });
     });
   });
 });

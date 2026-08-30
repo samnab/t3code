@@ -159,8 +159,10 @@ const handleManagerControl = (req, message) => {
 const managerUpsert = (fields) =>
   managerRecord({ kind: "run-upsert", managerId: managerId(), ...fields });
 
-// start(seq1) → update(seq2) → complete(seq3), then rejected stale/duplicate/
-// late-activation/wrong-owner records, then a fresh activation (new row).
+// Manager-global sequence: every record advances one sequence, across runs.
+// act-1: start(1) → update(2) → complete(3); then rejected stale, late, and
+// wrong-owner records; act-2 starts at (5); act-3 then supersedes the
+// still-live act-2 at (6).
 const emitManagerLifecycle = () => {
   const mid = managerId();
   const upsert = (fields) => managerRecord({ kind: "run-upsert", managerId: mid, ...fields });
@@ -204,11 +206,18 @@ const emitManagerLifecycle = () => {
     status: "running",
   });
   upsert({
-    sequence: 1,
+    sequence: 5,
     runId: "sa-1",
     activationId: "act-2",
     status: "running",
     title: "map auth, again",
+  });
+  upsert({
+    sequence: 6,
+    runId: "sa-1",
+    activationId: "act-3",
+    status: "running",
+    title: "map auth, third",
   });
 };
 

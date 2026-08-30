@@ -1725,9 +1725,29 @@ export const SubagentControlAvailability = Schema.Struct({
 export type SubagentControlAvailability = typeof SubagentControlAvailability.Type;
 
 /**
+ * Capability booleans a subagent manager declares during protocol
+ * negotiation, mirrored verbatim in status reads so clients can explain
+ * which owner controls are available and which source owns the lifecycle.
+ */
+export const SubagentManagerCapabilities = Schema.Struct({
+  normalizedEvents: Schema.Boolean,
+  stableActivations: Schema.Boolean,
+  ownerRouting: Schema.Boolean,
+  steering: Schema.Boolean,
+  cancellation: Schema.Boolean,
+  reloadRestore: Schema.Boolean,
+  scheduling: Schema.Boolean,
+  nativeChildProjection: Schema.Boolean,
+  deliveryAcknowledgements: Schema.Boolean,
+});
+export type SubagentManagerCapabilities = typeof SubagentManagerCapabilities.Type;
+
+/**
  * Declared subagent control-plane status for one live provider session.
  * `supported: false` always carries a reason; controls are then disabled
- * with per-control reasons.
+ * with per-control reasons. `supported: true` carries the negotiated
+ * manager identity, protocol version, and declared capabilities; controls
+ * stay enabled only for capabilities the manager actually declared.
  */
 export const SubagentControlPlaneStatus = Schema.Struct({
   provider: Schema.optional(ProviderDriverKind),
@@ -1737,6 +1757,7 @@ export const SubagentControlPlaneStatus = Schema.Struct({
   reason: Schema.optional(TrimmedNonEmptyString),
   managerId: Schema.optional(TrimmedNonEmptyString),
   protocolVersion: Schema.optional(Schema.Int),
+  capabilities: Schema.optional(SubagentManagerCapabilities),
   controls: Schema.Struct({
     steer: SubagentControlAvailability,
     cancel: SubagentControlAvailability,
