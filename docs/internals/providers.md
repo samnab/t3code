@@ -40,6 +40,8 @@ directory to route session and turn operations for a thread, so callers name a t
 Adding a driver means writing the driver plus adapter and adding it to `BUILT_IN_DRIVERS`. No
 orchestration, contract, or client change is required for the common case.
 
+Pi's optional manager protocol is documented in [Pi subagent control plane](./pi-subagent-control-plane.md).
+
 ## Model manifest
 
 The model picker's legacy section is driven by `apps/server/src/provider/model-manifest.json`, which

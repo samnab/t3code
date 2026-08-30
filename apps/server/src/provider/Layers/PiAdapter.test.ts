@@ -63,6 +63,9 @@ const makeFixture = (): Fixture => {
   delete process.env.FAKE_PI_MANAGER;
   delete process.env.FAKE_PI_MANAGER_ID;
   delete process.env.FAKE_PI_MANAGER_CAPABILITIES;
+  delete process.env.FAKE_PI_MANAGER_CAPABILITIES_FILE;
+  delete process.env.FAKE_PI_MANAGER_REMOVED_FILE;
+  delete process.env.FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS;
   delete process.env.FAKE_PI_MANAGER_REJECT_FILE;
   return { binaryPath: shimPath, closedPath, logPath, nativeSessionFile };
 };
@@ -1088,8 +1091,8 @@ describe("PiAdapter", () => {
         });
 
         // The negotiated protocol is valid, so status stays supported; the
-        // declared capabilities are exposed verbatim and controls derive
-        // independently per capability.
+        // declared capabilities are exposed verbatim, but controls require
+        // normalized lifecycle events.
         const statuses = yield* requireControlPlane(adapter).status();
         const status = statuses[0];
         expect(status?.supported).toBe(true);
@@ -1100,10 +1103,13 @@ describe("PiAdapter", () => {
           cancellation: true,
         });
         expect(status?.controls.steer.enabled).toBe(false);
+        expect(status?.controls.cancel.enabled).toBe(false);
         if (!status?.controls.steer.enabled) {
-          expect(status?.controls.steer.reason).toContain("steering");
+          expect(status?.controls.steer.reason).toContain("normalizedEvents");
         }
-        expect(status?.controls.cancel.enabled).toBe(true);
+        if (!status?.controls.cancel.enabled) {
+          expect(status?.controls.cancel.reason).toContain("normalizedEvents");
+        }
 
         // The pre-existing tool-result projection still owns the lifecycle.
         yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_LIFECYCLE" });
@@ -1131,6 +1137,41 @@ describe("PiAdapter", () => {
         );
         yield* adapter.stopSession(THREAD_ID);
       }).pipe(provideTestEnv),
+  );
+
+  it.live("buffers and replays only the newest pre-negotiation restore records", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_MANAGER = "1";
+      process.env.FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS = "65";
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* collector.waitFor((event) => event.type === "session.started");
+      const restoredStarts = collector.events.filter(
+        (event) =>
+          event.type === "task.started" &&
+          (event.payload as { description?: string }).description?.startsWith("restored run "),
+      );
+      expect(restoredStarts).toHaveLength(64);
+      expect(
+        restoredStarts.some(
+          (event) => (event.payload as { description?: string }).description === "restored run 1",
+        ),
+      ).toBe(false);
+      expect(
+        restoredStarts.some(
+          (event) => (event.payload as { description?: string }).description === "restored run 65",
+        ),
+      ).toBe(true);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
   );
 
   it.live("does not duplicate task rows when manager events and tool events arrive together", () =>
@@ -1212,8 +1253,9 @@ describe("PiAdapter", () => {
         const cancel = yield* plane.cancel({ managerId: "fake-manager-1", runId: taskId });
         expect(cancel).toEqual({ accepted: true });
         const envelopes = controlEnvelopes(fixture);
-        expect(envelopes).toHaveLength(promptsBeforeMismatch + 2);
-        expect(envelopes.at(-2)).toMatchObject({
+        expect(envelopes).toHaveLength(promptsBeforeMismatch + 4);
+        expect(envelopes.at(-4)).toMatchObject({ v: 1, op: "negotiate" });
+        expect(envelopes.at(-3)).toMatchObject({
           v: 1,
           op: "steer",
           managerId: "fake-manager-1",
@@ -1221,6 +1263,7 @@ describe("PiAdapter", () => {
           activationId: "act-1",
           text: "focus on auth",
         });
+        expect(envelopes.at(-2)).toMatchObject({ v: 1, op: "negotiate" });
         expect(envelopes.at(-1)).toMatchObject({
           v: 1,
           op: "cancel",
@@ -1242,5 +1285,78 @@ describe("PiAdapter", () => {
         delete process.env.FAKE_PI_MANAGER_REJECT_FILE;
         yield* adapter.stopSession(THREAD_ID);
       }).pipe(provideTestEnv),
+  );
+
+  it.live("re-checks live capabilities before sending a control command", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_MANAGER = "1";
+      const capabilitiesFile = NodePath.join(
+        NodePath.dirname(fixture.logPath),
+        "capabilities.json",
+      );
+      process.env.FAKE_PI_MANAGER_CAPABILITIES_FILE = capabilitiesFile;
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "MANAGER_RUN_OPEN" });
+      const started = yield* collector.waitFor((event) => event.type === "task.started");
+      const taskId = RuntimeTaskId.make((started.payload as { taskId: string }).taskId);
+      NodeFS.writeFileSync(capabilitiesFile, '{"steering":false}');
+      const before = controlEnvelopes(fixture).length;
+      const rejected = yield* Effect.flip(
+        requireControlPlane(adapter).steer({
+          managerId: "fake-manager-1",
+          runId: taskId,
+          text: "do not send this",
+        }),
+      );
+      if (rejected._tag === "SubagentControlError") {
+        expect(rejected.reason).toBe("control-disabled");
+        expect(rejected.detail).toContain("steering");
+      }
+      const added = controlEnvelopes(fixture).slice(before);
+      expect(added).toHaveLength(1);
+      expect(added[0]).toMatchObject({ op: "negotiate" });
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("never prompts when the manager command disappears before control send", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_MANAGER = "1";
+      const removedFile = NodePath.join(NodePath.dirname(fixture.logPath), "manager-removed");
+      process.env.FAKE_PI_MANAGER_REMOVED_FILE = removedFile;
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "MANAGER_RUN_OPEN" });
+      const started = yield* collector.waitFor((event) => event.type === "task.started");
+      const taskId = RuntimeTaskId.make((started.payload as { taskId: string }).taskId);
+      NodeFS.writeFileSync(removedFile, "removed");
+      const before = controlEnvelopes(fixture).length;
+      const unsupported = yield* Effect.flip(
+        requireControlPlane(adapter).cancel({ managerId: "fake-manager-1", runId: taskId }),
+      );
+      if (unsupported._tag === "SubagentControlError") {
+        expect(unsupported.reason).toBe("unsupported");
+        expect(unsupported.detail).toContain("not registered");
+      }
+      expect(controlEnvelopes(fixture)).toHaveLength(before);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
   );
 });

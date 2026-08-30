@@ -10,10 +10,12 @@
  *  - FAKE_PI_VETO — switch_session responds with { cancelled: true }.
  *  - FAKE_PI_FAIL_COMMAND — return a failed response for this command type.
  *  - FAKE_PI_BUSY — get_state reports isStreaming true.
- *  - FAKE_PI_MANAGER — register the T3 subagent manager control command and
- *    speak the t3.subagent.v1 stdout JSON contract.
+ *  - FAKE_PI_MANAGER — register the T3 subagent manager control command.
  *  - FAKE_PI_MANAGER_ID — managerId reported during negotiation.
  *  - FAKE_PI_MANAGER_CAPABILITIES — JSON patch over all-true capability flags.
+ *  - FAKE_PI_MANAGER_CAPABILITIES_FILE — live JSON capability patch read per negotiation.
+ *  - FAKE_PI_MANAGER_REMOVED_FILE — hide the manager from live get_commands results.
+ *  - FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS — emit this many restore upserts before negotiation.
  *  - FAKE_PI_MANAGER_REJECT_FILE — when this file exists, ack steer/cancel
  *    envelopes with accepted:false.
  */
@@ -43,6 +45,7 @@ process.on("SIGTERM", () => {
 record({ type: "launch", args });
 
 let buffer = "";
+let nextEntryId = 1;
 let interleavedRun = false;
 let isStreaming = false;
 let uiResponses = 0;
@@ -107,21 +110,45 @@ const MANAGER_COMMAND = "subagent:t3-control";
 const MANAGER_RECORD_TYPE = "t3.subagent.v1";
 const managerId = () => process.env.FAKE_PI_MANAGER_ID ?? "fake-manager-1";
 const managerEnabled = () => process.env.FAKE_PI_MANAGER === "1";
+const managerRegistered = () => {
+  const removedFile = process.env.FAKE_PI_MANAGER_REMOVED_FILE;
+  return managerEnabled() && (removedFile === undefined || !NodeFS.existsSync(removedFile));
+};
 
-const managerRecord = (value) => send({ type: MANAGER_RECORD_TYPE, ...value });
-
-const negotiatedCapabilities = () => ({
-  normalizedEvents: true,
-  stableActivations: true,
-  ownerRouting: true,
-  steering: true,
-  cancellation: true,
-  reloadRestore: true,
-  scheduling: true,
-  nativeChildProjection: true,
-  deliveryAcknowledgements: true,
-  ...JSON.parse(process.env.FAKE_PI_MANAGER_CAPABILITIES ?? "{}"),
+const customEntry = (customType, data) => ({
+  type: "custom",
+  id: `entry-${nextEntryId++}`,
+  parentId: null,
+  timestamp: "2026-01-01T00:00:00.000Z",
+  customType,
+  data,
 });
+const managerRecord = (value) =>
+  send({
+    type: "entry_appended",
+    entry: customEntry(MANAGER_RECORD_TYPE, { type: MANAGER_RECORD_TYPE, ...value }),
+  });
+
+const negotiatedCapabilities = () => {
+  const capabilitiesFile = process.env.FAKE_PI_MANAGER_CAPABILITIES_FILE;
+  const livePatch =
+    capabilitiesFile !== undefined && NodeFS.existsSync(capabilitiesFile)
+      ? JSON.parse(NodeFS.readFileSync(capabilitiesFile, "utf8"))
+      : {};
+  return {
+    normalizedEvents: true,
+    stableActivations: true,
+    ownerRouting: true,
+    steering: true,
+    cancellation: true,
+    reloadRestore: true,
+    scheduling: true,
+    nativeChildProjection: true,
+    deliveryAcknowledgements: true,
+    ...JSON.parse(process.env.FAKE_PI_MANAGER_CAPABILITIES ?? "{}"),
+    ...livePatch,
+  };
+};
 
 const handleManagerControl = (req, message) => {
   const arg = message.slice(`/${MANAGER_COMMAND} `.length).trim();
@@ -132,6 +159,18 @@ const handleManagerControl = (req, message) => {
     return;
   }
   if (envelope.op === "negotiate") {
+    const restoreCount = Number(process.env.FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS ?? "0");
+    for (let index = 1; index <= restoreCount; index += 1) {
+      managerRecord({
+        kind: "run-upsert",
+        managerId: managerId(),
+        sequence: index,
+        runId: `restore-${index}`,
+        activationId: `restore-act-${index}`,
+        status: "running",
+        title: `restored run ${index}`,
+      });
+    }
     managerRecord({
       kind: "negotiation",
       id: envelope.id,
@@ -242,11 +281,8 @@ const emitSubagentSpawnEnd = (status = "running") =>
     isError: false,
   });
 
-const subagentResultEntry = (status, content, id = "sa-1") => ({
-  type: "custom",
-  customType: "subagent-result",
-  data: { id, title: "map auth", status, content },
-});
+const subagentResultEntry = (status, content, id = "sa-1") =>
+  customEntry("subagent-result", { id, title: "map auth", status, content });
 
 const emitConsumedSubagentResult = (toolName, status) => {
   send({
@@ -314,7 +350,7 @@ const handle = (req) => {
           { name: "review", description: "Review code", source: "extension" },
           { name: "only", description: "Command-only fixture", source: "extension" },
           { name: "template", description: "Prompt template fixture", source: "prompt" },
-          ...(managerEnabled()
+          ...(managerRegistered()
             ? [
                 {
                   name: MANAGER_COMMAND,

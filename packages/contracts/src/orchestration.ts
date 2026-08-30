@@ -1749,12 +1749,10 @@ export type SubagentManagerCapabilities = typeof SubagentManagerCapabilities.Typ
  * manager identity, protocol version, and declared capabilities; controls
  * stay enabled only for capabilities the manager actually declared.
  */
-export const SubagentControlPlaneStatus = Schema.Struct({
+const SubagentControlPlaneStatusFields = {
   provider: Schema.optional(ProviderDriverKind),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   threadId: Schema.optional(ThreadId),
-  supported: Schema.Boolean,
-  reason: Schema.optional(TrimmedNonEmptyString),
   managerId: Schema.optional(TrimmedNonEmptyString),
   protocolVersion: Schema.optional(Schema.Int),
   capabilities: Schema.optional(SubagentManagerCapabilities),
@@ -1762,7 +1760,20 @@ export const SubagentControlPlaneStatus = Schema.Struct({
     steer: SubagentControlAvailability,
     cancel: SubagentControlAvailability,
   }),
-});
+} as const;
+
+export const SubagentControlPlaneStatus = Schema.Union([
+  Schema.Struct({
+    ...SubagentControlPlaneStatusFields,
+    supported: Schema.Literal(false),
+    reason: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    ...SubagentControlPlaneStatusFields,
+    supported: Schema.Literal(true),
+    reason: Schema.optional(TrimmedNonEmptyString),
+  }),
+]);
 export type SubagentControlPlaneStatus = typeof SubagentControlPlaneStatus.Type;
 
 export const OrchestrationSubagentControlStatusInput = Schema.Struct({});

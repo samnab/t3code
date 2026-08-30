@@ -82,6 +82,11 @@ describe("PiSubagentControl", () => {
         ),
       ).toBeUndefined();
     });
+
+    it("returns undefined for malformed base64 and JSON", () => {
+      expect(decodeControlEnvelope("%%%not-base64%%%")).toBeUndefined();
+      expect(decodeControlEnvelope(Buffer.from("not json").toString("base64url"))).toBeUndefined();
+    });
   });
 
   describe("record decoding", () => {
@@ -166,13 +171,19 @@ describe("PiSubagentControl", () => {
       }
     });
 
-    it("derives steer and cancel independently of normalized events", () => {
+    it("requires normalized events for both controls", () => {
       const availabilities = deriveControlAvailabilities({
         ...ALL_CAPABILITIES,
         normalizedEvents: false,
       });
-      expect(availabilities.steer.enabled).toBe(true);
-      expect(availabilities.cancel.enabled).toBe(true);
+      expect(availabilities.steer).toMatchObject({ enabled: false });
+      expect(availabilities.cancel).toMatchObject({ enabled: false });
+      if (!availabilities.steer.enabled) {
+        expect(availabilities.steer.reason).toContain("normalizedEvents");
+      }
+      if (!availabilities.cancel.enabled) {
+        expect(availabilities.cancel.reason).toContain("normalizedEvents");
+      }
     });
   });
 
@@ -334,6 +345,25 @@ describe("PiSubagentControl", () => {
       expect(registry.openRuns()).toHaveLength(50);
       expect(registry.findOpenRun("sa-1")).toBeUndefined();
       expect(registry.findOpenRun("sa-51")).toMatchObject({ activationId: "act-51" });
+    });
+
+    it("bounds finalized activations within each run", () => {
+      const registry = makeManagerRunRegistry("mgr-1");
+      for (let index = 1; index <= 51; index += 1) {
+        expect(
+          registry.apply(
+            runUpsert({
+              activationId: `act-${index}`,
+              status: "done",
+              sequence: index,
+            }),
+          ),
+        ).toMatchObject({ accepted: true, effect: "complete" });
+      }
+      expect(registry.apply(runUpsert({ activationId: "act-1", sequence: 52 }))).toMatchObject({
+        accepted: true,
+        effect: "start",
+      });
     });
   });
 });

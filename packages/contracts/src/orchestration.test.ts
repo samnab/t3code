@@ -16,6 +16,7 @@ import {
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
+  SubagentControlPlaneStatus,
   OrchestrationSession,
   OrchestrationThread,
   OrchestrationThreadShell,
@@ -58,6 +59,23 @@ const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationComma
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 const decodeDispatchCommandError = Schema.decodeUnknownEffect(OrchestrationDispatchCommandError);
+const decodeSubagentControlPlaneStatus = Schema.decodeUnknownOption(SubagentControlPlaneStatus);
+
+it("requires a reason when subagent control is unsupported", () => {
+  const controls = {
+    steer: { enabled: false, reason: "Manager unavailable." },
+    cancel: { enabled: false, reason: "Manager unavailable." },
+  };
+  assert.strictEqual(decodeSubagentControlPlaneStatus({ supported: false, controls })._tag, "None");
+  assert.strictEqual(
+    decodeSubagentControlPlaneStatus({
+      supported: false,
+      reason: "Manager unavailable.",
+      controls,
+    })._tag,
+    "Some",
+  );
+});
 
 it.effect("decodes a dispatch error after its bootstrap thread was deleted", () =>
   Effect.gen(function* () {

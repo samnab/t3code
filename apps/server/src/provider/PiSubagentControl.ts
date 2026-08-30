@@ -8,8 +8,8 @@
  * `prompt` would silently become a model prompt — so callers must prove the
  * command exists via `get_commands` before ever sending one. This module owns
  * that contract: versioned base64url command envelopes, bounded decoding of
- * the manager's dedicated stdout JSON records, protocol/capability
- * negotiation, and the idempotent per-run state machine that rejects wrong
+ * manager records carried by Pi's supported custom-entry channel,
+ * protocol/capability negotiation, and the idempotent per-run state machine that rejects wrong
  * owners, stale/out-of-order sequences, and late activation events.
  *
  * It deliberately knows nothing about transports or tasks; `PiAdapter` feeds
@@ -23,7 +23,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { piRecordString as recordString, type PiRpcRecord } from "./piRpc.ts";
+import { piRecordString as recordString } from "./piRpc.ts";
 
 /**
  * The manager's extension slash command. Presence in `get_commands` is the
@@ -32,7 +32,7 @@ import { piRecordString as recordString, type PiRpcRecord } from "./piRpc.ts";
  */
 export const SUBAGENT_MANAGER_COMMAND = "subagent:t3-control";
 
-/** Record `type` tag emitted by a compliant manager on stdout. */
+/** Reserved Pi custom-entry type and manager-envelope `type` tag. */
 export const MANAGER_RECORD_TYPE = "t3.subagent.v1";
 
 /** The only manager protocol version this bridge accepts. */
@@ -112,11 +112,10 @@ const decodeRunUpsert = Schema.decodeUnknownOption(RunUpsertRecordSchema);
 const decodeAck = Schema.decodeUnknownOption(AckRecordSchema);
 
 /**
- * Bounded decode of one manager stdout record. Malformed, non-compliant, or
- * oversized records return `undefined` and are dropped by the caller — a
- * chatty or legacy manager must never take a session down.
+ * Bounded decode of one manager envelope. Malformed, non-compliant, or
+ * oversized records return `undefined` and are dropped by the caller.
  */
-export function decodeManagerRecord(record: PiRpcRecord): ManagerRecord | undefined {
+export function decodeManagerRecord(record: unknown): ManagerRecord | undefined {
   if (recordString(record, "type") !== MANAGER_RECORD_TYPE) return undefined;
   switch (recordString(record, "kind")) {
     case "negotiation": {
@@ -168,17 +167,21 @@ export function encodeControlEnvelope(envelope: ControlEnvelope): string {
 }
 
 export function decodeControlEnvelope(encoded: string): ControlEnvelope | undefined {
-  const parsed: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
-  if (typeof parsed !== "object" || parsed === null) return undefined;
-  const record = parsed as Record<string, unknown>;
-  if (record["v"] !== MANAGER_PROTOCOL_VERSION) return undefined;
-  switch (record["op"]) {
-    case "negotiate":
-    case "steer":
-    case "cancel":
-      return parsed as ControlEnvelope;
-    default:
-      return undefined;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (record["v"] !== MANAGER_PROTOCOL_VERSION) return undefined;
+    switch (record["op"]) {
+      case "negotiate":
+      case "steer":
+      case "cancel":
+        return parsed as ControlEnvelope;
+      default:
+        return undefined;
+    }
+  } catch {
+    return undefined;
   }
 }
 
@@ -256,19 +259,21 @@ const CONTROL_UNAVAILABLE = (capability: string): string =>
   `Pi subagent manager does not declare the ${capability} capability.`;
 
 /**
- * Steer and cancel derive independently: each needs owner routing plus its
- * own capability. A negotiated status stays supported without normalized
- * events — that capability only decides which source owns the lifecycle.
+ * Steer and cancel each require normalized events, owner routing, and their
+ * individual capability. Without normalized lifecycle ownership, T3 cannot
+ * truthfully target the manager's live activation.
  */
 export function deriveControlAvailabilities(
   capabilities: ManagerCapabilities,
 ): ControlAvailabilities {
   const routed = (declared: boolean, capability: string): ControlAvailability =>
-    !capabilities.ownerRouting
-      ? { enabled: false, reason: CONTROL_UNAVAILABLE("ownerRouting") }
-      : declared
-        ? { enabled: true }
-        : { enabled: false, reason: CONTROL_UNAVAILABLE(capability) };
+    !capabilities.normalizedEvents
+      ? { enabled: false, reason: CONTROL_UNAVAILABLE("normalizedEvents") }
+      : !capabilities.ownerRouting
+        ? { enabled: false, reason: CONTROL_UNAVAILABLE("ownerRouting") }
+        : declared
+          ? { enabled: true }
+          : { enabled: false, reason: CONTROL_UNAVAILABLE(capability) };
   return {
     steer: routed(capabilities.steering, "steering"),
     cancel: routed(capabilities.cancellation, "cancellation"),
@@ -292,6 +297,7 @@ export type AppliedRunUpsert =
 
 /** The canonical manager keeps at most 50 runs; tracking never outgrows it. */
 const MAX_TRACKED_RUNS = 50;
+const MAX_FINALIZED_ACTIVATIONS_PER_RUN = 50;
 
 /**
  * Idempotent application of normalized run-upserts for one negotiated
@@ -316,6 +322,10 @@ export function makeManagerRunRegistry(managerId: string) {
         if (oldest !== undefined) finalizedActivations.delete(oldest);
       }
       finalizedActivations.set(runId, finalizedForRun);
+    }
+    if (finalizedForRun.size >= MAX_FINALIZED_ACTIVATIONS_PER_RUN) {
+      const oldest = finalizedForRun.values().next().value;
+      if (oldest !== undefined) finalizedForRun.delete(oldest);
     }
     finalizedForRun.add(activationId);
   };
