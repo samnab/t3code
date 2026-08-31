@@ -1,5 +1,6 @@
 import {
   CommandId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -10,6 +11,7 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { OrchestrationCommandInvariantError } from "./Errors.ts";
 
 const UPDATED_AT = "2026-01-01T00:00:00.000Z";
 
@@ -103,6 +105,91 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
       if (event.type === "thread.meta-updated") {
         expect("goal" in event.payload).toBe(false);
       }
+    }),
+  );
+
+  // A recognized T3-local /goal command is thread metadata, never a prompt:
+  // whatever client path let it through (persisted outbox, old pending data,
+  // remote dispatch), the decider must reject it before any message, turn, or
+  // activity event exists for a provider reactor to act on. This also covers
+  // the first message of a thread creation: by the time the final turn.start
+  // reaches the decider, the thread exists and the same check applies.
+  it.effect("rejects a turn whose text is a /goal command", () =>
+    Effect.gen(function* () {
+      const failure = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-goal-turn"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-goal"),
+            role: "user",
+            text: "/goal ship it",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: UPDATED_AT,
+        },
+        readModel,
+      }).pipe(Effect.flip);
+
+      expect(failure).toBeInstanceOf(OrchestrationCommandInvariantError);
+      expect(failure.message).toContain("/goal");
+    }),
+  );
+
+  it.effect("rejects /goal show and clear turn text as well", () =>
+    Effect.gen(function* () {
+      for (const text of ["/goal", "/goal clear"]) {
+        const failure = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.turn.start",
+            commandId: CommandId.make(`cmd-goal-turn-${text.length}`),
+            threadId: ThreadId.make("thread-1"),
+            message: {
+              messageId: MessageId.make("message-goal"),
+              role: "user",
+              text,
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: UPDATED_AT,
+          },
+          readModel,
+        }).pipe(Effect.flip);
+
+        expect(failure).toBeInstanceOf(OrchestrationCommandInvariantError);
+      }
+    }),
+  );
+
+  it.effect("still starts an ordinary turn, including one that mentions /goal", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-ordinary-turn"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-ordinary"),
+            role: "user",
+            text: "what does /goal do here?",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: UPDATED_AT,
+        },
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.message-sent",
+        "thread.turn-start-requested",
+      ]);
     }),
   );
 });

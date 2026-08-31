@@ -110,8 +110,53 @@ describe("parseThreadGoalCommand", () => {
     expect(parseThreadGoalCommand("/goal\nclear")).toEqual({ action: "clear" });
   });
 
-  it("does not treat zero-width characters as separators", () => {
+  it("does not treat zero-width or formatting characters as separators", () => {
+    // U+200B ZERO WIDTH SPACE, U+FEFF BOM/ZWNBSP, and U+2060 WORD JOINER render
+    // as nothing but are formatting characters, not Unicode White_Space: the
+    // joined text stays an ordinary prompt instead of a goal command.
     expect(parseThreadGoalCommand("/goal\u200bship it")).toBeNull();
     expect(parseThreadGoalCommand("/goal\u200b")).toBeNull();
+    expect(parseThreadGoalCommand("/goal\ufeffship it")).toBeNull();
+    expect(parseThreadGoalCommand("/goal\ufeff")).toBeNull();
+    expect(parseThreadGoalCommand("/goal\u2060ship it")).toBeNull();
+  });
+
+  it("trims only accepted whitespace at outer boundaries", () => {
+    // Formatting characters are content even at the edges: they neither
+    // separate the command from its goal nor get trimmed away, so a goal
+    // keeps them verbatim and a FEFF-joined text never becomes a command.
+    expect(parseThreadGoalCommand("\ufeff/goal\ufeff")).toBeNull();
+    expect(parseThreadGoalCommand("/goal ship it\ufeff")).toEqual({
+      action: "set",
+      goal: "ship it\ufeff",
+    });
+    expect(parseThreadGoalCommand("\u00a0/goal\u00a0ship\u00a0")).toEqual({
+      action: "set",
+      goal: "ship",
+    });
+  });
+
+  it("accepts exactly the Unicode White_Space delimiters", () => {
+    // Every Unicode White_Space code point separates /goal from its argument.
+    for (const separator of [
+      " ",
+      "\t",
+      "\n",
+      "\r\n",
+      "\r",
+      "\u00a0",
+      "\u1680",
+      "\u2000",
+      "\u2028",
+      "\u2029",
+      "\u202f",
+      "\u205f",
+      "\u3000",
+    ]) {
+      expect(parseThreadGoalCommand(`/goal${separator}ship it`)).toEqual({
+        action: "set",
+        goal: "ship it",
+      });
+    }
   });
 });

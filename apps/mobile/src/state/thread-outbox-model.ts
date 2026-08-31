@@ -15,6 +15,7 @@ import {
   type ProviderInteractionMode as ProviderInteractionModeType,
   type RuntimeMode as RuntimeModeType,
 } from "@t3tools/contracts";
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 import * as Schema from "effect/Schema";
 
 import { DraftComposerImageAttachmentSchema } from "../lib/composer-image-schema";
@@ -146,15 +147,24 @@ export function threadOutboxRetryDelayMs(attempt: number): number {
   return Math.min(1_000 * 2 ** Math.max(0, attempt - 1), THREAD_OUTBOX_MAX_RETRY_DELAY_MS);
 }
 
-export type ThreadOutboxDeliveryAction = "wait" | "remove" | "send";
+export type ThreadOutboxDeliveryAction = "wait" | "remove" | "send" | "blocked";
 
 export function resolveThreadOutboxDeliveryAction(input: {
+  readonly text: string;
   readonly isCreation: boolean;
   readonly threadExists: boolean;
   readonly shellStatus: EnvironmentShellStatus;
   readonly environmentConnected: boolean;
   readonly threadBusy: boolean;
 }): ThreadOutboxDeliveryAction {
+  // A persisted or edited queued entry can carry T3-local /goal text past the
+  // live composer interception (offline outbox, pending-task edits, older app
+  // versions). It must never start a provider turn through either branch, so
+  // classify it before anything else: no send, no retry loop, and the entry
+  // stays queued with its text until the user edits or deletes it.
+  if (parseThreadGoalCommand(input.text) !== null) {
+    return "blocked";
+  }
   if (input.isCreation) {
     // A pending task creates its thread on delivery. If the thread already
     // exists the creation command went through and only cleanup remains.

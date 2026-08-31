@@ -20,6 +20,7 @@ import { buildProjectThreadStartTurnInput } from "../lib/projectThreadStartTurn"
 import { toUploadChatImageAttachments } from "../lib/composerImages";
 import { randomHex } from "../lib/uuid";
 import { appAtomRegistry } from "./atom-registry";
+import { setPendingConnectionError } from "./use-remote-environment-registry";
 import { useProjects, useThreadShells } from "./entities";
 import {
   confirmThreadOutboxMessageQueued,
@@ -107,6 +108,7 @@ export function useThreadOutboxDrain(): void {
   const retryAttemptRef = useRef(new Map<MessageId, number>());
   const retryNotBeforeRef = useRef(new Map<MessageId, number>());
   const retryTimersRef = useRef(new Map<MessageId, ReturnType<typeof setTimeout>>());
+  const reportedBlockedMessageIdsRef = useRef(new Set<MessageId>());
 
   useEffect(() => {
     ensureThreadOutboxLoaded();
@@ -310,6 +312,7 @@ export function useThreadOutboxDrain(): void {
       );
       const shellStatus = shellStatuses.get(nextQueuedMessage.environmentId) ?? "empty";
       const deliveryAction = resolveThreadOutboxDeliveryAction({
+        text: nextQueuedMessage.text,
         isCreation: creation !== undefined,
         threadExists: thread !== undefined,
         shellStatus,
@@ -317,6 +320,22 @@ export function useThreadOutboxDrain(): void {
         threadBusy: thread?.session?.status === "running" || thread?.session?.status === "starting",
       });
       if (deliveryAction === "wait") {
+        continue;
+      }
+      // Blocked entries stay queued forever by design (no send, no retry),
+      // so the drain reports each one once instead of looping silently.
+      if (deliveryAction === "blocked") {
+        if (!reportedBlockedMessageIdsRef.current.has(nextQueuedMessage.messageId)) {
+          reportedBlockedMessageIdsRef.current.add(nextQueuedMessage.messageId);
+          console.warn("[thread-outbox] queued message blocked: /goal cannot start a turn", {
+            environmentId: nextQueuedMessage.environmentId,
+            threadId: nextQueuedMessage.threadId,
+            messageId: nextQueuedMessage.messageId,
+          });
+          setPendingConnectionError(
+            "A queued /goal command cannot be sent to the agent. Edit the pending task to change its text — your message was kept.",
+          );
+        }
         continue;
       }
       // The live project shell is preferred for the workspace path, with the

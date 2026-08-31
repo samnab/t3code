@@ -295,7 +295,9 @@ export const PendingTaskListRow = memo(function PendingTaskListRow(props: {
 
   const statusPill = (
     <View className="rounded-full bg-zinc-500/12 px-1.5 py-0.5 dark:bg-zinc-500/16">
-      <Text className="text-3xs font-t3-bold text-zinc-600 dark:text-zinc-300">Pending</Text>
+      <Text className="text-3xs font-t3-bold text-zinc-600 dark:text-zinc-300">
+        {pendingTask.blocked ? "Blocked" : "Pending"}
+      </Text>
     </View>
   );
 

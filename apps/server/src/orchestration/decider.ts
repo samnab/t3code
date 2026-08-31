@@ -4,6 +4,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationReadModel,
 } from "@t3tools/contracts";
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -928,6 +929,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.start": {
+      // A recognized T3-local /goal command is thread metadata (set via
+      // thread.meta.update), never a provider prompt. Clients intercept it
+      // live, but persisted outbox entries, old pending data, or remote
+      // dispatch can still deliver one here; rejecting before any event exists
+      // is the authoritative guard covering every provider-bound path.
+      if (parseThreadGoalCommand(command.message.text) !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "A /goal command cannot start a provider turn; it is thread metadata, set it on an existing thread.",
+        });
+      }
       const targetThread = yield* requireThread({
         readModel,
         command,

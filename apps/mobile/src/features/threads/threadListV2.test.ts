@@ -938,6 +938,7 @@ function makePendingTask(id: string): PendingNewTask {
       worktreePath: null,
     },
     title: id,
+    blocked: false,
   };
 }
 

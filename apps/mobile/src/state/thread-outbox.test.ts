@@ -460,6 +460,7 @@ describe("thread outbox", () => {
   it("only removes a missing-thread message after shell synchronization is live", () => {
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: false,
         threadExists: false,
         shellStatus: "synchronizing",
@@ -469,6 +470,7 @@ describe("thread outbox", () => {
     ).toBe("wait");
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: false,
         threadExists: false,
         shellStatus: "live",
@@ -478,6 +480,7 @@ describe("thread outbox", () => {
     ).toBe("remove");
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: false,
         threadExists: true,
         shellStatus: "live",
@@ -490,6 +493,7 @@ describe("thread outbox", () => {
   it("sends existing-thread messages whenever connected so queued messages can steer", () => {
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: false,
         threadExists: true,
         shellStatus: "live",
@@ -499,6 +503,7 @@ describe("thread outbox", () => {
     ).toBe("send");
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: false,
         threadExists: true,
         shellStatus: "live",
@@ -508,9 +513,85 @@ describe("thread outbox", () => {
     ).toBe("wait");
   });
 
+  it("blocks T3-local /goal text from both delivery branches before anything sends", () => {
+    // A persisted or edited outbox entry can carry /goal text past the live
+    // composer interception. It must never drain into a provider turn — not
+    // through the existing-thread branch nor through thread creation — and it
+    // must stay queued (never sent, never discarded) for the user to fix.
+    const goalTexts = ["/goal ship it", "/goal", "/goal clear", "  /goal ship it  "];
+    for (const text of goalTexts) {
+      expect(
+        resolveThreadOutboxDeliveryAction({
+          text,
+          isCreation: false,
+          threadExists: true,
+          shellStatus: "live",
+          environmentConnected: true,
+          threadBusy: false,
+        }),
+      ).toBe("blocked");
+      expect(
+        resolveThreadOutboxDeliveryAction({
+          text,
+          isCreation: true,
+          threadExists: false,
+          shellStatus: "live",
+          environmentConnected: true,
+          threadBusy: false,
+        }),
+      ).toBe("blocked");
+    }
+    // Blocked wins even while offline, so a later reconnect cannot drain it.
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        text: "/goal ship it",
+        isCreation: true,
+        threadExists: false,
+        shellStatus: "empty",
+        environmentConnected: false,
+        threadBusy: false,
+      }),
+    ).toBe("blocked");
+  });
+
+  it("keeps sending ordinary queued text through both delivery branches", () => {
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        text: "ship the login fix",
+        isCreation: false,
+        threadExists: true,
+        shellStatus: "live",
+        environmentConnected: true,
+        threadBusy: false,
+      }),
+    ).toBe("send");
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        text: "ship the login fix",
+        isCreation: true,
+        threadExists: false,
+        shellStatus: "live",
+        environmentConnected: true,
+        threadBusy: false,
+      }),
+    ).toBe("send");
+    // A prompt that merely mentions /goal mid-text is an ordinary prompt.
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        text: "please run /goal now",
+        isCreation: false,
+        threadExists: true,
+        shellStatus: "live",
+        environmentConnected: true,
+        threadBusy: false,
+      }),
+    ).toBe("send");
+  });
+
   it("sends queued creations once connected and live, removing already-created ones", () => {
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: true,
         threadExists: false,
         shellStatus: "cached",
@@ -522,6 +603,7 @@ describe("thread outbox", () => {
     // simply not be visible yet — sending now could duplicate the thread.
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: true,
         threadExists: false,
         shellStatus: "synchronizing",
@@ -531,6 +613,7 @@ describe("thread outbox", () => {
     ).toBe("wait");
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: true,
         threadExists: false,
         shellStatus: "live",
@@ -540,6 +623,7 @@ describe("thread outbox", () => {
     ).toBe("send");
     expect(
       resolveThreadOutboxDeliveryAction({
+        text: "ship it",
         isCreation: true,
         threadExists: true,
         shellStatus: "live",

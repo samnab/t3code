@@ -141,20 +141,38 @@ export type ThreadGoalCommand =
   | { readonly action: "clear" }
   | { readonly action: "set"; readonly goal: string };
 
+// The /goal delimiter policy, in one place so acceptance and trimming cannot
+// drift: exactly the Unicode White_Space code points (space, tab, LF, CRLF,
+// NBSP, and friends). Formatting characters that merely render as nothing —
+// U+200B ZERO WIDTH SPACE, U+FEFF BOM, U+2060 WORD JOINER — are NOT
+// separators, and unlike String.trim they are not outer whitespace either,
+// so a zero-width-joined `/goal\uFEFF…` stays an ordinary prompt and a goal
+// keeps them verbatim at its edges.
+const THREAD_GOAL_SEPARATOR = "\\p{White_Space}";
+const THREAD_GOAL_COMMAND_REGEX = new RegExp(
+  `^/goal(?:${THREAD_GOAL_SEPARATOR}+([\\s\\S]*))?$`,
+  "iu",
+);
+const THREAD_GOAL_LEADING_WHITESPACE = new RegExp(`^${THREAD_GOAL_SEPARATOR}+`, "u");
+const THREAD_GOAL_TRAILING_WHITESPACE = new RegExp(`${THREAD_GOAL_SEPARATOR}+$`, "u");
+
+export function trimThreadGoalWhitespace(text: string): string {
+  return text
+    .replace(THREAD_GOAL_LEADING_WHITESPACE, "")
+    .replace(THREAD_GOAL_TRAILING_WHITESPACE, "");
+}
+
 // `/goal` alone shows the current goal; `/goal clear` clears it (reserved,
 // case-insensitive like other built-ins — a literal goal of "clear" cannot be
-// set through this syntax); any other remainder is the new goal text. The
-// separator is JS `\s+`, so line breaks (LF/CRLF) and NBSP count as the gap
-// between command and goal; zero-width U+200B is not JS whitespace, so a
-// zero-width-joined `/goal\u200B…` stays an ordinary prompt.
-const THREAD_GOAL_COMMAND_REGEX = /^\/goal(?:\s+([\s\S]*))?$/i;
-
+// set through this syntax); any other remainder is the new goal text. This
+// same parser is the shared provider-dispatch guard: web, mobile, and the
+// server decider all recognize the exact same command set.
 export function parseThreadGoalCommand(text: string): ThreadGoalCommand | null {
-  const match = THREAD_GOAL_COMMAND_REGEX.exec(text.trim());
+  const match = THREAD_GOAL_COMMAND_REGEX.exec(trimThreadGoalWhitespace(text));
   if (!match) {
     return null;
   }
-  const rest = (match[1] ?? "").trim();
+  const rest = trimThreadGoalWhitespace(match[1] ?? "");
   if (rest === "") {
     return { action: "show" };
   }

@@ -242,7 +242,9 @@ export const ThreadListV2PendingRow = memo(function ThreadListV2PendingRow(props
         <Text className="flex-1 text-sm font-t3-medium text-foreground-muted" numberOfLines={1}>
           {projectTitle}
         </Text>
-        <Text className="text-xs text-foreground-tertiary">Queued</Text>
+        <Text className="text-xs text-foreground-tertiary">
+          {pendingTask.blocked ? "Blocked" : "Queued"}
+        </Text>
       </View>
       {/* One line, unlike the two an active row allows: a queued title is
           derived from the whole prompt rather than written as a title, so the

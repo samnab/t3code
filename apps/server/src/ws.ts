@@ -64,6 +64,7 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
@@ -867,6 +868,15 @@ const makeWsRpcLayer = (
         command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
         Effect.gen(function* () {
+          // Same guard as the decider, checked before any bootstrap side effect:
+          // a /goal command must not create a thread, worktree, or setup
+          // script run on its way to being rejected.
+          if (parseThreadGoalCommand(command.message.text) !== null) {
+            return yield* new OrchestrationDispatchCommandError({
+              message:
+                "A /goal command cannot start a provider turn; it is thread metadata, set it on an existing thread.",
+            });
+          }
           const bootstrap = command.bootstrap;
           const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
           let createdThread = false;

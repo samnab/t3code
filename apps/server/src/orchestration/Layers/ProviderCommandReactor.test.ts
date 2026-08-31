@@ -678,6 +678,41 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  effectIt.effect("never sends a provider turn for T3-local /goal text", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const now = "2026-01-01T00:00:00.000Z";
+
+      const failure = yield* harness.engine
+        .dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-goal"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-goal"),
+            role: "user",
+            text: "/goal ship it",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        })
+        .pipe(Effect.flip);
+      expect(failure._tag).toBe("OrchestrationCommandInvariantError");
+
+      // The rejection happened before any event existed, so there is nothing
+      // for the reactor to act on: no provider payload, no chat history.
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.messages).toEqual([]);
+      expect(thread?.activities).toEqual([]);
+      expect(thread?.session).toBeNull();
+    }),
+  );
+
   it("generates a thread title on the first turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

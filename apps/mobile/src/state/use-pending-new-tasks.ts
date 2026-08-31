@@ -1,5 +1,7 @@
 import { useMemo } from "react";
 
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+
 import { deriveThreadTitleFromPrompt } from "../lib/projectThreadStartTurn";
 import {
   flattenQueuedThreadMessages,
@@ -13,6 +15,8 @@ export interface PendingNewTask {
   readonly message: QueuedThreadMessage;
   readonly creation: QueuedThreadCreation;
   readonly title: string;
+  /** True when the queued text is a T3-local /goal command: it can never send. */
+  readonly blocked: boolean;
 }
 
 export function usePendingNewTasks(): ReadonlyArray<PendingNewTask> {
@@ -27,6 +31,7 @@ export function usePendingNewTasks(): ReadonlyArray<PendingNewTask> {
         message,
         creation: message.creation,
         title: deriveThreadTitleFromPrompt(message.text),
+        blocked: parseThreadGoalCommand(message.text) !== null,
       });
     }
     tasks.sort((left, right) => right.message.createdAt.localeCompare(left.message.createdAt));
