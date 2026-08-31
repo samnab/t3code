@@ -17,7 +17,7 @@
  * folding (completion can create an agent; a late start only fills
  * metadata).
  */
-import type { OrchestrationThreadActivity } from "@t3tools/contracts";
+import type { OrchestrationSubagentRun, OrchestrationThreadActivity } from "@t3tools/contracts";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -58,6 +58,10 @@ export interface SubagentRunHandles {
 
 export interface RuntimeSubagent {
   readonly id: string;
+  readonly runNumber?: number;
+  readonly historyAvailability?: OrchestrationSubagentRun["historyAvailability"];
+  readonly controlAvailability?: OrchestrationSubagentRun["controlAvailability"];
+  readonly terminalReason?: Exclude<OrchestrationSubagentRun["terminalReason"], null>;
   readonly kind: "subagent" | "workflow" | "workflow_agent";
   readonly title: string;
   readonly role: string | null;
@@ -227,6 +231,10 @@ function mergeUsageMax(
 
 interface MutableAgent {
   id: string;
+  runNumber?: number;
+  historyAvailability?: OrchestrationSubagentRun["historyAvailability"];
+  controlAvailability?: OrchestrationSubagentRun["controlAvailability"];
+  terminalReason?: Exclude<OrchestrationSubagentRun["terminalReason"], null>;
   kind: RuntimeSubagent["kind"];
   title: string;
   role: string | null;
@@ -266,6 +274,37 @@ function kindFromPayload(
     return "workflow_agent";
   }
   return "subagent";
+}
+
+function fillRunInventoryMetadata(agent: MutableAgent, payload: Record<string, unknown>): void {
+  if (typeof payload.subagentRun !== "object" || payload.subagentRun === null) return;
+  const evidence = payload.subagentRun as Record<string, unknown>;
+  const runNumber = asCount(evidence.runNumber);
+  if (runNumber !== undefined && runNumber > 0) agent.runNumber = runNumber;
+  if (
+    evidence.historyAvailability === "durable" ||
+    evidence.historyAvailability === "summary-only" ||
+    evidence.historyAvailability === "unavailable"
+  ) {
+    agent.historyAvailability = evidence.historyAvailability;
+  }
+  if (
+    evidence.terminalReason === "native-completed" ||
+    evidence.terminalReason === "native-error" ||
+    evidence.terminalReason === "native-cancelled" ||
+    evidence.terminalReason === "owner-lost" ||
+    evidence.terminalReason === "owner-replaced" ||
+    evidence.terminalReason === "server-restart"
+  ) {
+    agent.terminalReason = evidence.terminalReason;
+  }
+  if (
+    evidence.controlAvailability === "owner-routed" ||
+    evidence.controlAvailability === "read-only" ||
+    evidence.controlAvailability === "unsupported"
+  ) {
+    agent.controlAvailability = evidence.controlAvailability;
+  }
 }
 
 /** Completion can create an agent (its start may have aged out of retention). */
@@ -308,12 +347,14 @@ function getOrCreate(
     completedAt: null,
     updatedAt: at,
   };
+  fillRunInventoryMetadata(created, payload);
   agents.set(id, created);
   return created;
 }
 
 /** Metadata fill from any payload: never downgrades known values to null. */
 function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): void {
+  fillRunInventoryMetadata(agent, payload);
   const title = asString(payload.title);
   if (title) agent.title = title;
   const role = asString(payload.role);
@@ -672,6 +713,95 @@ export function foldSubagentActivities(
   }
 
   return roster.map((agent) => ({ ...agent }));
+}
+
+function inventoryStatus(status: OrchestrationSubagentRun["status"]): RuntimeSubagentStatus {
+  switch (status) {
+    case "queued":
+      return "pending";
+    case "active":
+    case "cancelling":
+      return "running";
+    case "done":
+      return "completed";
+    case "error":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    case "interrupted":
+      return "interrupted";
+  }
+}
+
+function runtimeSubagentFromInventory(run: OrchestrationSubagentRun): RuntimeSubagent {
+  const status = inventoryStatus(run.status);
+  const terminal = isTerminalSubagentStatus(status);
+  return {
+    id: run.runId,
+    runNumber: run.runNumber,
+    historyAvailability: run.historyAvailability,
+    controlAvailability: run.controlAvailability,
+    ...(run.terminalReason !== null ? { terminalReason: run.terminalReason } : {}),
+    kind: run.parentRunId === null ? "subagent" : "workflow_agent",
+    title: run.title ?? `${run.harness ?? run.runtimeFamily} run`,
+    role: run.harness ?? run.runtimeFamily,
+    model: run.model,
+    effort: run.effort,
+    status,
+    activationCount: 1,
+    usage: null,
+    progress: terminal ? null : run.summary,
+    lastToolName: null,
+    result: status === "completed" || status === "cancelled" ? run.summary : null,
+    error: status === "failed" || status === "interrupted" ? run.summary : null,
+    outputFile: null,
+    parentAgentId: run.parentRunId,
+    agentIndex: null,
+    phaseIndex: null,
+    phaseTitle: null,
+    attempt: null,
+    workflowName: null,
+    phases: [],
+    runHandles: { runId: run.runId },
+    recentActivity:
+      run.summary === null ? [] : [{ at: run.updatedAt, summary: bounded(run.summary) }],
+    firstSeenAt: run.createdAt,
+    startedAt: run.createdAt,
+    completedAt: terminal ? (run.terminalAt ?? run.updatedAt) : null,
+    updatedAt: run.updatedAt,
+  };
+}
+
+/** Merge the durable inventory with retained/live activities by opaque run id. */
+export function reconcileSubagentInventory(
+  inventory: ReadonlyArray<OrchestrationSubagentRun> | undefined,
+  activityAgents: ReadonlyArray<RuntimeSubagent>,
+): ReadonlyArray<RuntimeSubagent> {
+  if (inventory === undefined) return activityAgents;
+  const reconciled = new Map<string, RuntimeSubagent>(
+    inventory.map((run) => [run.runId, runtimeSubagentFromInventory(run)]),
+  );
+  for (const activityAgent of activityAgents) {
+    const persisted = reconciled.get(activityAgent.id);
+    if (persisted === undefined) {
+      reconciled.set(activityAgent.id, activityAgent);
+      continue;
+    }
+    if (activityAgent.updatedAt > persisted.updatedAt) {
+      reconciled.set(activityAgent.id, {
+        ...persisted,
+        ...activityAgent,
+        ...(persisted.runNumber !== undefined ? { runNumber: persisted.runNumber } : {}),
+        ...(persisted.historyAvailability !== undefined
+          ? { historyAvailability: persisted.historyAvailability }
+          : {}),
+        ...(persisted.controlAvailability !== undefined
+          ? { controlAvailability: persisted.controlAvailability }
+          : {}),
+      });
+    }
+  }
+  return Array.from(reconciled.values());
 }
 
 export interface AgentPanelWorkflowGroup {

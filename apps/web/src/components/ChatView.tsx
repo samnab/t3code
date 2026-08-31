@@ -170,6 +170,7 @@ import { AgentsPanel } from "./AgentsPanel";
 import {
   deriveAgentPanelModel,
   foldSubagentActivities,
+  reconcileSubagentInventory,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { BranchToolbar } from "./BranchToolbar";
@@ -2321,17 +2322,18 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
   const turnPlans = useMemo(() => deriveTurnPlans(threadActivities), [threadActivities]);
-  // Native subagent fold: memoized by activity-list identity, shared by the
-  // Agents surface, live strip, and workflow cards. v2Projection is null
-  // until orchestration-v2 lands (source precedence lives in the derive).
-  // sessionLive derives interruption for agents orphaned by session death.
+  // Retained/live activities reconcile onto the durable run inventory by opaque id.
   const agentSessionLive = phase !== "disconnected";
+  const subagentRuns = activeThread?.subagentRuns;
   const agentPanelModel = useMemo(
     () =>
       deriveAgentPanelModel({
-        agents: foldSubagentActivities(threadActivities, { sessionLive: agentSessionLive }),
+        agents: reconcileSubagentInventory(
+          subagentRuns,
+          foldSubagentActivities(threadActivities, { sessionLive: agentSessionLive }),
+        ),
       }),
-    [agentSessionLive, threadActivities],
+    [agentSessionLive, subagentRuns, threadActivities],
   );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),

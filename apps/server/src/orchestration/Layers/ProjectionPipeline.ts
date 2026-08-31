@@ -3,13 +3,16 @@ import {
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
+  SubagentRunEvidence,
   ThreadId,
+  TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -18,6 +21,7 @@ import { OrchestrationEventStore } from "../../persistence/Services/Orchestratio
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
+import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { type ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import {
@@ -37,6 +41,7 @@ import { ProjectionThreadRepository } from "../../persistence/Services/Projectio
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
+import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
@@ -61,6 +66,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadMessages: "projection.thread-messages",
   threadProposedPlans: "projection.thread-proposed-plans",
   threadActivities: "projection.thread-activities",
+  subagentRuns: "projection.subagent-runs",
   threadSessions: "projection.thread-sessions",
   threadTurns: "projection.thread-turns",
   checkpoints: "projection.checkpoints",
@@ -110,6 +116,41 @@ const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsFor
   (input: { readonly attachments: ReadonlyArray<ChatAttachment> }) =>
     Effect.succeed(input.attachments.length === 0 ? [] : input.attachments),
 );
+
+const decodeSubagentRunEvidence = Schema.decodeUnknownOption(SubagentRunEvidence);
+
+function activityPayloadRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function activityTrimmedString(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  return typeof value === "string" && value.trim().length > 0
+    ? TrimmedNonEmptyString.make(value.trim())
+    : null;
+}
+
+function isTerminalSubagentRunStatus(status: SubagentRunEvidence["status"]) {
+  return (
+    status === "done" || status === "error" || status === "cancelled" || status === "interrupted"
+  );
+}
+
+function readSubagentRunActivity(event: OrchestrationEvent) {
+  if (event.type !== "thread.activity-appended") return null;
+  const payload = activityPayloadRecord(event.payload.activity.payload);
+  if (payload === null) return null;
+  const decoded = decodeSubagentRunEvidence(payload.subagentRun);
+  if (Option.isNone(decoded) || payload.taskId !== decoded.value.runId) return null;
+  return {
+    threadId: event.payload.threadId,
+    activity: event.payload.activity,
+    payload,
+    evidence: decoded.value,
+  };
+}
 
 function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
   if (typeof payload !== "object" || payload === null) {
@@ -500,6 +541,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
     const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
     const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
+    const projectionSubagentRunRepository = yield* ProjectionSubagentRunRepository;
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
@@ -1165,6 +1207,73 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applySubagentRunsProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applySubagentRunsProjection",
+    )(function* (event, _attachmentSideEffects) {
+      const runActivity = readSubagentRunActivity(event);
+      if (runActivity === null) return;
+
+      const { activity, payload, evidence } = runActivity;
+      const title =
+        activityTrimmedString(payload, "title") ?? activityTrimmedString(payload, "detail");
+      const model = activityTrimmedString(payload, "model");
+      const effort = activityTrimmedString(payload, "effort");
+      const summary =
+        activity.kind === "task.started"
+          ? null
+          : (activityTrimmedString(payload, "summary") ?? activityTrimmedString(payload, "detail"));
+      const terminal = isTerminalSubagentRunStatus(evidence.status);
+
+      if (activity.kind === "task.started") {
+        if (evidence.runNumber === undefined) return;
+        yield* projectionSubagentRunRepository.insertStart({
+          runId: evidence.runId,
+          runNumber: evidence.runNumber,
+          threadId: runActivity.threadId,
+          parentRunId: evidence.parentRunId ?? null,
+          runtimeFamily: evidence.runtimeFamily,
+          harness: evidence.harness ?? null,
+          provider: evidence.provider,
+          providerInstanceId: evidence.providerInstanceId ?? null,
+          model,
+          effort,
+          title,
+          summary,
+          status: evidence.status,
+          terminalReason: evidence.terminalReason ?? null,
+          controlAvailability:
+            terminal && evidence.controlAvailability === "owner-routed"
+              ? "read-only"
+              : evidence.controlAvailability,
+          historyAvailability: evidence.historyAvailability,
+          capabilities: evidence.capabilities,
+          createdAt: evidence.startedAt,
+          updatedAt: activity.createdAt,
+          terminalAt: terminal ? activity.createdAt : null,
+          // Private routing provenance comes from the durable reservation.
+          ownerId: null,
+          ownerEpoch: "reserved",
+          nativeRunId: null,
+          activationId: null,
+          firstEventSequence: event.sequence,
+          lastEventSequence: event.sequence,
+        });
+        return;
+      }
+
+      yield* projectionSubagentRunRepository.updateLifecycle({
+        runId: evidence.runId,
+        status: evidence.status,
+        terminalReason: evidence.terminalReason ?? null,
+        title,
+        model,
+        effort,
+        summary,
+        updatedAt: activity.createdAt,
+        eventSequence: event.sequence,
+      });
+    });
+
     const applyThreadSessionsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadSessionsProjection",
     )(function* (event, _attachmentSideEffects) {
@@ -1663,6 +1772,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyThreadActivitiesProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.subagentRuns,
+        apply: applySubagentRunsProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
         apply: applyThreadSessionsProjection,
       },
@@ -1782,6 +1895,7 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),
   Layer.provideMerge(ProjectionThreadActivityRepositoryLive),
+  Layer.provideMerge(ProjectionSubagentRunRepositoryLive),
   Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
   Layer.provideMerge(ProjectionTurnRepositoryLive),
   Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),

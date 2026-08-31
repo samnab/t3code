@@ -30,6 +30,8 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -350,6 +352,7 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
     "outputFile",
     "agentPath",
     "timelineBypass",
+    "subagentRun",
     "typedUsage",
     "status",
     "error",
@@ -895,6 +898,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
+  const projectionSubagentRunRepository = yield* ProjectionSubagentRunRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -1493,10 +1497,33 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
+  const processRuntimeEvent = (inputEvent: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
-      const thread = yield* resolveThreadShell(event.threadId);
+      const thread = yield* resolveThreadShell(inputEvent.threadId);
       if (!thread) return;
+
+      const event =
+        inputEvent.type === "task.started" &&
+        inputEvent.payload.subagentRun !== undefined &&
+        inputEvent.payload.subagentRun.ownerEpoch !== undefined
+          ? ({
+              ...inputEvent,
+              payload: {
+                ...inputEvent.payload,
+                subagentRun: {
+                  ...inputEvent.payload.subagentRun,
+                  runNumber: yield* projectionSubagentRunRepository.reserveRunNumber({
+                    runId: inputEvent.payload.subagentRun.runId,
+                    allocatedAt: inputEvent.createdAt,
+                    ownerId: inputEvent.payload.subagentRun.ownerId ?? null,
+                    ownerEpoch: inputEvent.payload.subagentRun.ownerEpoch,
+                    nativeRunId: inputEvent.payload.subagentRun.nativeRunId ?? null,
+                    activationId: inputEvent.payload.subagentRun.activationId ?? null,
+                  }),
+                },
+              },
+            } satisfies ProviderRuntimeEvent)
+          : inputEvent;
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;
       const getLoadedThreadDetail = () =>
@@ -2091,4 +2118,7 @@ const make = Effect.gen(function* () {
 export const ProviderRuntimeIngestionLive = Layer.effect(
   ProviderRuntimeIngestionService,
   make,
-).pipe(Layer.provide(ProjectionTurnRepositoryLive));
+).pipe(
+  Layer.provide(ProjectionTurnRepositoryLive),
+  Layer.provide(ProjectionSubagentRunRepositoryLive),
+);

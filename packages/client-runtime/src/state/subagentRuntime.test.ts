@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
-import { classifyTaskAgentKind, type OrchestrationThreadActivity } from "@t3tools/contracts";
+import {
+  classifyTaskAgentKind,
+  ProviderDriverKind,
+  RuntimeTaskId,
+  ThreadId,
+  type OrchestrationSubagentRun,
+  type OrchestrationThreadActivity,
+} from "@t3tools/contracts";
 import {
   deriveAgentPanelModel,
   foldSubagentActivities,
@@ -8,6 +15,7 @@ import {
   isAgentAttributedToolActivity,
   isSubagentActivityKind,
   isTimelineBypassActivity,
+  reconcileSubagentInventory,
   workflowCardMembers,
 } from "./subagentRuntime.ts";
 
@@ -875,5 +883,91 @@ describe("nested agents vs subagent shells", () => {
       }),
     ]);
     expect(agents.map((agent) => agent.id)).toEqual(["nested-1"]);
+  });
+});
+
+describe("reconcileSubagentInventory", () => {
+  it("keeps durable history while applying newer live activity by opaque id", () => {
+    const runId = RuntimeTaskId.make("opaque-client-run");
+    const inventory: ReadonlyArray<OrchestrationSubagentRun> = [
+      {
+        runId,
+        runNumber: 42,
+        threadId: ThreadId.make("thread-client-run"),
+        parentRunId: null,
+        runtimeFamily: "pi-stock",
+        harness: "pi",
+        provider: ProviderDriverKind.make("pi"),
+        providerInstanceId: null,
+        model: null,
+        effort: null,
+        title: "Map auth",
+        summary: null,
+        status: "active",
+        terminalReason: null,
+        controlAvailability: "unsupported",
+        historyAvailability: "summary-only",
+        capabilities: { steer: false, cancel: false, resume: false },
+        createdAt: "2026-08-01T10:00:00.000Z",
+        updatedAt: "2026-08-01T10:00:00.000Z",
+        terminalAt: null,
+      },
+      {
+        runId: RuntimeTaskId.make("opaque-historical-run"),
+        runNumber: 41,
+        threadId: ThreadId.make("thread-client-run"),
+        parentRunId: null,
+        runtimeFamily: "pi-manager",
+        harness: "pi",
+        provider: ProviderDriverKind.make("pi"),
+        providerInstanceId: null,
+        model: null,
+        effort: null,
+        title: "Older run",
+        summary: "Server restarted",
+        status: "interrupted",
+        terminalReason: "server-restart",
+        controlAvailability: "read-only",
+        historyAvailability: "summary-only",
+        capabilities: { steer: true, cancel: true, resume: false },
+        createdAt: "2026-08-01T09:00:00.000Z",
+        updatedAt: "2026-08-01T09:10:00.000Z",
+        terminalAt: "2026-08-01T09:10:00.000Z",
+      },
+    ];
+    const live = fold([
+      activity(
+        "task.completed",
+        {
+          taskId: runId,
+          taskType: "subagent",
+          title: "Map auth",
+          status: "completed",
+          summary: "Mapped auth",
+          subagentRun: {
+            runId,
+            runNumber: 42,
+            status: "done",
+            historyAvailability: "summary-only",
+            controlAvailability: "read-only",
+          },
+        },
+        "2026-08-01T10:01:00.000Z",
+      ),
+    ]);
+
+    expect(live[0]).toMatchObject({ runNumber: 42, historyAvailability: "summary-only" });
+    const reconciled = reconcileSubagentInventory(inventory, live);
+    expect(reconciled.find((agent) => agent.id === runId)).toMatchObject({
+      runNumber: 42,
+      status: "completed",
+      result: "Mapped auth",
+      historyAvailability: "summary-only",
+    });
+    expect(reconciled.find((agent) => agent.id === "opaque-historical-run")).toMatchObject({
+      runNumber: 41,
+      status: "interrupted",
+      controlAvailability: "read-only",
+    });
   });
 });

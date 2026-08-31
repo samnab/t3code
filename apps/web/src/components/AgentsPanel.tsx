@@ -119,6 +119,7 @@ function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
  * failed rows because they explain a red row at a glance.
  */
 function agentActivityText(agent: RuntimeSubagent): string | null {
+  if (agent.terminalReason === "server-restart") return "Interrupted by T3 restart";
   const live =
     agent.status === "running" || agent.status === "pending" || agent.status === "waiting";
   if (live) {
@@ -146,8 +147,27 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
     agent.role?.trim().toLocaleLowerCase() === agent.title.trim().toLocaleLowerCase()
       ? null
       : agent.role;
+  const historyLabel =
+    agent.historyAvailability === "summary-only"
+      ? "Child transcript detail unavailable"
+      : agent.historyAvailability === "unavailable"
+        ? "History unavailable"
+        : agent.historyAvailability === "durable"
+          ? "History available"
+          : null;
+  const controlLabel =
+    agent.controlAvailability === "owner-routed"
+      ? "Controls available"
+      : agent.controlAvailability === "read-only"
+        ? "Read-only"
+        : agent.controlAvailability === "unsupported"
+          ? "Controls unsupported"
+          : null;
   const metadata = [
+    agent.runNumber !== undefined ? `#${agent.runNumber}` : null,
     modelLabel,
+    historyLabel,
+    controlLabel,
     agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} tok` : "— tok",
     agent.usage?.toolUses !== undefined ? `${agent.usage.toolUses} tools` : null,
     agent.activationCount > 1 ? `run ${agent.activationCount}` : null,

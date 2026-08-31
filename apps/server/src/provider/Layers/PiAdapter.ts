@@ -51,6 +51,7 @@ import {
   type OrchestrationSubagentControlCancelInput,
   type OrchestrationSubagentControlSteerInput,
   type SubagentControlPlaneStatus,
+  type SubagentRunEvidence,
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
@@ -165,11 +166,23 @@ const decodePiSubagentToolResults = Schema.decodeUnknownOption(PiSubagentToolRes
 
 interface ManagedPiSubagent {
   readonly taskId: RuntimeTaskId;
+  readonly nativeRunId: string;
+  readonly activationId: string;
+  readonly startedAt: string;
   readonly title: string;
   readonly harness: "pi" | "claude" | "codex";
   readonly model?: string;
   readonly toolUseId: string;
-  readonly parentAgentId?: string;
+  readonly parentAgentId?: RuntimeTaskId;
+}
+
+interface OpenManagerRun {
+  readonly nativeRunId: string;
+  readonly activationId: string;
+  readonly startedAt: string;
+  readonly title?: string;
+  readonly harness: string;
+  readonly model?: string;
 }
 
 interface PendingPiSubagentTerminal {
@@ -235,7 +248,7 @@ interface PiSessionContext {
   readonly pendingExtensionUi: Map<ApprovalRequestId, PendingPiExtensionUi>;
   /** Unique to this spawned Pi process; native manager ids reset to sa-1. */
   readonly processEpoch: string;
-  /** Raw manager id → namespaced T3 run. */
+  /** Raw manager id → opaque T3 run. */
   readonly managedSubagents: Map<string, ManagedPiSubagent>;
   readonly pendingManagedSpawnToolCalls: Set<string>;
   readonly pendingManagedTerminals: Map<string, PendingPiSubagentTerminal>;
@@ -252,10 +265,7 @@ interface PiSessionContext {
   /** Idempotent run-upsert state machine for the negotiated manager. */
   managerRegistry: ManagerRunRegistry;
   /** Namespaced T3 task id → open manager run (steer/cancel lookup). */
-  readonly managerRuns: Map<
-    RuntimeTaskId,
-    { readonly nativeRunId: string; readonly activationId: string }
-  >;
+  readonly managerRuns: Map<RuntimeTaskId, OpenManagerRun>;
   /** Correlated manager records awaiting a reply, by envelope id. */
   readonly pendingManagerRecords: Map<string, Deferred.Deferred<ManagerRecord>>;
   /** Restore upserts can arrive before the negotiation entry activates the registry. */
@@ -525,10 +535,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       return title === undefined ? toolName : `${toolName}: ${title}`;
     };
 
-    const namespacedManagedSubagentId = (ctx: PiSessionContext, nativeId: string) =>
-      RuntimeTaskId.make(`pi:${ctx.processEpoch}:${nativeId}`);
+    const newSubagentRunId = nextUuid.pipe(Effect.map(RuntimeTaskId.make));
 
-    const managedSubagentLinkage = (run: ManagedPiSubagent) => ({
+    const managedSubagentLinkage = (
+      ctx: PiSessionContext,
+      run: ManagedPiSubagent,
+      status: SubagentRunEvidence["status"],
+      terminalReason?: SubagentRunEvidence["terminalReason"],
+    ) => ({
       taskType: "subagent" as const,
       title: run.title,
       // The Pi manager has no separate role concept; harness is its best available role value.
@@ -538,6 +552,22 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       ...(run.parentAgentId !== undefined ? { parentAgentId: run.parentAgentId } : {}),
       runHandles: { runId: run.taskId },
       timelineBypass: true,
+      subagentRun: {
+        runId: run.taskId,
+        runtimeFamily: "pi-stock",
+        harness: run.harness,
+        provider: PROVIDER,
+        ...(boundInstanceId !== undefined ? { providerInstanceId: boundInstanceId } : {}),
+        ownerEpoch: ctx.processEpoch,
+        nativeRunId: run.nativeRunId,
+        activationId: run.activationId,
+        status,
+        ...(terminalReason !== undefined ? { terminalReason } : {}),
+        controlAvailability: "unsupported",
+        historyAvailability: "summary-only",
+        capabilities: { steer: false, cancel: false, resume: false },
+        startedAt: run.startedAt,
+      } satisfies SubagentRunEvidence,
     });
 
     const completeManagedSubagent = Effect.fnUntraced(function* (
@@ -545,6 +575,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       nativeId: string,
       status: "completed" | "failed" | "stopped",
       content?: string,
+      stopReason: "owner-lost" | "owner-replaced" = "owner-lost",
     ) {
       const run = ctx.managedSubagents.get(nativeId);
       if (run === undefined) return false;
@@ -555,6 +586,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ? undefined
           : truncateCodePoints(content, MANAGED_SUBAGENT_SUMMARY_MAX_CODE_POINTS).trim() ||
             `${run.title} ${status}`;
+      const inventoryStatus =
+        status === "completed" ? "done" : status === "failed" ? "error" : "interrupted";
+      const terminalReason =
+        status === "completed"
+          ? "native-completed"
+          : status === "failed"
+            ? "native-error"
+            : stopReason;
       const base = yield* makeEventBase(ctx.session);
       yield* offerRuntimeEvent({
         ...base,
@@ -563,7 +602,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           taskId: run.taskId,
           status,
           ...(summary !== undefined ? { summary } : {}),
-          ...managedSubagentLinkage(run),
+          ...managedSubagentLinkage(ctx, run, inventoryStatus, terminalReason),
         },
       });
       return true;
@@ -605,18 +644,23 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       if (ctx.managedSubagents.has(details.id)) return;
       const toolUseId = recordString(event, "toolCallId");
       if (toolUseId === undefined) return;
+      const [taskId, base] = yield* Effect.all([newSubagentRunId, makeEventBase(ctx.session)]);
+      const parentAgentId =
+        details.parent_id === undefined
+          ? undefined
+          : ctx.managedSubagents.get(details.parent_id)?.taskId;
       const run: ManagedPiSubagent = {
-        taskId: namespacedManagedSubagentId(ctx, details.id),
+        taskId,
+        nativeRunId: details.id,
+        activationId: toolUseId,
+        startedAt: base.createdAt,
         title: details.title,
         harness: details.harness,
         ...(details.model !== undefined ? { model: details.model } : {}),
         toolUseId,
-        ...(details.parent_id !== undefined
-          ? { parentAgentId: namespacedManagedSubagentId(ctx, details.parent_id) }
-          : {}),
+        ...(parentAgentId !== undefined ? { parentAgentId } : {}),
       };
       ctx.managedSubagents.set(details.id, run);
-      const base = yield* makeEventBase(ctx.session);
       yield* offerRuntimeEvent({
         ...base,
         type: "task.started",
@@ -624,7 +668,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         payload: {
           taskId: run.taskId,
           description: run.title,
-          ...managedSubagentLinkage(run),
+          ...managedSubagentLinkage(ctx, run, "active"),
         },
       });
       const pending = ctx.pendingManagedTerminals.get(details.id);
@@ -762,16 +806,86 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         return parsed.ok ? { control: parsed.control } : { control: null, reason: parsed.reason };
       });
 
-    const managerTaskId = (ctx: PiSessionContext, activationId: string, nativeRunId: string) =>
-      RuntimeTaskId.make(`pi:${ctx.processEpoch}:${activationId}:${nativeRunId}`);
+    const findManagerRun = (ctx: PiSessionContext, nativeRunId: string, activationId: string) => {
+      for (const entry of ctx.managerRuns) {
+        if (entry[1].nativeRunId === nativeRunId && entry[1].activationId === activationId) {
+          return entry;
+        }
+      }
+      return undefined;
+    };
 
-    const managerTaskLinkage = (record: ManagerRunUpsert, taskId: RuntimeTaskId) => ({
-      taskType: "subagent" as const,
-      ...(record.title !== undefined ? { title: record.title } : {}),
-      role: record.harness ?? "pi",
-      ...(record.model !== undefined ? { model: record.model } : {}),
-      runHandles: { runId: taskId },
-      timelineBypass: true,
+    const managerTaskLinkage = (
+      ctx: PiSessionContext,
+      taskId: RuntimeTaskId,
+      run: OpenManagerRun,
+      status: SubagentRunEvidence["status"],
+      terminalReason?: SubagentRunEvidence["terminalReason"],
+    ) => {
+      const control = ctx.managerControl;
+      const controls =
+        control === null
+          ? { steer: { enabled: false }, cancel: { enabled: false } }
+          : deriveControlAvailabilities(control.capabilities);
+      const ownerRouted = controls.steer.enabled || controls.cancel.enabled;
+      return {
+        taskType: "subagent" as const,
+        ...(run.title !== undefined ? { title: run.title } : {}),
+        role: run.harness,
+        ...(run.model !== undefined ? { model: run.model } : {}),
+        runHandles: { runId: taskId },
+        timelineBypass: true,
+        subagentRun: {
+          runId: taskId,
+          runtimeFamily: "pi-manager",
+          harness: run.harness,
+          provider: PROVIDER,
+          ...(boundInstanceId !== undefined ? { providerInstanceId: boundInstanceId } : {}),
+          ...(control !== null ? { ownerId: control.managerId } : {}),
+          ownerEpoch: ctx.processEpoch,
+          nativeRunId: run.nativeRunId,
+          activationId: run.activationId,
+          status,
+          ...(terminalReason !== undefined ? { terminalReason } : {}),
+          controlAvailability:
+            status === "queued" || status === "active" || status === "cancelling"
+              ? ownerRouted
+                ? "owner-routed"
+                : "unsupported"
+              : ownerRouted
+                ? "read-only"
+                : "unsupported",
+          historyAvailability: "summary-only",
+          capabilities: {
+            steer: control?.capabilities.steering ?? false,
+            cancel: control?.capabilities.cancellation ?? false,
+            resume: false,
+          },
+          startedAt: run.startedAt,
+        } satisfies SubagentRunEvidence,
+      };
+    };
+
+    const settleManagerRun = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      nativeRunId: string,
+      activationId: string,
+      reason: "owner-lost" | "owner-replaced",
+    ) {
+      const entry = findManagerRun(ctx, nativeRunId, activationId);
+      if (entry === undefined) return;
+      const [taskId, run] = entry;
+      ctx.managerRuns.delete(taskId);
+      const base = yield* makeEventBase(ctx.session);
+      yield* offerRuntimeEvent({
+        ...base,
+        type: "task.completed",
+        payload: {
+          taskId,
+          status: "stopped",
+          ...managerTaskLinkage(ctx, taskId, run, "interrupted", reason),
+        },
+      });
     });
 
     const applyManagerRunUpsert = Effect.fnUntraced(function* (
@@ -787,61 +901,80 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         });
         return;
       }
-      const taskId = managerTaskId(ctx, record.activationId, record.runId);
-      const base = yield* makeEventBase(ctx.session);
       if (applied.effect === "start") {
-        // A replacement activation must settle the old row first, or the
-        // prior activation's task stays running forever.
         if (applied.superseded !== undefined) {
-          const supersededTaskId = managerTaskId(ctx, applied.superseded, record.runId);
-          ctx.managerRuns.delete(supersededTaskId);
-          const supersededBase = yield* makeEventBase(ctx.session);
-          yield* offerRuntimeEvent({
-            ...supersededBase,
-            type: "task.completed",
-            payload: { taskId: supersededTaskId, status: "stopped" },
-          });
+          yield* settleManagerRun(ctx, record.runId, applied.superseded, "owner-replaced");
         }
         if (applied.evicted !== undefined) {
-          const evictedTaskId = managerTaskId(
+          yield* settleManagerRun(
             ctx,
-            applied.evicted.activationId,
             applied.evicted.runId,
-          );
-          yield* Effect.gen(function* () {
-            const evictedBase = yield* makeEventBase(ctx.session);
-            yield* offerRuntimeEvent({
-              ...evictedBase,
-              type: "task.completed",
-              payload: { taskId: evictedTaskId, status: "stopped" },
-            });
-          }).pipe(Effect.ignore);
-          ctx.managerRuns.delete(evictedTaskId);
+            applied.evicted.activationId,
+            "owner-lost",
+          ).pipe(Effect.ignore);
         }
-        ctx.managerRuns.set(taskId, {
+        const [taskId, base] = yield* Effect.all([newSubagentRunId, makeEventBase(ctx.session)]);
+        const run: OpenManagerRun = {
           nativeRunId: record.runId,
           activationId: record.activationId,
-        });
+          startedAt: base.createdAt,
+          ...(record.title !== undefined ? { title: record.title } : {}),
+          harness: record.harness ?? "pi",
+          ...(record.model !== undefined ? { model: record.model } : {}),
+        };
+        ctx.managerRuns.set(taskId, run);
         yield* offerRuntimeEvent({
           ...base,
           type: "task.started",
           payload: {
             taskId,
-            ...(record.title !== undefined ? { description: record.title } : {}),
-            ...managerTaskLinkage(record, taskId),
+            ...(run.title !== undefined ? { description: run.title } : {}),
+            ...managerTaskLinkage(ctx, taskId, run, "active"),
           },
         });
         return;
       }
-      if (applied.effect === "update") {
-        yield* offerRuntimeEvent({
-          ...base,
-          type: "task.updated",
-          payload: { taskId, status: "running", ...managerTaskLinkage(record, taskId) },
+
+      const entry = findManagerRun(ctx, record.runId, record.activationId);
+      if (entry === undefined) {
+        yield* Effect.logDebug("Ignored Pi subagent manager event without an owned live run.", {
+          runId: record.runId,
+          activationId: record.activationId,
         });
         return;
       }
+      const [taskId, existingRun] = entry;
+      const run: OpenManagerRun = {
+        ...existingRun,
+        ...(record.title !== undefined ? { title: record.title } : {}),
+        ...(record.harness !== undefined ? { harness: record.harness } : {}),
+        ...(record.model !== undefined ? { model: record.model } : {}),
+      };
+      if (applied.effect === "update") {
+        ctx.managerRuns.set(taskId, run);
+        const base = yield* makeEventBase(ctx.session);
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "task.updated",
+          payload: {
+            taskId,
+            status: "running",
+            ...managerTaskLinkage(ctx, taskId, run, "active"),
+          },
+        });
+        return;
+      }
+
       ctx.managerRuns.delete(taskId);
+      const base = yield* makeEventBase(ctx.session);
+      const status =
+        record.status === "done" ? "done" : record.status === "error" ? "error" : "cancelled";
+      const terminalReason =
+        record.status === "done"
+          ? "native-completed"
+          : record.status === "error"
+            ? "native-error"
+            : "native-cancelled";
       yield* offerRuntimeEvent({
         ...base,
         type: "task.completed",
@@ -856,7 +989,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ...(record.summary !== undefined && record.summary.trim().length > 0
             ? { summary: record.summary }
             : {}),
-          ...managerTaskLinkage(record, taskId),
+          ...managerTaskLinkage(ctx, taskId, run, status, terminalReason),
         },
       });
     });
@@ -1400,15 +1533,17 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         ctx.pendingManagedTerminals.clear();
         // Manager-owned runs are not tool results; finalize them explicitly so
         // stopping the owning process never leaves rows running forever.
-        if (ctx.managerControl !== null) {
-          for (const taskId of ctx.managerRuns.keys()) {
-            const base = yield* makeEventBase(ctx.session);
-            yield* offerRuntimeEvent({
-              ...base,
-              type: "task.completed",
-              payload: { taskId, status: "stopped" },
-            });
-          }
+        for (const [taskId, run] of ctx.managerRuns) {
+          const base = yield* makeEventBase(ctx.session);
+          yield* offerRuntimeEvent({
+            ...base,
+            type: "task.completed",
+            payload: {
+              taskId,
+              status: "stopped",
+              ...managerTaskLinkage(ctx, taskId, run, "interrupted", "owner-lost"),
+            },
+          });
         }
         ctx.managerRuns.clear();
         ctx.pendingManagerRunUpserts.length = 0;

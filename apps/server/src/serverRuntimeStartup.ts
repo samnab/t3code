@@ -37,6 +37,7 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
+import * as ProjectionSubagentRuns from "./persistence/Services/ProjectionSubagentRuns.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import {
@@ -296,6 +297,17 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
 const ORPHANED_PROVIDER_SESSION_ERROR =
   "Provider session did not survive a server restart. Send a new message to continue.";
 
+export const reconcileSubagentRuns = Effect.gen(function* () {
+  const repository = yield* ProjectionSubagentRuns.ProjectionSubagentRunRepository;
+  const interruptedAt = DateTime.formatIso(yield* DateTime.now);
+  const interruptedCount = yield* repository.interruptNonResumable({ interruptedAt });
+  if (interruptedCount > 0) {
+    yield* Effect.logInfo("Interrupted non-resumable subagent runs after T3 restart", {
+      interruptedCount,
+    });
+  }
+});
+
 export const reconcileProviderSessions = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
@@ -430,6 +442,9 @@ export const make = (options?: StartupOptions) =>
           ),
         ),
       );
+
+      yield* Effect.logDebug("startup phase: reconciling subagent run inventory");
+      yield* runStartupPhase("subagent-runs.reconcile", reconcileSubagentRuns);
 
       yield* Effect.logDebug("startup phase: parking orchestration roots at activation");
       yield* runStartupPhase(

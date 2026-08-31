@@ -366,6 +366,76 @@ export const OrchestrationThreadActivity = Schema.Struct({
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
 
+export const SubagentRunStatus = Schema.Literals([
+  "queued",
+  "active",
+  "cancelling",
+  "done",
+  "error",
+  "cancelled",
+  "interrupted",
+]);
+export type SubagentRunStatus = typeof SubagentRunStatus.Type;
+
+export const SubagentRunTerminalReason = Schema.Literals([
+  "native-completed",
+  "native-error",
+  "native-cancelled",
+  "owner-lost",
+  "owner-replaced",
+  "server-restart",
+]);
+export type SubagentRunTerminalReason = typeof SubagentRunTerminalReason.Type;
+
+export const SubagentRunControlAvailability = Schema.Literals([
+  "owner-routed",
+  "read-only",
+  "unsupported",
+]);
+export type SubagentRunControlAvailability = typeof SubagentRunControlAvailability.Type;
+
+export const SubagentRunHistoryAvailability = Schema.Literals([
+  "durable",
+  "summary-only",
+  "unavailable",
+]);
+export type SubagentRunHistoryAvailability = typeof SubagentRunHistoryAvailability.Type;
+
+export const SubagentRunRuntimeFamily = Schema.Literals(["pi-stock", "pi-manager"]);
+export type SubagentRunRuntimeFamily = typeof SubagentRunRuntimeFamily.Type;
+
+export const SubagentRunCapabilities = Schema.Struct({
+  steer: Schema.Boolean,
+  cancel: Schema.Boolean,
+  resume: Schema.Boolean,
+});
+export type SubagentRunCapabilities = typeof SubagentRunCapabilities.Type;
+
+/** Bounded, authorized inventory row exposed only with its owning thread. */
+export const OrchestrationSubagentRun = Schema.Struct({
+  runId: RuntimeTaskId,
+  runNumber: PositiveInt,
+  threadId: ThreadId,
+  parentRunId: Schema.NullOr(RuntimeTaskId),
+  runtimeFamily: SubagentRunRuntimeFamily,
+  harness: Schema.NullOr(TrimmedNonEmptyString),
+  provider: ProviderDriverKind,
+  providerInstanceId: Schema.NullOr(ProviderInstanceId),
+  model: Schema.NullOr(TrimmedNonEmptyString),
+  effort: Schema.NullOr(TrimmedNonEmptyString),
+  title: Schema.NullOr(TrimmedNonEmptyString),
+  summary: Schema.NullOr(TrimmedNonEmptyString),
+  status: SubagentRunStatus,
+  terminalReason: Schema.NullOr(SubagentRunTerminalReason),
+  controlAvailability: SubagentRunControlAvailability,
+  historyAvailability: SubagentRunHistoryAvailability,
+  capabilities: SubagentRunCapabilities,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  terminalAt: Schema.NullOr(IsoDateTime),
+});
+export type OrchestrationSubagentRun = typeof OrchestrationSubagentRun.Type;
+
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
   "interrupted",
@@ -447,6 +517,8 @@ export const OrchestrationThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
+  // Optional so older servers and cached snapshots keep decoding unchanged.
+  subagentRuns: Schema.optional(Schema.Array(OrchestrationSubagentRun)),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
 });

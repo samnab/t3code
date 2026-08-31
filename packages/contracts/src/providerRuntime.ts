@@ -14,7 +14,15 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
-import { ProviderApprovalOption } from "./orchestration.ts";
+import {
+  ProviderApprovalOption,
+  SubagentRunCapabilities,
+  SubagentRunControlAvailability,
+  SubagentRunHistoryAvailability,
+  SubagentRunRuntimeFamily,
+  SubagentRunStatus,
+  SubagentRunTerminalReason,
+} from "./orchestration.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
@@ -548,6 +556,28 @@ export function classifyTaskAgentKind(input: {
  * reconstruct an agent even when its start row aged out of activity retention.
  * All fields optional: old emitters and old rows decode unchanged.
  */
+export const SubagentRunEvidence = Schema.Struct({
+  runId: RuntimeTaskId,
+  // Stamped by T3 ingestion after a durable global reservation.
+  runNumber: Schema.optional(PositiveInt),
+  parentRunId: Schema.optional(RuntimeTaskId),
+  runtimeFamily: SubagentRunRuntimeFamily,
+  harness: Schema.optional(TrimmedNonEmptyStringSchema),
+  provider: ProviderDriverKind,
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  ownerId: Schema.optional(TrimmedNonEmptyStringSchema),
+  ownerEpoch: Schema.optional(TrimmedNonEmptyStringSchema),
+  nativeRunId: Schema.optional(TrimmedNonEmptyStringSchema),
+  activationId: Schema.optional(TrimmedNonEmptyStringSchema),
+  status: SubagentRunStatus,
+  terminalReason: Schema.optional(SubagentRunTerminalReason),
+  controlAvailability: SubagentRunControlAvailability,
+  historyAvailability: SubagentRunHistoryAvailability,
+  capabilities: SubagentRunCapabilities,
+  startedAt: IsoDateTime,
+});
+export type SubagentRunEvidence = typeof SubagentRunEvidence.Type;
+
 const taskAgentLinkageFields = {
   /** SDK task_type (subagent/shell/monitor/local_workflow/…), repeated on
    * every row so folds can classify without the start row. */
@@ -586,6 +616,8 @@ const taskAgentLinkageFields = {
    * belongs in the Agents surface, never the parent timeline.
    */
   timelineBypass: Schema.optional(Schema.Boolean),
+  /** T3-owned identity and bounded provenance for durable run inventory. */
+  subagentRun: Schema.optional(SubagentRunEvidence),
 } as const;
 
 export const TaskAgentLinkage = Schema.Struct(taskAgentLinkageFields);

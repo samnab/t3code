@@ -276,7 +276,8 @@ describe("PiAdapter", () => {
         throw new Error("Expected managed subagent completion.");
       }
 
-      expect(taskId).toMatch(/^pi:[^:]+:sa-1$/);
+      expect(taskId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(taskId).not.toContain("sa-1");
       expect(started.turnId).toBe(turn.turnId);
       expect(started.payload).toMatchObject({
         taskId,
@@ -287,6 +288,13 @@ describe("PiAdapter", () => {
         toolUseId: "spawn-1",
         runHandles: { runId: taskId },
         timelineBypass: true,
+        subagentRun: {
+          runId: taskId,
+          runtimeFamily: "pi-stock",
+          nativeRunId: "sa-1",
+          status: "active",
+          historyAvailability: "summary-only",
+        },
       });
       expect(completed.turnId).toBeUndefined();
       expect(completed.payload).toMatchObject({
@@ -300,6 +308,12 @@ describe("PiAdapter", () => {
         toolUseId: "spawn-1",
         runHandles: { runId: taskId },
         timelineBypass: true,
+        subagentRun: {
+          runId: taskId,
+          nativeRunId: "sa-1",
+          status: "done",
+          terminalReason: "native-completed",
+        },
       });
       expect(
         collector.events.filter(
@@ -429,7 +443,7 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
-  it.live("namespaces reset native ids by fresh Pi process context", () =>
+  it.live("mints opaque ids when a fresh Pi process reuses a native id", () =>
     Effect.gen(function* () {
       const fixture = makeFixture();
       const adapter = yield* makeTestAdapter(
@@ -459,9 +473,14 @@ describe("PiAdapter", () => {
         (event) => event.type === "task.started" && event.payload.taskId !== first.payload.taskId,
       );
       if (second.type !== "task.started") throw new Error("Expected second task start.");
-      expect(first.payload.taskId.endsWith(":sa-1")).toBe(true);
-      expect(second.payload.taskId.endsWith(":sa-1")).toBe(true);
+      expect(first.payload.subagentRun?.nativeRunId).toBe("sa-1");
+      expect(second.payload.subagentRun?.nativeRunId).toBe("sa-1");
+      expect(second.payload.subagentRun?.ownerEpoch).not.toBe(
+        first.payload.subagentRun?.ownerEpoch,
+      );
       expect(second.payload.taskId).not.toBe(first.payload.taskId);
+      expect(first.payload.taskId).not.toContain("sa-1");
+      expect(second.payload.taskId).not.toContain("sa-1");
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
   );
@@ -1032,6 +1051,13 @@ describe("PiAdapter", () => {
             summary?: string;
             taskType?: string;
             role?: string;
+            subagentRun?: {
+              runId: string;
+              nativeRunId?: string;
+              activationId?: string;
+              status: string;
+              terminalReason?: string;
+            };
           };
         const starts = taskEvents.filter((event) => event.type === "task.started");
         expect(starts).toHaveLength(3);
@@ -1040,9 +1066,18 @@ describe("PiAdapter", () => {
           taskType: "subagent",
           role: "pi",
         });
-        expect(payloadOfTask(starts[0]!).taskId).toMatch(/:act-1:sa-1$/);
-        expect(payloadOfTask(starts[1]!).taskId).toMatch(/:act-2:sa-1$/);
-        expect(payloadOfTask(starts[2]!).taskId).toMatch(/:act-3:sa-1$/);
+        expect(starts.map((event) => payloadOfTask(event).taskId)).toEqual(
+          expect.arrayContaining([
+            expect.stringMatching(/^[0-9a-f-]{36}$/),
+            expect.stringMatching(/^[0-9a-f-]{36}$/),
+            expect.stringMatching(/^[0-9a-f-]{36}$/),
+          ]),
+        );
+        expect(starts.map((event) => payloadOfTask(event).subagentRun?.activationId)).toEqual([
+          "act-1",
+          "act-2",
+          "act-3",
+        ]);
         const updates = taskEvents.filter((event) => event.type === "task.updated");
         expect(updates).toHaveLength(1);
         expect(payloadOfTask(updates[0]!)).toMatchObject({ status: "running" });
@@ -1056,26 +1091,29 @@ describe("PiAdapter", () => {
         // replacement activation starts.
         const supersededIndex = taskEvents.findIndex(
           (event) =>
-            event.type === "task.completed" && payloadOfTask(event).taskId?.includes("act-2"),
+            event.type === "task.completed" &&
+            payloadOfTask(event).subagentRun?.activationId === "act-2",
         );
         const replacementIndex = taskEvents.findIndex(
           (event) =>
-            event.type === "task.started" && payloadOfTask(event).taskId?.includes("act-3"),
+            event.type === "task.started" &&
+            payloadOfTask(event).subagentRun?.activationId === "act-3",
         );
         expect(supersededIndex).toBeGreaterThanOrEqual(0);
         expect(replacementIndex).toBeGreaterThan(supersededIndex);
         expect(payloadOfTask(taskEvents[supersededIndex]!)).toMatchObject({ status: "stopped" });
         // Stale, duplicate-terminal, late-activation, and wrong-owner records
         // produced no rows at all.
-        expect(taskEvents.some((event) => payloadOfTask(event).taskId?.includes("sa-9"))).toBe(
-          false,
-        );
+        expect(
+          taskEvents.some((event) => payloadOfTask(event).subagentRun?.nativeRunId === "sa-9"),
+        ).toBe(false);
         // Stopping the session finalizes the still-open third activation.
         yield* adapter.stopSession(THREAD_ID);
         const stopped = collector.events.filter(
           (event) =>
             event.type === "task.completed" &&
-            (event.payload as { taskId?: string }).taskId?.includes("act-3"),
+            (event.payload as { subagentRun?: { activationId?: string } }).subagentRun
+              ?.activationId === "act-3",
         );
         expect(stopped).toHaveLength(1);
         expect((stopped[0]!.payload as { status?: string }).status).toBe("stopped");
@@ -1129,7 +1167,13 @@ describe("PiAdapter", () => {
             event.type === "task.completed" && event.payload.taskId === started.payload.taskId,
         );
         if (completed.type !== "task.completed") throw new Error("Expected fallback completion.");
-        expect(started.payload.taskId).toMatch(/^pi:[^:]+:sa-1$/);
+        expect(started.payload.taskId).toMatch(/^[0-9a-f-]{36}$/);
+        expect(started.payload.taskId).not.toContain("sa-1");
+        expect(started.payload.subagentRun).toMatchObject({
+          runtimeFamily: "pi-stock",
+          nativeRunId: "sa-1",
+          status: "active",
+        });
         expect(completed.payload.status).toBe("completed");
         expect(completed.payload.summary).toBe("Mapped the auth flow.");
 
@@ -1201,7 +1245,8 @@ describe("PiAdapter", () => {
       const firstCompletion = collector.events.find(
         (event) =>
           event.type === "task.completed" &&
-          event.payload.taskId.includes(":restore-act-1:restore-1"),
+          event.payload.subagentRun?.nativeRunId === "restore-1" &&
+          event.payload.subagentRun.activationId === "restore-act-1",
       );
       if (firstCompletion?.type !== "task.completed") {
         throw new Error("Expected the evicted manager run to stop.");
@@ -1239,7 +1284,14 @@ describe("PiAdapter", () => {
       );
       const started = collector.events.filter((event) => event.type === "task.started");
       expect(started).toHaveLength(1);
-      expect((started[0]!.payload as { taskId?: string }).taskId).toMatch(/^pi:.+:act-1:sa-1$/);
+      expect((started[0]!.payload as { taskId?: string }).taskId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(
+        (
+          started[0]!.payload as {
+            subagentRun?: { nativeRunId?: string; activationId?: string };
+          }
+        ).subagentRun,
+      ).toMatchObject({ nativeRunId: "sa-1", activationId: "act-1" });
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
   );

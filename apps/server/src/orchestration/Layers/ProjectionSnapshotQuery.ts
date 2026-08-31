@@ -48,6 +48,8 @@ import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts"
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
+import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
@@ -200,6 +202,7 @@ const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.threadMessages,
   ORCHESTRATION_PROJECTOR_NAMES.threadProposedPlans,
   ORCHESTRATION_PROJECTOR_NAMES.threadActivities,
+  ORCHESTRATION_PROJECTOR_NAMES.subagentRuns,
   ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
   ORCHESTRATION_PROJECTOR_NAMES.checkpoints,
 ] as const;
@@ -355,6 +358,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const sql = yield* SqlClient.SqlClient;
+  const projectionSubagentRunRepository = yield* ProjectionSubagentRunRepository;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const repositoryIdentityResolutionConcurrency = 4;
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
@@ -2535,6 +2539,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         checkpointRows,
         latestTurnRow,
         sessionRow,
+        subagentRuns,
       ] = yield* Effect.all([
         getActiveThreadRowById({ threadId }).pipe(
           Effect.mapError(
@@ -2606,6 +2611,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ),
           ),
         ),
+        projectionSubagentRunRepository.listByThreadId({ threadId, limit: 100 }),
       ]);
 
       if (Option.isNone(threadRow)) {
@@ -2679,6 +2685,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           }
           return activity;
         }),
+        ...(subagentRuns.length > 0 ? { subagentRuns } : {}),
         checkpoints: checkpointRows.map((row) => ({
           turnId: row.turnId,
           checkpointTurnCount: row.checkpointTurnCount,
@@ -2867,4 +2874,4 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 export const OrchestrationProjectionSnapshotQueryLive = Layer.effect(
   ProjectionSnapshotQuery,
   makeProjectionSnapshotQuery,
-);
+).pipe(Layer.provide(ProjectionSubagentRunRepositoryLive));

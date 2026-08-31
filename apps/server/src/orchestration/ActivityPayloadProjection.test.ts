@@ -44,6 +44,43 @@ describe("projectActivityPayload", () => {
     expect(data.somethingClientNeverReads).toBeUndefined();
   });
 
+  it("keeps public run evidence without exposing owner routing provenance", () => {
+    const projected = projectActivityPayload(
+      activity({
+        taskId: "opaque-run",
+        subagentRun: {
+          runId: "opaque-run",
+          runNumber: 17,
+          runtimeFamily: "pi-manager",
+          provider: "pi",
+          ownerId: "manager-private",
+          ownerEpoch: "epoch-private",
+          nativeRunId: "sa-1",
+          activationId: "activation-private",
+          status: "active",
+          controlAvailability: "owner-routed",
+          historyAvailability: "summary-only",
+          capabilities: { steer: true, cancel: true, resume: false },
+          startedAt: "2026-08-01T10:00:00.000Z",
+        },
+      }),
+    );
+    expect(projected.payload).toMatchObject({
+      taskId: "opaque-run",
+      subagentRun: {
+        runId: "opaque-run",
+        runNumber: 17,
+        status: "active",
+        historyAvailability: "summary-only",
+      },
+    });
+    const evidence = (projected.payload as { subagentRun: Record<string, unknown> }).subagentRun;
+    expect(evidence.ownerId).toBeUndefined();
+    expect(evidence.ownerEpoch).toBeUndefined();
+    expect(evidence.nativeRunId).toBeUndefined();
+    expect(evidence.activationId).toBeUndefined();
+  });
+
   it("keeps a bounded Codex command output summary", () => {
     const projected = projectActivityPayload(
       activity({

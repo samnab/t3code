@@ -270,6 +270,32 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
   return projectedData;
 }
 
+const SUBAGENT_RUN_PUBLIC_FIELDS = [
+  "runId",
+  "runNumber",
+  "parentRunId",
+  "runtimeFamily",
+  "harness",
+  "provider",
+  "providerInstanceId",
+  "status",
+  "terminalReason",
+  "controlAvailability",
+  "historyAvailability",
+  "capabilities",
+  "startedAt",
+] as const;
+
+function projectSubagentRunEvidence(value: unknown): Record<string, unknown> | undefined {
+  const evidence = asRecord(value);
+  if (!evidence) return undefined;
+  const projected: Record<string, unknown> = {};
+  for (const key of SUBAGENT_RUN_PUBLIC_FIELDS) {
+    if (evidence[key] !== undefined) projected[key] = evidence[key];
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
 function projectRawOutput(value: unknown): Record<string, unknown> | undefined {
   const direct = asTrimmedString(value);
   if (direct) {
@@ -337,16 +363,24 @@ export function projectActivityPayload(
   activity: OrchestrationThreadActivity,
 ): OrchestrationThreadActivity {
   const payload = asRecord(activity.payload);
-  const data = asRecord(payload?.data);
-  if (!payload || !data) {
-    return activity;
+  if (!payload) return activity;
+
+  const projectedSubagentRun = projectSubagentRunEvidence(payload.subagentRun);
+  const { subagentRun: _privateSubagentRun, ...payloadWithoutSubagentRun } = payload;
+  const safePayload =
+    projectedSubagentRun === undefined
+      ? payloadWithoutSubagentRun
+      : { ...payloadWithoutSubagentRun, subagentRun: projectedSubagentRun };
+  const data = asRecord(payload.data);
+  if (!data) {
+    return payload.subagentRun === undefined ? activity : { ...activity, payload: safePayload };
   }
 
   const itemStatus = asRecord(data.item)?.status;
   const projectedPayload =
     payload.status === "completed" && (itemStatus === "failed" || itemStatus === "declined")
-      ? { ...payload, status: itemStatus }
-      : payload;
+      ? { ...safePayload, status: itemStatus }
+      : safePayload;
 
   if (payload.itemType === "mcp_tool_call") {
     return {
