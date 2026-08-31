@@ -143,8 +143,11 @@ export type ThreadGoalCommand =
 
 // `/goal` alone shows the current goal; `/goal clear` clears it (reserved,
 // case-insensitive like other built-ins — a literal goal of "clear" cannot be
-// set through this syntax); any other remainder is the new goal text.
-const THREAD_GOAL_COMMAND_REGEX = /^\/goal(?:[ \t]+([\s\S]*))?$/i;
+// set through this syntax); any other remainder is the new goal text. The
+// separator is JS `\s+`, so line breaks (LF/CRLF) and NBSP count as the gap
+// between command and goal; zero-width U+200B is not JS whitespace, so a
+// zero-width-joined `/goal\u200B…` stays an ordinary prompt.
+const THREAD_GOAL_COMMAND_REGEX = /^\/goal(?:\s+([\s\S]*))?$/i;
 
 export function parseThreadGoalCommand(text: string): ThreadGoalCommand | null {
   const match = THREAD_GOAL_COMMAND_REGEX.exec(text.trim());

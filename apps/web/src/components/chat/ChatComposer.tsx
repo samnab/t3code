@@ -1833,25 +1833,56 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
       if (item.type === "slash-command") {
-        if (item.command === "model") {
-          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
-            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
-            focusEditorAfterReplace: false,
-          });
-          if (applied) {
-            setComposerHighlightedItemId(null);
-            setIsComposerModelPickerOpen(true);
+        switch (item.command) {
+          case "model": {
+            const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+              expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+              focusEditorAfterReplace: false,
+            });
+            if (applied) {
+              setComposerHighlightedItemId(null);
+              setIsComposerModelPickerOpen(true);
+            }
+            return;
           }
-          return;
+          case "goal": {
+            // Selecting /goal stages the command for typing the goal text,
+            // mirroring provider slash commands; it never changes mode.
+            const replacement = "/goal ";
+            const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
+              snapshot.value,
+              trigger.rangeEnd,
+              replacement,
+            );
+            const applied = applyPromptReplacement(
+              trigger.rangeStart,
+              replacementRangeEnd,
+              replacement,
+              { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
+            );
+            if (applied) {
+              setComposerHighlightedItemId(null);
+            }
+            return;
+          }
+          case "plan":
+          case "default": {
+            void handleInteractionModeChange(item.command);
+            const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+              expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+            });
+            if (applied) {
+              setComposerHighlightedItemId(null);
+            }
+            return;
+          }
+          default: {
+            // Exhaustiveness guard: a new built-in command must pick a behavior.
+            const exhaustive: never = item;
+            void exhaustive;
+            return;
+          }
         }
-        void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
-        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
-          expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
-        });
-        if (applied) {
-          setComposerHighlightedItemId(null);
-        }
-        return;
       }
       if (item.type === "provider-slash-command") {
         const replacement = `/${item.command.name} `;

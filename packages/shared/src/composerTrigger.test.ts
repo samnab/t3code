@@ -82,4 +82,36 @@ describe("parseThreadGoalCommand", () => {
       goal: "fix\nall the bugs",
     });
   });
+
+  it("accepts line breaks and NBSP as command separators", () => {
+    expect(parseThreadGoalCommand("/goal\nship the fix")).toEqual({
+      action: "set",
+      goal: "ship the fix",
+    });
+    expect(parseThreadGoalCommand("/goal\r\nship the fix")).toEqual({
+      action: "set",
+      goal: "ship the fix",
+    });
+    expect(parseThreadGoalCommand("/goal\u00a0ship the fix")).toEqual({
+      action: "set",
+      goal: "ship the fix",
+    });
+  });
+
+  it("shows when only whitespace follows the command", () => {
+    expect(parseThreadGoalCommand("/goal \n\t \u00a0")).toEqual({ action: "show" });
+  });
+
+  it("trims multi-line goals and clears via a line-break separator", () => {
+    expect(parseThreadGoalCommand("/goal \n ship it\nnow \n")).toEqual({
+      action: "set",
+      goal: "ship it\nnow",
+    });
+    expect(parseThreadGoalCommand("/goal\nclear")).toEqual({ action: "clear" });
+  });
+
+  it("does not treat zero-width characters as separators", () => {
+    expect(parseThreadGoalCommand("/goal\u200bship it")).toBeNull();
+    expect(parseThreadGoalCommand("/goal\u200b")).toBeNull();
+  });
 });

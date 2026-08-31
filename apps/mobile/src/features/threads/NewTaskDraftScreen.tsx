@@ -21,6 +21,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 
 import { ComposerEditor, type ComposerEditorHandle } from "../../components/ComposerEditor";
 import {
@@ -668,6 +669,16 @@ export function NewTaskDraftScreen(props: {
       flow.submitting ||
       (workspaceMode === "worktree" && !selectedBranchName)
     ) {
+      return;
+    }
+
+    // Goals live on existing threads; a /goal draft here has nothing to
+    // target yet, so keep everything and let the user send a message first.
+    if (parseThreadGoalCommand(initialMessageText)) {
+      Alert.alert(
+        "Start the thread first",
+        "Thread goals need an existing thread. Send a message once, then set a goal with /goal. Your draft was kept.",
+      );
       return;
     }
 
