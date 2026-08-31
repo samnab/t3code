@@ -350,6 +350,60 @@ describe("applyThreadDetailEvent", () => {
         expect(cleared.thread.linkedPullRequest).toBeNull();
       }
     });
+
+    it("sets, preserves, and clears the goal according to payload presence", () => {
+      const set = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 5,
+        occurredAt: "2026-04-01T05:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.meta-updated",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          goal: "Ship it",
+          updatedAt: "2026-04-01T05:00:00.000Z",
+        },
+      });
+      expect(set.kind).toBe("updated");
+      if (set.kind !== "updated") return;
+      expect(set.thread.goal).toBe("Ship it");
+
+      const omitted = applyThreadDetailEvent(set.thread, {
+        ...baseEventFields,
+        sequence: 6,
+        occurredAt: "2026-04-01T06:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.meta-updated",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          title: "Renamed",
+          updatedAt: "2026-04-01T06:00:00.000Z",
+        },
+      });
+      expect(omitted.kind).toBe("updated");
+      if (omitted.kind !== "updated") return;
+      expect(omitted.thread.goal).toBe("Ship it");
+
+      const cleared = applyThreadDetailEvent(omitted.thread, {
+        ...baseEventFields,
+        sequence: 7,
+        occurredAt: "2026-04-01T07:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.meta-updated",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          goal: null,
+          updatedAt: "2026-04-01T07:00:00.000Z",
+        },
+      });
+      expect(cleared.kind).toBe("updated");
+      if (cleared.kind === "updated") {
+        expect(cleared.thread.goal).toBeNull();
+      }
+    });
   });
 
   describe("thread.message-sent", () => {

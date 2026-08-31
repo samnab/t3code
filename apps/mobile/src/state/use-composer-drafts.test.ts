@@ -61,6 +61,7 @@ vi.mock("expo-file-system", () => ({
 
 import { appAtomRegistry } from "./atom-registry";
 import {
+  clearComposerDraftContentIfUnchanged,
   clearComposerDraftContentState,
   ComposerDraftPersistenceError,
   composerDraftsAtom,
@@ -226,6 +227,19 @@ describe("mobile composer drafts", () => {
     appAtomRegistry.set(composerDraftsAtom, { [draftKey]: selectedDraft });
 
     expect(getComposerDraftSnapshot(draftKey)).toEqual(selectedDraft);
+  });
+
+  it("does not clear a newer draft after an earlier command succeeds", () => {
+    const draftKey = "environment-1:thread-1";
+    setComposerDraftText(draftKey, "/goal first");
+    const submitted = getComposerDraftSnapshot(draftKey);
+
+    setComposerDraftText(draftKey, "/goal second");
+    clearComposerDraftContentIfUnchanged(draftKey, submitted);
+    expect(getComposerDraftSnapshot(draftKey).text).toBe("/goal second");
+
+    clearComposerDraftContentIfUnchanged(draftKey, getComposerDraftSnapshot(draftKey));
+    expect(getComposerDraftSnapshot(draftKey).text).toBe("");
   });
 
   it("carries unfinished content to a newly selected project without overwriting its settings", () => {

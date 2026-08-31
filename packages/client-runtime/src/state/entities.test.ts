@@ -205,6 +205,7 @@ describe("environment entity projections", () => {
       title: "Cached thread",
       branch: "stale-branch",
       worktreePath: "/repo/stale-worktree",
+      goal: "Cached goal",
       deletedAt: null,
       messages,
       proposedPlans: [],
@@ -217,6 +218,7 @@ describe("environment entity projections", () => {
       title: "Current thread",
       branch: "current-branch",
       worktreePath: "/repo/current-worktree",
+      goal: "Current goal",
     };
 
     const merged = mergeEnvironmentThread(detail, shell);
@@ -225,8 +227,14 @@ describe("environment entity projections", () => {
       title: "Current thread",
       branch: "current-branch",
       worktreePath: "/repo/current-worktree",
+      goal: "Current goal",
     });
     expect(merged?.messages).toBe(messages);
+
+    expect(
+      mergeEnvironmentThread(detail, { ...THREAD_SHELL, environmentId: ENVIRONMENT_ID })?.goal,
+    ).toBe("Cached goal");
+    expect(mergeEnvironmentThread(detail, { ...shell, goal: null })?.goal).toBeNull();
   });
 
   it("preserves untouched project and thread identities across unrelated shell updates", () => {

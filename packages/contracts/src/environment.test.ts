@@ -39,4 +39,14 @@ describe("ExecutionEnvironmentDescriptor", () => {
       }).capabilities.attachmentUploads,
     ).toBe(true);
   });
+
+  it("treats missing thread goals as unsupported and preserves advertisement", () => {
+    expect(decodeDescriptor(descriptor).capabilities.threadGoals).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, threadGoals: true },
+      }).capabilities.threadGoals,
+    ).toBe(true);
+  });
 });

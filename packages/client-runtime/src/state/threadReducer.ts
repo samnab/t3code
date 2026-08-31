@@ -229,6 +229,7 @@ export function applyThreadDetailEvent(
           ...(event.payload.linkedPullRequest !== undefined
             ? { linkedPullRequest: event.payload.linkedPullRequest }
             : {}),
+          ...(event.payload.goal !== undefined ? { goal: event.payload.goal } : {}),
           updatedAt: event.payload.updatedAt,
         },
       };

@@ -604,6 +604,22 @@ export function clearComposerDraftContent(
   updateComposerDrafts((current) => clearComposerDraftContentState(current, draftKey, options));
 }
 
+export function clearComposerDraftContentIfUnchanged(
+  draftKey: string,
+  expected: ComposerDraftContent,
+): void {
+  updateComposerDrafts((current) => {
+    const actual = normalizeDraft(current[draftKey]);
+    const unchanged =
+      actual.text === expected.text &&
+      actual.attachments.length === expected.attachments.length &&
+      actual.attachments.every(
+        (attachment, index) => attachment.id === expected.attachments[index]?.id,
+      );
+    return unchanged ? clearComposerDraftContentState(current, draftKey) : current;
+  });
+}
+
 export function clearComposerDraft(draftKey: string): void {
   updateComposerDrafts((current) => {
     if (!current[draftKey]) {

@@ -348,6 +348,7 @@ import {
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
   shouldShowBranchMismatchBanner,
+  shouldClearSubmittedThreadGoalDraft,
   getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
@@ -359,6 +360,7 @@ import {
   reconcileMountedTerminalThreadIds,
   resolveBackgroundDraftWorkspaceOptions,
   resolveDraftHeroState,
+  resolveThreadGoalCommandBlockReason,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
@@ -2122,6 +2124,7 @@ function ChatViewContent(props: ChatViewProps) {
     : (primaryEnvironment?.serverConfig ?? null);
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
+  const supportsThreadGoals = serverConfig?.environment.capabilities.threadGoals === true;
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
   const supportsAttachmentUploads =
@@ -5380,7 +5383,7 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
     const sendCtx = composerRef.current?.getSendContext();
-    if (!sendCtx?.providerAvailable) {
+    if (!sendCtx) {
       notifyDirectAnnotationAttached();
       return;
     }
@@ -5431,23 +5434,40 @@ function ChatViewContent(props: ChatViewProps) {
         composerPreviewAnnotations.length +
         composerReviewComments.length,
     });
-    const goalCommand =
-      composerImages.length === 0 &&
-      sendableComposerTerminalContexts.length === 0 &&
-      composerElementContexts.length === 0 &&
-      composerPreviewAnnotations.length === 0 &&
-      composerReviewComments.length === 0
-        ? parseThreadGoalCommand(trimmed)
-        : null;
+    const goalCommand = parseThreadGoalCommand(trimmed);
     if (goalCommand) {
-      if (!isServerThread || !activeServerThread) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: "Start the thread first",
-            description: "Send a message once, then set a goal with /goal.",
-          }),
-        );
+      const goalBlockReason = resolveThreadGoalCommandBlockReason({
+        isServerThread: isServerThread && activeServerThread !== null,
+        attachmentCount: composerImages.length,
+        contextCount:
+          composerTerminalContexts.length +
+          composerElementContexts.length +
+          composerPreviewAnnotations.length +
+          composerReviewComments.length,
+        supportsThreadGoals,
+      });
+      if (goalBlockReason !== null) {
+        const copy =
+          goalBlockReason === "draft-thread"
+            ? {
+                title: "Start the thread first",
+                description: "Send a message once, then set a goal with /goal.",
+              }
+            : goalBlockReason === "attachments"
+              ? {
+                  title: "Remove attachments to use /goal",
+                  description: "Your draft and attachments were kept.",
+                }
+              : goalBlockReason === "context"
+                ? {
+                    title: "Remove context to use /goal",
+                    description: "Your draft and context were kept.",
+                  }
+                : {
+                    title: "Thread goals are unavailable",
+                    description: "Update the connected T3 Code server before using /goal.",
+                  };
+        toastManager.add(stackedThreadToast({ type: "warning", ...copy }));
         return;
       }
       if (goalCommand.action === "set" && goalCommand.goal.length > THREAD_GOAL_MAX_CHARS) {
@@ -5461,7 +5481,7 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
       if (goalCommand.action === "show") {
-        const currentGoal = activeServerThread.goal ?? null;
+        const currentGoal = activeServerThread?.goal ?? null;
         if (currentGoal !== null) {
           document.querySelector<HTMLElement>("[data-thread-goal]")?.focus();
           toastManager.add(
@@ -5486,15 +5506,14 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
       const goalThreadRef = activeServerThread;
+      if (!goalThreadRef) return;
       const goalNextValue = goalCommand.action === "set" ? goalCommand.goal : null;
-      promptRef.current = "";
-      clearComposerDraftContent(composerDraftTarget);
-      composerRef.current?.resetCursorState();
-      void updateThreadMetadata({
+      const result = await updateThreadMetadata({
         environmentId: goalThreadRef.environmentId,
         input: { threadId: goalThreadRef.id, goal: goalNextValue },
-      }).then((result) => {
-        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           toastManager.add(
             stackedThreadToast({
@@ -5507,7 +5526,30 @@ function ChatViewContent(props: ChatViewProps) {
             }),
           );
         }
-      });
+        return;
+      }
+      const latestDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+      if (
+        latestDraft &&
+        shouldClearSubmittedThreadGoalDraft({
+          submittedPrompt: promptForSend,
+          currentPrompt: latestDraft.prompt,
+          attachmentCount: latestDraft.images.length,
+          contextCount:
+            latestDraft.terminalContexts.length +
+            latestDraft.elementContexts.length +
+            latestDraft.previewAnnotations.length +
+            latestDraft.reviewComments.length,
+        })
+      ) {
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+      }
+      return;
+    }
+    if (!sendCtx.providerAvailable) {
+      notifyDirectAnnotationAttached();
       return;
     }
     const feedbackCommand =
@@ -7112,6 +7154,7 @@ function ChatViewContent(props: ChatViewProps) {
                             environmentId={environmentId}
                             attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}
                             supportsAttachmentUploads={supportsAttachmentUploads}
+                            supportsThreadGoals={supportsThreadGoals}
                             routeKind={routeKind}
                             routeThreadRef={routeThreadRef}
                             draftId={draftId}

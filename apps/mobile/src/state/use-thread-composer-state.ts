@@ -39,6 +39,7 @@ import {
   appendComposerDraftAttachments,
   appendComposerDraftText,
   clearComposerDraftContent,
+  clearComposerDraftContentIfUnchanged,
   composerDraftsAtom,
   ensureComposerDraftsLoaded,
   getComposerDraftSnapshot,
@@ -180,8 +181,22 @@ export function useThreadComposerState() {
     const provider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
       (entry) => entry.instanceId === thread.modelSelection.instanceId,
     );
-    const goalCommand = attachments.length === 0 ? parseThreadGoalCommand(text) : null;
+    const goalCommand = parseThreadGoalCommand(text);
     if (goalCommand) {
+      if (attachments.length > 0) {
+        Alert.alert(
+          "Remove attachments to use /goal",
+          "Thread goal commands cannot include attachments. Your draft was kept.",
+        );
+        return null;
+      }
+      if (selectedEnvironmentRuntime?.serverConfig?.environment.capabilities.threadGoals !== true) {
+        Alert.alert(
+          "Thread goals are unavailable",
+          "Update the connected T3 Code server before using /goal. Your draft was kept.",
+        );
+        return null;
+      }
       if (goalCommand.action === "set" && goalCommand.goal.length > THREAD_GOAL_MAX_CHARS) {
         Alert.alert("Goal is too long", `Keep it under ${THREAD_GOAL_MAX_CHARS} characters.`);
         return null;
@@ -197,7 +212,6 @@ export function useThreadComposerState() {
         return null;
       }
       const goalValue = goalCommand.action === "set" ? goalCommand.goal : null;
-      clearComposerDraftContent(threadKey);
       const result = await updateThreadMetadata({
         environmentId: selectedThreadShell.environmentId,
         input: { threadId: selectedThreadShell.id, goal: goalValue },
@@ -211,7 +225,9 @@ export function useThreadComposerState() {
           goalValue === null ? "Could not clear thread goal" : "Could not set thread goal",
           error instanceof Error ? error.message : "An error occurred.",
         );
+        return null;
       }
+      clearComposerDraftContentIfUnchanged(threadKey, draft);
       return null;
     }
     const feedbackCommand =

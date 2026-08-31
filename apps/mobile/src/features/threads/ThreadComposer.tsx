@@ -355,6 +355,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+  const supportsThreadGoals = props.serverConfig?.environment.capabilities.threadGoals === true;
 
   // ── Trigger detection ────────────────────────────────────
   const [composerSelection, setComposerSelection] = useState(() => ({
@@ -402,13 +403,17 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           label: "/model",
           description: "Switch model",
         },
-        {
-          id: "cmd:goal",
-          type: "slash-command" as const,
-          command: "goal",
-          label: "/goal",
-          description: "Set or view this thread's goal",
-        },
+        ...(supportsThreadGoals
+          ? [
+              {
+                id: "cmd:goal",
+                type: "slash-command" as const,
+                command: "goal",
+                label: "/goal",
+                description: "Set or view this thread's goal",
+              },
+            ]
+          : []),
         {
           id: "cmd:plan",
           type: "slash-command" as const,
@@ -549,7 +554,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     }
 
     return [];
-  }, [composerTrigger, pathSearch.entries, selectedProviderStatus]);
+  }, [composerTrigger, pathSearch.entries, selectedProviderStatus, supportsThreadGoals]);
 
   // ── Handle command selection ──────────────────────────────
   const { onChangeDraftMessage, onUpdateInteractionMode, draftMessage, onSendMessage } = props;

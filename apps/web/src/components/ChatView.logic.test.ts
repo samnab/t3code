@@ -28,11 +28,13 @@ import {
   reconcileRetainedMountedThreadIds,
   resolveBackgroundDraftWorkspaceOptions,
   resolveDraftPromotionNavigationTarget,
+  resolveThreadGoalCommandBlockReason,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   resolveDraftHeroState,
   scheduleEnvironmentReconnectWarning,
   startNewThreadForProject,
+  shouldClearSubmittedThreadGoalDraft,
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
   shouldShowBranchMismatchBanner,
@@ -43,6 +45,70 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("thread goal command submission", () => {
+  it("blocks incompatible and unsupported submissions without provider gating", () => {
+    expect(
+      resolveThreadGoalCommandBlockReason({
+        isServerThread: true,
+        attachmentCount: 1,
+        contextCount: 0,
+        supportsThreadGoals: true,
+      }),
+    ).toBe("attachments");
+    expect(
+      resolveThreadGoalCommandBlockReason({
+        isServerThread: true,
+        attachmentCount: 0,
+        contextCount: 1,
+        supportsThreadGoals: true,
+      }),
+    ).toBe("context");
+    expect(
+      resolveThreadGoalCommandBlockReason({
+        isServerThread: true,
+        attachmentCount: 0,
+        contextCount: 0,
+        supportsThreadGoals: false,
+      }),
+    ).toBe("unsupported");
+    expect(
+      resolveThreadGoalCommandBlockReason({
+        isServerThread: true,
+        attachmentCount: 0,
+        contextCount: 0,
+        supportsThreadGoals: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("clears only the acknowledged draft when it is still unchanged", () => {
+    expect(
+      shouldClearSubmittedThreadGoalDraft({
+        submittedPrompt: "/goal first",
+        currentPrompt: "/goal first",
+        attachmentCount: 0,
+        contextCount: 0,
+      }),
+    ).toBe(true);
+    expect(
+      shouldClearSubmittedThreadGoalDraft({
+        submittedPrompt: "/goal first",
+        currentPrompt: "/goal second",
+        attachmentCount: 0,
+        contextCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      shouldClearSubmittedThreadGoalDraft({
+        submittedPrompt: "/goal first",
+        currentPrompt: "/goal first",
+        attachmentCount: 1,
+        contextCount: 0,
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("draft hero submission transition", () => {
   it("does not dock the composer before a background submission", () => {

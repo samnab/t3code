@@ -83,6 +83,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           linked_pull_request_json,
+          goal,
           latest_turn_id,
           latest_user_message_at,
           pending_approval_count,
@@ -104,6 +105,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           NULL,
           '{"projectId":"project-1","repository":"pingdotgg/t3code","number":42,"url":"https://github.com/pingdotgg/t3code/pull/42"}',
+          'Ship the projection fix',
           'turn-1',
           '2026-02-24T00:00:04.000Z',
           1,
@@ -312,6 +314,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             number: 42,
             url: "https://github.com/pingdotgg/t3code/pull/42",
           },
+          goal: "Ship the projection fix",
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -438,6 +441,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             number: 42,
             url: "https://github.com/pingdotgg/t3code/pull/42",
           },
+          goal: "Ship the projection fix",
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -479,9 +483,19 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         },
       ]);
 
+      assert.equal(snapshot.threads[0]?.goal, "Ship the projection fix");
+      assert.equal(shellSnapshot.threads[0]?.goal, "Ship the projection fix");
+
+      const threadShell = yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-1"));
+      assert.equal(threadShell._tag, "Some");
+      if (threadShell._tag === "Some") {
+        assert.equal(threadShell.value.goal, "Ship the projection fix");
+      }
+
       const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
+        assert.equal(threadDetail.value.goal, "Ship the projection fix");
         assert.deepEqual(threadDetail.value, snapshot.threads[0]);
       }
     }),
@@ -529,6 +543,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           interaction_mode,
           branch,
           worktree_path,
+          goal,
           latest_turn_id,
           latest_user_message_at,
           pending_approval_count,
@@ -549,6 +564,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'default',
             NULL,
             NULL,
+            'Keep the active goal',
             NULL,
             NULL,
             0,
@@ -568,6 +584,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'default',
             NULL,
             NULL,
+            'Remember the archived goal',
             NULL,
             NULL,
             0,
@@ -597,6 +614,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         shellSnapshot.threads.map((thread) => thread.id),
         [ThreadId.make("thread-active")],
       );
+      assert.equal(shellSnapshot.threads[0]?.goal, "Keep the active goal");
 
       const archivedShellSnapshot = yield* snapshotQuery.getArchivedShellSnapshot();
       assert.deepEqual(
@@ -604,6 +622,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         [ThreadId.make("thread-archived")],
       );
       assert.equal(archivedShellSnapshot.threads[0]?.archivedAt, "2026-04-06T00:00:06.000Z");
+      assert.equal(archivedShellSnapshot.threads[0]?.goal, "Remember the archived goal");
     }),
   );
 
