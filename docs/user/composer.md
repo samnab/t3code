@@ -21,6 +21,14 @@ same `$name` skill token to your message. The original skill name remains search
 also reports that skill as a native slash command, T3 Code hides the duplicate native entry and keeps
 the `/skill:Skill Name` label.
 
+### Thread goals
+
+Set a goal for the current thread with `/goal` followed by a short description, for example
+`/goal ship the login fix`. The goal appears next to the thread title on web, desktop, and in the
+thread view on mobile. Sending `/goal` on its own shows the current goal, and `/goal clear` removes
+it. Goals are T3 Code state: they are stored with the thread, stay in sync across your devices, and
+are never sent to the agent. The word `clear` is reserved, so a goal cannot literally be `clear`.
+
 On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from a new thread to
 start it in the background. T3 Code opens another new thread and shows an **Open** action for the
 thread that started. The new thread keeps the selected workspace mode and base branch. If **New

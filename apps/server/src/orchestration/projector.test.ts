@@ -7,7 +7,7 @@ import {
   type OrchestrationEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@effect/vitest";
 
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
 
@@ -957,4 +957,80 @@ describe("orchestration projector", () => {
     expect(thread?.checkpoints[0]?.turnId).toBe("turn-100");
     expect(thread?.checkpoints.at(-1)?.turnId).toBe("turn-599");
   });
+});
+
+describe("thread goal projection", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+
+  const THREAD_CREATED_INPUT = {
+    type: "thread.created" as const,
+    aggregateKind: "thread" as const,
+    aggregateId: "thread-1",
+    commandId: "cmd-thread-create",
+    payload: {
+      threadId: "thread-1",
+      projectId: "project-1",
+      title: "demo",
+      modelSelection: {
+        provider: ProviderDriverKind.make("codex"),
+        model: "gpt-5-codex",
+      },
+      runtimeMode: "full-access",
+      branch: null,
+      worktreePath: null,
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+
+  const META_UPDATED_INPUT = (commandId: string, payload: Record<string, unknown>) => ({
+    type: "thread.meta-updated" as const,
+    aggregateKind: "thread" as const,
+    aggregateId: "thread-1",
+    commandId,
+    payload: { threadId: "thread-1", ...payload },
+  });
+
+  it.effect("sets, replaces, and clears a thread goal", () =>
+    Effect.gen(function* () {
+      let model = createEmptyReadModel(now);
+      const events = [
+        THREAD_CREATED_INPUT,
+        META_UPDATED_INPUT("cmd-goal-set", { goal: "Ship the login fix", updatedAt: now }),
+        META_UPDATED_INPUT("cmd-goal-replace", { goal: "Ship the logout fix", updatedAt: now }),
+        META_UPDATED_INPUT("cmd-goal-clear", { goal: null, updatedAt: now }),
+      ];
+      for (const [index, event] of events.entries()) {
+        model = yield* projectEvent(
+          model,
+          makeEvent({ sequence: index + 1, occurredAt: now, ...event }),
+        );
+      }
+
+      expect(model.threads[0]?.goal).toBeNull();
+    }),
+  );
+
+  it.effect("preserves the goal when an unrelated meta update omits it", () =>
+    Effect.gen(function* () {
+      let model = createEmptyReadModel(now);
+      const events = [
+        THREAD_CREATED_INPUT,
+        META_UPDATED_INPUT("cmd-goal-set", { goal: "Ship the login fix", updatedAt: now }),
+        META_UPDATED_INPUT("cmd-title-only", { title: "Renamed", updatedAt: now }),
+      ];
+      for (const [index, event] of events.entries()) {
+        model = yield* projectEvent(
+          model,
+          makeEvent({ sequence: index + 1, occurredAt: now, ...event }),
+        );
+      }
+
+      expect(model.threads[0]?.title).toBe("Renamed");
+      expect(model.threads[0]?.goal).toBe("Ship the login fix");
+      // Goal updates forge no chat or activity events.
+      expect(model.threads[0]?.messages).toEqual([]);
+      expect(model.threads[0]?.activities).toEqual([]);
+    }),
+  );
 });

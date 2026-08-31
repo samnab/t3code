@@ -11,7 +11,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { ChangeRequestSettleSource } from "@t3tools/client-runtime/state/thread-settled";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, TargetIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -51,6 +51,8 @@ interface ChatHeaderProps {
   activeThreadId: ThreadId;
   draftId?: DraftId;
   activeThreadTitle: string;
+  /** Current thread goal, when set; rendered as a compact chip next to the title. */
+  activeThreadGoal: string | null;
   /** Drafts have no server thread yet, so the title carries no action menu. */
   isServerThread: boolean;
   /** PR feeding the settled classification, resolved by ChatView. */
@@ -122,6 +124,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   draftId,
   activeThreadTitle,
+  activeThreadGoal,
   isServerThread,
   changeRequest,
   activeProjectName,
@@ -369,6 +372,24 @@ export const ChatHeader = memo(function ChatHeader({
                 }
               />
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
+            </Tooltip>
+          )}
+          {activeThreadGoal !== null && (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span
+                    data-thread-goal
+                    tabIndex={-1}
+                    aria-label={`Thread goal: ${activeThreadGoal}`}
+                    className="inline-flex min-w-0 max-w-48 shrink items-center gap-1 rounded-sm bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                }
+              >
+                <TargetIcon aria-hidden className="size-3 shrink-0" />
+                <span className="truncate">{activeThreadGoal}</span>
+              </TooltipTrigger>
+              <TooltipPopup side="top">{activeThreadGoal}</TooltipPopup>
             </Tooltip>
           )}
         </WorkspaceBreadcrumbItem>

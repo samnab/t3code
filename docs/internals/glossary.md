@@ -42,6 +42,10 @@ A single user-to-assistant work cycle inside a thread. It starts with user input
 
 A user-visible log item attached to a thread. In [the contracts][1], activities cover important non-message events like approvals, tool actions, and failures. They are projected into thread state in [projector.ts][4].
 
+#### Goal
+
+A short, durable, T3-owned statement of intent for a thread, set with `/goal`. It rides thread metadata (see the `goal` field in [the contracts][1]), never enters provider prompts or chat history, and is purely user-facing state.
+
 ### Orchestration
 
 Orchestration is the server-side domain layer that turns runtime activity into stable app state. The main entry point is [OrchestrationEngine.ts][7], with core logic in [decider.ts][8] and [projector.ts][4].

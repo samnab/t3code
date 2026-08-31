@@ -1144,6 +1144,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: "/model",
           description: "Switch response model for this thread",
         },
+        {
+          id: "slash:goal",
+          type: "slash-command",
+          command: "goal",
+          label: "/goal",
+          description: "Set or view this thread's goal",
+        },
         ...(planModeUiEnabled
           ? ([
               {

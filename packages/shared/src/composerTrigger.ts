@@ -136,6 +136,31 @@ export function parseStandaloneComposerSlashCommand(
   return "default";
 }
 
+export type ThreadGoalCommand =
+  | { readonly action: "show" }
+  | { readonly action: "clear" }
+  | { readonly action: "set"; readonly goal: string };
+
+// `/goal` alone shows the current goal; `/goal clear` clears it (reserved,
+// case-insensitive like other built-ins — a literal goal of "clear" cannot be
+// set through this syntax); any other remainder is the new goal text.
+const THREAD_GOAL_COMMAND_REGEX = /^\/goal(?:[ \t]+([\s\S]*))?$/i;
+
+export function parseThreadGoalCommand(text: string): ThreadGoalCommand | null {
+  const match = THREAD_GOAL_COMMAND_REGEX.exec(text.trim());
+  if (!match) {
+    return null;
+  }
+  const rest = (match[1] ?? "").trim();
+  if (rest === "") {
+    return { action: "show" };
+  }
+  if (/^clear$/i.test(rest)) {
+    return { action: "clear" };
+  }
+  return { action: "set", goal: rest };
+}
+
 export function replaceTextRange(
   text: string,
   rangeStart: number,

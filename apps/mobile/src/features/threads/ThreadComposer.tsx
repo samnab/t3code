@@ -403,6 +403,13 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           description: "Switch model",
         },
         {
+          id: "cmd:goal",
+          type: "slash-command" as const,
+          command: "goal",
+          label: "/goal",
+          description: "Set or view this thread's goal",
+        },
+        {
           id: "cmd:plan",
           type: "slash-command" as const,
           command: "plan",

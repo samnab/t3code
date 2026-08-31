@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { serializeComposerFileLink, serializeComposerMentionPath } from "./composerTrigger.ts";
+import {
+  parseThreadGoalCommand,
+  serializeComposerFileLink,
+  serializeComposerMentionPath,
+} from "./composerTrigger.ts";
 
 describe("serializeComposerMentionPath", () => {
   it("keeps simple mention paths unquoted", () => {
@@ -39,5 +43,43 @@ describe("serializeComposerFileLink", () => {
     expect(serializeComposerFileLink("@scope/package.json")).toBe(
       "[package.json](@scope/package.json)",
     );
+  });
+});
+
+describe("parseThreadGoalCommand", () => {
+  it("shows on bare /goal with surrounding whitespace", () => {
+    expect(parseThreadGoalCommand("  /goal  ")).toEqual({ action: "show" });
+  });
+
+  it("sets a trimmed goal with preserved unicode", () => {
+    expect(parseThreadGoalCommand("/goal  Ship the ✨ login fix ")).toEqual({
+      action: "set",
+      goal: "Ship the ✨ login fix",
+    });
+  });
+
+  it("clears on reserved clear, case-insensitive", () => {
+    expect(parseThreadGoalCommand("/goal clear")).toEqual({ action: "clear" });
+    expect(parseThreadGoalCommand("/GOAL CLEAR")).toEqual({ action: "clear" });
+  });
+
+  it("matches command case-insensitively like other built-ins", () => {
+    expect(parseThreadGoalCommand("/Goal ship it")).toEqual({
+      action: "set",
+      goal: "ship it",
+    });
+  });
+
+  it("does not intercept ordinary prompts containing /goal", () => {
+    expect(parseThreadGoalCommand("please run /goal now")).toBeNull();
+    expect(parseThreadGoalCommand("/goaling the deploy")).toBeNull();
+    expect(parseThreadGoalCommand("")).toBeNull();
+  });
+
+  it("keeps multi-line remainders as the goal", () => {
+    expect(parseThreadGoalCommand("/goal fix\nall the bugs")).toEqual({
+      action: "set",
+      goal: "fix\nall the bugs",
+    });
   });
 });

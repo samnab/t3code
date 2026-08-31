@@ -471,6 +471,7 @@ export function projectEvent(
             ...(payload.linkedPullRequest !== undefined
               ? { linkedPullRequest: payload.linkedPullRequest }
               : {}),
+            ...(payload.goal !== undefined ? { goal: payload.goal } : {}),
             updatedAt: payload.updatedAt,
           }),
         })),

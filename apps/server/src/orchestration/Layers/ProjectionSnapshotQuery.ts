@@ -1711,6 +1711,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ...(row.linkedPullRequest === null
                   ? {}
                   : { linkedPullRequest: row.linkedPullRequest }),
+                goal: row.goal ?? null,
                 latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -1922,6 +1923,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ...(row.linkedPullRequest === null
                     ? {}
                     : { linkedPullRequest: row.linkedPullRequest }),
+                  goal: row.goal ?? null,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2062,6 +2064,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                       ...(row.linkedPullRequest === null
                         ? {}
                         : { linkedPullRequest: row.linkedPullRequest }),
+                      goal: row.goal ?? null,
                       latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                       createdAt: row.createdAt,
                       updatedAt: row.updatedAt,
@@ -2211,6 +2214,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ...(row.linkedPullRequest === null
                     ? {}
                     : { linkedPullRequest: row.linkedPullRequest }),
+                  goal: row.goal ?? null,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2494,6 +2498,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ...(threadRow.value.linkedPullRequest === null
           ? {}
           : { linkedPullRequest: threadRow.value.linkedPullRequest }),
+        goal: threadRow.value.goal ?? null,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,
@@ -2641,6 +2646,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ...(threadRow.value.linkedPullRequest === null
           ? {}
           : { linkedPullRequest: threadRow.value.linkedPullRequest }),
+        goal: threadRow.value.goal ?? null,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,

@@ -21,6 +21,7 @@ import {
   ProviderDriverKind,
   RuntimeMode,
   TerminalOpenInput,
+  THREAD_GOAL_MAX_CHARS,
 } from "@t3tools/contracts";
 import {
   connectionStatusTitle,
@@ -51,6 +52,7 @@ import {
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import {
@@ -5429,6 +5431,85 @@ function ChatViewContent(props: ChatViewProps) {
         composerPreviewAnnotations.length +
         composerReviewComments.length,
     });
+    const goalCommand =
+      composerImages.length === 0 &&
+      sendableComposerTerminalContexts.length === 0 &&
+      composerElementContexts.length === 0 &&
+      composerPreviewAnnotations.length === 0 &&
+      composerReviewComments.length === 0
+        ? parseThreadGoalCommand(trimmed)
+        : null;
+    if (goalCommand) {
+      if (!isServerThread || !activeServerThread) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Start the thread first",
+            description: "Send a message once, then set a goal with /goal.",
+          }),
+        );
+        return;
+      }
+      if (goalCommand.action === "set" && goalCommand.goal.length > THREAD_GOAL_MAX_CHARS) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Goal is too long",
+            description: `Keep it under ${THREAD_GOAL_MAX_CHARS} characters.`,
+          }),
+        );
+        return;
+      }
+      if (goalCommand.action === "show") {
+        const currentGoal = activeServerThread.goal ?? null;
+        if (currentGoal !== null) {
+          document.querySelector<HTMLElement>("[data-thread-goal]")?.focus();
+          toastManager.add(
+            stackedThreadToast({
+              type: "info",
+              title: "Thread goal",
+              description: currentGoal,
+            }),
+          );
+        } else {
+          toastManager.add(
+            stackedThreadToast({
+              type: "info",
+              title: "No goal set",
+              description: "Set one with /goal followed by a short description.",
+            }),
+          );
+        }
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        return;
+      }
+      const goalThreadRef = activeServerThread;
+      const goalNextValue = goalCommand.action === "set" ? goalCommand.goal : null;
+      promptRef.current = "";
+      clearComposerDraftContent(composerDraftTarget);
+      composerRef.current?.resetCursorState();
+      void updateThreadMetadata({
+        environmentId: goalThreadRef.environmentId,
+        input: { threadId: goalThreadRef.id, goal: goalNextValue },
+      }).then((result) => {
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title:
+                goalNextValue === null
+                  ? "Could not clear thread goal"
+                  : "Could not set thread goal",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      });
+      return;
+    }
     const feedbackCommand =
       ctxSelectedProvider === "codex" &&
       composerImages.length === 0 &&
@@ -6847,6 +6928,7 @@ function ChatViewContent(props: ChatViewProps) {
             activeThreadId={activeThread.id}
             {...(routeKind === "draft" && draftId ? { draftId } : {})}
             activeThreadTitle={activeThread.title}
+            activeThreadGoal={isServerThread ? (activeServerThread?.goal ?? null) : null}
             isServerThread={isServerThread}
             changeRequest={activeThreadChangeRequest}
             activeProjectName={activeProject?.title}

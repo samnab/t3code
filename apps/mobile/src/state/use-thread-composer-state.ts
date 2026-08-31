@@ -6,6 +6,7 @@ import * as Cause from "effect/Cause";
 import {
   CommandId,
   MessageId,
+  THREAD_GOAL_MAX_CHARS,
   type EnvironmentId,
   type ModelSelection,
   type ProviderInteractionMode,
@@ -13,6 +14,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
@@ -96,6 +98,9 @@ export function useThreadComposerState() {
   const uploadThreadFeedback = useAtomCommand(threadEnvironment.uploadFeedback, {
     reportFailure: false,
   });
+  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
 
   useEffect(() => {
     ensureComposerDraftsLoaded();
@@ -175,6 +180,40 @@ export function useThreadComposerState() {
     const provider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
       (entry) => entry.instanceId === thread.modelSelection.instanceId,
     );
+    const goalCommand = attachments.length === 0 ? parseThreadGoalCommand(text) : null;
+    if (goalCommand) {
+      if (goalCommand.action === "set" && goalCommand.goal.length > THREAD_GOAL_MAX_CHARS) {
+        Alert.alert("Goal is too long", `Keep it under ${THREAD_GOAL_MAX_CHARS} characters.`);
+        return null;
+      }
+      if (goalCommand.action === "show") {
+        const currentGoal = thread.goal ?? null;
+        if (currentGoal !== null) {
+          Alert.alert("Thread goal", currentGoal);
+        } else {
+          Alert.alert("No goal set", "Set one with /goal followed by a short description.");
+        }
+        clearComposerDraftContent(threadKey);
+        return null;
+      }
+      const goalValue = goalCommand.action === "set" ? goalCommand.goal : null;
+      clearComposerDraftContent(threadKey);
+      const result = await updateThreadMetadata({
+        environmentId: selectedThreadShell.environmentId,
+        input: { threadId: selectedThreadShell.id, goal: goalValue },
+      });
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) {
+          return null;
+        }
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          goalValue === null ? "Could not clear thread goal" : "Could not set thread goal",
+          error instanceof Error ? error.message : "An error occurred.",
+        );
+      }
+      return null;
+    }
     const feedbackCommand =
       attachments.length === 0 &&
       (provider?.driver === "codex" || thread.session?.providerName === "codex")
@@ -272,6 +311,7 @@ export function useThreadComposerState() {
     selectedEnvironmentRuntime?.serverConfig?.providers,
     selectedThreadDetail,
     selectedThreadShell,
+    updateThreadMetadata,
     uploadThreadFeedback,
   ]);
 

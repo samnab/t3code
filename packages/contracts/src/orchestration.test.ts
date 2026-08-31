@@ -21,6 +21,7 @@ import {
   OrchestrationThread,
   OrchestrationThreadShell,
   ProjectCreateCommand,
+  THREAD_GOAL_MAX_CHARS,
   ThreadMetaUpdatedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
@@ -1039,3 +1040,97 @@ it("isProviderSendTurnSupportedImageMimeType accepts raster formats and rejects 
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("IMAGE/JPEG"), true);
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("image/svg+xml"), false);
 });
+
+it.effect("thread.meta.update goal accepts set, null clear, and rejects blank or overlong", () =>
+  Effect.gen(function* () {
+    const decode = decodeOrchestrationCommand;
+
+    const set = yield* decode({
+      type: "thread.meta.update",
+      commandId: "cmd-goal-set",
+      threadId: "thread-1",
+      goal: "  Ship the login fix  ",
+    });
+    assert.deepStrictEqual(
+      set.type === "thread.meta.update" ? set.goal : undefined,
+      "Ship the login fix",
+    );
+
+    const cleared = yield* decode({
+      type: "thread.meta.update",
+      commandId: "cmd-goal-clear",
+      threadId: "thread-1",
+      goal: null,
+    });
+    assert.deepStrictEqual(cleared.type === "thread.meta.update" ? cleared.goal : undefined, null);
+
+    const blank = yield* Effect.exit(
+      decode({
+        type: "thread.meta.update",
+        commandId: "cmd-goal-blank",
+        threadId: "thread-1",
+        goal: "   ",
+      }),
+    );
+    assert.strictEqual(blank._tag, "Failure");
+
+    const overlong = yield* Effect.exit(
+      decode({
+        type: "thread.meta.update",
+        commandId: "cmd-goal-long",
+        threadId: "thread-1",
+        goal: "x".repeat(THREAD_GOAL_MAX_CHARS + 1),
+      }),
+    );
+    assert.strictEqual(overlong._tag, "Failure");
+  }),
+);
+
+it.effect("thread.meta-updated payload and thread state carry goal or drop it on null", () =>
+  Effect.gen(function* () {
+    const updated = yield* decodeThreadMetaUpdatedPayload({
+      threadId: "thread-1",
+      goal: "Ship it",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(updated.goal, "Ship it");
+
+    const cleared = yield* decodeThreadMetaUpdatedPayload({
+      threadId: "thread-1",
+      goal: null,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(cleared.goal, null);
+
+    // Unrelated meta updates (goal omitted) stay decodable with no goal key.
+    const untouched = yield* decodeThreadMetaUpdatedPayload({
+      threadId: "thread-1",
+      title: "Renamed",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual("goal" in untouched, false);
+
+    const thread = yield* decodeOrchestrationThread({
+      id: "thread-1",
+      projectId: "project-1",
+      title: "Goal thread",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      archivedAt: null,
+      session: null,
+      deletedAt: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+      goal: "Ship it",
+    });
+    assert.strictEqual(thread.goal, "Ship it");
+  }),
+);

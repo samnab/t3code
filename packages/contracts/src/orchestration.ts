@@ -469,6 +469,16 @@ export const ThreadLinkedPullRequest = Schema.Struct({
 });
 export type ThreadLinkedPullRequest = typeof ThreadLinkedPullRequest.Type;
 
+/** Maximum length of a thread goal, matching {@link ThreadGoal}. */
+export const THREAD_GOAL_MAX_CHARS = 1024;
+
+/**
+ * The thread's durable, T3-owned goal (set with `/goal`). Never sent to
+ * providers; it is user-facing state only.
+ */
+export const ThreadGoal = TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_GOAL_MAX_CHARS));
+export type ThreadGoal = typeof ThreadGoal.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -509,6 +519,8 @@ export const OrchestrationThread = Schema.Struct({
   // servers never need each other's threads to agree on the merged list.
   // Optional so payloads from pre-reorder servers still decode.
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // See ThreadGoal: user-facing only, optional so older servers still decode.
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -573,6 +585,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // See ThreadGoal: user-facing only, optional so older servers still decode.
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
@@ -878,6 +892,8 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  // Null clears the goal; omission preserves it. See ThreadGoal.
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
 }).check(
   Schema.makeFilter(
     (input) =>
@@ -1322,6 +1338,8 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  /** Null clears the goal; omitted fields never touch it. See ThreadGoal. */
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
   updatedAt: IsoDateTime,
 });
 

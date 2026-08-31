@@ -32,6 +32,7 @@ import {
   AppState,
   Keyboard,
   Platform,
+  Text,
   useWindowDimensions,
   View,
   type GestureResponderEvent,
@@ -606,6 +607,15 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           onTouchEnd={handleFeedTouchEnd}
           onTouchCancel={handleFeedTouchCancel}
         >
+          {props.selectedThread.goal != null && (
+            <Text
+              accessibilityLabel={`Thread goal: ${props.selectedThread.goal}`}
+              numberOfLines={1}
+              className="shrink-0 px-4 pb-1 pt-2 text-xs font-t3-medium text-foreground-muted"
+            >
+              Goal: {props.selectedThread.goal}
+            </Text>
+          )}
           <ThreadFeed
             key={props.selectedThread.id}
             environmentId={props.environmentId}

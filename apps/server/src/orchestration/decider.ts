@@ -850,6 +850,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.linkedPullRequest !== undefined
             ? { linkedPullRequest: command.linkedPullRequest }
             : {}),
+          ...(command.goal !== undefined ? { goal: command.goal } : {}),
           updatedAt: occurredAt,
         },
       };
