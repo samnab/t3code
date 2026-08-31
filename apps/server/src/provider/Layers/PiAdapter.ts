@@ -554,6 +554,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       timelineBypass: true,
       subagentRun: {
         runId: run.taskId,
+        // Only ever a currently-known T3 run of this owner epoch; a native
+        // parent id with no live T3 mapping is omitted, never forged.
+        ...(run.parentAgentId !== undefined ? { parentRunId: run.parentAgentId } : {}),
         runtimeFamily: "pi-stock",
         harness: run.harness,
         provider: PROVIDER,

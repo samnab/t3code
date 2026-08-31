@@ -443,6 +443,49 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
+  it.live("maps a known native parent to the current opaque parent run only", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "SUBAGENT_NESTED" });
+      const startedByNative = (nativeRunId: string) =>
+        collector.waitFor(
+          (event) =>
+            event.type === "task.started" && event.payload.subagentRun?.nativeRunId === nativeRunId,
+        );
+      const root = yield* startedByNative("sa-1");
+      const nested = yield* startedByNative("sa-2");
+      const orphan = yield* startedByNative("sa-3");
+      if (
+        root.type !== "task.started" ||
+        nested.type !== "task.started" ||
+        orphan.type !== "task.started"
+      ) {
+        throw new Error("Expected three nested subagent starts.");
+      }
+
+      expect(root.payload.parentAgentId).toBeUndefined();
+      expect(root.payload.subagentRun?.parentRunId).toBeUndefined();
+      expect(nested.payload.parentAgentId).toBe(root.payload.taskId);
+      expect(nested.payload.subagentRun?.parentRunId).toBe(root.payload.taskId);
+      expect(orphan.payload.parentAgentId).toBeUndefined();
+      expect(orphan.payload.subagentRun?.parentRunId).toBeUndefined();
+      for (const started of [root, nested, orphan]) {
+        expect(started.payload.taskId).toMatch(/^[0-9a-f-]{36}$/);
+      }
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
   it.live("mints opaque ids when a fresh Pi process reuses a native id", () =>
     Effect.gen(function* () {
       const fixture = makeFixture();

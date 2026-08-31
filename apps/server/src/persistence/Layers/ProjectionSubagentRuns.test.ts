@@ -1,4 +1,4 @@
-import { ProviderDriverKind, RuntimeTaskId, ThreadId } from "@t3tools/contracts";
+import { ProviderDriverKind, RuntimeTaskId, SubagentRunStatus, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -135,6 +135,145 @@ layer("ProjectionSubagentRunRepository", (it) => {
         updatedAt: at(21),
         terminalAt: at(21),
       });
+    }),
+  );
+
+  it.effect("interrupts queued, active, and cancelling once and preserves terminal rows", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionSubagentRunRepository;
+      const reserve = (id: string, minute: number) =>
+        repository.reserveRunNumber({
+          runId: RuntimeTaskId.make(id),
+          allocatedAt: at(minute),
+          ownerId: null,
+          ownerEpoch: `epoch-${id}`,
+          nativeRunId: "sa-1",
+          activationId: null,
+        });
+      const startRow = (
+        id: string,
+        runNumber: number,
+        minute: number,
+        status: SubagentRunStatus,
+        terminalAt: string | null,
+      ) =>
+        repository.insertStart({
+          runId: RuntimeTaskId.make(id),
+          runNumber,
+          threadId: ThreadId.make("thread-inventory"),
+          parentRunId: null,
+          runtimeFamily: "pi-manager",
+          harness: null,
+          provider: ProviderDriverKind.make("pi"),
+          providerInstanceId: null,
+          model: null,
+          effort: null,
+          title: null,
+          summary: null,
+          status,
+          terminalReason: null,
+          controlAvailability: "read-only",
+          historyAvailability: "summary-only",
+          capabilities: { steer: false, cancel: false, resume: false },
+          createdAt: at(minute),
+          updatedAt: at(minute),
+          terminalAt,
+          ownerId: null,
+          ownerEpoch: "reserved",
+          nativeRunId: null,
+          activationId: null,
+          firstEventSequence: minute,
+          lastEventSequence: minute,
+        });
+
+      const queuedNumber = yield* reserve("opaque-queued", 30);
+      yield* startRow("opaque-queued", queuedNumber, 30, "queued", null);
+      const cancellingNumber = yield* reserve("opaque-cancelling", 31);
+      yield* startRow("opaque-cancelling", cancellingNumber, 31, "cancelling", null);
+      const doneNumber = yield* reserve("opaque-done", 32);
+      yield* startRow("opaque-done", doneNumber, 32, "done", at(32));
+      const priorInterruptedNumber = yield* reserve("opaque-prior-interrupted", 33);
+      yield* startRow(
+        "opaque-prior-interrupted",
+        priorInterruptedNumber,
+        33,
+        "interrupted",
+        at(33),
+      );
+
+      assert.strictEqual(yield* repository.interruptNonResumable({ interruptedAt: at(40) }), 2);
+      assert.strictEqual(yield* repository.interruptNonResumable({ interruptedAt: at(41) }), 0);
+
+      const statusOf = (id: string) =>
+        Effect.map(repository.getByRunId({ runId: RuntimeTaskId.make(id) }), (run) => run?.status);
+      assert.strictEqual(yield* statusOf("opaque-queued"), "interrupted");
+      assert.strictEqual(yield* statusOf("opaque-cancelling"), "interrupted");
+      assert.strictEqual(yield* statusOf("opaque-done"), "done");
+      const prior = yield* repository.getByRunId({
+        runId: RuntimeTaskId.make("opaque-prior-interrupted"),
+      });
+      assert.strictEqual(prior?.status, "interrupted");
+      assert.strictEqual(prior?.terminalReason, null);
+      assert.strictEqual(prior?.terminalAt, at(33));
+    }),
+  );
+
+  it.effect("a failed row write leaves a gap without reusing the reserved number", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionSubagentRunRepository;
+      const failedId = RuntimeTaskId.make("opaque-write-failure");
+      const failedNumber = yield* repository.reserveRunNumber({
+        runId: failedId,
+        allocatedAt: at(50),
+        ownerId: null,
+        ownerEpoch: "epoch-failure",
+        nativeRunId: "sa-2",
+        activationId: null,
+      });
+
+      // A terminal status without a terminal timestamp violates the table's
+      // CHECK: the write fails atomically, leaving no partial row.
+      yield* repository
+        .insertStart({
+          runId: failedId,
+          runNumber: failedNumber,
+          threadId: ThreadId.make("thread-inventory"),
+          parentRunId: null,
+          runtimeFamily: "pi-manager",
+          harness: null,
+          provider: ProviderDriverKind.make("pi"),
+          providerInstanceId: null,
+          model: null,
+          effort: null,
+          title: null,
+          summary: null,
+          status: "done",
+          terminalReason: null,
+          controlAvailability: "read-only",
+          historyAvailability: "summary-only",
+          capabilities: { steer: false, cancel: false, resume: false },
+          createdAt: at(50),
+          updatedAt: at(50),
+          terminalAt: null,
+          ownerId: null,
+          ownerEpoch: "reserved",
+          nativeRunId: null,
+          activationId: null,
+          firstEventSequence: 50,
+          lastEventSequence: 50,
+        })
+        .pipe(Effect.flip);
+
+      assert.strictEqual(yield* repository.getByRunId({ runId: failedId }), null);
+      const nextNumber = yield* repository.reserveRunNumber({
+        runId: RuntimeTaskId.make("opaque-after-failure"),
+        allocatedAt: at(51),
+        ownerId: null,
+        ownerEpoch: "epoch-after",
+        nativeRunId: "sa-3",
+        activationId: null,
+      });
+      assert.ok(nextNumber > failedNumber);
     }),
   );
 });

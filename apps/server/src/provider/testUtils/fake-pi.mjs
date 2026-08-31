@@ -94,7 +94,7 @@ const emitAgentRun = () => {
   send({ type: "agent_settled" });
 };
 
-const subagentDetails = (status = "running") => ({
+const subagentDetails = (status = "running", overrides = {}) => ({
   id: "sa-1",
   title: "map auth",
   cwd: process.cwd(),
@@ -102,6 +102,11 @@ const subagentDetails = (status = "running") => ({
   model: "zai/glm-5.3-flash",
   status,
   trusted_suborch: false,
+  ...("parentId" in overrides && overrides.parentId !== undefined
+    ? { parent_id: overrides.parentId }
+    : {}),
+  ...(overrides.id !== undefined ? { id: overrides.id } : {}),
+  ...(overrides.title !== undefined ? { title: overrides.title } : {}),
 });
 
 // ── fake T3 subagent manager ──
@@ -260,23 +265,23 @@ const emitManagerLifecycle = () => {
   });
 };
 
-const emitSubagentSpawnStart = () =>
+const emitSubagentSpawnStart = (toolCallId = "spawn-1") =>
   send({
     type: "tool_execution_start",
-    toolCallId: "spawn-1",
+    toolCallId,
     toolName: "subagent_spawn",
     args: { name: "map auth", harness: "pi" },
   });
 
-const emitSubagentSpawnEnd = (status = "running") =>
+const emitSubagentSpawnEnd = (status = "running", toolCallId = "spawn-1", details) =>
   send({
     type: "tool_execution_end",
-    toolCallId: "spawn-1",
+    toolCallId,
     toolName: "subagent_spawn",
     args: { name: "map auth", harness: "pi" },
     result: {
-      content: [{ type: "text", text: "Spawned subagent sa-1." }],
-      details: subagentDetails(status),
+      content: [{ type: "text", text: "Spawned subagent." }],
+      details: details ?? subagentDetails(status),
     },
     isError: false,
   });
@@ -523,6 +528,28 @@ const handle = (req) => {
           emitSubagentSpawnEnd("done");
         } else if (message === "SUBAGENT_SPAWN_ERROR") {
           emitSubagentSpawnEnd("error");
+        } else if (message === "SUBAGENT_NESTED") {
+          emitSubagentSpawnEnd();
+          emitSubagentSpawnStart("spawn-2");
+          emitSubagentSpawnEnd(
+            "running",
+            "spawn-2",
+            subagentDetails("running", {
+              id: "sa-2",
+              title: "audit auth",
+              parentId: "sa-1",
+            }),
+          );
+          emitSubagentSpawnStart("spawn-3");
+          emitSubagentSpawnEnd(
+            "running",
+            "spawn-3",
+            subagentDetails("running", {
+              id: "sa-3",
+              title: "orphan work",
+              parentId: "sa-404",
+            }),
+          );
         } else {
           emitSubagentSpawnEnd();
         }
