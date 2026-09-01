@@ -72,11 +72,13 @@ export function ThreadGoalEditorSheet(props: {
       navigationBarTranslucent
       onRequestClose={props.onClose}
     >
-      <Pressable
-        accessibilityLabel="Close goal editor"
-        className="flex-1 justify-end bg-backdrop"
-        onPress={props.onClose}
-      >
+      <View className="flex-1 justify-end bg-backdrop">
+        <Pressable
+          accessibilityLabel="Close goal editor"
+          accessibilityRole="button"
+          className="flex-1"
+          onPress={props.onClose}
+        />
         {/* Lifts the sheet above the focused input so the keyboard never
             covers the action row (ReviewCommentComposerSheet pattern). */}
         <KeyboardAvoidingView automaticOffset behavior="padding">
@@ -128,7 +130,7 @@ export function ThreadGoalEditorSheet(props: {
             </View>
           </View>
         </KeyboardAvoidingView>
-      </Pressable>
+      </View>
     </Modal>
   );
 }
