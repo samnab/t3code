@@ -143,6 +143,17 @@ export function flattenQueuedThreadMessages(
   return Object.values(queues).flat();
 }
 
+/**
+ * Queued entries whose text is a T3-local /goal command: they can never
+ * deliver, so the thread's queued line shows them separately from messages
+ * that will send automatically, with a way to remove them.
+ */
+export function blockedQueuedThreadMessages(
+  messages: ReadonlyArray<QueuedThreadMessage>,
+): ReadonlyArray<QueuedThreadMessage> {
+  return messages.filter((message) => parseThreadGoalCommand(message.text) !== null);
+}
+
 export function threadOutboxRetryDelayMs(attempt: number): number {
   return Math.min(1_000 * 2 ** Math.max(0, attempt - 1), THREAD_OUTBOX_MAX_RETRY_DELAY_MS);
 }

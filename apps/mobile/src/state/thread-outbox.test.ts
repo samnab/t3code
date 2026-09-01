@@ -10,6 +10,7 @@ import {
 import { AtomRegistry } from "effect/unstable/reactivity";
 
 import {
+  blockedQueuedThreadMessages,
   decodeQueuedThreadMessage,
   encodeQueuedThreadMessage,
   groupQueuedThreadMessages,
@@ -552,6 +553,50 @@ describe("thread outbox", () => {
         threadBusy: false,
       }),
     ).toBe("blocked");
+  });
+
+  it("separates blocked /goal entries for the queued line and removes them through the existing removal path", async () => {
+    // The blocked affordance at the queued line needs the blocked subset in
+    // queue order, and removal goes through the same manager.remove path the
+    // pending-task list uses. Ordinary queued entries stay untouched.
+    const goalA = {
+      ...queuedMessage({ messageId: "goal-a", createdAt: "2026-06-08T10:00:01.000Z" }),
+      text: "/goal ship it",
+    };
+    const ordinary = queuedMessage({
+      messageId: "message-2",
+      createdAt: "2026-06-08T10:00:02.000Z",
+    });
+    const goalB = {
+      ...queuedMessage({ messageId: "goal-b", createdAt: "2026-06-08T10:00:03.000Z" }),
+      text: "/goal",
+    };
+
+    expect(blockedQueuedThreadMessages([goalA, ordinary, goalB])).toEqual([goalA, goalB]);
+
+    const registry = AtomRegistry.make();
+    const stored = new Map<MessageId, QueuedThreadMessage>();
+    const storage: ThreadOutboxStorage = {
+      load: async () => [...stored.values()],
+      write: async (message) => {
+        stored.set(message.messageId, message);
+      },
+      remove: async (message) => {
+        stored.delete(message.messageId);
+      },
+    };
+    const manager = createThreadOutboxManager({ registry, storage });
+    await manager.enqueue(goalA);
+    await manager.enqueue(ordinary);
+    await manager.enqueue(goalB);
+
+    await manager.remove(goalA);
+    const remaining = registry.get(manager.queuedMessagesByThreadKeyAtom)[
+      "environment-1:thread-1"
+    ]!;
+    expect(blockedQueuedThreadMessages(remaining)).toEqual([goalB]);
+    expect(remaining).toEqual([ordinary, goalB]);
+    registry.dispose();
   });
 
   it("keeps sending ordinary queued text through both delivery branches", () => {

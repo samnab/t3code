@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Alert } from "react-native";
 import * as Cause from "effect/Cause";
 
@@ -14,7 +14,12 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
-import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+import { hasVisibleThreadGoalText, parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+import {
+  resolveThreadGoalCommandBlockReason,
+  threadGoalEditorCanSave,
+  threadGoalEditorReducer,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
@@ -52,7 +57,12 @@ import {
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
 import { useSelectedThreadDetail } from "../state/use-thread-detail";
 import { useThreadSelection } from "../state/use-thread-selection";
-import { enqueueThreadOutboxMessage } from "./thread-outbox";
+import {
+  blockedQueuedThreadMessages,
+  enqueueThreadOutboxMessage,
+  removeThreadOutboxMessage,
+  type QueuedThreadMessage,
+} from "./thread-outbox";
 import { useThreadOutboxMessages } from "./use-thread-outbox";
 import { threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
@@ -133,7 +143,15 @@ export function useThreadComposerState() {
   const selectedDraft = selectedThreadKey ? composerDrafts[selectedThreadKey] : null;
   const draftMessage = selectedDraft?.text ?? "";
   const draftAttachments = selectedDraft?.attachments ?? [];
-  const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
+  // Blocked queued entries (legacy /goal text) never deliver, so they must not
+  // count toward "will send automatically"; they surface separately with a
+  // removal affordance instead.
+  const selectedThreadBlockedQueued = useMemo(
+    () => blockedQueuedThreadMessages(selectedThreadQueuedMessages),
+    [selectedThreadQueuedMessages],
+  );
+  const selectedThreadQueueCount =
+    selectedThreadQueuedMessages.length - selectedThreadBlockedQueued.length;
   const selectedThread = selectedThreadDetail ?? selectedThreadShell;
   const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
@@ -164,6 +182,81 @@ export function useThreadComposerState() {
     );
   }, [selectedThreadDetail, selectedThreadSessionActivity, selectedThreadShell]);
 
+  // ── Thread goal editor ── Keyed by the thread it opened for; remote goal
+  // updates only follow a clean draft, and switching threads closes it.
+  const [threadGoalEditorState, dispatchThreadGoalEditor] = useReducer(
+    threadGoalEditorReducer,
+    null,
+  );
+  const goalMetadataInFlightRef = useRef(false);
+  const selectedThreadGoal = (selectedThreadDetail ?? selectedThreadShell)?.goal ?? null;
+  useEffect(() => {
+    if (!threadGoalEditorState || !selectedThreadKey) return;
+    if (threadGoalEditorState.threadKey !== selectedThreadKey) {
+      dispatchThreadGoalEditor({ type: "close" });
+      return;
+    }
+    dispatchThreadGoalEditor({
+      type: "remoteUpdate",
+      threadKey: selectedThreadKey,
+      goal: selectedThreadGoal,
+    });
+  }, [selectedThreadGoal, selectedThreadKey, threadGoalEditorState]);
+
+  const openThreadGoalEditor = useCallback(() => {
+    if (!selectedThreadShell) return;
+    dispatchThreadGoalEditor({
+      type: "open",
+      threadKey: scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id),
+      environmentId: selectedThreadShell.environmentId,
+      threadId: selectedThreadShell.id,
+      goal: (selectedThreadDetail ?? selectedThreadShell)?.goal ?? null,
+    });
+  }, [selectedThreadDetail, selectedThreadShell]);
+
+  const changeThreadGoalDraft = useCallback((text: string) => {
+    dispatchThreadGoalEditor({ type: "setDraft", text });
+  }, []);
+
+  const writeThreadGoalFromEditor = useCallback(
+    async (goal: string | null) => {
+      const state = threadGoalEditorState;
+      if (!state || goalMetadataInFlightRef.current) return;
+      dispatchThreadGoalEditor({ type: "beginSave" });
+      goalMetadataInFlightRef.current = true;
+      const result = await updateThreadMetadata({
+        environmentId: state.environmentId,
+        input: { threadId: state.threadId, goal },
+      });
+      goalMetadataInFlightRef.current = false;
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = Cause.squash(result.cause);
+          dispatchThreadGoalEditor({
+            type: "saveFailure",
+            error: error instanceof Error ? error.message : "An error occurred.",
+          });
+        } else {
+          dispatchThreadGoalEditor({ type: "saveFailure", error: "Try again." });
+        }
+        return;
+      }
+      dispatchThreadGoalEditor({ type: "saveSuccess", goal });
+      if (goal !== null) dispatchThreadGoalEditor({ type: "close" });
+    },
+    [threadGoalEditorState, updateThreadMetadata],
+  );
+
+  const saveThreadGoalFromEditor = useCallback(() => {
+    if (!threadGoalEditorState || !threadGoalEditorCanSave(threadGoalEditorState)) return;
+    void writeThreadGoalFromEditor(threadGoalEditorState.draft);
+  }, [threadGoalEditorState, writeThreadGoalFromEditor]);
+
+  const clearThreadGoalFromEditor = useCallback(() => {
+    if (!threadGoalEditorState || threadGoalEditorState.savedGoal === null) return;
+    void writeThreadGoalFromEditor(null);
+  }, [threadGoalEditorState, writeThreadGoalFromEditor]);
+
   const onSendMessage = useCallback(async () => {
     if (!selectedThreadShell) {
       return null;
@@ -172,6 +265,10 @@ export function useThreadComposerState() {
     const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
     const draft = getComposerDraftSnapshot(threadKey);
     const thread = selectedThreadDetail ?? selectedThreadShell;
+    // Parse the raw draft text: native String.trim removes U+FEFF, which the
+    // /goal delimiter policy keeps as content, so a FEFF-joined draft must
+    // never become a goal command. Ordinary sends keep using `text` below.
+    const goalCommand = parseThreadGoalCommand(draft.text);
     const text = draft.text.trim();
     const attachments = draft.attachments;
     if (text.length === 0 && attachments.length === 0) {
@@ -181,16 +278,32 @@ export function useThreadComposerState() {
     const provider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
       (entry) => entry.instanceId === thread.modelSelection.instanceId,
     );
-    const goalCommand = parseThreadGoalCommand(text);
     if (goalCommand) {
-      if (attachments.length > 0) {
+      // Shared block-reason matrix with web: attachments first, then unknown
+      // capability (still connecting) kept separate from known-unsupported.
+      const goalBlockReason = resolveThreadGoalCommandBlockReason({
+        isServerThread: true,
+        attachmentCount: attachments.length,
+        contextCount: 0,
+        capabilityKnown: selectedEnvironmentRuntime?.serverConfig != null,
+        supportsThreadGoals:
+          selectedEnvironmentRuntime?.serverConfig?.environment.capabilities.threadGoals === true,
+      });
+      if (goalBlockReason === "attachments") {
         Alert.alert(
           "Remove attachments to use /goal",
           "Thread goal commands cannot include attachments. Your draft was kept.",
         );
         return null;
       }
-      if (selectedEnvironmentRuntime?.serverConfig?.environment.capabilities.threadGoals !== true) {
+      if (goalBlockReason === "unavailable") {
+        Alert.alert(
+          "Still connecting to the environment",
+          "Wait for the connection, then try /goal again. Your draft was kept.",
+        );
+        return null;
+      }
+      if (goalBlockReason === "unsupported") {
         Alert.alert(
           "Thread goals are unavailable",
           "Update the connected T3 Code server before using /goal. Your draft was kept.",
@@ -201,21 +314,36 @@ export function useThreadComposerState() {
         Alert.alert("Goal is too long", `Keep it under ${THREAD_GOAL_MAX_CHARS} characters.`);
         return null;
       }
+      if (goalCommand.action === "set" && !hasVisibleThreadGoalText(goalCommand.goal)) {
+        Alert.alert(
+          "Goal needs visible text",
+          "Spaces and zero-width characters don't count. Write something you can read.",
+        );
+        return null;
+      }
       if (goalCommand.action === "show") {
-        const currentGoal = thread.goal ?? null;
-        if (currentGoal !== null) {
-          Alert.alert("Thread goal", currentGoal);
-        } else {
-          Alert.alert("No goal set", "Set one with /goal followed by a short description.");
-        }
+        // Bare /goal opens the goal editor prefilled instead of a read-only
+        // alert, mirroring the composer pill.
+        dispatchThreadGoalEditor({
+          type: "open",
+          threadKey,
+          environmentId: selectedThreadShell.environmentId,
+          threadId: selectedThreadShell.id,
+          goal: thread.goal ?? null,
+        });
         clearComposerDraftContent(threadKey);
         return null;
       }
+      if (goalMetadataInFlightRef.current) {
+        return null;
+      }
       const goalValue = goalCommand.action === "set" ? goalCommand.goal : null;
+      goalMetadataInFlightRef.current = true;
       const result = await updateThreadMetadata({
         environmentId: selectedThreadShell.environmentId,
         input: { threadId: selectedThreadShell.id, goal: goalValue },
       });
+      goalMetadataInFlightRef.current = false;
       if (result._tag === "Failure") {
         if (isAtomCommandInterrupted(result)) {
           return null;
@@ -324,6 +452,7 @@ export function useThreadComposerState() {
     });
     return messageId;
   }, [
+    dispatchThreadGoalEditor,
     selectedEnvironmentRuntime?.serverConfig?.providers,
     selectedThreadDetail,
     selectedThreadShell,
@@ -449,15 +578,36 @@ export function useThreadComposerState() {
     [selectedThreadKey],
   );
 
+  const closeThreadGoalEditor = useCallback(() => {
+    dispatchThreadGoalEditor({ type: "close" });
+  }, []);
+
+  const onRemoveBlockedQueuedMessage = useCallback((message: QueuedThreadMessage) => {
+    void removeThreadOutboxMessage(message).catch((error: unknown) => {
+      console.warn("[thread-outbox] failed to remove blocked /goal message", {
+        messageId: message.messageId,
+        ...safeErrorLogAttributes(error),
+      });
+    });
+  }, []);
+
   return {
     selectedThreadFeed,
     selectedThreadQueueCount,
+    selectedThreadBlockedQueued,
     activeWorkStartedAt,
     draftMessage,
     draftAttachments,
     modelSelection,
     runtimeMode,
     interactionMode,
+    threadGoalEditorState,
+    openThreadGoalEditor,
+    changeThreadGoalDraft,
+    saveThreadGoalFromEditor,
+    clearThreadGoalFromEditor,
+    closeThreadGoalEditor,
+    onRemoveBlockedQueuedMessage,
     onChangeDraftMessage,
     onPickDraftImages,
     onPasteIntoDraft,

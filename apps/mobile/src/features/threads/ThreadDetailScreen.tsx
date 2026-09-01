@@ -1,4 +1,5 @@
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import type { ThreadGoalEditorState } from "@t3tools/client-runtime/state/threadGoalEditor";
 import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/threads";
 import { useKeyboardChatComposerInset, useKeyboardScrollToEnd } from "@legendapp/list/keyboard";
 import type { LegendListRef } from "@legendapp/list/react-native";
@@ -32,7 +33,6 @@ import {
   AppState,
   Keyboard,
   Platform,
-  Text,
   useWindowDimensions,
   View,
   type GestureResponderEvent,
@@ -107,6 +107,15 @@ export interface ThreadDetailScreenProps {
   readonly projectWorkspaceRoot: string | null;
   readonly threadCwd: string | null;
   readonly selectedThreadQueueCount: number;
+  readonly selectedThreadBlockedQueuedCount: number;
+  readonly selectedThreadBlockedQueuedHeadText: string | null;
+  readonly onRemoveBlockedQueued: () => void;
+  readonly goalEditorState: ThreadGoalEditorState | null;
+  readonly onOpenGoalEditor: () => void;
+  readonly onCloseGoalEditor: () => void;
+  readonly onChangeGoalDraft: (text: string) => void;
+  readonly onSaveGoalEditor: () => void;
+  readonly onClearGoalEditor: () => void;
   readonly serverConfig: T3ServerConfig | null;
   readonly layoutVariant?: LayoutVariant;
   readonly usesAutomaticContentInsets?: boolean;
@@ -607,15 +616,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           onTouchEnd={handleFeedTouchEnd}
           onTouchCancel={handleFeedTouchCancel}
         >
-          {props.selectedThread.goal != null && (
-            <Text
-              accessibilityLabel={`Thread goal: ${props.selectedThread.goal}`}
-              numberOfLines={1}
-              className="shrink-0 px-4 pb-1 pt-2 text-xs font-t3-medium text-foreground-muted"
-            >
-              Goal: {props.selectedThread.goal}
-            </Text>
-          )}
           <ThreadFeed
             key={props.selectedThread.id}
             environmentId={props.environmentId}
@@ -762,6 +762,15 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                 selectedThread={props.selectedThread}
                 serverConfig={props.serverConfig}
                 queueCount={props.selectedThreadQueueCount}
+                blockedQueuedCount={props.selectedThreadBlockedQueuedCount}
+                blockedQueuedHeadText={props.selectedThreadBlockedQueuedHeadText}
+                onRemoveBlockedQueued={props.onRemoveBlockedQueued}
+                goalEditorState={props.goalEditorState}
+                onOpenGoalEditor={props.onOpenGoalEditor}
+                onCloseGoalEditor={props.onCloseGoalEditor}
+                onChangeGoalDraft={props.onChangeGoalDraft}
+                onSaveGoalEditor={props.onSaveGoalEditor}
+                onClearGoalEditor={props.onClearGoalEditor}
                 environmentId={props.environmentId}
                 projectCwd={props.projectWorkspaceRoot}
                 bottomInset={composerBottomInset}

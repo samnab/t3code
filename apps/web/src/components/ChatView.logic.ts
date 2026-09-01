@@ -30,24 +30,10 @@ export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
-export type ThreadGoalCommandBlockReason =
-  | "draft-thread"
-  | "attachments"
-  | "context"
-  | "unsupported";
-
-export function resolveThreadGoalCommandBlockReason(input: {
-  isServerThread: boolean;
-  attachmentCount: number;
-  contextCount: number;
-  supportsThreadGoals: boolean;
-}): ThreadGoalCommandBlockReason | null {
-  if (!input.isServerThread) return "draft-thread";
-  if (input.attachmentCount > 0) return "attachments";
-  if (input.contextCount > 0) return "context";
-  if (!input.supportsThreadGoals) return "unsupported";
-  return null;
-}
+export {
+  resolveThreadGoalCommandBlockReason,
+  type ThreadGoalCommandBlockReason,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 
 export function shouldClearSubmittedThreadGoalDraft(input: {
   submittedPrompt: string;

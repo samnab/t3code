@@ -67,6 +67,7 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
+import { ThreadGoalEditor } from "./ThreadGoalEditor";
 import {
   ComposerTasksBadge,
   ComposerTasksDrawer,
@@ -248,8 +249,10 @@ import {
   PenLineIcon,
   RotateCcwIcon,
   SparklesIcon,
+  TargetIcon,
   XIcon,
 } from "lucide-react";
+import type { ThreadGoalEditorState } from "@t3tools/client-runtime/state/threadGoalEditor";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle } from "../../providerModels";
 import {
@@ -436,6 +439,47 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   );
 });
 
+/**
+ * Thread-goal shortcut in the composer controls: the entry point when no
+ * goal is set, and an active pill (icon + truncated goal, full text in the
+ * tooltip) once one exists. Both states open the inline goal editor.
+ */
+const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props: {
+  goal: string | null;
+  editorOpen: boolean;
+  onToggle: () => void;
+}) {
+  const goalTooltip = props.goal ?? "Set a goal for this thread";
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <ComposerControl
+            type="button"
+            data-thread-goal
+            data-thread-goal-set={props.goal !== null ? "true" : "false"}
+            aria-label={props.goal !== null ? `Thread goal: ${props.goal}` : "Set thread goal"}
+            aria-expanded={props.editorOpen}
+            className={cn(
+              "min-w-0 shrink",
+              props.goal !== null
+                ? "bg-accent text-accent-foreground hover:bg-accent/80"
+                : "text-secondary-label hover:text-foreground",
+            )}
+            onClick={props.onToggle}
+          />
+        }
+      >
+        <ComposerControlIcon icon={TargetIcon} className="text-current opacity-100" />
+        {props.goal !== null ? (
+          <span className="min-w-0 max-w-28 truncate sm:max-w-44">{props.goal}</span>
+        ) : null}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{goalTooltip}</TooltipPopup>
+    </Tooltip>
+  );
+});
+
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
   activeContextWindow: ContextWindowSnapshot | null;
@@ -558,6 +602,15 @@ export interface ChatComposerProps {
   attachmentUploadsCapabilityKnown: boolean;
   supportsAttachmentUploads: boolean;
   supportsThreadGoals: boolean;
+  /** Current thread goal, when set; shown as a pill in the composer footer. */
+  activeThreadGoal: string | null;
+  /** Open editor state (owned by ChatView, keyed by thread), or null. */
+  threadGoalEditor: ThreadGoalEditorState | null;
+  onThreadGoalEditorOpen: () => void;
+  onThreadGoalEditorClose: () => void;
+  onThreadGoalDraftChange: (text: string) => void;
+  onThreadGoalEditorSave: () => void;
+  onThreadGoalEditorClear: () => void;
   routeKind: "server" | "draft";
   routeThreadRef: ScopedThreadRef;
   draftId: DraftId | null;
@@ -677,13 +730,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     attachmentUploadsCapabilityKnown,
     supportsAttachmentUploads,
     supportsThreadGoals,
+    activeThreadGoal,
+    threadGoalEditor,
+    onThreadGoalEditorOpen,
+    onThreadGoalEditorClose,
+    onThreadGoalDraftChange,
+    onThreadGoalEditorSave,
+    onThreadGoalEditorClear,
     routeKind,
     routeThreadRef,
     draftId,
     activeThreadId,
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
-    isServerThread: _isServerThread,
+    isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     forceExpandedOnMobile,
     projectSelectionRequired,
@@ -1057,6 +1117,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const isMobileViewport = useMediaQuery("max-sm");
   const isComposerCollapsedMobile =
     isMobileViewport && !forceExpandedOnMobile && !isComposerFocused;
+
+  // Returning focus after the goal editor closes keeps keyboard users on the
+  // trigger instead of dropping focus to the page (the editor lives in a
+  // fixed layer, so focus would otherwise fall back to <body>).
+  const wasThreadGoalEditorOpenRef = useRef(false);
+  useEffect(() => {
+    const wasOpen = wasThreadGoalEditorOpenRef.current;
+    wasThreadGoalEditorOpenRef.current = threadGoalEditor !== null;
+    if (wasOpen && threadGoalEditor === null) {
+      document.querySelector<HTMLElement>("[data-thread-goal]")?.focus();
+    }
+  }, [threadGoalEditor]);
 
   // ------------------------------------------------------------------
   // Refs
@@ -3245,6 +3317,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 </ComposerCommandMenuLayer>
               )}
 
+              {threadGoalEditor !== null &&
+              supportsThreadGoals &&
+              !composerMenuOpen &&
+              !isComposerApprovalState ? (
+                <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
+                  <ThreadGoalEditor
+                    state={threadGoalEditor}
+                    onDraftChange={onThreadGoalDraftChange}
+                    onSave={onThreadGoalEditorSave}
+                    onClear={onThreadGoalEditorClear}
+                    onClose={onThreadGoalEditorClose}
+                  />
+                </ComposerCommandMenuLayer>
+              ) : null}
+
               {composerMenuOpen && !isComposerApprovalState && (
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
                   <ComposerCommandMenu
@@ -3588,6 +3675,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       />
                     </>
                   )}
+
+                  {supportsThreadGoals && isServerThread ? (
+                    <ComposerThreadGoalControl
+                      goal={activeThreadGoal}
+                      editorOpen={threadGoalEditor !== null}
+                      onToggle={
+                        threadGoalEditor !== null ? onThreadGoalEditorClose : onThreadGoalEditorOpen
+                      }
+                    />
+                  ) : null}
                 </div>
 
                 {/* Right side: send / stop button */}

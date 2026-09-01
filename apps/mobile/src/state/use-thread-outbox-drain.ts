@@ -20,7 +20,6 @@ import { buildProjectThreadStartTurnInput } from "../lib/projectThreadStartTurn"
 import { toUploadChatImageAttachments } from "../lib/composerImages";
 import { randomHex } from "../lib/uuid";
 import { appAtomRegistry } from "./atom-registry";
-import { setPendingConnectionError } from "./use-remote-environment-registry";
 import { useProjects, useThreadShells } from "./entities";
 import {
   confirmThreadOutboxMessageQueued,
@@ -323,7 +322,10 @@ export function useThreadOutboxDrain(): void {
         continue;
       }
       // Blocked entries stay queued forever by design (no send, no retry),
-      // so the drain reports each one once instead of looping silently.
+      // so the drain reports each one once instead of looping silently. The
+      // user-facing signal is the blocked affordance at the thread's queued
+      // line plus the "Blocked" pending-task status — never a connection
+      // error, because the connection is not the problem.
       if (deliveryAction === "blocked") {
         if (!reportedBlockedMessageIdsRef.current.has(nextQueuedMessage.messageId)) {
           reportedBlockedMessageIdsRef.current.add(nextQueuedMessage.messageId);
@@ -332,9 +334,6 @@ export function useThreadOutboxDrain(): void {
             threadId: nextQueuedMessage.threadId,
             messageId: nextQueuedMessage.messageId,
           });
-          setPendingConnectionError(
-            "A queued /goal command cannot be sent to the agent. Edit the pending task to change its text — your message was kept.",
-          );
         }
         continue;
       }

@@ -44,7 +44,7 @@ A user-visible log item attached to a thread. In [the contracts][1], activities 
 
 #### Goal
 
-A short, durable, T3-owned statement of intent for a thread, set with `/goal`. It rides thread metadata (see the `goal` field in [the contracts][1]), never enters provider prompts or chat history, and is purely user-facing state.
+A short, durable, T3-owned statement of intent for a thread, set with `/goal` or the composer's goal pill and editor. It rides thread metadata (see the `goal` field in [the contracts][1]), never enters provider prompts or chat history, and is purely user-facing state.
 
 ### Orchestration
 

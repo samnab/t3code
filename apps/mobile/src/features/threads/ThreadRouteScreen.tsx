@@ -789,6 +789,20 @@ function ThreadRouteContent(
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
           selectedThreadQueueCount={composer.selectedThreadQueueCount}
+          selectedThreadBlockedQueuedCount={composer.selectedThreadBlockedQueued.length}
+          selectedThreadBlockedQueuedHeadText={
+            composer.selectedThreadBlockedQueued[0]?.text ?? null
+          }
+          onRemoveBlockedQueued={() => {
+            const head = composer.selectedThreadBlockedQueued[0];
+            if (head) composer.onRemoveBlockedQueuedMessage(head);
+          }}
+          goalEditorState={composer.threadGoalEditorState}
+          onOpenGoalEditor={composer.openThreadGoalEditor}
+          onCloseGoalEditor={composer.closeThreadGoalEditor}
+          onChangeGoalDraft={composer.changeThreadGoalDraft}
+          onSaveGoalEditor={composer.saveThreadGoalFromEditor}
+          onClearGoalEditor={composer.clearThreadGoalFromEditor}
           layoutVariant={layout.variant}
           usesAutomaticContentInsets={usesNativeHeaderGlass}
           onOpenConnectionEditor={handleOpenConnectionEditor}

@@ -53,6 +53,7 @@ describe("thread goal command submission", () => {
         isServerThread: true,
         attachmentCount: 1,
         contextCount: 0,
+        capabilityKnown: true,
         supportsThreadGoals: true,
       }),
     ).toBe("attachments");
@@ -61,6 +62,7 @@ describe("thread goal command submission", () => {
         isServerThread: true,
         attachmentCount: 0,
         contextCount: 1,
+        capabilityKnown: true,
         supportsThreadGoals: true,
       }),
     ).toBe("context");
@@ -69,14 +71,27 @@ describe("thread goal command submission", () => {
         isServerThread: true,
         attachmentCount: 0,
         contextCount: 0,
+        capabilityKnown: true,
         supportsThreadGoals: false,
       }),
     ).toBe("unsupported");
+    // Unknown capability (config still loading / disconnected) is neutral,
+    // not "update your server".
     expect(
       resolveThreadGoalCommandBlockReason({
         isServerThread: true,
         attachmentCount: 0,
         contextCount: 0,
+        capabilityKnown: false,
+        supportsThreadGoals: false,
+      }),
+    ).toBe("unavailable");
+    expect(
+      resolveThreadGoalCommandBlockReason({
+        isServerThread: true,
+        attachmentCount: 0,
+        contextCount: 0,
+        capabilityKnown: true,
         supportsThreadGoals: true,
       }),
     ).toBeNull();

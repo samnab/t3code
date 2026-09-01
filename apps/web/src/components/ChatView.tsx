@@ -52,7 +52,11 @@ import {
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
-import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+import { hasVisibleThreadGoalText, parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+import {
+  threadGoalEditorCanSave,
+  threadGoalEditorReducer,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import {
@@ -70,6 +74,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -243,6 +248,7 @@ import {
 import {
   appendTerminalContextsToPrompt,
   formatTerminalContextLabel,
+  stripInlineTerminalContextPlaceholders,
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
@@ -1346,6 +1352,89 @@ function ChatViewContent(props: ChatViewProps) {
     [routeServerThreadShell, threadDetailLoading],
   );
   const activeServerThread = serverThread ?? loadingServerThread;
+
+  // ── Thread goal editor ── State is keyed by the thread it opened for, so
+  // switching threads cannot save into the old one, and remote goal updates
+  // (another device) only follow the editor while its draft is clean.
+  const [threadGoalEditorState, dispatchThreadGoalEditor] = useReducer(
+    threadGoalEditorReducer,
+    null,
+  );
+  const activeServerThreadGoal = activeServerThread?.goal ?? null;
+  const activeServerThreadKey = activeServerThread
+    ? scopedThreadKey(scopeThreadRef(activeServerThread.environmentId, activeServerThread.id))
+    : null;
+  useEffect(() => {
+    if (!threadGoalEditorState) return;
+    // The user navigated away: the editor belongs to the old thread's
+    // composer, so close it instead of showing it over a different thread.
+    if (activeServerThreadKey !== threadGoalEditorState.threadKey) {
+      dispatchThreadGoalEditor({ type: "close" });
+      return;
+    }
+    dispatchThreadGoalEditor({
+      type: "remoteUpdate",
+      threadKey: threadGoalEditorState.threadKey,
+      goal: activeServerThreadGoal,
+    });
+  }, [activeServerThreadGoal, activeServerThreadKey, threadGoalEditorState]);
+
+  const openThreadGoalEditor = useCallback(() => {
+    if (!activeServerThread) return;
+    dispatchThreadGoalEditor({
+      type: "open",
+      threadKey: scopedThreadKey(
+        scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
+      ),
+      environmentId: activeServerThread.environmentId,
+      threadId: activeServerThread.id,
+      goal: activeServerThread.goal ?? null,
+    });
+  }, [activeServerThread]);
+
+  const changeThreadGoalDraft = useCallback((text: string) => {
+    dispatchThreadGoalEditor({ type: "setDraft", text });
+  }, []);
+
+  const writeThreadGoalFromEditor = useCallback(
+    async (goal: string | null) => {
+      const state = threadGoalEditorState;
+      if (!state || goalMetadataInFlightRef.current) return;
+      dispatchThreadGoalEditor({ type: "beginSave" });
+      goalMetadataInFlightRef.current = true;
+      const result = await updateThreadMetadata({
+        environmentId: state.environmentId,
+        input: { threadId: state.threadId, goal },
+      });
+      goalMetadataInFlightRef.current = false;
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          dispatchThreadGoalEditor({
+            type: "saveFailure",
+            error: error instanceof Error ? error.message : "An error occurred.",
+          });
+        } else {
+          dispatchThreadGoalEditor({ type: "saveFailure", error: "Try again." });
+        }
+        return;
+      }
+      dispatchThreadGoalEditor({ type: "saveSuccess", goal });
+      // Saving closes the editor; clearing leaves it open with an empty draft.
+      if (goal !== null) dispatchThreadGoalEditor({ type: "close" });
+    },
+    [threadGoalEditorState, updateThreadMetadata],
+  );
+
+  const saveThreadGoalFromEditor = useCallback(() => {
+    if (!threadGoalEditorState || !threadGoalEditorCanSave(threadGoalEditorState)) return;
+    void writeThreadGoalFromEditor(threadGoalEditorState.draft);
+  }, [threadGoalEditorState, writeThreadGoalFromEditor]);
+
+  const clearThreadGoalFromEditor = useCallback(() => {
+    if (!threadGoalEditorState || threadGoalEditorState.savedGoal === null) return;
+    void writeThreadGoalFromEditor(null);
+  }, [threadGoalEditorState, writeThreadGoalFromEditor]);
   // Pagination window state for the routed server thread: drives the
   // "load earlier turns" header when the loaded window has older history.
   const routeThreadState = useEnvironmentThread(
@@ -1496,6 +1585,9 @@ function ChatViewContent(props: ChatViewProps) {
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
   const feedbackUploadsInFlightRef = useRef(new Set<string>());
+  // Guards goal metadata writes (typed /goal and the editor) so a rapid Enter
+  // can never interleave a set with a clear.
+  const goalMetadataInFlightRef = useRef(false);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useLayoutEffect(() => {
@@ -2124,6 +2216,7 @@ function ChatViewContent(props: ChatViewProps) {
     : (primaryEnvironment?.serverConfig ?? null);
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
+  const threadGoalsCapabilityKnown = serverConfig !== null;
   const supportsThreadGoals = serverConfig?.environment.capabilities.threadGoals === true;
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
@@ -5434,7 +5527,12 @@ function ChatViewContent(props: ChatViewProps) {
         composerPreviewAnnotations.length +
         composerReviewComments.length,
     });
-    const goalCommand = parseThreadGoalCommand(trimmed);
+    // Parse on the placeholder-stripped but untrimmed prompt: native
+    // String.trim removes U+FEFF, which the /goal delimiter policy keeps as
+    // content, so a FEFF-joined text must never become a goal command.
+    const goalCommand = parseThreadGoalCommand(
+      stripInlineTerminalContextPlaceholders(promptForSend),
+    );
     if (goalCommand) {
       const goalBlockReason = resolveThreadGoalCommandBlockReason({
         isServerThread: isServerThread && activeServerThread !== null,
@@ -5444,6 +5542,7 @@ function ChatViewContent(props: ChatViewProps) {
           composerElementContexts.length +
           composerPreviewAnnotations.length +
           composerReviewComments.length,
+        capabilityKnown: threadGoalsCapabilityKnown,
         supportsThreadGoals,
       });
       if (goalBlockReason !== null) {
@@ -5463,10 +5562,15 @@ function ChatViewContent(props: ChatViewProps) {
                     title: "Remove context to use /goal",
                     description: "Your draft and context were kept.",
                   }
-                : {
-                    title: "Thread goals are unavailable",
-                    description: "Update the connected T3 Code server before using /goal.",
-                  };
+                : goalBlockReason === "unavailable"
+                  ? {
+                      title: "Still connecting to the environment",
+                      description: "Wait for the connection, then try /goal again.",
+                    }
+                  : {
+                      title: "Thread goals are unavailable",
+                      description: "Update the connected T3 Code server before using /goal.",
+                    };
         toastManager.add(stackedThreadToast({ type: "warning", ...copy }));
         return;
       }
@@ -5480,38 +5584,48 @@ function ChatViewContent(props: ChatViewProps) {
         );
         return;
       }
+      if (goalCommand.action === "set" && !hasVisibleThreadGoalText(goalCommand.goal)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Goal needs visible text",
+            description:
+              "Spaces and zero-width characters don't count. Write something you can read.",
+          }),
+        );
+        return;
+      }
       if (goalCommand.action === "show") {
-        const currentGoal = activeServerThread?.goal ?? null;
-        if (currentGoal !== null) {
-          document.querySelector<HTMLElement>("[data-thread-goal]")?.focus();
-          toastManager.add(
-            stackedThreadToast({
-              type: "info",
-              title: "Thread goal",
-              description: currentGoal,
-            }),
-          );
-        } else {
-          toastManager.add(
-            stackedThreadToast({
-              type: "info",
-              title: "No goal set",
-              description: "Set one with /goal followed by a short description.",
-            }),
-          );
+        // Bare /goal opens the composer's goal editor prefilled with the
+        // current goal instead of hunting for a header chip.
+        if (activeServerThread) {
+          dispatchThreadGoalEditor({
+            type: "open",
+            threadKey: scopedThreadKey(
+              scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
+            ),
+            environmentId: activeServerThread.environmentId,
+            threadId: activeServerThread.id,
+            goal: activeServerThread.goal ?? null,
+          });
         }
         promptRef.current = "";
         clearComposerDraftContent(composerDraftTarget);
         composerRef.current?.resetCursorState();
         return;
       }
+      if (goalMetadataInFlightRef.current) {
+        return;
+      }
       const goalThreadRef = activeServerThread;
       if (!goalThreadRef) return;
       const goalNextValue = goalCommand.action === "set" ? goalCommand.goal : null;
+      goalMetadataInFlightRef.current = true;
       const result = await updateThreadMetadata({
         environmentId: goalThreadRef.environmentId,
         input: { threadId: goalThreadRef.id, goal: goalNextValue },
       });
+      goalMetadataInFlightRef.current = false;
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
@@ -6970,7 +7084,6 @@ function ChatViewContent(props: ChatViewProps) {
             activeThreadId={activeThread.id}
             {...(routeKind === "draft" && draftId ? { draftId } : {})}
             activeThreadTitle={activeThread.title}
-            activeThreadGoal={isServerThread ? (activeServerThread?.goal ?? null) : null}
             isServerThread={isServerThread}
             changeRequest={activeThreadChangeRequest}
             activeProjectName={activeProject?.title}
@@ -7155,6 +7268,17 @@ function ChatViewContent(props: ChatViewProps) {
                             attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}
                             supportsAttachmentUploads={supportsAttachmentUploads}
                             supportsThreadGoals={supportsThreadGoals}
+                            activeThreadGoal={
+                              isServerThread ? (activeServerThread?.goal ?? null) : null
+                            }
+                            threadGoalEditor={threadGoalEditorState}
+                            onThreadGoalEditorOpen={openThreadGoalEditor}
+                            onThreadGoalEditorClose={() =>
+                              dispatchThreadGoalEditor({ type: "close" })
+                            }
+                            onThreadGoalDraftChange={changeThreadGoalDraft}
+                            onThreadGoalEditorSave={saveThreadGoalFromEditor}
+                            onThreadGoalEditorClear={clearThreadGoalFromEditor}
                             routeKind={routeKind}
                             routeThreadRef={routeThreadRef}
                             draftId={draftId}

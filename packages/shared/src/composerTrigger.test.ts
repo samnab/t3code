@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  hasVisibleThreadGoalText,
   parseThreadGoalCommand,
   serializeComposerFileLink,
   serializeComposerMentionPath,
@@ -100,6 +101,22 @@ describe("parseThreadGoalCommand", () => {
 
   it("shows when only whitespace follows the command", () => {
     expect(parseThreadGoalCommand("/goal \n\t \u00a0")).toEqual({ action: "show" });
+  });
+
+  it("rejects goals with no visible characters", () => {
+    expect(hasVisibleThreadGoalText("")).toBe(false);
+    expect(hasVisibleThreadGoalText("  \n\t \u00a0")).toBe(false);
+    expect(hasVisibleThreadGoalText("\u200b")).toBe(false);
+    expect(hasVisibleThreadGoalText("\ufeff\u200b\u2060")).toBe(false);
+    expect(hasVisibleThreadGoalText(" \u200b\n\ufeff\t")).toBe(false);
+    // Legitimate content passes, including edge formatting marks and emoji.
+    expect(hasVisibleThreadGoalText("ship it")).toBe(true);
+    expect(hasVisibleThreadGoalText("résumé 🚀")).toBe(true);
+    expect(hasVisibleThreadGoalText("e\u0301gal\u00e9")) // combining acute
+      .toBe(true);
+    expect(hasVisibleThreadGoalText("\u200bship\u200b")).toBe(true);
+    expect(hasVisibleThreadGoalText("日本語のゴール")).toBe(true);
+    expect(hasVisibleThreadGoalText("العربية")).toBe(true);
   });
 
   it("trims multi-line goals and clears via a line-break separator", () => {

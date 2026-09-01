@@ -162,6 +162,18 @@ export function trimThreadGoalWhitespace(text: string): string {
     .replace(THREAD_GOAL_TRAILING_WHITESPACE, "");
 }
 
+// A goal payload must contain at least one visible character. White_Space
+// separators and the formatting marks the delimiter policy excludes
+// (U+200B, U+FEFF, U+2060) render as nothing, so a payload made only of
+// them would persist an invisible goal. Scripts, emoji, and combining text
+// all pass untouched. Clients reject before any metadata RPC; empty strings
+// also fail.
+const INVISIBLE_THREAD_GOAL_CHARS = /^[\p{White_Space}\u200B\uFEFF\u2060]*$/u;
+
+export function hasVisibleThreadGoalText(text: string): boolean {
+  return !INVISIBLE_THREAD_GOAL_CHARS.test(text);
+}
+
 // `/goal` alone shows the current goal; `/goal clear` clears it (reserved,
 // case-insensitive like other built-ins — a literal goal of "clear" cannot be
 // set through this syntax); any other remainder is the new goal text. This

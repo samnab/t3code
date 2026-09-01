@@ -674,7 +674,10 @@ export function NewTaskDraftScreen(props: {
 
     // Goals live on existing threads; a /goal draft here has nothing to
     // target yet, so keep everything and let the user send a message first.
-    if (parseThreadGoalCommand(initialMessageText)) {
+    // Parse the raw draft: native String.trim removes U+FEFF, which the
+    // /goal delimiter policy keeps as content, so a FEFF-joined draft must
+    // stay an ordinary message here too.
+    if (parseThreadGoalCommand(draft.text)) {
       Alert.alert(
         "Start the thread first",
         "Thread goals need an existing thread. Send a message once, then set a goal with /goal. Your draft was kept.",

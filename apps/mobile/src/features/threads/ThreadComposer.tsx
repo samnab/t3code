@@ -7,6 +7,7 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
+import type { ThreadGoalEditorState } from "@t3tools/client-runtime/state/threadGoalEditor";
 import {
   detectComposerTrigger,
   replaceTextRange,
@@ -39,6 +40,7 @@ import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/re
 import { scopedThreadKey } from "../../lib/scopedEntities";
 
 import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/AppSymbol";
 import { ComposerAttachmentStrip } from "../../components/ComposerAttachmentStrip";
 import { GlassSurface } from "../../components/GlassSurface";
 import {
@@ -72,6 +74,7 @@ import {
   type ExistingThreadSettingsRouteSession,
   useExistingThreadSettingsRoutePresentation,
 } from "./ThreadSettingsSheet";
+import { ThreadGoalEditorSheet } from "./ThreadGoalEditorSheet";
 import {
   useThreadSettingsSheetPresentation,
   type NavigationWithFinishTransitioning,
@@ -107,6 +110,16 @@ export interface ThreadComposerProps {
   readonly selectedThread: OrchestrationThreadShell;
   readonly serverConfig: T3ServerConfig | null;
   readonly queueCount: number;
+  /** Blocked queued entries (legacy /goal text) for this thread's queued line. */
+  readonly blockedQueuedCount: number;
+  readonly blockedQueuedHeadText: string | null;
+  readonly onRemoveBlockedQueued: () => void;
+  readonly goalEditorState: ThreadGoalEditorState | null;
+  readonly onOpenGoalEditor: () => void;
+  readonly onCloseGoalEditor: () => void;
+  readonly onChangeGoalDraft: (text: string) => void;
+  readonly onSaveGoalEditor: () => void;
+  readonly onClearGoalEditor: () => void;
   readonly environmentId: EnvironmentId;
   readonly projectCwd: string | null;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
@@ -275,6 +288,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const { themeAppearance } = useAppearancePreferences();
   const isDarkMode = themeAppearance === "dark";
   const foregroundColor = useThemeColor("--color-foreground");
+  const mutedIconColor = useThemeColor("--color-icon-muted");
   const bodyText = useScaledTextRole("body");
   const fallbackInputRef = useRef<ComposerEditorHandle>(null);
   const inputRef = props.editorRef ?? fallbackInputRef;
@@ -898,6 +912,26 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   maxWidth={152}
                   onPress={openSettings}
                 />
+                {supportsThreadGoals ? (
+                  props.selectedThread.goal != null ? (
+                    <ComposerInlineControl
+                      accessibilityLabel={`Thread goal: ${props.selectedThread.goal ?? ""}`}
+                      accessibilityHint="Opens the goal editor"
+                      icon="scope"
+                      label={props.selectedThread.goal}
+                      maxWidth={132}
+                      showChevron={false}
+                      onPress={props.onOpenGoalEditor}
+                    />
+                  ) : (
+                    <ComposerToolbarButton
+                      accessibilityLabel="Set thread goal"
+                      icon="scope"
+                      onPress={props.onOpenGoalEditor}
+                      showChevron={false}
+                    />
+                  )
+                ) : null}
                 {showStopAction ? (
                   <ComposerToolbarButton
                     accessibilityLabel="Stop"
@@ -929,7 +963,44 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
             </Text>
           </Animated.View>
         ) : null}
+
+        {/* Blocked legacy /goal entries can never send; offer removal at the
+            queued line instead of pretending they will deliver. */}
+        {props.blockedQueuedCount > 0 ? (
+          <View className="flex-row items-center gap-1.5 pt-2">
+            <SymbolView
+              name="exclamationmark.triangle"
+              size={12}
+              tintColor={mutedIconColor}
+              type="monochrome"
+            />
+            <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={1}>
+              {props.blockedQueuedCount === 1
+                ? "Blocked /goal message can't send"
+                : `${props.blockedQueuedCount} blocked /goal messages can't send`}
+              {props.blockedQueuedHeadText ? ` — ${props.blockedQueuedHeadText}` : ""}
+            </Text>
+            <Pressable
+              accessibilityLabel="Remove blocked /goal message"
+              accessibilityRole="button"
+              className="active:opacity-70"
+              onPress={props.onRemoveBlockedQueued}
+            >
+              <Text className="text-xs font-t3-medium text-foreground">Remove</Text>
+            </Pressable>
+          </View>
+        ) : null}
       </Animated.View>
+
+      {props.goalEditorState ? (
+        <ThreadGoalEditorSheet
+          state={props.goalEditorState}
+          onDraftChange={props.onChangeGoalDraft}
+          onSave={props.onSaveGoalEditor}
+          onClear={props.onClearGoalEditor}
+          onClose={props.onCloseGoalEditor}
+        />
+      ) : null}
 
       <ImageViewing
         images={previewImageUri ? [{ uri: previewImageUri }] : []}
