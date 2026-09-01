@@ -1,12 +1,12 @@
-import type { ServerProvider } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { resolveThreadCompactionControl } from "./thread-compaction";
 
 function provider(input?: { contextCompaction?: "prompt" | "native" }): ServerProvider {
   return {
-    instanceId: "pi" as never,
-    driver: "pi",
+    instanceId: ProviderInstanceId.make("pi"),
+    driver: ProviderDriverKind.make("pi"),
     enabled: true,
     installed: true,
     version: null,
@@ -17,7 +17,7 @@ function provider(input?: { contextCompaction?: "prompt" | "native" }): ServerPr
     slashCommands: [],
     skills: [],
     ...(input?.contextCompaction ? { contextCompaction: input.contextCompaction } : {}),
-  } as ServerProvider;
+  };
 }
 
 const idle = {

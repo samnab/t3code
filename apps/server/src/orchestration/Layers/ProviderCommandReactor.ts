@@ -1488,6 +1488,10 @@ const make = Effect.gen(function* () {
     pendingCompactions.set(event.payload.threadId, {
       acceptedAt: yield* nowMillis,
     });
+    // Forked like sendTurn: this reactor runs on a single shared drain
+    // worker, and a provider compact (Codex runs it as a full turn) can stay
+    // pending arbitrarily long. The fork keeps the worker free for other
+    // intents; the pending guard above stays authoritative while it runs.
     yield* providerService.compactContext({ threadId: event.payload.threadId }).pipe(
       Effect.catchCause((cause) =>
         Effect.gen(function* () {
@@ -1505,6 +1509,7 @@ const make = Effect.gen(function* () {
           });
         }),
       ),
+      Effect.forkScoped,
     );
   });
 

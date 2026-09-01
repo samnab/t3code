@@ -3330,6 +3330,50 @@ describe("ProviderCommandReactor", () => {
       expect(harness.compactContext).toHaveBeenCalledTimes(1);
     });
 
+    it("does not block the shared drain worker while a provider compaction stays unresolved", async () => {
+      const harness = await createCompactionHarness({
+        compactContextEffect: () => Effect.never,
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.context.compact",
+          commandId: CommandId.make("cmd-context-compact-unresolved"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        }),
+      );
+      await waitFor(() => harness.compactContext.mock.calls.length === 1);
+
+      // Duplicate compact while the first is still in flight: suppressed.
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.context.compact",
+          commandId: CommandId.make("cmd-context-compact-unresolved-dup"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+      expect(harness.compactContext).toHaveBeenCalledTimes(1);
+
+      // An unrelated intent on the same shared drain worker must complete
+      // while the compact child is suspended: before the fork this drain
+      // hung forever on the unresolved provider effect.
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-session-stop-during-unresolved-compact"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      expect(harness.compactContext).toHaveBeenCalledTimes(1);
+    });
+
     it("reports a failure activity when the provider rejects compaction", async () => {
       const harness = await createCompactionHarness({
         compactContextEffect: () =>
