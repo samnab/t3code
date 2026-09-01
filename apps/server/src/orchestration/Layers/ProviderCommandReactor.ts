@@ -1144,6 +1144,22 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    // A pending native compaction owns this thread's provider session: the
+    // compact runs as a provider turn while the T3 session stays idle, so a
+    // sendTurn dispatched now races it and fails the user turn. Fail fast;
+    // the gate clears on observed completion, failure, or the TTL sweep.
+    if (pendingCompactions.has(event.payload.threadId)) {
+      yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.start.failed",
+        summary: "Provider turn start failed",
+        detail: "Context compaction is in progress; send again when it finishes",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
+      return;
+    }
+
     yield* ensureThreadWorktree(thread);
 
     const isFirstUserMessageTurn =

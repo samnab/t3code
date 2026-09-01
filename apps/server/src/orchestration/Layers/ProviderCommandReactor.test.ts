@@ -3420,6 +3420,144 @@ describe("ProviderCommandReactor", () => {
       });
     });
 
+    it("fails a turn start fast while a compaction is pending instead of racing the provider", async () => {
+      const harness = await createCompactionHarness({
+        compactContextEffect: () => Effect.never,
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.context.compact",
+          commandId: CommandId.make("cmd-context-compact-gate"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        }),
+      );
+      await waitFor(() => harness.compactContext.mock.calls.length === 1);
+
+      // Reverse-order race: the turn start lands while the pending
+      // compaction owns the thread's provider session.
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-during-compact"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-during-compact"),
+            role: "user",
+            text: "hello during compaction",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+
+      // The provider is never asked for a turn, and the failure is
+      // observable exactly once with a truthful reason.
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const gatedThread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      const gateFailures = gatedThread?.activities.filter(
+        (activity) => activity.kind === "provider.turn.start.failed",
+      );
+      expect(gateFailures).toHaveLength(1);
+      expect(gateFailures?.[0]).toMatchObject({
+        summary: "Provider turn start failed",
+        payload: { detail: "Context compaction is in progress; send again when it finishes" },
+      });
+
+      // The gate is per thread: an untouched thread's turn still proceeds.
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-thread-create-gate-other"),
+          threadId: ThreadId.make("thread-2"),
+          projectId: asProjectId("project-1"),
+          title: "Thread 2",
+          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5-codex"),
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        }),
+      );
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-gate-other-thread"),
+          threadId: ThreadId.make("thread-2"),
+          message: {
+            messageId: asMessageId("user-message-gate-other-thread"),
+            role: "user",
+            text: "other thread proceeds",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+        threadId: ThreadId.make("thread-2"),
+      });
+
+      // Observed compaction completion clears the gate: the next turn on the
+      // compacted thread dispatches to the provider.
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("cmd-context-compacted-activity"),
+          threadId: ThreadId.make("thread-1"),
+          activity: {
+            id: EventId.make("event-context-compacted"),
+            tone: "info",
+            kind: "context-compaction",
+            summary: "Context compacted",
+            payload: {},
+            turnId: null,
+            createdAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-after-compacted"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-after-compacted"),
+            role: "user",
+            text: "resend after compaction",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+        threadId: ThreadId.make("thread-1"),
+      });
+      const afterThread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(
+        afterThread?.activities.filter((a) => a.kind === "provider.turn.start.failed"),
+      ).toHaveLength(1);
+    });
+
     it("refuses to compact without an active session and while a turn runs", async () => {
       // A stopped session exercises the same "no active provider session"
       // reactor branch as a never-started one (session null vs stopped).
