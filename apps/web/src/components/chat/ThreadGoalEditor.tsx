@@ -54,6 +54,15 @@ export const ThreadGoalEditor = memo(function ThreadGoalEditor(props: {
       ref={panelRef}
       className="chat-composer-drawer-surface chat-composer-drawer-attached relative w-full overflow-hidden"
       data-composer-goal-drawer="true"
+      onKeyDown={(event) => {
+        // Escape closes from any focused control in the panel, not just the
+        // textarea. This is the only Escape handler, so the close cannot
+        // fire twice on one keypress.
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        props.onClose();
+      }}
     >
       <div className="flex h-7 items-center justify-between gap-2 px-2 pt-1">
         <span className="inline-flex min-w-0 items-center gap-1.5 px-1 text-xs font-medium text-secondary-label">
@@ -80,12 +89,6 @@ export const ThreadGoalEditor = memo(function ThreadGoalEditor(props: {
         placeholder="What should this thread accomplish?"
         onChange={(event) => props.onDraftChange(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            props.onClose();
-            return;
-          }
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (canSave && !state.saving) props.onSave();

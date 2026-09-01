@@ -407,12 +407,20 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const backdropGradient = `linear-gradient(to bottom, ${themeColorWithAlpha(backdropSurface, 0)} 0%, ${themeColorWithAlpha(backdropSurface, 0.6)} 55%, ${themeColorWithAlpha(backdropSurface, 0.9)} 100%)`;
   const selectedProviderStatus = useMemo(() => {
     if (!props.serverConfig) return null;
-    return (
-      props.serverConfig.providers.find(
-        (p) => p.instanceId === props.selectedThread.modelSelection.instanceId,
-      ) ?? null
-    );
-  }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+    // The live session's harness wins — a session can't move between
+    // provider instances — so capability checks (compact, execution goal)
+    // target the instance actually running the thread. Model selection is
+    // only the fallback before a session starts (or on servers that don't
+    // report the session's instance).
+    const sessionInstanceId =
+      props.selectedThread.session?.providerInstanceId ??
+      props.selectedThread.modelSelection.instanceId;
+    return props.serverConfig.providers.find((p) => p.instanceId === sessionInstanceId) ?? null;
+  }, [
+    props.serverConfig,
+    props.selectedThread.modelSelection.instanceId,
+    props.selectedThread.session?.providerInstanceId,
+  ]);
   const [compactionInFlight, setCompactionInFlight] = useState(false);
   const executionGoalControl = resolveExecutionGoalControl({
     provider: selectedProviderStatus,
@@ -1104,6 +1112,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
               accessibilityLabel="Remove blocked /goal message"
               accessibilityRole="button"
               className="active:opacity-70"
+              // The compact text link stays visually light; hitSlop grows the
+              // tap area to the 44pt minimum without padding the queued line.
+              hitSlop={{ bottom: 14, left: 8, right: 8, top: 14 }}
               onPress={props.onRemoveBlockedQueued}
             >
               <Text className="text-xs font-t3-medium text-foreground">Remove</Text>

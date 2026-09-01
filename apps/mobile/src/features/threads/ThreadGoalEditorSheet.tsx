@@ -44,7 +44,7 @@ export function ThreadGoalEditorSheet(props: {
       <Pressable
         accessibilityRole="button"
         android_ripple={{ color: pressedOverlay }}
-        className="min-h-10 items-center justify-center px-4"
+        className="min-h-11 items-center justify-center px-4"
         disabled={options?.disabled}
         onPress={onPress}
       >
@@ -99,7 +99,7 @@ export function ThreadGoalEditorSheet(props: {
               maxLength={THREAD_GOAL_MAX_CHARS}
               multiline
               textAlignVertical="top"
-              className="min-h-24 rounded-2xl bg-subtle px-3.5 py-3 text-base text-foreground"
+              className="max-h-40 min-h-24 rounded-2xl bg-subtle px-3.5 py-3 text-base text-foreground"
               placeholder="What should this thread accomplish?"
               placeholderTextColor={mutedColor}
               value={state.draft}
