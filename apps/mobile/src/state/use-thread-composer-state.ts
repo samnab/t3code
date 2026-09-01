@@ -14,7 +14,11 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
-import { hasVisibleThreadGoalText, parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+import {
+  hasVisibleThreadGoalText,
+  parseThreadGoalCommand,
+  trimThreadGoalWhitespace,
+} from "@t3tools/shared/composerTrigger";
 import {
   resolveThreadGoalCommandBlockReason,
   threadGoalEditorCanSave,
@@ -276,13 +280,15 @@ export function useThreadComposerState() {
     const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
     const draft = getComposerDraftSnapshot(threadKey);
     const thread = selectedThreadDetail ?? selectedThreadShell;
-    // Parse the raw draft text: native String.trim removes U+FEFF, which the
-    // /goal delimiter policy keeps as content, so a FEFF-joined draft must
-    // never become a goal command. Ordinary sends keep using `text` below.
+    // Parse the raw draft and send the same policy-trimmed text so the two
+    // cannot drift: native String.trim removes U+FEFF, which the /goal
+    // delimiter policy keeps as content, so it would reclassify a FEFF-joined
+    // ordinary draft as "/goal …" outbox text that can never deliver.
     const goalCommand = parseThreadGoalCommand(draft.text);
-    const text = draft.text.trim();
+    const text = trimThreadGoalWhitespace(draft.text);
     const attachments = draft.attachments;
-    if (text.length === 0 && attachments.length === 0) {
+    // Policy whitespace only: a FEFF-only draft stays invisible, a no-op.
+    if (!hasVisibleThreadGoalText(text) && attachments.length === 0) {
       return null;
     }
 

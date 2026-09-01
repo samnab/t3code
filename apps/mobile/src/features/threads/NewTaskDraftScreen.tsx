@@ -21,7 +21,11 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+import {
+  hasVisibleThreadGoalText,
+  parseThreadGoalCommand,
+  trimThreadGoalWhitespace,
+} from "@t3tools/shared/composerTrigger";
 
 import { ComposerEditor, type ComposerEditorHandle } from "../../components/ComposerEditor";
 import {
@@ -661,11 +665,11 @@ export function NewTaskDraftScreen(props: {
     const interactionMode = flow.planModeEnabled
       ? (draft.interactionMode ?? flow.interactionMode)
       : "default";
-    const initialMessageText = draft.text.trim();
+    const initialMessageText = trimThreadGoalWhitespace(draft.text);
 
     if (
       !modelSelection ||
-      initialMessageText.length === 0 ||
+      !hasVisibleThreadGoalText(initialMessageText) ||
       flow.submitting ||
       (workspaceMode === "worktree" && !selectedBranchName)
     ) {
@@ -674,9 +678,9 @@ export function NewTaskDraftScreen(props: {
 
     // Goals live on existing threads; a /goal draft here has nothing to
     // target yet, so keep everything and let the user send a message first.
-    // Parse the raw draft: native String.trim removes U+FEFF, which the
-    // /goal delimiter policy keeps as content, so a FEFF-joined draft must
-    // stay an ordinary message here too.
+    // The initial message text is policy-trimmed so it classifies identically
+    // to this parse: a FEFF-joined draft stays an ordinary message instead of
+    // being trimmed into a rejected /goal command.
     if (parseThreadGoalCommand(draft.text)) {
       Alert.alert(
         "Start the thread first",

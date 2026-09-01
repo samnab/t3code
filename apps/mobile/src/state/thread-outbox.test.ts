@@ -8,6 +8,11 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { AtomRegistry } from "effect/unstable/reactivity";
+import {
+  hasVisibleThreadGoalText,
+  parseThreadGoalCommand,
+  trimThreadGoalWhitespace,
+} from "@t3tools/shared/composerTrigger";
 
 import {
   blockedQueuedThreadMessages,
@@ -631,6 +636,39 @@ describe("thread outbox", () => {
         threadBusy: false,
       }),
     ).toBe("send");
+  });
+
+  it("keeps a FEFF-joined /goal draft ordinary from parse through the queued outbox row", () => {
+    // The composer parses the raw draft but enqueues trimmed text. Native
+    // String.trim strips U+FEFF, which the /goal delimiter policy keeps as
+    // content, so a \uFEFF/goal draft classified ordinary at parse time
+    // became a blocked /goal outbox row after trimming. Policy trimming
+    // keeps classification identical end to end.
+    const rawDraft = "\uFEFF/goal ship it";
+    const sentText = trimThreadGoalWhitespace(rawDraft);
+    expect(parseThreadGoalCommand(rawDraft)).toBeNull();
+    expect(parseThreadGoalCommand(sentText)).toBeNull();
+    // Native trim is the defect this regression pins: it strips the FEFF and
+    // turns the same draft into a goal command.
+    expect(parseThreadGoalCommand(rawDraft.trim())).toEqual({ action: "set", goal: "ship it" });
+
+    const feffDraftRow = {
+      ...queuedMessage({ messageId: "message-1", createdAt: "2026-06-08T10:00:01.000Z" }),
+      text: sentText,
+    };
+    expect(blockedQueuedThreadMessages([feffDraftRow])).toEqual([]);
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        text: sentText,
+        isCreation: true,
+        threadExists: false,
+        shellStatus: "live",
+        environmentConnected: true,
+        threadBusy: false,
+      }),
+    ).toBe("send");
+    // A FEFF-only draft is not visible text: the empty guard stays a no-op.
+    expect(hasVisibleThreadGoalText(trimThreadGoalWhitespace("\uFEFF"))).toBe(false);
   });
 
   it("sends queued creations once connected and live, removing already-created ones", () => {
