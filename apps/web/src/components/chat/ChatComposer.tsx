@@ -252,7 +252,10 @@ import {
   TargetIcon,
   XIcon,
 } from "lucide-react";
-import type { ThreadGoalEditorState } from "@t3tools/client-runtime/state/threadGoalEditor";
+import {
+  resolveThreadGoalDisplay,
+  type ThreadGoalEditorState,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle } from "../../providerModels";
 import {
@@ -476,6 +479,33 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
         ) : null}
       </TooltipTrigger>
       <TooltipPopup side="top">{goalTooltip}</TooltipPopup>
+    </Tooltip>
+  );
+});
+
+/**
+ * Read-only goal text for the states where the interactive pill cannot
+ * render (footer collapsed/unmounted/hidden, pending input, or capability
+ * not known): the durable goal stays visible without offering edits.
+ */
+const ComposerThreadGoalPassive = memo(function ComposerThreadGoalPassive(props: { goal: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <div
+            data-thread-goal-passive="true"
+            className="flex min-w-0 items-center gap-1.5 px-3 pt-1 pb-3 text-xs text-secondary-label sm:px-4 sm:pb-4"
+          >
+            <TargetIcon aria-hidden className="size-3 shrink-0" />
+            {/* Truncated visually; the label keeps the full text for AT. */}
+            <span aria-label={`Thread goal: ${props.goal}`} className="min-w-0 truncate">
+              {props.goal}
+            </span>
+          </div>
+        }
+      />
+      <TooltipPopup side="top">{props.goal}</TooltipPopup>
     </Tooltip>
   );
 });
@@ -1448,6 +1478,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const collapsedComposerPrimaryActionLabel = "Send message";
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
+
+  // Editing control only while its control row is on screen with known
+  // support; a durable goal otherwise stays readable (passive) so loading,
+  // reconnecting, approval, and collapsed states never hide it.
+  const threadGoalDisplay = resolveThreadGoalDisplay({
+    goal: activeThreadGoal,
+    controlsVisible:
+      isServerThread &&
+      !isComposerCollapsedMobile &&
+      !isComposerApprovalState &&
+      !showMobilePendingAnswerActions,
+    supportsThreadGoals,
+  });
 
   // ------------------------------------------------------------------
   // Prompt helpers
@@ -3592,6 +3635,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
 
+            {threadGoalDisplay === "passive" && activeThreadGoal !== null ? (
+              <ComposerThreadGoalPassive goal={activeThreadGoal} />
+            ) : null}
+
             {/* Bottom toolbar */}
             {isComposerCollapsedMobile || isComposerApprovalState ? null : (
               <div
@@ -3676,7 +3723,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     </>
                   )}
 
-                  {supportsThreadGoals && isServerThread ? (
+                  {threadGoalDisplay === "control" ? (
                     <ComposerThreadGoalControl
                       goal={activeThreadGoal}
                       editorOpen={threadGoalEditor !== null}

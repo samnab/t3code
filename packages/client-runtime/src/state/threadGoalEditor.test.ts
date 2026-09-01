@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   resolveThreadGoalCommandBlockReason,
+  resolveThreadGoalDisplay,
   threadGoalEditorCanSave,
   threadGoalEditorDraftError,
   threadGoalEditorReducer,
@@ -120,6 +121,7 @@ describe("threadGoalEditorReducer", () => {
 
     const failed = threadGoalEditorReducer(state, {
       type: "saveFailure",
+      threadKey,
       error: "socket closed",
     })!;
     expect(failed.saving).toBe(false);
@@ -131,9 +133,54 @@ describe("threadGoalEditorReducer", () => {
     let state = openState("goal");
     state = threadGoalEditorReducer(state, { type: "setDraft", text: "new goal" })!;
     state = threadGoalEditorReducer(state, { type: "beginSave" })!;
-    state = threadGoalEditorReducer(state, { type: "saveSuccess", goal: "new goal" })!;
+    state = threadGoalEditorReducer(state, {
+      type: "saveSuccess",
+      threadKey,
+      goal: "new goal",
+    })!;
     expect(state).toMatchObject({ draft: "new goal", savedGoal: "new goal", saving: false });
     expect(threadGoalEditorReducer(state, { type: "close" })).toBeNull();
+  });
+
+  it("a late save reply for thread A never mutates thread B's editor", () => {
+    // Save on A, navigate away (effect closes the stale editor), open B.
+    let state = openState("goal A");
+    state = threadGoalEditorReducer(state, { type: "beginSave" })!;
+    state = threadGoalEditorReducer(state, { type: "close" }) as ThreadGoalEditorState;
+    const threadBKey = "environment-1:thread-2";
+    state = threadGoalEditorReducer(state, {
+      type: "open",
+      threadKey: threadBKey,
+      environmentId,
+      threadId: ThreadId.make("thread-2"),
+      goal: "goal B",
+    })!;
+
+    const staleSuccess = threadGoalEditorReducer(state, {
+      type: "saveSuccess",
+      threadKey,
+      goal: "goal A saved",
+    })!;
+    expect(staleSuccess).toBe(state);
+
+    const staleFailure = threadGoalEditorReducer(staleSuccess, {
+      type: "saveFailure",
+      threadKey,
+      error: "socket closed",
+    })!;
+    expect(staleFailure).toBe(state);
+
+    // The completion-driven close is guarded the same way: B stays open.
+    expect(threadGoalEditorReducer(staleFailure, { type: "close", threadKey })).toBe(state);
+
+    // B's own replies still apply, and an unguarded close still closes.
+    const applied = threadGoalEditorReducer(state, {
+      type: "saveSuccess",
+      threadKey: threadBKey,
+      goal: "goal B saved",
+    })!;
+    expect(applied).toMatchObject({ savedGoal: "goal B saved", draft: "goal B saved" });
+    expect(threadGoalEditorReducer(applied, { type: "close", threadKey: threadBKey })).toBeNull();
   });
 
   it("treats an unchanged or invalid draft as a save no-op", () => {
@@ -151,5 +198,51 @@ describe("threadGoalEditorReducer", () => {
     expect(threadGoalEditorDraftError("x".repeat(1025))).toContain("1024");
     expect(threadGoalEditorDraftError("résumé 🚀")).toBeNull();
     expect(threadGoalEditorDraftError("x".repeat(1024))).toBeNull();
+  });
+});
+
+describe("resolveThreadGoalDisplay", () => {
+  it("shows the editing control only with visible controls and known support", () => {
+    expect(
+      resolveThreadGoalDisplay({ goal: null, controlsVisible: true, supportsThreadGoals: true }),
+    ).toBe("control");
+    expect(
+      resolveThreadGoalDisplay({
+        goal: "ship it",
+        controlsVisible: true,
+        supportsThreadGoals: true,
+      }),
+    ).toBe("control");
+  });
+
+  it("keeps an existing goal readable while capability is unknown or unsupported", () => {
+    // Unknown (config not loaded / reconnecting) and known-unsupported both
+    // hide the control but never the durable goal text.
+    expect(
+      resolveThreadGoalDisplay({
+        goal: "ship it",
+        controlsVisible: true,
+        supportsThreadGoals: false,
+      }),
+    ).toBe("passive");
+  });
+
+  it("falls back passively when controls are collapsed or hidden", () => {
+    expect(
+      resolveThreadGoalDisplay({
+        goal: "ship it",
+        controlsVisible: false,
+        supportsThreadGoals: true,
+      }),
+    ).toBe("passive");
+  });
+
+  it("renders nothing without a goal or any way to display one", () => {
+    expect(
+      resolveThreadGoalDisplay({ goal: null, controlsVisible: false, supportsThreadGoals: true }),
+    ).toBe("none");
+    expect(
+      resolveThreadGoalDisplay({ goal: null, controlsVisible: true, supportsThreadGoals: false }),
+    ).toBe("none");
   });
 });

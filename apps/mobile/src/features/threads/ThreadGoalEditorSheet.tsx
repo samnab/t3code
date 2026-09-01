@@ -5,6 +5,7 @@ import {
   type ThreadGoalEditorState,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
 import { Modal, Pressable, TextInput, View } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
@@ -76,53 +77,57 @@ export function ThreadGoalEditorSheet(props: {
         className="flex-1 justify-end bg-backdrop"
         onPress={props.onClose}
       >
-        <View
-          className="rounded-t-[24px] bg-card px-5 pb-3 pt-3"
-          style={{ paddingBottom: insets.bottom + 12 }}
-        >
-          <View className="mb-2 flex-row items-center justify-between">
-            <View className="flex-row items-center gap-1.5">
-              <SymbolView name="scope" size={14} tintColor={mutedColor} type="monochrome" />
-              <Text className="text-sm font-t3-bold text-foreground-muted">Thread goal</Text>
+        {/* Lifts the sheet above the focused input so the keyboard never
+            covers the action row (ReviewCommentComposerSheet pattern). */}
+        <KeyboardAvoidingView automaticOffset behavior="padding">
+          <View
+            className="rounded-t-[24px] bg-card px-5 pb-3 pt-3"
+            style={{ paddingBottom: insets.bottom + 12 }}
+          >
+            <View className="mb-2 flex-row items-center justify-between">
+              <View className="flex-row items-center gap-1.5">
+                <SymbolView name="scope" size={14} tintColor={mutedColor} type="monochrome" />
+                <Text className="text-sm font-t3-bold text-foreground-muted">Thread goal</Text>
+              </View>
+              {actionButton("Close", props.onClose)}
             </View>
-            {actionButton("Close", props.onClose)}
-          </View>
-          <TextInput
-            accessibilityLabel="Thread goal"
-            autoFocus
-            maxLength={THREAD_GOAL_MAX_CHARS}
-            multiline
-            textAlignVertical="top"
-            className="min-h-24 rounded-2xl bg-subtle px-3.5 py-3 text-base text-foreground"
-            placeholder="What should this thread accomplish?"
-            placeholderTextColor={mutedColor}
-            value={state.draft}
-            onChangeText={props.onDraftChange}
-          />
-          {state.error !== null || draftError !== null ? (
-            <Text accessibilityRole="alert" className="mt-2 px-1 text-xs text-danger-foreground">
-              {state.error ?? draftError}
-            </Text>
-          ) : null}
-          <View className="mt-2 flex-row items-center justify-between gap-2">
-            <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={1}>
-              {state.draft.length >= GOAL_COUNTER_THRESHOLD
-                ? `${state.draft.length}/${THREAD_GOAL_MAX_CHARS} characters`
-                : ""}
-            </Text>
-            <View className="flex-row items-center justify-end gap-1">
-              {state.savedGoal !== null
-                ? actionButton(state.saving ? "Clearing…" : "Clear", props.onClear, {
-                    disabled: state.saving,
-                    destructive: true,
-                  })
-                : null}
-              {actionButton(state.saving ? "Saving…" : "Save", props.onSave, {
-                disabled: !canSave,
-              })}
+            <TextInput
+              accessibilityLabel="Thread goal"
+              autoFocus
+              maxLength={THREAD_GOAL_MAX_CHARS}
+              multiline
+              textAlignVertical="top"
+              className="min-h-24 rounded-2xl bg-subtle px-3.5 py-3 text-base text-foreground"
+              placeholder="What should this thread accomplish?"
+              placeholderTextColor={mutedColor}
+              value={state.draft}
+              onChangeText={props.onDraftChange}
+            />
+            {state.error !== null || draftError !== null ? (
+              <Text accessibilityRole="alert" className="mt-2 px-1 text-xs text-danger-foreground">
+                {state.error ?? draftError}
+              </Text>
+            ) : null}
+            <View className="mt-2 flex-row items-center justify-between gap-2">
+              <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={1}>
+                {state.draft.length >= GOAL_COUNTER_THRESHOLD
+                  ? `${state.draft.length}/${THREAD_GOAL_MAX_CHARS} characters`
+                  : ""}
+              </Text>
+              <View className="flex-row items-center justify-end gap-1">
+                {state.savedGoal !== null
+                  ? actionButton(state.saving ? "Clearing…" : "Clear", props.onClear, {
+                      disabled: state.saving,
+                      destructive: true,
+                    })
+                  : null}
+                {actionButton(state.saving ? "Saving…" : "Save", props.onSave, {
+                  disabled: !canSave,
+                })}
+              </View>
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Pressable>
     </Modal>
   );

@@ -56,12 +56,12 @@ export type ThreadGoalEditorAction =
       threadId: ThreadId;
       goal: string | null;
     }
-  | { type: "close" }
+  | { type: "close"; threadKey?: string }
   | { type: "setDraft"; text: string }
   | { type: "remoteUpdate"; threadKey: string; goal: string | null }
   | { type: "beginSave" }
-  | { type: "saveSuccess"; goal: string | null }
-  | { type: "saveFailure"; error: string };
+  | { type: "saveSuccess"; threadKey: string; goal: string | null }
+  | { type: "saveFailure"; threadKey: string; error: string };
 
 export function threadGoalEditorReducer(
   state: ThreadGoalEditorState | null,
@@ -79,6 +79,10 @@ export function threadGoalEditorReducer(
         error: null,
       };
     case "close":
+      // A close can carry the thread it was issued for: completion closes
+      // from a save RPC must not tear down an editor the user reopened for
+      // another thread while the request was in flight.
+      if (action.threadKey && state?.threadKey !== action.threadKey) return state;
       return null;
     case "setDraft":
       if (!state || state.draft === action.text) return state;
@@ -96,7 +100,9 @@ export function threadGoalEditorReducer(
       if (!state || state.saving) return state;
       return { ...state, saving: true, error: null };
     case "saveSuccess":
-      if (!state) return state;
+      // The save RPC names its thread: a late reply must never mutate an
+      // editor reopened for a different thread.
+      if (!state || state.threadKey !== action.threadKey) return state;
       return {
         ...state,
         saving: false,
@@ -105,7 +111,7 @@ export function threadGoalEditorReducer(
         error: null,
       };
     case "saveFailure":
-      if (!state) return state;
+      if (!state || state.threadKey !== action.threadKey) return state;
       return { ...state, saving: false, error: action.error };
   }
 }
@@ -128,4 +134,24 @@ export function threadGoalEditorCanSave(state: ThreadGoalEditorState): boolean {
     state.draft !== (state.savedGoal ?? "") &&
     threadGoalEditorDraftError(state.draft) === null
   );
+}
+
+export type ThreadGoalDisplay = "control" | "passive" | "none";
+
+/**
+ * Which goal display a composer surface should render. The editing control
+ * (the pill that opens the editor) needs the composer's control row visible
+ * and known server support; the durable goal text displays independently of
+ * both, as a passive read-only fallback, so an unknown/reconnecting
+ * capability or a collapsed/hidden control row never hides an existing
+ * goal. Resolving to exactly one display keeps the goal from showing twice.
+ */
+export function resolveThreadGoalDisplay(input: {
+  goal: string | null;
+  /** Whether the control row that hosts the pill is visible right now. */
+  controlsVisible: boolean;
+  supportsThreadGoals: boolean;
+}): ThreadGoalDisplay {
+  if (input.controlsVisible && input.supportsThreadGoals) return "control";
+  return input.goal !== null ? "passive" : "none";
 }

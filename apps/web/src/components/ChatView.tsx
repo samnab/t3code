@@ -1407,21 +1407,32 @@ function ChatViewContent(props: ChatViewProps) {
         input: { threadId: state.threadId, goal },
       });
       goalMetadataInFlightRef.current = false;
+      // Completion events are keyed to the thread the RPC was issued for, so
+      // a late reply cannot mutate or close an editor reopened for another
+      // thread while the request was in flight.
+      const saveThreadKey = state.threadKey;
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           dispatchThreadGoalEditor({
             type: "saveFailure",
+            threadKey: saveThreadKey,
             error: error instanceof Error ? error.message : "An error occurred.",
           });
         } else {
-          dispatchThreadGoalEditor({ type: "saveFailure", error: "Try again." });
+          dispatchThreadGoalEditor({
+            type: "saveFailure",
+            threadKey: saveThreadKey,
+            error: "Try again.",
+          });
         }
         return;
       }
-      dispatchThreadGoalEditor({ type: "saveSuccess", goal });
+      dispatchThreadGoalEditor({ type: "saveSuccess", threadKey: saveThreadKey, goal });
       // Saving closes the editor; clearing leaves it open with an empty draft.
-      if (goal !== null) dispatchThreadGoalEditor({ type: "close" });
+      if (goal !== null) {
+        dispatchThreadGoalEditor({ type: "close", threadKey: saveThreadKey });
+      }
     },
     [threadGoalEditorState, updateThreadMetadata],
   );

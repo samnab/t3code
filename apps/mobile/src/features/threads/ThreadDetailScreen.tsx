@@ -1,5 +1,8 @@
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
-import type { ThreadGoalEditorState } from "@t3tools/client-runtime/state/threadGoalEditor";
+import {
+  resolveThreadGoalDisplay,
+  type ThreadGoalEditorState,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/threads";
 import { useKeyboardChatComposerInset, useKeyboardScrollToEnd } from "@legendapp/list/keyboard";
 import type { LegendListRef } from "@legendapp/list/react-native";
@@ -77,6 +80,7 @@ import {
   COMPOSER_COLLAPSED_CHROME,
   COMPOSER_EXPANDED_CHROME,
   ThreadComposer,
+  ThreadGoalPassiveLabel,
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
@@ -741,6 +745,17 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       onChangeCustomAnswer={props.onChangeUserInputCustomAnswer}
                       onSubmit={props.onSubmitUserInput}
                     />
+                  ) : null}
+                  {/* The composer (and its goal pill) is hidden while this
+                      request owns the slot; keep the durable goal readable. */}
+                  {activeUserInputRequestId !== null &&
+                  resolveThreadGoalDisplay({
+                    goal: props.selectedThread.goal ?? null,
+                    controlsVisible: false,
+                    supportsThreadGoals:
+                      props.serverConfig?.environment.capabilities.threadGoals === true,
+                  }) === "passive" ? (
+                    <ThreadGoalPassiveLabel goal={props.selectedThread.goal ?? ""} />
                   ) : null}
                 </Animated.View>
               ) : null}

@@ -7,7 +7,10 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
-import type { ThreadGoalEditorState } from "@t3tools/client-runtime/state/threadGoalEditor";
+import {
+  resolveThreadGoalDisplay,
+  type ThreadGoalEditorState,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import {
   detectComposerTrigger,
   replaceTextRange,
@@ -283,6 +286,30 @@ const ComposerConnectionStatusPill = memo(function ComposerConnectionStatusPill(
   );
 });
 
+/**
+ * Read-only goal line for states where the composer's goal pill cannot
+ * render (collapsed composer or capability not known): the durable goal
+ * stays visible without offering edits. Exported so ThreadDetailScreen can
+ * render it while a user-input request hides the whole composer.
+ */
+export const ThreadGoalPassiveLabel = memo(function ThreadGoalPassiveLabel(props: {
+  readonly goal: string;
+}) {
+  const mutedIconColor = useThemeColor("--color-icon-muted");
+  return (
+    <View className="flex-row items-center gap-1.5 pt-2">
+      <SymbolView name="scope" size={12} tintColor={mutedIconColor} type="monochrome" />
+      <Text
+        accessibilityLabel={`Thread goal: ${props.goal}`}
+        className="min-w-0 flex-1 text-xs text-foreground-muted"
+        numberOfLines={1}
+      >
+        {props.goal}
+      </Text>
+    </View>
+  );
+});
+
 export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposerProps) {
   const navigation = useNavigation();
   const { themeAppearance } = useAppearancePreferences();
@@ -370,6 +397,15 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
   const supportsThreadGoals = props.serverConfig?.environment.capabilities.threadGoals === true;
+
+  // Editing control only while expanded with known support; a durable goal
+  // otherwise stays readable (passive) so collapsed composers and unknown/
+  // reconnecting capability never hide it.
+  const threadGoalDisplay = resolveThreadGoalDisplay({
+    goal: props.selectedThread.goal ?? null,
+    controlsVisible: isExpanded,
+    supportsThreadGoals,
+  });
 
   // ── Trigger detection ────────────────────────────────────
   const [composerSelection, setComposerSelection] = useState(() => ({
@@ -912,7 +948,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   maxWidth={152}
                   onPress={openSettings}
                 />
-                {supportsThreadGoals ? (
+                {threadGoalDisplay === "control" ? (
                   props.selectedThread.goal != null ? (
                     <ComposerInlineControl
                       accessibilityLabel={`Thread goal: ${props.selectedThread.goal ?? ""}`}
@@ -953,6 +989,10 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
             </ComposerToolbarRow>
           ) : null}
         </ComposerSurface>
+
+        {threadGoalDisplay === "passive" ? (
+          <ThreadGoalPassiveLabel goal={props.selectedThread.goal ?? ""} />
+        ) : null}
 
         {/* Queue count */}
         {props.queueCount > 0 ? (
