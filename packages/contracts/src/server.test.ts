@@ -86,6 +86,19 @@ describe("ServerProvider", () => {
     expect(legacy.contextCompaction).toBeUndefined();
   });
 
+  it("decodes the execution-goal capability and keeps old-server snapshots without it", () => {
+    const decoded = decodeServerProvider({
+      ...baseProviderSnapshot,
+      executionGoal: "native",
+    });
+    expect(decoded.executionGoal).toBe("native");
+
+    // Old servers (and non-Codex providers) never send the field; absent
+    // must stay undefined so clients hide the execution-goal controls.
+    const legacy = decodeServerProvider({ ...baseProviderSnapshot });
+    expect(legacy.executionGoal).toBeUndefined();
+  });
+
   it("decodes continuation group metadata", () => {
     const parsed = decodeServerProvider({
       instanceId: "codex_personal",

@@ -11,6 +11,7 @@ import {
   resolveThreadGoalDisplay,
   type ThreadGoalEditorState,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
+import type { ExecutionGoalPanelState } from "@t3tools/client-runtime/state/executionGoalPanel";
 import {
   detectComposerTrigger,
   replaceTextRange,
@@ -80,6 +81,8 @@ import {
   useExistingThreadSettingsRoutePresentation,
 } from "./ThreadSettingsSheet";
 import { ThreadGoalEditorSheet } from "./ThreadGoalEditorSheet";
+import { CodexExecutionGoalSheet } from "./CodexExecutionGoalSheet";
+import { resolveExecutionGoalControl } from "./thread-execution-goal";
 import {
   useThreadSettingsSheetPresentation,
   type NavigationWithFinishTransitioning,
@@ -125,6 +128,13 @@ export interface ThreadComposerProps {
   readonly onChangeGoalDraft: (text: string) => void;
   readonly onSaveGoalEditor: () => void;
   readonly onClearGoalEditor: () => void;
+  /** Codex-native execution goal panel state, owned by the caller. */
+  readonly executionGoalState: ExecutionGoalPanelState | null;
+  readonly onOpenExecutionGoal: () => void;
+  readonly onRefreshExecutionGoal: () => void;
+  readonly onPauseExecutionGoal: () => void;
+  readonly onClearExecutionGoal: () => void;
+  readonly onCloseExecutionGoal: () => void;
   readonly environmentId: EnvironmentId;
   readonly projectCwd: string | null;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
@@ -404,6 +414,11 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
   const [compactionInFlight, setCompactionInFlight] = useState(false);
+  const executionGoalControl = resolveExecutionGoalControl({
+    provider: selectedProviderStatus,
+    sessionPresent: props.selectedThread.session !== null,
+    connected: props.connectionState === "connected",
+  });
   const compactionControl = resolveThreadCompactionControl({
     provider: selectedProviderStatus,
     sessionStatus: props.selectedThread.session?.status,
@@ -1020,6 +1035,19 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     showChevron={false}
                   />
                 ) : null}
+                {executionGoalControl.visible ? (
+                  <ComposerToolbarButton
+                    accessibilityLabel="Codex execution goal"
+                    accessibilityHint={
+                      executionGoalControl.disabledReason ??
+                      "Shows the execution goal Codex tracks in this session."
+                    }
+                    disabled={executionGoalControl.disabled}
+                    icon="flag"
+                    onPress={props.onOpenExecutionGoal}
+                    showChevron={false}
+                  />
+                ) : null}
                 {showStopAction ? (
                   <ComposerToolbarButton
                     accessibilityLabel="Stop"
@@ -1091,6 +1119,16 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           onSave={props.onSaveGoalEditor}
           onClear={props.onClearGoalEditor}
           onClose={props.onCloseGoalEditor}
+        />
+      ) : null}
+
+      {props.executionGoalState ? (
+        <CodexExecutionGoalSheet
+          state={props.executionGoalState}
+          onRefresh={props.onRefreshExecutionGoal}
+          onPause={props.onPauseExecutionGoal}
+          onClear={props.onClearExecutionGoal}
+          onClose={props.onCloseExecutionGoal}
         />
       ) : null}
 

@@ -25,7 +25,9 @@ import {
   ProviderApprovalDecision,
   ThreadId,
   ProviderSendTurnInput,
+  type ProviderExecutionGoalGetResult,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
@@ -1624,6 +1626,12 @@ function mapToRuntimeEvents(
     ];
   }
 
+  // Unmapped Codex notifications intentionally produce no runtime events.
+  // This includes `thread/goal/updated` and `thread/goal/cleared`: the
+  // Codex-native execution goal is provider-owned live session state, read
+  // on demand via the execution-goal RPCs. Projecting it here would create
+  // canonical goal history T3 deliberately does not keep, and would risk
+  // blurring it into the pinned T3 thread goal (asserted in tests).
   return [];
 }
 
@@ -1880,6 +1888,88 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
     );
 
+  /**
+   * Codex reports goal timestamps as int64 Unix SECONDS; the contract wants
+   * ISO strings. Range-guarded so a corrupt int64 surfaces as a request
+   * error instead of an invalid IsoDateTime. Returns null when unusable.
+   */
+  const codexGoalIsoDateTime = (seconds: number): string | null => {
+    if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > 1e12) {
+      return null;
+    }
+    return DateTime.formatIso(DateTime.makeUnsafe(seconds * 1000));
+  };
+
+  /**
+   * Maps Codex's live ThreadGoal onto the provider-neutral snapshot. Fails
+   * the request rather than inventing a timestamp Codex did not report.
+   */
+  const toExecutionGoalResult = (
+    response: EffectCodexSchema.V2ThreadGoalGetResponse,
+    threadId: ThreadId,
+  ): Effect.Effect<ProviderExecutionGoalGetResult, ProviderAdapterRequestError> => {
+    const goal = response.goal ?? null;
+    if (goal === null) {
+      return Effect.succeed({ goal: null });
+    }
+    const createdAt = codexGoalIsoDateTime(goal.createdAt);
+    const updatedAt = codexGoalIsoDateTime(goal.updatedAt);
+    if (createdAt === null || updatedAt === null) {
+      return Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/goal/get",
+          detail: `Codex reported an unusable goal timestamp for thread ${threadId}.`,
+        }),
+      );
+    }
+    return Effect.succeed({
+      goal: {
+        threadId,
+        objective: goal.objective,
+        status: goal.status,
+        tokensUsed: goal.tokensUsed,
+        ...(goal.tokenBudget !== undefined && goal.tokenBudget !== null
+          ? { tokenBudget: goal.tokenBudget }
+          : {}),
+        timeUsedSeconds: goal.timeUsedSeconds,
+        createdAt,
+        updatedAt,
+      },
+    });
+  };
+
+  const getExecutionGoal: CodexAdapterShape["getExecutionGoal"] = (threadId) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) => session.runtime.getExecutionGoal),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/goal/get", cause),
+      ),
+      Effect.flatMap((response) => toExecutionGoalResult(response, threadId)),
+    );
+
+  const pauseExecutionGoal: CodexAdapterShape["pauseExecutionGoal"] = (threadId) =>
+    requireSession(threadId).pipe(
+      Effect.andThen((session) => session.runtime.pauseExecutionGoal),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/goal/set", cause),
+      ),
+    );
+
+  const clearExecutionGoal: CodexAdapterShape["clearExecutionGoal"] = (threadId) =>
+    requireSession(threadId).pipe(
+      Effect.andThen((session) => session.runtime.clearExecutionGoal),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/goal/clear", cause),
+      ),
+    );
+
   const readThread: CodexAdapterShape["readThread"] = (threadId) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) => session.runtime.readThread),
@@ -2016,6 +2106,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     sendTurn,
     interruptTurn,
     compactContext,
+    getExecutionGoal,
+    pauseExecutionGoal,
+    clearExecutionGoal,
     readThread,
     rollbackThread,
     uploadFeedback,

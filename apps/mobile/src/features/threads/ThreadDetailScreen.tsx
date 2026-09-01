@@ -3,6 +3,7 @@ import {
   resolveThreadGoalDisplay,
   type ThreadGoalEditorState,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
+import type { ExecutionGoalPanelState } from "@t3tools/client-runtime/state/executionGoalPanel";
 import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/threads";
 import { useKeyboardChatComposerInset, useKeyboardScrollToEnd } from "@legendapp/list/keyboard";
 import type { LegendListRef } from "@legendapp/list/react-native";
@@ -120,6 +121,12 @@ export interface ThreadDetailScreenProps {
   readonly onChangeGoalDraft: (text: string) => void;
   readonly onSaveGoalEditor: () => void;
   readonly onClearGoalEditor: () => void;
+  readonly executionGoalState: ExecutionGoalPanelState | null;
+  readonly onOpenExecutionGoal: () => void;
+  readonly onRefreshExecutionGoal: () => void;
+  readonly onPauseExecutionGoal: () => void;
+  readonly onClearExecutionGoal: () => void;
+  readonly onCloseExecutionGoal: () => void;
   readonly serverConfig: T3ServerConfig | null;
   readonly layoutVariant?: LayoutVariant;
   readonly usesAutomaticContentInsets?: boolean;
@@ -787,6 +794,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                 onChangeGoalDraft={props.onChangeGoalDraft}
                 onSaveGoalEditor={props.onSaveGoalEditor}
                 onClearGoalEditor={props.onClearGoalEditor}
+                executionGoalState={props.executionGoalState}
+                onOpenExecutionGoal={props.onOpenExecutionGoal}
+                onRefreshExecutionGoal={props.onRefreshExecutionGoal}
+                onPauseExecutionGoal={props.onPauseExecutionGoal}
+                onClearExecutionGoal={props.onClearExecutionGoal}
+                onCloseExecutionGoal={props.onCloseExecutionGoal}
                 environmentId={props.environmentId}
                 projectCwd={props.projectWorkspaceRoot}
                 bottomInset={composerBottomInset}

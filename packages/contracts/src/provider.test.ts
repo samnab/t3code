@@ -4,6 +4,9 @@ import * as Schema from "effect/Schema";
 import { ThreadId } from "./baseSchemas.ts";
 import {
   ProviderEvent,
+  ProviderExecutionGoalGetResult,
+  ProviderExecutionGoalSnapshot,
+  ProviderExecutionGoalError,
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
@@ -18,6 +21,9 @@ const decodeProviderSession = Schema.decodeUnknownSync(ProviderSession);
 const decodeProviderEvent = Schema.decodeUnknownSync(ProviderEvent);
 const decodeProviderUploadFeedbackInput = Schema.decodeUnknownSync(ProviderUploadFeedbackInput);
 const decodeProviderUploadFeedbackResult = Schema.decodeUnknownSync(ProviderUploadFeedbackResult);
+const decodeExecutionGoalSnapshot = Schema.decodeUnknownSync(ProviderExecutionGoalSnapshot);
+const decodeExecutionGoalGetResult = Schema.decodeUnknownSync(ProviderExecutionGoalGetResult);
+const decodeExecutionGoalError = Schema.decodeUnknownSync(ProviderExecutionGoalError);
 
 function getOptionValue(
   options: ReadonlyArray<{ id: string; value: unknown }> | undefined,
@@ -263,5 +269,53 @@ describe("providerInstanceId routing key (slice-2 invariant)", () => {
         runtimeMode: "full-access",
       }),
     ).toThrow();
+  });
+});
+
+describe("ProviderExecutionGoalSnapshot", () => {
+  const goalSnapshot = {
+    threadId: "thread-1",
+    objective: "ship the login fix",
+    status: "usageLimited",
+    tokensUsed: 12345,
+    tokenBudget: null,
+    timeUsedSeconds: 200,
+    createdAt: "2026-04-15T17:00:00.000Z",
+    updatedAt: "2026-04-15T17:01:00.000Z",
+  };
+
+  it("accepts every Codex status literally", () => {
+    for (const status of [
+      "active",
+      "paused",
+      "blocked",
+      "usageLimited",
+      "budgetLimited",
+      "complete",
+    ]) {
+      expect(decodeExecutionGoalSnapshot({ ...goalSnapshot, status }).status).toBe(status);
+    }
+  });
+
+  it("keeps an absent tokenBudget absent and a null one null", () => {
+    const { tokenBudget: _omitted, ...withoutBudget } = goalSnapshot;
+    expect(decodeExecutionGoalSnapshot(withoutBudget).tokenBudget).toBeUndefined();
+    expect(decodeExecutionGoalSnapshot(goalSnapshot).tokenBudget).toBeNull();
+  });
+
+  it("rejects an unknown status so provider vocabulary cannot drift silently", () => {
+    expect(() => decodeExecutionGoalSnapshot({ ...goalSnapshot, status: "expired" })).toThrow();
+  });
+
+  it("decodes a null goal result and the typed error reason", () => {
+    expect(decodeExecutionGoalGetResult({ goal: null }).goal).toBeNull();
+    const error = decodeExecutionGoalError({
+      _tag: "ProviderExecutionGoalError",
+      threadId: "thread-1",
+      reason: "no-live-session",
+      message: "Unknown codex adapter thread: thread-1",
+    });
+    expect(error.reason).toBe("no-live-session");
+    expect(error.threadId).toBe("thread-1");
   });
 });

@@ -46,6 +46,10 @@ A user-visible log item attached to a thread. In [the contracts][1], activities 
 
 A short, durable, T3-owned statement of intent for a thread, set with `/goal` or the composer's goal pill and editor. It rides thread metadata (see the `goal` field in [the contracts][1]), never enters provider prompts or chat history, and is purely user-facing state.
 
+#### Execution goal (Codex-native)
+
+A provider-owned objective that Codex itself tracks for a live session (objective, status, token budget, time used), read on demand through `thread/goal/*` on the live provider session. Unlike the T3-owned [Goal](#goal), it is never persisted, projected, or synced into thread state — T3 only reads it, pauses it, or clears it at the user's request, and `thread/goal/updated|cleared` notifications are deliberately dropped instead of becoming runtime events.
+
 ### Orchestration
 
 Orchestration is the server-side domain layer that turns runtime activity into stable app state. The main entry point is [OrchestrationEngine.ts][7], with core logic in [decider.ts][8] and [projector.ts][4].

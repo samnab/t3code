@@ -95,6 +95,43 @@ rl.on("line", (line) => {
     }
     return;
   }
+  if (
+    method === "thread/goal/get" ||
+    method === "thread/goal/set" ||
+    method === "thread/goal/clear"
+  ) {
+    // Record the exact goal request (sidecar file the test reads), then
+    // answer from the script: goalGet is the ThreadGoal (or null),
+    // goalMethodNotFound simulates an outdated Codex binary.
+    NodeFS.appendFileSync(
+      `${process.env.T3_CODEX_COLLAB_SCRIPT}.goalCalls`,
+      `${JSON.stringify({ method, params: message.params })}\n`,
+    );
+    if (script.goalMethodNotFound === true) {
+      write({ id, error: { code: -32601, message: "Method not found" } });
+      return;
+    }
+    if (method === "thread/goal/get") {
+      write({ id, result: { goal: script.goalGet ?? null } });
+      return;
+    }
+    if (method === "thread/goal/set") {
+      const goal = script.goalGet ?? {
+        threadId: message.params?.threadId,
+        objective: "ship the fix",
+        status: "paused",
+        tokenBudget: null,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        createdAt: 1776272400,
+        updatedAt: 1776272460,
+      };
+      write({ id, result: { goal: { ...goal, status: message.params?.status ?? goal.status } } });
+      return;
+    }
+    write({ id, result: { cleared: true } });
+    return;
+  }
   if (method === "thread/compact/start") {
     // Record the exact compact request (sidecar file the test reads) and
     // answer like the real app server: accept immediately, then signal the

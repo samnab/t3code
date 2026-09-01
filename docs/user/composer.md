@@ -31,7 +31,9 @@ editor live in the thread composer's toolbar and open the same editor as a botto
 `/goal` on its own opens the editor with the current goal, and `/goal clear` removes the goal.
 Goals are T3 Code state: they are stored with the thread, stay in sync across your devices, and
 are never sent to the agent. The word `clear` is reserved, so a goal cannot literally be `clear`.
-A goal needs at least one visible character and fits within 1,024 characters.
+A goal needs at least one visible character and fits within 1,024 characters. This is separate
+from a Codex execution goal, which Codex itself tracks in a live session — see
+[Codex](./providers-codex.md#codex-execution-goals).
 
 On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from a new thread to
 start it in the background. T3 Code opens another new thread and shows an **Open** action for the

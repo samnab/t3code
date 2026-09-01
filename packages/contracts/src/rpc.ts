@@ -76,6 +76,9 @@ import {
   SubagentControlError,
 } from "./orchestration.ts";
 import {
+  ProviderExecutionGoalError,
+  ProviderExecutionGoalGetResult,
+  ProviderExecutionGoalInput,
   ProviderUploadFeedbackError,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
@@ -229,6 +232,9 @@ export const WS_METHODS = {
 
   // Provider methods
   providerUploadFeedback: "provider.uploadFeedback",
+  providerExecutionGoalGet: "provider.executionGoal.get",
+  providerExecutionGoalPause: "provider.executionGoal.pause",
+  providerExecutionGoalClear: "provider.executionGoal.clear",
 
   // VCS methods
   vcsPull: "vcs.pull",
@@ -701,6 +707,27 @@ export const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFee
   error: Schema.Union([ProviderUploadFeedbackError, EnvironmentAuthorizationError]),
 });
 
+// Live provider session reads/writes, deliberately NOT orchestration
+// commands: a provider execution goal has no canonical history or state in
+// T3, so get/pause/clear go straight to the live session and never persist.
+export const WsProviderExecutionGoalGetRpc = Rpc.make(WS_METHODS.providerExecutionGoalGet, {
+  payload: ProviderExecutionGoalInput,
+  success: ProviderExecutionGoalGetResult,
+  error: Schema.Union([ProviderExecutionGoalError, EnvironmentAuthorizationError]),
+});
+
+export const WsProviderExecutionGoalPauseRpc = Rpc.make(WS_METHODS.providerExecutionGoalPause, {
+  payload: ProviderExecutionGoalInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([ProviderExecutionGoalError, EnvironmentAuthorizationError]),
+});
+
+export const WsProviderExecutionGoalClearRpc = Rpc.make(WS_METHODS.providerExecutionGoalClear, {
+  payload: ProviderExecutionGoalInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([ProviderExecutionGoalError, EnvironmentAuthorizationError]),
+});
+
 export const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusInput,
   success: VcsStatusStreamEvent,
@@ -1100,6 +1127,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,
   WsProviderUploadFeedbackRpc,
+  WsProviderExecutionGoalGetRpc,
+  WsProviderExecutionGoalPauseRpc,
+  WsProviderExecutionGoalClearRpc,
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,

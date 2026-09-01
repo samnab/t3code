@@ -268,6 +268,22 @@ export function readEnvironmentSupportsPinReorder(environmentId: EnvironmentId):
   );
 }
 
+/** Whether the thread's live session provider exposes native execution
+ * goals (Codex on a current server). Gates the thread action menu entry;
+ * absent on old servers and other providers so the control hides. */
+export function readThreadSupportsExecutionGoal(ref: ScopedThreadRef): boolean {
+  const shell = appAtomRegistry.get(environmentThreadShells.threadShellAtom(ref));
+  const instanceId = shell?.session?.providerInstanceId;
+  if (shell?.session == null || instanceId === undefined) {
+    return false;
+  }
+  const provider = appAtomRegistry
+    .get(environmentServerConfigsAtom)
+    .get(ref.environmentId)
+    ?.providers.find((entry) => entry.instanceId === instanceId);
+  return provider?.executionGoal === "native";
+}
+
 export function readThreadDetail(ref: ScopedThreadRef): EnvironmentThread | null {
   return appAtomRegistry.get(environmentThreadDetails.detailAtom(ref));
 }

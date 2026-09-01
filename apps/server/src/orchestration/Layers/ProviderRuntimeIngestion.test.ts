@@ -110,6 +110,9 @@ function createProviderServiceHarness() {
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     compactContext: () => unsupported(),
+    getExecutionGoal: () => unsupported(),
+    pauseExecutionGoal: () => unsupported(),
+    clearExecutionGoal: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     getInstanceInfo: (instanceId) => {

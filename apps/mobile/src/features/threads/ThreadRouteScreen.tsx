@@ -803,6 +803,12 @@ function ThreadRouteContent(
           onChangeGoalDraft={composer.changeThreadGoalDraft}
           onSaveGoalEditor={composer.saveThreadGoalFromEditor}
           onClearGoalEditor={composer.clearThreadGoalFromEditor}
+          executionGoalState={composer.executionGoalPanelState}
+          onOpenExecutionGoal={composer.openExecutionGoalPanel}
+          onRefreshExecutionGoal={composer.refreshExecutionGoalPanel}
+          onPauseExecutionGoal={composer.pauseExecutionGoalPanel}
+          onClearExecutionGoal={composer.clearExecutionGoalPanel}
+          onCloseExecutionGoal={composer.closeExecutionGoalPanel}
           layoutVariant={layout.variant}
           usesAutomaticContentInsets={usesNativeHeaderGlass}
           onOpenConnectionEditor={handleOpenConnectionEditor}

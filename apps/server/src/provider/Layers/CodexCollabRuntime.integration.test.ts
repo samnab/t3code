@@ -83,6 +83,16 @@ function buildScript() {
 
 const scriptPath = NodePath.join(import.meta.dirname, "../testFixtures/.collab-script.json");
 const peerPath = NodePath.join(import.meta.dirname, "../testFixtures/codexCollabMockPeer.sh");
+/** Sidecar the mock peer appends every thread/goal/* request to. Derived from
+ * the script path, so it is removed wherever the script is. */
+const goalCallsPath = `${scriptPath}.goalCalls`;
+
+/** Finalizer for the goal tests: the peer writes the sidecar on any goal
+ * request, so both artifacts leave the fixtures directory clean. */
+const removeGoalScriptArtifacts = Effect.sync(() => {
+  NodeFS.rmSync(scriptPath, { force: true });
+  NodeFS.rmSync(goalCallsPath, { force: true });
+});
 
 describe("CodexSessionRuntime collab integration", () => {
   it.effect("replays the captured fan-out into synthetic agent events without child leaks", () =>
@@ -503,6 +513,116 @@ describe("CodexSessionRuntime compaction", () => {
         .map((line) => JSON.parse(line) as { threadId?: string });
       // The request must target the provider's own thread id, not T3's.
       assert.deepEqual(requested, [{ threadId: ROOT }]);
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+const GOAL_FIXTURE = {
+  threadId: "irrelevant-provider-id",
+  objective: "ship the login fix",
+  status: "active",
+  tokenBudget: 100000,
+  tokensUsed: 12345,
+  timeUsedSeconds: 200,
+  createdAt: 1776272400,
+  updatedAt: 1776272460,
+} as const;
+
+describe("CodexSessionRuntime execution goal", () => {
+  it.live("reads, pauses, and clears the provider thread's goal with exact wire params", () =>
+    Effect.gen(function* () {
+      const script = {
+        rootThreadId: ROOT,
+        notifications: [],
+        serverRequests: [],
+        goalGet: GOAL_FIXTURE,
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      NodeFS.rmSync(goalCallsPath, { force: true });
+      yield* Effect.addFinalizer(() => removeGoalScriptArtifacts);
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-execution-goal-integration"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+
+      yield* runtime.start();
+
+      const read = yield* runtime.getExecutionGoal;
+      assert.equal(read.goal?.objective, "ship the login fix");
+      assert.equal(read.goal?.tokenBudget, 100000);
+
+      yield* runtime.pauseExecutionGoal;
+      yield* runtime.clearExecutionGoal;
+
+      const calls = NodeFS.readFileSync(goalCallsPath, "utf8")
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as { method: string; params: unknown });
+      // Every request targets the provider's own thread id. Pause carries
+      // ONLY threadId + status; clear carries ONLY the thread id.
+      assert.deepEqual(calls, [
+        { method: "thread/goal/get", params: { threadId: ROOT } },
+        { method: "thread/goal/set", params: { threadId: ROOT, status: "paused" } },
+        { method: "thread/goal/clear", params: { threadId: ROOT } },
+      ]);
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("normalizes an absent goal to null", () =>
+    Effect.gen(function* () {
+      const script = { rootThreadId: ROOT, notifications: [], serverRequests: [] };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      yield* Effect.addFinalizer(() => removeGoalScriptArtifacts);
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-execution-goal-empty"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      yield* runtime.start();
+
+      const read = yield* runtime.getExecutionGoal;
+      assert.equal(read.goal, null);
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("surfaces method-not-found as a truthful request error, not silent success", () =>
+    Effect.gen(function* () {
+      const script = {
+        rootThreadId: ROOT,
+        notifications: [],
+        serverRequests: [],
+        goalMethodNotFound: true,
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      yield* Effect.addFinalizer(() => removeGoalScriptArtifacts);
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-execution-goal-old-codex"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      yield* runtime.start();
+
+      const result = yield* runtime.getExecutionGoal.pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
 
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

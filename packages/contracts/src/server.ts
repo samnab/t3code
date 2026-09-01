@@ -134,6 +134,16 @@ export type ServerProviderContinuation = typeof ServerProviderContinuation.Type;
 export const ServerProviderContextCompaction = Schema.Literals(["prompt", "native"]);
 export type ServerProviderContextCompaction = typeof ServerProviderContextCompaction.Type;
 
+/**
+ * Whether the provider exposes a native, provider-owned execution goal for
+ * its threads. Today only Codex, via `thread/goal/*` on its live sessions.
+ *
+ * Absent means the provider (or an older server) does not support reading
+ * provider execution goals; clients hide the control entirely.
+ */
+export const ServerProviderExecutionGoal = Schema.Literals(["native"]);
+export type ServerProviderExecutionGoal = typeof ServerProviderExecutionGoal.Type;
+
 export const ServerProviderVersionAdvisoryStatus = Schema.Literals([
   "unknown",
   "current",
@@ -186,6 +196,8 @@ export const ServerProvider = Schema.Struct({
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
   // See ServerProviderContextCompaction. Absent = no manual compaction.
   contextCompaction: Schema.optional(ServerProviderContextCompaction),
+  // See ServerProviderExecutionGoal. Absent = no provider execution goals.
+  executionGoal: Schema.optional(ServerProviderExecutionGoal),
   enabled: Schema.Boolean,
   installed: Schema.Boolean,
   version: Schema.NullOr(TrimmedNonEmptyString),

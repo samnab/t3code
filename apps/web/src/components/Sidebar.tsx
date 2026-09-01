@@ -107,7 +107,7 @@ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
-import { useProjects, useThreadShells } from "../state/entities";
+import { useProjects, useThreadShells, readThreadSupportsExecutionGoal } from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
@@ -122,6 +122,7 @@ import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat"
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
+import { openExecutionGoalDialog } from "./chat/CodexExecutionGoalDialog";
 import {
   animatePinnedLayoutChanges,
   buildBulkTitleRegenerationContextMenuItem,
@@ -3091,6 +3092,7 @@ export default function Sidebar() {
                 pinning: supportsPinning,
                 titleRegeneration: supportsTitleRegeneration,
               },
+              executionGoal: readThreadSupportsExecutionGoal(threadRef),
               snoozePresets,
             }),
             position,
@@ -3166,6 +3168,9 @@ export default function Sidebar() {
           }
           case "mark-unread":
             markThreadUnread(threadKey, thread.latestTurn?.completedAt);
+            return;
+          case "execution-goal":
+            openExecutionGoalDialog(threadRef);
             return;
           case "copy-path":
             if (!threadWorkspacePath) {

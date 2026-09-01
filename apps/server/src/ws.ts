@@ -45,6 +45,7 @@ import {
   ProjectSearchEntriesError,
   ProjectWriteFileError,
   ProviderUploadFeedbackError,
+  ProviderExecutionGoalError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   type ServerSelfUpdateError,
@@ -88,6 +89,7 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderAdapterRegistry from "./provider/Services/ProviderAdapterRegistry.ts";
+import type { ProviderServiceError } from "./provider/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import {
@@ -166,6 +168,40 @@ export const resolveFileManagerRevealKindForConfig = <E, R>(
 
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
+}
+
+/**
+ * Classify a ProviderService execution-goal failure into the wire error's
+ * reason vocabulary so clients can name the recovery: unsupported provider,
+ * no live session to ask, or the provider refused the request.
+ */
+function toExecutionGoalRpcError(
+  threadId: ThreadId,
+  cause: ProviderServiceError,
+): ProviderExecutionGoalError {
+  if (cause._tag === "ProviderValidationError") {
+    return new ProviderExecutionGoalError({
+      threadId,
+      reason: "unsupported",
+      message: cause.issue,
+    });
+  }
+  if (
+    cause._tag === "ProviderSessionNotFoundError" ||
+    cause._tag === "ProviderAdapterSessionNotFoundError" ||
+    cause._tag === "ProviderAdapterSessionClosedError"
+  ) {
+    return new ProviderExecutionGoalError({
+      threadId,
+      reason: "no-live-session",
+      message: cause.message,
+    });
+  }
+  return new ProviderExecutionGoalError({
+    threadId,
+    reason: "provider-error",
+    message: cause.message,
+  });
 }
 
 /** Preserve the setup runner's broader pre-refactor message normalization. */
@@ -1635,6 +1671,32 @@ const makeWsRpcLayer = (
                     cause,
                   }),
               ),
+            ),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.providerExecutionGoalGet]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerExecutionGoalGet,
+            providerService
+              .getExecutionGoal(input)
+              .pipe(Effect.mapError((cause) => toExecutionGoalRpcError(input.threadId, cause))),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.providerExecutionGoalPause]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerExecutionGoalPause,
+            providerService.pauseExecutionGoal(input).pipe(
+              Effect.mapError((cause) => toExecutionGoalRpcError(input.threadId, cause)),
+              Effect.as({}),
+            ),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.providerExecutionGoalClear]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerExecutionGoalClear,
+            providerService.clearExecutionGoal(input).pipe(
+              Effect.mapError((cause) => toExecutionGoalRpcError(input.threadId, cause)),
+              Effect.as({}),
             ),
             { "rpc.aggregate": "provider" },
           ),

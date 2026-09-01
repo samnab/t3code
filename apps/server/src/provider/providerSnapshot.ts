@@ -4,6 +4,7 @@ import type {
   ServerProvider,
   ServerProviderAuth,
   ServerProviderContextCompaction,
+  ServerProviderExecutionGoal,
   ServerProviderSkill,
   ServerProviderSlashCommand,
   ServerProviderModel,
@@ -60,6 +61,8 @@ export interface ServerProviderPresentation {
   readonly requiresNewThreadForModelChange?: boolean;
   /** How manual context compaction is requested; absent = unsupported. */
   readonly contextCompaction?: ServerProviderContextCompaction;
+  /** Whether the provider exposes native execution goals; absent = unsupported. */
+  readonly executionGoal?: ServerProviderExecutionGoal;
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
@@ -244,6 +247,9 @@ export function buildServerProvider(input: {
       : {}),
     ...(input.presentation.contextCompaction !== undefined
       ? { contextCompaction: input.presentation.contextCompaction }
+      : {}),
+    ...(input.presentation.executionGoal !== undefined
+      ? { executionGoal: input.presentation.executionGoal }
       : {}),
     enabled: input.enabled,
     installed: input.probe.installed,

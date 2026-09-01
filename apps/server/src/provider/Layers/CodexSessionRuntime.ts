@@ -198,6 +198,18 @@ export interface CodexSessionRuntimeShape {
    * notification and `contextCompaction` items.
    */
   readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
+  /**
+   * Codex-native execution-goal access for this session's provider thread
+   * (`thread/goal/get|set|clear`). Read returns the provider's snapshot with
+   * `goal ?? null` normalized; pause sends only `{threadId, status: "paused"}`;
+   * clear sends only the thread id. No T3 goal state is touched.
+   */
+  readonly getExecutionGoal: Effect.Effect<
+    EffectCodexSchema.V2ThreadGoalGetResponse,
+    CodexSessionRuntimeError
+  >;
+  readonly pauseExecutionGoal: Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly clearExecutionGoal: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
@@ -2190,6 +2202,26 @@ export const makeCodexSessionRuntime = (
       compactThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
         yield* client.request("thread/compact/start", {
+          threadId: providerThreadId,
+        });
+      }),
+      getExecutionGoal: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        const response = yield* client.request("thread/goal/get", {
+          threadId: providerThreadId,
+        });
+        return { goal: response.goal ?? null };
+      }),
+      pauseExecutionGoal: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        yield* client.request("thread/goal/set", {
+          threadId: providerThreadId,
+          status: "paused",
+        });
+      }),
+      clearExecutionGoal: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        yield* client.request("thread/goal/clear", {
           threadId: providerThreadId,
         });
       }),

@@ -133,6 +133,74 @@ export class ProviderUploadFeedbackError extends Schema.TaggedErrorClass<Provide
   }
 }
 
+/**
+ * Live status of a provider-native execution goal, as reported by the
+ * provider itself. Codex's vocabulary; other providers do not report
+ * execution goals at all.
+ */
+export const ProviderExecutionGoalStatus = Schema.Literals([
+  "active",
+  "paused",
+  "blocked",
+  "usageLimited",
+  "budgetLimited",
+  "complete",
+]);
+export type ProviderExecutionGoalStatus = typeof ProviderExecutionGoalStatus.Type;
+
+/**
+ * One provider-owned execution-goal snapshot, read live from the provider
+ * session. Never persisted, projected, or reconciled into thread state — the
+ * provider's `updatedAt` is the only freshness signal. Deliberately distinct
+ * from the T3-owned `ThreadGoal` on thread metadata.
+ */
+export const ProviderExecutionGoalSnapshot = Schema.Struct({
+  threadId: ThreadId,
+  objective: TrimmedNonEmptyString,
+  status: ProviderExecutionGoalStatus,
+  tokensUsed: Schema.Number,
+  tokenBudget: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  timeUsedSeconds: Schema.Number,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type ProviderExecutionGoalSnapshot = typeof ProviderExecutionGoalSnapshot.Type;
+
+/** Thread-scoped input shared by the execution-goal get/pause/clear RPCs. */
+export const ProviderExecutionGoalInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ProviderExecutionGoalInput = typeof ProviderExecutionGoalInput.Type;
+
+/** Current goal as the live provider session reports it; null = none set. */
+export const ProviderExecutionGoalGetResult = Schema.Struct({
+  goal: Schema.NullOr(ProviderExecutionGoalSnapshot),
+});
+export type ProviderExecutionGoalGetResult = typeof ProviderExecutionGoalGetResult.Type;
+
+/**
+ * Why an execution-goal RPC failed. `unsupported` — the thread's provider has
+ * no native execution-goal protocol (or the server predates the RPCs);
+ * `no-live-session` — the thread has no provider session to ask, and none is
+ * recovered implicitly; `provider-error` — the provider refused or failed
+ * the request (includes method-not-found on an outdated Codex install).
+ */
+export const ProviderExecutionGoalErrorReason = Schema.Literals([
+  "unsupported",
+  "no-live-session",
+  "provider-error",
+]);
+export type ProviderExecutionGoalErrorReason = typeof ProviderExecutionGoalErrorReason.Type;
+
+export class ProviderExecutionGoalError extends Schema.TaggedErrorClass<ProviderExecutionGoalError>()(
+  "ProviderExecutionGoalError",
+  {
+    threadId: ThreadId,
+    reason: ProviderExecutionGoalErrorReason,
+    message: Schema.String,
+  },
+) {}
+
 const ProviderEventKind = Schema.Literals(["session", "notification", "request", "error"]);
 
 export const ProviderEvent = Schema.Struct({

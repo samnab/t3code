@@ -23,6 +23,7 @@ import type {
   ProviderStopSessionInput,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
+  ProviderExecutionGoalGetResult,
   ThreadId,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
@@ -121,6 +122,25 @@ export interface ProviderServiceShape {
   readonly uploadFeedback: (
     input: ProviderUploadFeedbackInput,
   ) => Effect.Effect<ProviderUploadFeedbackResult, ProviderServiceError>;
+
+  /**
+   * Read the thread's live provider-native execution goal. Unsupported
+   * providers and missing live sessions fail truthfully; nothing recovers,
+   * persists, or reconciles the goal into thread state.
+   */
+  readonly getExecutionGoal: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<ProviderExecutionGoalGetResult, ProviderServiceError>;
+
+  /** Pause an active provider-native execution goal on the live session. */
+  readonly pauseExecutionGoal: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Clear the thread's provider-native execution goal on the live session. */
+  readonly clearExecutionGoal: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Canonical provider runtime event stream.

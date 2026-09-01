@@ -21,6 +21,7 @@ import type {
   ProviderSessionStartInput,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
+  ProviderExecutionGoalGetResult,
   SubagentControlError,
   SubagentControlPlaneStatus,
   ThreadId,
@@ -153,6 +154,18 @@ export interface ProviderAdapterShape<TError> {
    * request error instead.
    */
   readonly compactContext?: (threadId: ThreadId) => Effect.Effect<void, TError>;
+
+  /**
+   * Provider-native execution-goal reads and actions for one thread. Only
+   * adapters whose driver has a native execution-goal protocol (Codex's
+   * `thread/goal/*`) define these; absence is the truthful "unsupported"
+   * answer. Live-session only: no session means an error, never recovery.
+   */
+  readonly getExecutionGoal?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProviderExecutionGoalGetResult, TError>;
+  readonly pauseExecutionGoal?: (threadId: ThreadId) => Effect.Effect<void, TError>;
+  readonly clearExecutionGoal?: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
   /**
    * Stop all sessions owned by this adapter.

@@ -18,6 +18,29 @@ Common reasons:
 - switch to another account when one account hits limits
 - keep one shared Codex history instead of maintaining two separate Codex setups
 
+## Codex Execution Goals
+
+Codex can track an **execution goal** for a thread on its own: an objective it works toward with a
+token budget, time used, and a status it updates itself. T3 Code does not create or store these
+goals — it reads the one Codex already set for the live session.
+
+Open **Codex execution goal…** from the thread's action menu (click the thread title in the chat
+header, or right-click the thread in the sidebar). On mobile, use the flag button in the composer's
+expanded toolbar. The panel shows the objective, status, tokens used, time used, and when Codex
+last updated it. **Refresh** re-reads the live goal.
+
+You can also act on it:
+
+- **Pause** asks Codex to pause an active goal for this session.
+- **Clear** asks Codex to stop tracking the goal. Clearing asks for confirmation first.
+
+Reading and changing the execution goal needs a live Codex session for the thread. If Codex is too
+old to know execution goals, the panel says so — update the Codex CLI and try again.
+
+An execution goal is not the same as a [thread goal](./composer.md#thread-goals). A thread goal is
+a short note you keep in T3 Code that is never sent to the agent; an execution goal is Codex's own
+state, tracked only in the live Codex session.
+
 ## I Only Use One Codex Account
 
 Use the default provider.

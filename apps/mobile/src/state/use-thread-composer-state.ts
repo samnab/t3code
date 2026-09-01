@@ -25,6 +25,12 @@ import {
   threadGoalEditorReducer,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
 import {
+  createExecutionGoalPanelController,
+  executionGoalCanRefresh,
+  executionGoalPanelReducer,
+  type ExecutionGoalPanelState,
+} from "@t3tools/client-runtime/state/executionGoalPanel";
+import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
   submitCodexFeedback,
@@ -116,6 +122,38 @@ export function useThreadComposerState() {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+
+  // ── Codex execution goal ── Provider-owned live session state, pulled
+  // via the three execution-goal RPCs only; never the thread metadata path
+  // the T3 goal editor above uses.
+  const [executionGoalPanelState, dispatchExecutionGoalPanel] = useReducer(
+    executionGoalPanelReducer,
+    null,
+  );
+  const executionGoalStateRef = useRef<ExecutionGoalPanelState | null>(null);
+  executionGoalStateRef.current = executionGoalPanelState;
+  const executionGoalGet = useAtomCommand(threadEnvironment.executionGoalGet, {
+    reportFailure: false,
+  });
+  const executionGoalPause = useAtomCommand(threadEnvironment.executionGoalPause, {
+    reportFailure: false,
+  });
+  const executionGoalClear = useAtomCommand(threadEnvironment.executionGoalClear, {
+    reportFailure: false,
+  });
+  const executionGoalController = useMemo(
+    () =>
+      createExecutionGoalPanelController({
+        commands: {
+          get: executionGoalGet,
+          pause: executionGoalPause,
+          clear: executionGoalClear,
+        },
+        dispatch: dispatchExecutionGoalPanel,
+        state: () => executionGoalStateRef.current,
+      }),
+    [executionGoalGet, executionGoalPause, executionGoalClear],
+  );
 
   useEffect(() => {
     ensureComposerDraftsLoaded();
@@ -599,6 +637,49 @@ export function useThreadComposerState() {
     dispatchThreadGoalEditor({ type: "close" });
   }, []);
 
+  // Switching threads closes the execution-goal sheet: it belongs to the
+  // thread's live Codex session.
+  useEffect(() => {
+    if (!executionGoalPanelState || !selectedThreadKey) return;
+    if (executionGoalPanelState.threadKey !== selectedThreadKey) {
+      dispatchExecutionGoalPanel({ type: "close" });
+    }
+  }, [executionGoalPanelState, selectedThreadKey]);
+
+  const openExecutionGoalPanel = useCallback(() => {
+    if (!selectedThreadShell) return;
+    const target = {
+      threadKey: scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id),
+      environmentId: selectedThreadShell.environmentId,
+      threadId: selectedThreadShell.id,
+    };
+    dispatchExecutionGoalPanel({ type: "open", ...target });
+    void executionGoalController.fetch(target);
+  }, [executionGoalController, selectedThreadShell]);
+
+  const refreshExecutionGoalPanel = useCallback(() => {
+    const state = executionGoalStateRef.current;
+    if (!state || !executionGoalCanRefresh(state)) return;
+    dispatchExecutionGoalPanel({ type: "beginRefresh", threadKey: state.threadKey });
+    void executionGoalController.fetch({
+      threadKey: state.threadKey,
+      environmentId: state.environmentId,
+      threadId: state.threadId,
+    });
+  }, [executionGoalController]);
+
+  const pauseExecutionGoalPanel = useCallback(() => {
+    void executionGoalController.pause();
+  }, [executionGoalController]);
+
+  const clearExecutionGoalPanel = useCallback(() => {
+    void executionGoalController.clear();
+  }, [executionGoalController]);
+
+  const closeExecutionGoalPanel = useCallback(() => {
+    dispatchExecutionGoalPanel({ type: "close" });
+  }, []);
+
   const onRemoveBlockedQueuedMessage = useCallback((message: QueuedThreadMessage) => {
     void removeThreadOutboxMessage(message).catch((error: unknown) => {
       console.warn("[thread-outbox] failed to remove blocked /goal message", {
@@ -698,6 +779,12 @@ export function useThreadComposerState() {
     saveThreadGoalFromEditor,
     clearThreadGoalFromEditor,
     closeThreadGoalEditor,
+    executionGoalPanelState,
+    openExecutionGoalPanel,
+    refreshExecutionGoalPanel,
+    pauseExecutionGoalPanel,
+    clearExecutionGoalPanel,
+    closeExecutionGoalPanel,
     onRemoveBlockedQueuedMessage,
     onChangeDraftMessage,
     onPickDraftImages,

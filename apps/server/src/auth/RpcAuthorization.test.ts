@@ -43,6 +43,18 @@ describe("RPC authorization scopes", () => {
     );
   });
 
+  it("reads a provider execution goal under the read scope but pauses and clears under operate", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.providerExecutionGoalGet)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.providerExecutionGoalPause)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.providerExecutionGoalClear)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
   it("reads the reviewer menu under the same scope as the pull request it belongs to", () => {
     // The candidate list is a read like the detail beside it, and asking somebody for a review is
     // a write like every other pull request operation.

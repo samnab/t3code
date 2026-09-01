@@ -91,6 +91,23 @@ const ProviderCompactContextInput = Schema.Struct({
   threadId: ThreadId,
 });
 
+const ProviderExecutionGoalInput = Schema.Struct({
+  threadId: ThreadId,
+});
+
+const decodeExecutionGoalInput = (operation: string, payload: unknown) =>
+  decodeInputOrValidationError({
+    operation,
+    schema: ProviderExecutionGoalInput,
+    payload,
+  });
+
+const unsupportedExecutionGoal = (provider: ProviderDriverKind) =>
+  toValidationError(
+    "ProviderService.executionGoal",
+    `Provider '${provider}' does not support native execution goals.`,
+  );
+
 function toValidationError(
   operation: string,
   issue: string,
@@ -1204,6 +1221,56 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const getExecutionGoal: ProviderServiceMethod<"getExecutionGoal"> = Effect.fn("getExecutionGoal")(
+    function* (rawInput) {
+      const input = yield* decodeExecutionGoalInput("ProviderService.getExecutionGoal", rawInput);
+      // No recovery: an execution goal belongs to the live session a user is
+      // looking at, never a side effect of resurrecting one.
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.getExecutionGoal",
+        allowRecovery: false,
+      });
+      const get = routed.adapter.getExecutionGoal;
+      if (get === undefined) {
+        return yield* unsupportedExecutionGoal(routed.adapter.provider);
+      }
+      return yield* get(routed.threadId);
+    },
+  );
+
+  const pauseExecutionGoal: ProviderServiceMethod<"pauseExecutionGoal"> = Effect.fn(
+    "pauseExecutionGoal",
+  )(function* (rawInput) {
+    const input = yield* decodeExecutionGoalInput("ProviderService.pauseExecutionGoal", rawInput);
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.pauseExecutionGoal",
+      allowRecovery: false,
+    });
+    const pause = routed.adapter.pauseExecutionGoal;
+    if (pause === undefined) {
+      return yield* unsupportedExecutionGoal(routed.adapter.provider);
+    }
+    yield* pause(routed.threadId);
+  });
+
+  const clearExecutionGoal: ProviderServiceMethod<"clearExecutionGoal"> = Effect.fn(
+    "clearExecutionGoal",
+  )(function* (rawInput) {
+    const input = yield* decodeExecutionGoalInput("ProviderService.clearExecutionGoal", rawInput);
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.clearExecutionGoal",
+      allowRecovery: false,
+    });
+    const clear = routed.adapter.clearExecutionGoal;
+    if (clear === undefined) {
+      return yield* unsupportedExecutionGoal(routed.adapter.provider);
+    }
+    yield* clear(routed.threadId);
+  });
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
@@ -1277,6 +1344,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getInstanceInfo,
     rollbackConversation,
     uploadFeedback,
+    getExecutionGoal,
+    pauseExecutionGoal,
+    clearExecutionGoal,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

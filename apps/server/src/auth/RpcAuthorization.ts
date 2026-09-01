@@ -90,6 +90,12 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.attachmentsCreateUploadUrl]: AuthOrchestrationOperateScope,
   [WS_METHODS.attachmentsDelete]: AuthOrchestrationOperateScope,
   [WS_METHODS.providerUploadFeedback]: AuthOrchestrationOperateScope,
+  // Reading a live provider execution goal is a read like the snapshot it
+  // fetches; pausing or clearing one steers the provider session, so it sits
+  // with the other operate actions.
+  [WS_METHODS.providerExecutionGoalGet]: AuthOrchestrationReadScope,
+  [WS_METHODS.providerExecutionGoalPause]: AuthOrchestrationOperateScope,
+  [WS_METHODS.providerExecutionGoalClear]: AuthOrchestrationOperateScope,
   [WS_METHODS.subscribeVcsStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeResourceTelemetry]: AuthOrchestrationReadScope,
   [WS_METHODS.vcsRefreshStatus]: AuthOrchestrationReadScope,

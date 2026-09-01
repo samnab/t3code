@@ -17,6 +17,7 @@ export type ThreadActionMenuId =
   | "unsnooze"
   | "rename"
   | "regenerate-title"
+  | "execution-goal"
   | "mark-unread"
   | "copy"
   | "copy-path"
@@ -40,6 +41,8 @@ export interface ThreadActionMenuState {
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
   };
+  /** The thread's live session provider exposes native execution goals. */
+  readonly executionGoal: boolean;
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
 
@@ -106,6 +109,17 @@ export function buildThreadActionMenuItems(
         ]
       : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
+    // Codex-owned live session state; always named in full so it can never
+    // read as the T3 thread goal above the composer.
+    ...(state.executionGoal
+      ? [
+          {
+            id: "execution-goal" as const,
+            label: "Codex execution goal…",
+            icon: "flag",
+          },
+        ]
+      : []),
     {
       id: "copy",
       label: "Copy",

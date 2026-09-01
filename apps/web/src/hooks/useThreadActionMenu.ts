@@ -15,6 +15,7 @@ import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useCallback } from "react";
 
 import { resolveSnoozePresets, snoozeWakeDescription } from "../components/Sidebar.snooze";
+import { openExecutionGoalDialog } from "../components/chat/CodexExecutionGoalDialog";
 import {
   buildThreadActionMenuItems,
   type ThreadActionMenuId,
@@ -28,6 +29,7 @@ import {
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
+  readThreadSupportsExecutionGoal,
 } from "../state/entities";
 import { readLocalApi } from "../localApi";
 import { useUiStateStore } from "../uiStateStore";
@@ -143,6 +145,7 @@ export function useThreadActionMenu(input: {
           isRegeneratingTitle,
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
           supports,
+          executionGoal: readThreadSupportsExecutionGoal(threadRef),
           snoozePresets,
         });
         const clicked = await settlePromise(() => api.contextMenu.show(items, position));
@@ -232,6 +235,9 @@ export function useThreadActionMenu(input: {
             return;
           case "mark-unread":
             markThreadUnread(scopedThreadKey(threadRef), thread.latestTurn?.completedAt);
+            return;
+          case "execution-goal":
+            openExecutionGoalDialog(threadRef);
             return;
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;

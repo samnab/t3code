@@ -11,6 +11,7 @@ const baseState: ThreadActionMenuState = {
   isRegeneratingTitle: false,
   isRunning: false,
   supports: { settlement: true, snooze: true, pinning: true, titleRegeneration: true },
+  executionGoal: false,
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
   ],
@@ -34,6 +35,18 @@ describe("buildThreadActionMenuItems", () => {
         supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
       }),
     ).toEqual(["rename", "mark-unread", "copy", "archive", "delete"]);
+  });
+
+  it("offers the Codex execution goal only when the thread's provider declares it", () => {
+    expect(ids({ ...baseState, executionGoal: true })).toContain("execution-goal");
+    // Absent capability (other providers, old servers, no live session)
+    // hides the entry instead of dead-ending the click.
+    expect(ids({ ...baseState })).not.toContain("execution-goal");
+    const item = buildThreadActionMenuItems({ ...baseState, executionGoal: true }).find(
+      (candidate) => candidate.id === "execution-goal",
+    );
+    // The label names Codex in full so it can never read as the T3 goal.
+    expect(item?.label).toBe("Codex execution goal…");
   });
 
   it("includes branch items only for threads with a branch", () => {

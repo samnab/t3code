@@ -34,6 +34,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
+import type * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -90,6 +91,14 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   public readonly compactThreadImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
 
+  public readonly getExecutionGoalImpl = vi.fn(
+    (): Promise<EffectCodexSchema.V2ThreadGoalGetResponse> => Promise.resolve({ goal: null }),
+  );
+
+  public readonly pauseExecutionGoalImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
+
+  public readonly clearExecutionGoalImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
+
   public readonly readThreadImpl = vi.fn(
     (): Promise<CodexThreadSnapshot> =>
       Promise.resolve({
@@ -143,6 +152,12 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   compactThread = Effect.promise(() => this.compactThreadImpl());
+
+  getExecutionGoal = Effect.promise(() => this.getExecutionGoalImpl());
+
+  pauseExecutionGoal = Effect.promise(() => this.pauseExecutionGoalImpl());
+
+  clearExecutionGoal = Effect.promise(() => this.clearExecutionGoalImpl());
 
   readThread = Effect.promise(() => this.readThreadImpl());
 
@@ -1649,6 +1664,148 @@ compactLayer("CodexAdapter context compaction", (it) => {
       NodeAssert.ok(compactContext);
       const result = yield* compactContext(asThreadId("thread-no-session")).pipe(Effect.result);
       NodeAssert.equal(result._tag, "Failure");
+    }),
+  );
+});
+
+const GOAL_THREAD_FIXTURE = {
+  threadId: "provider-thread-1",
+  objective: "ship the login fix",
+  status: "active" as const,
+  tokenBudget: 100000,
+  tokensUsed: 12345,
+  timeUsedSeconds: 200,
+  createdAt: 1776272400,
+  updatedAt: 1776272460,
+};
+
+const executionGoalRuntimeFactory = makeRuntimeFactory();
+const executionGoalLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        makeRuntime: executionGoalRuntimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+executionGoalLayer("CodexAdapter execution goal", (it) => {
+  it.effect(
+    "maps Codex's goal snapshot truthfully (int64 seconds to ISO, absent budget omitted)",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          runtimeMode: "full-access",
+        });
+        const runtime = executionGoalRuntimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        runtime?.getExecutionGoalImpl.mockReturnValue(
+          Promise.resolve({ goal: { ...GOAL_THREAD_FIXTURE } }),
+        );
+
+        const getExecutionGoal = adapter.getExecutionGoal;
+        NodeAssert.ok(getExecutionGoal);
+        const result = yield* getExecutionGoal(asThreadId("thread-1"));
+
+        NodeAssert.equal(result.goal?.objective, "ship the login fix");
+        NodeAssert.equal(result.goal?.threadId, asThreadId("thread-1"));
+        NodeAssert.equal(result.goal?.tokenBudget, 100000);
+        NodeAssert.equal(result.goal?.createdAt, "2026-04-15T17:00:00.000Z");
+        NodeAssert.equal(result.goal?.updatedAt, "2026-04-15T17:01:00.000Z");
+      }),
+  );
+
+  it.effect("routes pause and clear to the session runtime", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = executionGoalRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      const pauseExecutionGoal = adapter.pauseExecutionGoal;
+      const clearExecutionGoal = adapter.clearExecutionGoal;
+      NodeAssert.ok(pauseExecutionGoal);
+      NodeAssert.ok(clearExecutionGoal);
+      yield* pauseExecutionGoal(asThreadId("thread-1"));
+      yield* clearExecutionGoal(asThreadId("thread-1"));
+
+      NodeAssert.equal(runtime?.pauseExecutionGoalImpl.mock.calls.length, 1);
+      NodeAssert.equal(runtime?.clearExecutionGoalImpl.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("fails truthfully when no live session owns the thread", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const getExecutionGoal = adapter.getExecutionGoal;
+      NodeAssert.ok(getExecutionGoal);
+      const error = yield* getExecutionGoal(asThreadId("thread-no-session")).pipe(Effect.flip);
+      NodeAssert.equal(error._tag, "ProviderAdapterSessionNotFoundError");
+    }),
+  );
+
+  it.effect("drops thread/goal notifications instead of mapping runtime events", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = executionGoalRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      // First collected event proves the goal notifications produced none:
+      // had they mapped, they would precede the turn event in the queue.
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime?.emit({
+        id: asEventId("evt-goal-updated"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "thread/goal/updated",
+        threadId: asThreadId("thread-1"),
+        payload: { goal: GOAL_THREAD_FIXTURE, threadId: "provider-thread-1" },
+      });
+      yield* runtime?.emit({
+        id: asEventId("evt-goal-cleared"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "thread/goal/cleared",
+        threadId: asThreadId("thread-1"),
+        payload: { threadId: "provider-thread-1" },
+      });
+      yield* runtime?.emit({
+        id: asEventId("evt-thread-closed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "thread/closed",
+        threadId: asThreadId("thread-1"),
+        payload: { threadId: "provider-thread-1" },
+      });
+
+      const first = yield* Fiber.join(firstEventFiber);
+      NodeAssert.ok(first._tag === "Some");
+      if (first._tag === "Some") {
+        NodeAssert.equal(first.value.type, "thread.state.changed");
+      }
     }),
   );
 });

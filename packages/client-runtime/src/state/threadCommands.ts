@@ -219,5 +219,23 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    executionGoalGet: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:execution-goal-get",
+      tag: WS_METHODS.providerExecutionGoalGet,
+      scheduler,
+      concurrency,
+    }),
+    executionGoalPause: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:execution-goal-pause",
+      tag: WS_METHODS.providerExecutionGoalPause,
+      scheduler,
+      concurrency,
+    }),
+    executionGoalClear: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:execution-goal-clear",
+      tag: WS_METHODS.providerExecutionGoalClear,
+      scheduler,
+      concurrency,
+    }),
   };
 }
