@@ -1,5 +1,6 @@
 import type { FileDiffMetadata, SelectedLineRange, SelectionSide } from "@pierre/diffs";
 import type { PullRequestReviewPosition } from "@t3tools/contracts";
+import { trimThreadGoalWhitespace } from "@t3tools/shared/composerTrigger";
 import * as Schema from "effect/Schema";
 
 const ReviewCommentSelectionSchema = Schema.Struct({
@@ -230,7 +231,7 @@ export function appendReviewCommentsToPrompt(
 ): string {
   const blocks = comments.map(formatReviewCommentContext);
   if (blocks.length === 0) return prompt;
-  const trimmedPrompt = prompt.trim();
+  const trimmedPrompt = trimThreadGoalWhitespace(prompt);
   return trimmedPrompt.length > 0
     ? `${trimmedPrompt}\n\n${blocks.join("\n\n")}`
     : blocks.join("\n\n");

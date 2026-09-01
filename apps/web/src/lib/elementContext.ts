@@ -1,5 +1,6 @@
 import { type ThreadId } from "@t3tools/contracts";
 import type { PickedElementPayload, PickedElementStackFrame } from "@t3tools/contracts";
+import { trimThreadGoalWhitespace } from "@t3tools/shared/composerTrigger";
 
 const ELEMENT_CONTEXT_HTML_PREVIEW_LIMIT = 4000;
 const ELEMENT_CONTEXT_STYLES_LIMIT = 4000;
@@ -193,7 +194,9 @@ export function appendElementContextsToPrompt(
 ): string {
   const block = buildElementContextBlock(contexts);
   if (block.length === 0) return prompt;
-  const trimmed = prompt.trim();
+  // Policy trim (keeps U+FEFF et al.) so a FEFF-joined prompt can never
+  // reach the wire as a server-rejected /goal command.
+  const trimmed = trimThreadGoalWhitespace(prompt);
   return trimmed.length > 0 ? `${trimmed}\n\n${block}` : block;
 }
 

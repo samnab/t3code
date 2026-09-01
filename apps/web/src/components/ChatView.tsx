@@ -52,7 +52,11 @@ import {
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
-import { hasVisibleThreadGoalText, parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+import {
+  hasVisibleThreadGoalText,
+  parseThreadGoalCommand,
+  trimThreadGoalWhitespace,
+} from "@t3tools/shared/composerTrigger";
 import {
   threadGoalEditorCanSave,
   threadGoalEditorReducer,
@@ -246,19 +250,13 @@ import {
   type DraftId,
 } from "../composerDraftStore";
 import {
-  appendTerminalContextsToPrompt,
   formatTerminalContextLabel,
   stripInlineTerminalContextPlaceholders,
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
-import {
-  appendElementContextsToPrompt,
-  type ElementContextDraft,
-  formatElementContextLabel,
-} from "../lib/elementContext";
-import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
-import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
+import { type ElementContextDraft, formatElementContextLabel } from "../lib/elementContext";
+import { type ReviewCommentContext } from "../reviewCommentContext";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -342,6 +340,7 @@ import {
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   buildLoadingThreadFromShell,
+  buildOutgoingMessageText,
   buildThreadTurnInterruptInput,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
@@ -5774,7 +5773,10 @@ function ChatViewContent(props: ChatViewProps) {
     }
     if (!directAnnotation && showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
-        draftText: trimmed,
+        // Raw, placeholder-stripped draft: deriveComposerSendState's trimmed
+        // prompt is a native String.trim, which would strip a leading U+FEFF
+        // the /goal policy keeps as content.
+        draftText: stripInlineTerminalContextPlaceholders(promptForSend),
         planMarkdown: activeProposedPlan.planMarkdown,
       });
       const outgoingFollowUpText = formatOutgoingPrompt({
@@ -5861,18 +5863,13 @@ function ChatViewContent(props: ChatViewProps) {
     const composerElementContextsSnapshot = [...composerElementContexts];
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
     const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
-    const messageTextWithContexts = appendElementContextsToPrompt(
-      appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
-      composerElementContextsSnapshot,
-    );
-    const messageTextWithPreviewAnnotations = composerPreviewAnnotationsSnapshot.reduce(
-      (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
-      messageTextWithContexts,
-    );
-    const messageTextForSend = appendReviewCommentsToPrompt(
-      messageTextWithPreviewAnnotations,
-      composerReviewCommentsSnapshot,
-    );
+    const messageTextForSend = buildOutgoingMessageText({
+      prompt: promptForSend,
+      terminalContexts: composerTerminalContextsSnapshot,
+      elementContexts: composerElementContextsSnapshot,
+      previewAnnotations: composerPreviewAnnotationsSnapshot,
+      reviewComments: composerReviewCommentsSnapshot,
+    });
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
       model: ctxSelectedModel,
@@ -6447,8 +6444,8 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
 
-      const trimmed = text.trim();
-      if (!trimmed) {
+      const trimmed = trimThreadGoalWhitespace(text);
+      if (!hasVisibleThreadGoalText(trimmed)) {
         return;
       }
 

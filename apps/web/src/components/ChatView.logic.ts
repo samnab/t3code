@@ -1,10 +1,11 @@
 import {
   type EnvironmentId,
   isProviderDriverKind,
-  ProjectId,
   type MessageId,
   type ModelSelection,
+  type PreviewAnnotationPayload,
   type ProviderDriverKind,
+  ProjectId,
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -17,10 +18,15 @@ import * as Schema from "effect/Schema";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
 import {
+  appendTerminalContextsToPrompt,
   filterTerminalContextsWithText,
   stripInlineTerminalContextPlaceholders,
   type TerminalContextDraft,
+  type TerminalContextSelection,
 } from "../lib/terminalContext";
+import { appendElementContextsToPrompt, type ElementContextSelection } from "../lib/elementContext";
+import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
+import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
 import type { ComposerSubmissionIntent } from "../composer-logic";
 import type { TimelineEntry } from "../session-logic";
@@ -409,6 +415,32 @@ export function deriveComposerSendState(options: {
       sendableTerminalContexts.length > 0 ||
       elementContextCount > 0,
   };
+}
+
+/**
+ * Compose the wire text for a composer submission: terminal contexts, then
+ * element contexts, then preview annotations, then review comments, in the
+ * exact order send applies. Every layer's trimming follows the /goal
+ * whitespace policy so the sent value can never drift from the client-side
+ * /goal classification of the raw draft (String.trim strips U+FEFF, which
+ * the delimiter policy keeps as content).
+ */
+export function buildOutgoingMessageText(input: {
+  prompt: string;
+  terminalContexts: ReadonlyArray<TerminalContextSelection>;
+  elementContexts: ReadonlyArray<ElementContextSelection>;
+  previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
+  reviewComments: ReadonlyArray<ReviewCommentContext>;
+}): string {
+  const withContexts = appendElementContextsToPrompt(
+    appendTerminalContextsToPrompt(input.prompt, input.terminalContexts),
+    input.elementContexts,
+  );
+  const withPreviewAnnotations = input.previewAnnotations.reduce(
+    (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
+    withContexts,
+  );
+  return appendReviewCommentsToPrompt(withPreviewAnnotations, input.reviewComments);
 }
 
 export function buildExpiredTerminalContextToastCopy(

@@ -208,4 +208,11 @@ describe("terminalContext", () => {
       ),
     ).toBe("Investigate @terminal-1:12-13 carefully");
   });
+
+  it("keeps a FEFF-leading prompt verbatim even with no contexts", () => {
+    // This trim runs on every send; String.trim would strip the U+FEFF the
+    // /goal delimiter policy keeps as content and flip the server-side
+    // classification from ordinary prompt to rejected /goal command.
+    expect(appendTerminalContextsToPrompt("\uFEFF/goal ship it", [])).toBe("\uFEFF/goal ship it");
+  });
 });

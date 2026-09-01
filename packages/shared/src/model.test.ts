@@ -185,4 +185,10 @@ describe("applyClaudePromptEffortPrefix", () => {
       "Ultrathink:\n/home/theo/app.ts crashed on load",
     );
   });
+
+  it("keeps a FEFF-leading prompt ordinary instead of trimming it into a command", () => {
+    // This is the last web-side transform before the wire; policy trim keeps
+    // the U+FEFF the /goal delimiter policy treats as content.
+    expect(applyClaudePromptEffortPrefix("\uFEFF/goal ship it", null)).toBe("\uFEFF/goal ship it");
+  });
 });

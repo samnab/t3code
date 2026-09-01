@@ -1,4 +1,5 @@
 import type { PreviewAnnotationPayload } from "@t3tools/contracts";
+import { trimThreadGoalWhitespace } from "@t3tools/shared/composerTrigger";
 import { buildElementContextBlock, normalizeElementContextSelection } from "./elementContext";
 
 const TRAILING_PREVIEW_ANNOTATION_BLOCK_PATTERN =
@@ -63,7 +64,7 @@ export function appendPreviewAnnotationPrompt(
   annotation: PreviewAnnotationPayload,
 ): string {
   const annotationText = buildPreviewAnnotationPrompt(annotation);
-  const trimmed = prompt.trim();
+  const trimmed = trimThreadGoalWhitespace(prompt);
   return trimmed ? `${trimmed}\n\n${annotationText}` : annotationText;
 }
 

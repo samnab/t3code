@@ -7,14 +7,18 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 
 import type { Thread, ThreadShell } from "../types";
+import { stripInlineTerminalContextPlaceholders } from "../lib/terminalContext";
+import { resolvePlanFollowUpSubmission } from "../proposedPlan";
 import {
   MAX_HIDDEN_MOUNTED_PREVIEW_THREADS,
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
   buildLoadingThreadFromShell,
+  buildOutgoingMessageText,
   buildThreadTurnInterruptInput,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
@@ -983,5 +987,48 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingApproval: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingUserInput: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, threadError: "failed" })).toBe(true);
+  });
+});
+
+describe("outgoing message text agrees with /goal classification", () => {
+  const noAttachments = {
+    terminalContexts: [],
+    elementContexts: [],
+    previewAnnotations: [],
+    reviewComments: [],
+  };
+
+  it("keeps a FEFF-leading ordinary prompt unchanged and unclassified through the value sent", () => {
+    const draft = "\uFEFF/goal ship it";
+    // Exactly the production classification call in ChatView: placeholder-stripped, untrimmed.
+    expect(parseThreadGoalCommand(stripInlineTerminalContextPlaceholders(draft))).toBeNull();
+    const messageTextForSend = buildOutgoingMessageText({ prompt: draft, ...noAttachments });
+    expect(messageTextForSend).toBe(draft);
+    // The server decider runs the same parser on the wire value; it must agree.
+    expect(parseThreadGoalCommand(messageTextForSend)).toBeNull();
+  });
+
+  it("policy-trims surrounding Unicode White_Space from the outgoing prompt", () => {
+    expect(buildOutgoingMessageText({ prompt: " \tship it\u00A0\n", ...noAttachments })).toBe(
+      "ship it",
+    );
+  });
+
+  it("keeps invisible-only drafts a no-op instead of a sendable command", () => {
+    const draft = " \uFEFF\t";
+    expect(parseThreadGoalCommand(draft)).toBeNull();
+    expect(
+      deriveComposerSendState({ prompt: draft, imageCount: 0, terminalContexts: [] })
+        .hasSendableContent,
+    ).toBe(false);
+  });
+
+  it("keeps a FEFF-leading plan follow-up draft verbatim", () => {
+    expect(
+      resolvePlanFollowUpSubmission({
+        draftText: "\uFEFF/goal ship it",
+        planMarkdown: "# Plan",
+      }).text,
+    ).toBe("\uFEFF/goal ship it");
   });
 });

@@ -1,4 +1,5 @@
 import { type ThreadId } from "@t3tools/contracts";
+import { trimThreadGoalWhitespace } from "@t3tools/shared/composerTrigger";
 
 import { extractTrailingElementContexts, type ParsedElementContextEntry } from "./elementContext";
 
@@ -212,7 +213,14 @@ export function appendTerminalContextsToPrompt(
   prompt: string,
   contexts: ReadonlyArray<TerminalContextSelection>,
 ): string {
-  const trimmedPrompt = materializeInlineTerminalContextPrompt(prompt, contexts).trim();
+  // Policy trim, not String.trim: the /goal delimiter policy treats U+FEFF
+  // (and U+200B, U+2060) as content, so trimming here must never turn an
+  // ordinary FEFF-joined prompt into a server-rejected /goal command. Runs
+  // on every send even with zero contexts, so this is the classification/
+  // wire boundary for the whole composer.
+  const trimmedPrompt = trimThreadGoalWhitespace(
+    materializeInlineTerminalContextPrompt(prompt, contexts),
+  );
   const contextBlock = buildTerminalContextBlock(contexts);
   if (contextBlock.length === 0) {
     return trimmedPrompt;

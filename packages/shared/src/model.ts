@@ -9,6 +9,7 @@ import {
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
 } from "@t3tools/contracts";
+import { trimThreadGoalWhitespace } from "./composerTrigger.ts";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 
@@ -358,7 +359,11 @@ export function applyClaudePromptEffortPrefix(
   text: string,
   effort: string | null | undefined,
 ): string {
-  const trimmed = text.trim();
+  // Policy trim, not String.trim: this is the last web-side transform before
+  // the wire, so it must keep U+FEFF (content per the /goal delimiter policy)
+  // exactly like every earlier composer transform, or a FEFF-joined prompt
+  // would reach the server as a rejected /goal command.
+  const trimmed = trimThreadGoalWhitespace(text);
   if (!trimmed) {
     return trimmed;
   }
