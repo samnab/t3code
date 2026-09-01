@@ -26,6 +26,7 @@ import {
   ThreadId,
   ProviderSendTurnInput,
   type ProviderExecutionGoalGetResult,
+  TurnId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -763,9 +764,47 @@ function mapCollabAgentEvent(
   }
 }
 
+/**
+ * The incumbent compacted runtime signal: one `thread.state.changed`
+ * (state "compacted") per compaction, whichever protocol shape delivered it —
+ * the completed `contextCompaction` item (current protocol) or the deprecated
+ * `thread/compacted` notification (kept for older app-servers). Both shapes
+ * carry the compaction turn's id, so the first signal per (thread, turn) wins
+ * and later duplicates are dropped: one compaction can never append two
+ * `context-compaction` activities downstream. Keyed by protocol identity,
+ * never by payload content.
+ */
+function mapCompactedThreadSignal(input: {
+  readonly event: ProviderEvent;
+  readonly canonicalThreadId: ThreadId;
+  readonly turnId: string | undefined;
+  readonly seenCompactionTurnKeys: Set<string>;
+}): ReadonlyArray<ProviderRuntimeEvent> {
+  const turnId = trimText(input.turnId);
+  const key = turnId ? `${input.canonicalThreadId}:${turnId}` : undefined;
+  if (key && input.seenCompactionTurnKeys.has(key)) {
+    return [];
+  }
+  if (key) {
+    input.seenCompactionTurnKeys.add(key);
+  }
+  return [
+    {
+      ...runtimeEventBase(input.event, input.canonicalThreadId),
+      ...(turnId ? { turnId: TurnId.make(turnId) } : {}),
+      type: "thread.state.changed",
+      payload: {
+        state: "compacted",
+        ...(input.event.payload !== undefined ? { detail: input.event.payload } : {}),
+      },
+    },
+  ];
+}
+
 function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
+  seenCompactionTurnKeys: Set<string>,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   if (event.kind === "notification" && event.method.startsWith("collabAgent/")) {
     return mapCollabAgentEvent(event, canonicalThreadId);
@@ -962,12 +1001,26 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "thread/compacted") {
+    // Deprecated signal; the current protocol completes a `contextCompaction`
+    // item instead (handled under item/completed below).
+    const payload = readPayload(
+      EffectCodexSchema.ServerNotification__ContextCompactedNotification,
+      event.payload,
+    );
+    return mapCompactedThreadSignal({
+      event,
+      canonicalThreadId,
+      turnId: payload?.turnId,
+      seenCompactionTurnKeys,
+    });
+  }
+
   if (
     event.method === "thread/status/changed" ||
     event.method === "thread/archived" ||
     event.method === "thread/unarchived" ||
-    event.method === "thread/closed" ||
-    event.method === "thread/compacted"
+    event.method === "thread/closed"
   ) {
     const payload =
       event.method === "thread/status/changed"
@@ -983,11 +1036,9 @@ function mapToRuntimeEvents(
               ? "archived"
               : event.method === "thread/closed"
                 ? "closed"
-                : event.method === "thread/compacted"
-                  ? "compacted"
-                  : payload
-                    ? toThreadState(payload.status)
-                    : "active",
+                : payload
+                  ? toThreadState(payload.status)
+                  : "active",
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },
@@ -1145,6 +1196,17 @@ function mapToRuntimeEvents(
           },
         },
       ];
+    }
+    if (itemType === "context_compaction") {
+      // Current protocol: the compaction turn completes as a `contextCompaction`
+      // item. Emit the incumbent compacted signal instead of the generic item
+      // lifecycle (which ingestion drops for this item type anyway).
+      return mapCompactedThreadSignal({
+        event,
+        canonicalThreadId,
+        turnId: payload.turnId,
+        seenCompactionTurnKeys,
+      });
     }
     const completed = mapItemLifecycle(event, canonicalThreadId, "item.completed");
     return completed ? [completed] : [];
@@ -1738,6 +1800,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
         );
 
+        // Per-session compaction signal memory: bounded by compactions this
+        // session actually observed (rare), freed with the session.
+        const seenCompactionTurnKeys = new Set<string>();
         // Fork into the session scope, not the calling fiber. `forkChild` makes
         // this a child of `startSession`, and Effect interrupts a fiber's
         // children when it completes, so the consumer died on return and every
@@ -1745,7 +1810,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+            const runtimeEvents = mapToRuntimeEvents(event, event.threadId, seenCompactionTurnKeys);
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,

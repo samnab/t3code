@@ -1679,6 +1679,174 @@ const GOAL_THREAD_FIXTURE = {
   updatedAt: 1776272460,
 };
 
+const compactionSignalRuntimeFactory = makeRuntimeFactory();
+const compactionSignalLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        makeRuntime: compactionSignalRuntimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+function compactionItemCompletedEvent(id: string, turnId: string): ProviderEvent {
+  return {
+    id: asEventId(id),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    createdAt: "2026-01-01T00:00:00.000Z",
+    method: "item/completed",
+    threadId: asThreadId("thread-1"),
+    turnId: asTurnId(turnId),
+    itemId: asItemId(`item-${turnId}`),
+    payload: {
+      completedAtMs: 1_778_000_000_000,
+      threadId: "thread-1",
+      turnId,
+      item: { id: `item-${turnId}`, type: "contextCompaction" },
+    },
+  } satisfies ProviderEvent;
+}
+
+function compactedNotificationEvent(id: string, turnId: string): ProviderEvent {
+  return {
+    id: asEventId(id),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    createdAt: "2026-01-01T00:00:01.000Z",
+    method: "thread/compacted",
+    threadId: asThreadId("thread-1"),
+    payload: { threadId: "thread-1", turnId },
+  } satisfies ProviderEvent;
+}
+
+compactionSignalLayer("CodexAdapter compaction signals", (it) => {
+  it.effect("maps a completed contextCompaction item to the compacted thread signal", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = compactionSignalRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit(compactionItemCompletedEvent("evt-compaction-item", "turn-compact-1"));
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.type, "thread.state.changed");
+      if (firstEvent.value.type !== "thread.state.changed") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.payload.state, "compacted");
+      NodeAssert.equal(firstEvent.value.turnId, asTurnId("turn-compact-1"));
+    }),
+  );
+
+  it.effect("keeps the deprecated thread/compacted notification working", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = compactionSignalRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      yield* runtime.emit(
+        compactedNotificationEvent("evt-compaction-notification", "turn-compact-1"),
+      );
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.type, "thread.state.changed");
+      if (firstEvent.value.type !== "thread.state.changed") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.payload.state, "compacted");
+      // The deprecated notification has no event-level turn id; the signal is
+      // stamped from the payload so downstream identity survives.
+      NodeAssert.equal(firstEvent.value.turnId, asTurnId("turn-compact-1"));
+    }),
+  );
+
+  it.effect(
+    "emits one compacted signal per compaction when both protocol shapes arrive, and separate compactions still signal",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          runtimeMode: "full-access",
+        });
+        const runtime = compactionSignalRuntimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+
+        const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+          Effect.forkChild,
+        );
+
+        // One compaction, both shapes (current item + deprecated notification).
+        yield* runtime.emit(compactionItemCompletedEvent("evt-both-item", "turn-compact-1"));
+        yield* runtime.emit(compactedNotificationEvent("evt-both-notification", "turn-compact-1"));
+        // A second, distinct compaction must still signal.
+        yield* runtime.emit(compactionItemCompletedEvent("evt-second-item", "turn-compact-2"));
+        // Sentinel: proves the stream drained past every signal above.
+        yield* runtime.emit({
+          id: asEventId("evt-thread-closed"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+          method: "thread/closed",
+          threadId: asThreadId("thread-1"),
+          payload: { threadId: "thread-1" },
+        } satisfies ProviderEvent);
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const compactedEvents = events.filter(
+          (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+        );
+        NodeAssert.equal(
+          compactedEvents.length,
+          2,
+          `expected one signal per compaction, got [${events.map((event) => event.type).join(", ")}]`,
+        );
+        NodeAssert.deepEqual(
+          compactedEvents.map((event) => event.turnId),
+          [asTurnId("turn-compact-1"), asTurnId("turn-compact-2")],
+        );
+        // The deprecated duplicate produced no runtime event at all, so the
+        // stream reached the sentinel in exactly three events.
+        NodeAssert.equal(events.length, 3);
+        const sentinel = events.at(-1);
+        NodeAssert.equal(sentinel?.type, "thread.state.changed");
+        if (sentinel?.type === "thread.state.changed") {
+          NodeAssert.equal(sentinel.payload.state, "closed");
+        }
+      }),
+  );
+});
+
 const executionGoalRuntimeFactory = makeRuntimeFactory();
 const executionGoalLayer = it.layer(
   Layer.effect(

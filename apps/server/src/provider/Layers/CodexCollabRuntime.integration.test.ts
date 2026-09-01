@@ -517,6 +517,71 @@ describe("CodexSessionRuntime compaction", () => {
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.live("surfaces the current contextCompaction item completion for the compact turn", () =>
+    Effect.gen(function* () {
+      const script = {
+        rootThreadId: ROOT,
+        notifications: [],
+        serverRequests: [],
+        // Current protocol shape: the deprecated thread/compacted notification
+        // is replaced by a completed `contextCompaction` item.
+        compactionSignal: "item",
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      const compactsPath = `${scriptPath}.compacts`;
+      NodeFS.rmSync(compactsPath, { force: true });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scriptPath, { force: true });
+          NodeFS.rmSync(compactsPath, { force: true });
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-compact-item-integration"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+
+      const eventsFiber = yield* runtime.events.pipe(
+        Stream.takeUntil(
+          (event) =>
+            event.method === "item/completed" &&
+            (event.payload as { item?: { type?: string } } | undefined)?.item?.type ===
+              "contextCompaction",
+        ),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* runtime.start();
+      yield* runtime.compactThread;
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const compactionItem = events.find((event) => event.method === "item/completed") as
+        | ProviderEvent
+        | undefined;
+      assert.ok(compactionItem, "expected an item/completed provider event");
+      const params = (compactionItem.payload ?? {}) as {
+        item?: { id?: string; type?: string };
+        turnId?: string;
+      };
+      assert.equal(params.item?.type, "contextCompaction");
+      assert.equal(params.item?.id, "item-context-compaction-1");
+      assert.equal(params.turnId, "compact-turn-1");
+      // The deprecated notification must not have been emitted by this script.
+      assert.equal(
+        events.some((event) => event.method === "thread/compacted"),
+        false,
+      );
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });
 
 const GOAL_FIXTURE = {

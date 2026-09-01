@@ -141,11 +141,28 @@ rl.on("line", (line) => {
       `${JSON.stringify({ threadId: message.params?.threadId })}\n`,
     );
     write({ id, result: {} });
-    if (script.emitCompactedNotification !== false) {
+    // The current protocol signals the finished compact turn as a completed
+    // `contextCompaction` item; `thread/compacted` is the deprecated shape.
+    // compactionSignal scripts which shape(s) the peer emits: "notification"
+    // (default, legacy), "item", or "both" (transition overlap).
+    const compactionSignal = script.compactionSignal ?? "notification";
+    if (compactionSignal === "notification" || compactionSignal === "both") {
       write({
         jsonrpc: "2.0",
         method: "thread/compacted",
         params: { threadId: message.params?.threadId, turnId: "compact-turn-1" },
+      });
+    }
+    if (compactionSignal === "item" || compactionSignal === "both") {
+      write({
+        jsonrpc: "2.0",
+        method: "item/completed",
+        params: {
+          threadId: message.params?.threadId,
+          turnId: "compact-turn-1",
+          completedAtMs: 1_778_000_000_000,
+          item: { id: "item-context-compaction-1", type: "contextCompaction" },
+        },
       });
     }
     return;
