@@ -20,6 +20,7 @@ import {
   trimThreadGoalWhitespace,
 } from "@t3tools/shared/composerTrigger";
 import {
+  nextThreadGoalEditorEpoch,
   resolveThreadGoalCommandBlockReason,
   threadGoalEditorCanSave,
   threadGoalEditorReducer,
@@ -107,6 +108,10 @@ export function useThreadDraftForThread(input: {
     draftAttachments: draft.attachments,
   };
 }
+
+/** Marks the in-flight goal-metadata write slot as owned by the typed /goal
+ * command write, which has no editor epoch (those start at 1). */
+const COMMAND_GOAL_WRITE = 0;
 
 export function useThreadComposerState() {
   const { selectedThread: selectedThreadShell, selectedEnvironmentRuntime } = useThreadSelection();
@@ -230,7 +235,15 @@ export function useThreadComposerState() {
     threadGoalEditorReducer,
     null,
   );
-  const goalMetadataInFlightRef = useRef(false);
+  // Holds the epoch of the editor save that owns the in-flight write slot,
+  // COMMAND_GOAL_WRITE for the typed /goal command, or null when idle, so a
+  // rapid Enter can never interleave a set with a clear. A reopened editor's
+  // save (new epoch) supersedes a hung stale one instead of being swallowed
+  // by it.
+  // ponytail: a superseded write can still land server-side after the newer
+  // one; the server's command queue serializes them — cancel the RPC instead
+  // if strict ordering ever needs to hold.
+  const goalMetadataInFlightRef = useRef<number | null>(null);
   const selectedThreadGoal = (selectedThreadDetail ?? selectedThreadShell)?.goal ?? null;
   useEffect(() => {
     if (!threadGoalEditorState || !selectedThreadKey) return;
@@ -249,6 +262,7 @@ export function useThreadComposerState() {
     if (!selectedThreadShell) return;
     dispatchThreadGoalEditor({
       type: "open",
+      epoch: nextThreadGoalEditorEpoch(),
       threadKey: scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id),
       environmentId: selectedThreadShell.environmentId,
       threadId: selectedThreadShell.id,
@@ -263,17 +277,30 @@ export function useThreadComposerState() {
   const writeThreadGoalFromEditor = useCallback(
     async (goal: string | null) => {
       const state = threadGoalEditorState;
-      if (!state || goalMetadataInFlightRef.current) return;
+      // Only the current editor generation may claim the write slot: a
+      // same-generation save (or the typed /goal command) is already in
+      // flight. A stale generation's hung request does not block — this save
+      // supersedes it and the stale completion is ignored by epoch below.
+      if (
+        !state ||
+        goalMetadataInFlightRef.current === state.epoch ||
+        goalMetadataInFlightRef.current === COMMAND_GOAL_WRITE
+      ) {
+        return;
+      }
       dispatchThreadGoalEditor({ type: "beginSave" });
-      goalMetadataInFlightRef.current = true;
+      goalMetadataInFlightRef.current = state.epoch;
+      const saveEpoch = state.epoch;
       const result = await updateThreadMetadata({
         environmentId: state.environmentId,
         input: { threadId: state.threadId, goal },
       });
-      goalMetadataInFlightRef.current = false;
-      // Completion events are keyed to the thread the RPC was issued for, so
-      // a late reply cannot mutate or close an editor reopened for another
-      // thread while the request was in flight.
+      // Release the slot only while this request still owns it, so a late
+      // stale completion cannot clear a newer save's claim.
+      if (goalMetadataInFlightRef.current === saveEpoch) goalMetadataInFlightRef.current = null;
+      // Completion events carry the thread and generation the RPC was issued
+      // for, so a late reply — for another thread, or for this thread before
+      // a close/reopen — can neither mutate nor close the current editor.
       const saveThreadKey = state.threadKey;
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
@@ -281,20 +308,27 @@ export function useThreadComposerState() {
           dispatchThreadGoalEditor({
             type: "saveFailure",
             threadKey: saveThreadKey,
+            epoch: saveEpoch,
             error: error instanceof Error ? error.message : "An error occurred.",
           });
         } else {
           dispatchThreadGoalEditor({
             type: "saveFailure",
             threadKey: saveThreadKey,
+            epoch: saveEpoch,
             error: "Try again.",
           });
         }
         return;
       }
-      dispatchThreadGoalEditor({ type: "saveSuccess", threadKey: saveThreadKey, goal });
+      dispatchThreadGoalEditor({
+        type: "saveSuccess",
+        threadKey: saveThreadKey,
+        epoch: saveEpoch,
+        goal,
+      });
       if (goal !== null) {
-        dispatchThreadGoalEditor({ type: "close", threadKey: saveThreadKey });
+        dispatchThreadGoalEditor({ type: "close", threadKey: saveThreadKey, epoch: saveEpoch });
       }
     },
     [threadGoalEditorState, updateThreadMetadata],
@@ -381,6 +415,7 @@ export function useThreadComposerState() {
         // alert, mirroring the composer pill.
         dispatchThreadGoalEditor({
           type: "open",
+          epoch: nextThreadGoalEditorEpoch(),
           threadKey,
           environmentId: selectedThreadShell.environmentId,
           threadId: selectedThreadShell.id,
@@ -389,16 +424,18 @@ export function useThreadComposerState() {
         clearComposerDraftContent(threadKey);
         return null;
       }
-      if (goalMetadataInFlightRef.current) {
+      if (goalMetadataInFlightRef.current !== null) {
         return null;
       }
       const goalValue = goalCommand.action === "set" ? goalCommand.goal : null;
-      goalMetadataInFlightRef.current = true;
+      goalMetadataInFlightRef.current = COMMAND_GOAL_WRITE;
       const result = await updateThreadMetadata({
         environmentId: selectedThreadShell.environmentId,
         input: { threadId: selectedThreadShell.id, goal: goalValue },
       });
-      goalMetadataInFlightRef.current = false;
+      if (goalMetadataInFlightRef.current === COMMAND_GOAL_WRITE) {
+        goalMetadataInFlightRef.current = null;
+      }
       if (result._tag === "Failure") {
         if (isAtomCommandInterrupted(result)) {
           return null;

@@ -30,14 +30,31 @@ export function resolveThreadGoalCommandBlockReason(input: {
 }
 
 /**
+ * Monotonic generation id for a freshly opened editor. Every open gets a
+ * new epoch, so an async save completion (success, failure, or the close it
+ * earns) can be recognized as stale after the editor was closed and reopened
+ * — even on the same thread, where the thread key cannot tell them apart.
+ */
+let threadGoalEditorEpoch = 0;
+
+export function nextThreadGoalEditorEpoch(): number {
+  threadGoalEditorEpoch += 1;
+  return threadGoalEditorEpoch;
+}
+
+/**
  * Pure state for the thread-goal editor shared by web and mobile. The state
- * carries the thread it was opened for, so a save can never land on a thread
- * the user has since navigated away from, and a remote update (another device
- * changed the goal while the editor was open) never silently overwrites local
- * edits: a clean editor follows the remote value, a dirty one keeps the local
- * draft and lets Save explicitly win.
+ * carries the thread and generation (`epoch`) it was opened for, so a save
+ * can never land on a thread the user has since navigated away from, a late
+ * reply from a closed-and-reopened editor cannot clobber the fresh draft,
+ * and a remote update (another device changed the goal while the editor was
+ * open) never silently overwrites local edits: a clean editor follows the
+ * remote value, a dirty one keeps the local draft and lets Save explicitly
+ * win.
  */
 export interface ThreadGoalEditorState {
+  /** Generation of this open; stale-epoch completions are ignored. */
+  readonly epoch: number;
   readonly threadKey: string;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -51,17 +68,18 @@ export interface ThreadGoalEditorState {
 export type ThreadGoalEditorAction =
   | {
       type: "open";
+      epoch: number;
       threadKey: string;
       environmentId: EnvironmentId;
       threadId: ThreadId;
       goal: string | null;
     }
-  | { type: "close"; threadKey?: string }
+  | { type: "close"; threadKey?: string; epoch?: number }
   | { type: "setDraft"; text: string }
   | { type: "remoteUpdate"; threadKey: string; goal: string | null }
   | { type: "beginSave" }
-  | { type: "saveSuccess"; threadKey: string; goal: string | null }
-  | { type: "saveFailure"; threadKey: string; error: string };
+  | { type: "saveSuccess"; threadKey: string; goal: string | null; epoch: number }
+  | { type: "saveFailure"; threadKey: string; error: string; epoch: number };
 
 export function threadGoalEditorReducer(
   state: ThreadGoalEditorState | null,
@@ -70,6 +88,7 @@ export function threadGoalEditorReducer(
   switch (action.type) {
     case "open":
       return {
+        epoch: action.epoch,
         threadKey: action.threadKey,
         environmentId: action.environmentId,
         threadId: action.threadId,
@@ -79,9 +98,11 @@ export function threadGoalEditorReducer(
         error: null,
       };
     case "close":
-      // A close can carry the thread it was issued for: completion closes
-      // from a save RPC must not tear down an editor the user reopened for
-      // another thread while the request was in flight.
+      // A close can carry the thread and epoch it was issued for: the close
+      // earned by a save RPC must not tear down an editor the user reopened
+      // (a new epoch) or opened for another thread while the request was in
+      // flight. A user-issued close carries neither and always wins.
+      if (action.epoch !== undefined && state?.epoch !== action.epoch) return state;
       if (action.threadKey && state?.threadKey !== action.threadKey) return state;
       return null;
     case "setDraft":
@@ -100,9 +121,12 @@ export function threadGoalEditorReducer(
       if (!state || state.saving) return state;
       return { ...state, saving: true, error: null };
     case "saveSuccess":
-      // The save RPC names its thread: a late reply must never mutate an
-      // editor reopened for a different thread.
-      if (!state || state.threadKey !== action.threadKey) return state;
+      // The save RPC names its thread and generation: a late reply must never
+      // mutate an editor reopened for another thread — or reopened on the
+      // same thread, where only the epoch can tell the generations apart.
+      if (!state || state.threadKey !== action.threadKey || state.epoch !== action.epoch) {
+        return state;
+      }
       return {
         ...state,
         saving: false,
@@ -111,7 +135,9 @@ export function threadGoalEditorReducer(
         error: null,
       };
     case "saveFailure":
-      if (!state || state.threadKey !== action.threadKey) return state;
+      if (!state || state.threadKey !== action.threadKey || state.epoch !== action.epoch) {
+        return state;
+      }
       return { ...state, saving: false, error: action.error };
   }
 }

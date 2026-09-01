@@ -58,6 +58,7 @@ import {
   trimThreadGoalWhitespace,
 } from "@t3tools/shared/composerTrigger";
 import {
+  nextThreadGoalEditorEpoch,
   threadGoalEditorCanSave,
   threadGoalEditorReducer,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
@@ -1252,6 +1253,10 @@ type LocalThreadErrorEntry = {
   readonly at: number;
 };
 
+/** Marks the in-flight goal-metadata write slot as owned by the typed /goal
+ * command write, which has no editor epoch (those start at 1). */
+const COMMAND_GOAL_WRITE = 0;
+
 function chatActionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "An error occurred.";
 }
@@ -1386,6 +1391,7 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeServerThread) return;
     dispatchThreadGoalEditor({
       type: "open",
+      epoch: nextThreadGoalEditorEpoch(),
       threadKey: scopedThreadKey(
         scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
       ),
@@ -1402,17 +1408,30 @@ function ChatViewContent(props: ChatViewProps) {
   const writeThreadGoalFromEditor = useCallback(
     async (goal: string | null) => {
       const state = threadGoalEditorState;
-      if (!state || goalMetadataInFlightRef.current) return;
+      // Only the current editor generation may claim the write slot: a
+      // same-generation save (or the typed /goal command) is already in
+      // flight. A stale generation's hung request does not block — this save
+      // supersedes it and the stale completion is ignored by epoch below.
+      if (
+        !state ||
+        goalMetadataInFlightRef.current === state.epoch ||
+        goalMetadataInFlightRef.current === COMMAND_GOAL_WRITE
+      ) {
+        return;
+      }
       dispatchThreadGoalEditor({ type: "beginSave" });
-      goalMetadataInFlightRef.current = true;
+      goalMetadataInFlightRef.current = state.epoch;
+      const saveEpoch = state.epoch;
       const result = await updateThreadMetadata({
         environmentId: state.environmentId,
         input: { threadId: state.threadId, goal },
       });
-      goalMetadataInFlightRef.current = false;
-      // Completion events are keyed to the thread the RPC was issued for, so
-      // a late reply cannot mutate or close an editor reopened for another
-      // thread while the request was in flight.
+      // Release the slot only while this request still owns it, so a late
+      // stale completion cannot clear a newer save's claim.
+      if (goalMetadataInFlightRef.current === saveEpoch) goalMetadataInFlightRef.current = null;
+      // Completion events carry the thread and generation the RPC was issued
+      // for, so a late reply — for another thread, or for this thread before
+      // a close/reopen — can neither mutate nor close the current editor.
       const saveThreadKey = state.threadKey;
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
@@ -1420,21 +1439,28 @@ function ChatViewContent(props: ChatViewProps) {
           dispatchThreadGoalEditor({
             type: "saveFailure",
             threadKey: saveThreadKey,
+            epoch: saveEpoch,
             error: error instanceof Error ? error.message : "An error occurred.",
           });
         } else {
           dispatchThreadGoalEditor({
             type: "saveFailure",
             threadKey: saveThreadKey,
+            epoch: saveEpoch,
             error: "Try again.",
           });
         }
         return;
       }
-      dispatchThreadGoalEditor({ type: "saveSuccess", threadKey: saveThreadKey, goal });
+      dispatchThreadGoalEditor({
+        type: "saveSuccess",
+        threadKey: saveThreadKey,
+        epoch: saveEpoch,
+        goal,
+      });
       // Saving closes the editor; clearing leaves it open with an empty draft.
       if (goal !== null) {
-        dispatchThreadGoalEditor({ type: "close", threadKey: saveThreadKey });
+        dispatchThreadGoalEditor({ type: "close", threadKey: saveThreadKey, epoch: saveEpoch });
       }
     },
     [threadGoalEditorState, updateThreadMetadata],
@@ -1599,9 +1625,15 @@ function ChatViewContent(props: ChatViewProps) {
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
   const feedbackUploadsInFlightRef = useRef(new Set<string>());
-  // Guards goal metadata writes (typed /goal and the editor) so a rapid Enter
-  // can never interleave a set with a clear.
-  const goalMetadataInFlightRef = useRef(false);
+  // Guards goal metadata writes (typed /goal and the editor) so a rapid
+  // Enter can never interleave a set with a clear. Holds the epoch of the
+  // editor save that owns the in-flight slot, COMMAND_GOAL_WRITE for the
+  // typed /goal command, or null when idle. A reopened editor's save (new
+  // epoch) supersedes a hung stale one instead of being swallowed by it.
+  // ponytail: a superseded write can still land server-side after the newer
+  // one; the server's command queue serializes them — cancel the RPC instead
+  // if strict ordering ever needs to hold.
+  const goalMetadataInFlightRef = useRef<number | null>(null);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useLayoutEffect(() => {
@@ -5668,6 +5700,7 @@ function ChatViewContent(props: ChatViewProps) {
         if (activeServerThread) {
           dispatchThreadGoalEditor({
             type: "open",
+            epoch: nextThreadGoalEditorEpoch(),
             threadKey: scopedThreadKey(
               scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
             ),
@@ -5681,18 +5714,20 @@ function ChatViewContent(props: ChatViewProps) {
         composerRef.current?.resetCursorState();
         return;
       }
-      if (goalMetadataInFlightRef.current) {
+      if (goalMetadataInFlightRef.current !== null) {
         return;
       }
       const goalThreadRef = activeServerThread;
       if (!goalThreadRef) return;
       const goalNextValue = goalCommand.action === "set" ? goalCommand.goal : null;
-      goalMetadataInFlightRef.current = true;
+      goalMetadataInFlightRef.current = COMMAND_GOAL_WRITE;
       const result = await updateThreadMetadata({
         environmentId: goalThreadRef.environmentId,
         input: { threadId: goalThreadRef.id, goal: goalNextValue },
       });
-      goalMetadataInFlightRef.current = false;
+      if (goalMetadataInFlightRef.current === COMMAND_GOAL_WRITE) {
+        goalMetadataInFlightRef.current = null;
+      }
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);

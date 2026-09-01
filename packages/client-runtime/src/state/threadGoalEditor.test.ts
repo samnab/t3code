@@ -2,6 +2,7 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  nextThreadGoalEditorEpoch,
   resolveThreadGoalCommandBlockReason,
   resolveThreadGoalDisplay,
   threadGoalEditorCanSave,
@@ -14,9 +15,13 @@ const environmentId = EnvironmentId.make("environment-1");
 const threadId = ThreadId.make("thread-1");
 const threadKey = "environment-1:thread-1";
 
-function openState(goal: string | null): ThreadGoalEditorState {
+function openState(
+  goal: string | null,
+  epoch: number = nextThreadGoalEditorEpoch(),
+): ThreadGoalEditorState {
   return threadGoalEditorReducer(null, {
     type: "open",
+    epoch,
     threadKey,
     environmentId,
     threadId,
@@ -71,6 +76,7 @@ describe("threadGoalEditorReducer", () => {
     // A second open for another thread rebinds the editor completely.
     const other = threadGoalEditorReducer(state, {
       type: "open",
+      epoch: nextThreadGoalEditorEpoch(),
       threadKey: "environment-1:thread-2",
       environmentId,
       threadId: ThreadId.make("thread-2"),
@@ -123,6 +129,7 @@ describe("threadGoalEditorReducer", () => {
       type: "saveFailure",
       threadKey,
       error: "socket closed",
+      epoch: state.epoch,
     })!;
     expect(failed.saving).toBe(false);
     expect(failed.error).toBe("socket closed");
@@ -137,6 +144,7 @@ describe("threadGoalEditorReducer", () => {
       type: "saveSuccess",
       threadKey,
       goal: "new goal",
+      epoch: state.epoch,
     })!;
     expect(state).toMatchObject({ draft: "new goal", savedGoal: "new goal", saving: false });
     expect(threadGoalEditorReducer(state, { type: "close" })).toBeNull();
@@ -144,12 +152,15 @@ describe("threadGoalEditorReducer", () => {
 
   it("a late save reply for thread A never mutates thread B's editor", () => {
     // Save on A, navigate away (effect closes the stale editor), open B.
-    let state = openState("goal A");
+    // Both opens share an epoch so only the thread key guard can reject A's
+    // late reply — the thread-switch guard holds independently of epochs.
+    let state = openState("goal A", 101);
     state = threadGoalEditorReducer(state, { type: "beginSave" })!;
     state = threadGoalEditorReducer(state, { type: "close" }) as ThreadGoalEditorState;
     const threadBKey = "environment-1:thread-2";
     state = threadGoalEditorReducer(state, {
       type: "open",
+      epoch: 101,
       threadKey: threadBKey,
       environmentId,
       threadId: ThreadId.make("thread-2"),
@@ -160,6 +171,7 @@ describe("threadGoalEditorReducer", () => {
       type: "saveSuccess",
       threadKey,
       goal: "goal A saved",
+      epoch: 101,
     })!;
     expect(staleSuccess).toBe(state);
 
@@ -167,6 +179,7 @@ describe("threadGoalEditorReducer", () => {
       type: "saveFailure",
       threadKey,
       error: "socket closed",
+      epoch: 101,
     })!;
     expect(staleFailure).toBe(state);
 
@@ -178,9 +191,56 @@ describe("threadGoalEditorReducer", () => {
       type: "saveSuccess",
       threadKey: threadBKey,
       goal: "goal B saved",
+      epoch: 101,
     })!;
     expect(applied).toMatchObject({ savedGoal: "goal B saved", draft: "goal B saved" });
     expect(threadGoalEditorReducer(applied, { type: "close", threadKey: threadBKey })).toBeNull();
+  });
+
+  it("ignores a stale save reply after close/reopen on the same thread", () => {
+    // Generation 1 starts a save; the user closes and reopens the editor on
+    // the same thread (epoch 2) and types a fresh draft. The late reply from
+    // generation 1 must not clobber it — here the thread key matches, so only
+    // the epoch guard can tell the generations apart.
+    const first = threadGoalEditorReducer(openState("old goal", 1), { type: "beginSave" })!;
+    expect(first.epoch).toBe(1);
+    const reopened = openState("old goal", 2);
+    const edited = threadGoalEditorReducer(reopened, { type: "setDraft", text: "fresh draft" })!;
+
+    const staleSuccess = threadGoalEditorReducer(edited, {
+      type: "saveSuccess",
+      threadKey,
+      goal: "stale goal",
+      epoch: 1,
+    })!;
+    expect(staleSuccess).toBe(edited);
+
+    const staleFailure = threadGoalEditorReducer(edited, {
+      type: "saveFailure",
+      threadKey,
+      error: "socket closed",
+      epoch: 1,
+    })!;
+    expect(staleFailure).toBe(edited);
+
+    // The close earned by the stale save must not close the reopened editor.
+    expect(threadGoalEditorReducer(edited, { type: "close", threadKey, epoch: 1 })).toBe(edited);
+
+    // The current generation's own save still applies and closes.
+    let state = threadGoalEditorReducer(edited, { type: "beginSave" })!;
+    state = threadGoalEditorReducer(state, {
+      type: "saveSuccess",
+      threadKey,
+      goal: "fresh draft",
+      epoch: 2,
+    })!;
+    expect(state).toMatchObject({
+      savedGoal: "fresh draft",
+      draft: "fresh draft",
+      saving: false,
+      epoch: 2,
+    });
+    expect(threadGoalEditorReducer(state, { type: "close", threadKey, epoch: 2 })).toBeNull();
   });
 
   it("treats an unchanged or invalid draft as a save no-op", () => {
