@@ -55,6 +55,7 @@ import { useDebouncedValue, usePaginatedBranches } from "../../state/queries";
 import { vcsEnvironment } from "../../state/vcs";
 import {
   flattenQueuedThreadMessages,
+  resolvePendingTaskDraftText,
   threadOutboxManager,
   updateThreadOutboxMessage,
   type QueuedThreadMessage,
@@ -831,7 +832,11 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         return null;
       }
       const draft = getComposerDraftSnapshot(selectedProjectDraftKey);
-      const text = draft.text.trim();
+      // Same policy trim as the composer send path: native String.trim strips
+      // U+FEFF, which the /goal delimiter policy keeps as content, so it would
+      // reclassify a FEFF-joined ordinary draft into "/goal" queue text that
+      // the drain then blocks forever. Null when nothing visible remains.
+      const text = resolvePendingTaskDraftText(draft.text);
       // Same availability gate the composer display applies: a stored
       // selection targeting a disabled provider must not ride into the queue.
       const draftModelSelection =
@@ -839,7 +844,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
           selectedEnvironmentServerConfig,
           draft.modelSelection ?? null,
         ) ?? selectedModel;
-      if (text.length === 0 || !draftModelSelection) {
+      if (text === null || !draftModelSelection) {
         return null;
       }
       const workspaceSelection = draft.workspaceSelection;

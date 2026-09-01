@@ -1,5 +1,7 @@
 import {
   CommandId,
+  DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_RUNTIME_MODE,
   MessageId,
   ThreadId,
   type ModelSelection,
@@ -7,7 +9,7 @@ import {
   type ProviderInteractionMode,
   type RuntimeMode,
 } from "@t3tools/contracts";
-
+import type { QueuedThreadCreation, QueuedThreadMessage } from "../state/thread-outbox-model";
 import { toUploadChatImageAttachments, type DraftComposerImageAttachment } from "./composerImages";
 
 export function deriveThreadTitleFromPrompt(value: string): string {
@@ -86,4 +88,43 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
     },
     createdAt: spec.createdAt,
   };
+}
+
+/**
+ * The exact `thread.turn.start` payload the outbox drain sends for a queued
+ * creation. The drain's delivery action classifies the queued text raw, so
+ * the wire payload carries that same text unchanged — a native trim here
+ * would strip a leading U+FEFF and deliver "/goal …" that the server decider
+ * treats as a goal command instead of a turn. Null when the row never
+ * carried a model selection.
+ */
+export function buildQueuedCreationStartTurnInput(input: {
+  readonly message: QueuedThreadMessage;
+  readonly creation: QueuedThreadCreation;
+  readonly projectCwd: string;
+  /** Generated per delivery by the caller; unused for local mode. */
+  readonly worktreeBranchName: string;
+}) {
+  const { message, creation, projectCwd, worktreeBranchName } = input;
+  if (message.modelSelection === undefined) {
+    return null;
+  }
+  return buildProjectThreadStartTurnInput({
+    projectId: creation.projectId,
+    projectCwd,
+    threadId: message.threadId,
+    commandId: message.commandId,
+    messageId: message.messageId,
+    createdAt: message.createdAt,
+    text: message.text,
+    attachments: message.attachments,
+    modelSelection: message.modelSelection,
+    runtimeMode: message.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+    interactionMode: message.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+    workspaceMode: creation.workspaceMode,
+    branch: creation.branch,
+    worktreePath: creation.worktreePath,
+    startFromOrigin: creation.startFromOrigin ?? false,
+    worktreeBranchName,
+  });
 }

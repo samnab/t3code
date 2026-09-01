@@ -15,7 +15,11 @@ import {
   type ProviderInteractionMode as ProviderInteractionModeType,
   type RuntimeMode as RuntimeModeType,
 } from "@t3tools/contracts";
-import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
+import {
+  hasVisibleThreadGoalText,
+  parseThreadGoalCommand,
+  trimThreadGoalWhitespace,
+} from "@t3tools/shared/composerTrigger";
 import * as Schema from "effect/Schema";
 
 import { DraftComposerImageAttachmentSchema } from "../lib/composer-image-schema";
@@ -191,6 +195,19 @@ export function resolveThreadOutboxDeliveryAction(input: {
     return input.shellStatus === "live" ? "remove" : "wait";
   }
   return input.environmentConnected ? "send" : "wait";
+}
+
+/**
+ * Queue text for a pending task built from a raw composer draft (offline
+ * creates and pending-task edit flushes). Native String.trim strips U+FEFF,
+ * which the /goal delimiter policy keeps as content, so it would reclassify
+ * a FEFF-joined ordinary draft into "/goal" queue text that the drain blocks
+ * forever. Null when nothing visible remains, so an invisible-only flush
+ * never rewrites the queued row.
+ */
+export function resolvePendingTaskDraftText(rawText: string): string | null {
+  const text = trimThreadGoalWhitespace(rawText);
+  return hasVisibleThreadGoalText(text) ? text : null;
 }
 
 /**

@@ -7,13 +7,11 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import { vi } from "vite-plus/test";
 import { AtomRegistry } from "effect/unstable/reactivity";
-import {
-  hasVisibleThreadGoalText,
-  parseThreadGoalCommand,
-  trimThreadGoalWhitespace,
-} from "@t3tools/shared/composerTrigger";
+import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 
+import { buildQueuedCreationStartTurnInput } from "../lib/projectThreadStartTurn";
 import {
   blockedQueuedThreadMessages,
   decodeQueuedThreadMessage,
@@ -21,6 +19,7 @@ import {
   groupQueuedThreadMessages,
   isQueuedThreadCreationSendable,
   modelSelectionsEqual,
+  resolvePendingTaskDraftText,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxFailureAction,
   resolveQueuedThreadSettings,
@@ -30,6 +29,13 @@ import {
 } from "./thread-outbox-model";
 import { createThreadOutboxManager, ThreadOutboxManagerError } from "./thread-outbox-manager";
 import type { ThreadOutboxStorage } from "./thread-outbox-storage";
+
+// The creation payload seam transitively reaches expo-crypto (attachment
+// ids), which imports react-native's Flow sources — unparseable in node.
+vi.mock("expo-crypto", () => ({
+  getRandomBytes: vi.fn(() => new Uint8Array(16)),
+  randomUUID: vi.fn(() => "00000000-0000-4000-8000-000000000000"),
+}));
 
 function queuedMessage(input: {
   readonly environmentId?: string;
@@ -638,28 +644,46 @@ describe("thread outbox", () => {
     ).toBe("send");
   });
 
-  it("keeps a FEFF-joined /goal draft ordinary from parse through the queued outbox row", () => {
-    // The composer parses the raw draft but enqueues trimmed text. Native
-    // String.trim strips U+FEFF, which the /goal delimiter policy keeps as
-    // content, so a \uFEFF/goal draft classified ordinary at parse time
-    // became a blocked /goal outbox row after trimming. Policy trimming
-    // keeps classification identical end to end.
-    const rawDraft = "\uFEFF/goal ship it";
-    const sentText = trimThreadGoalWhitespace(rawDraft);
-    expect(parseThreadGoalCommand(rawDraft)).toBeNull();
-    expect(parseThreadGoalCommand(sentText)).toBeNull();
-    // Native trim is the defect this regression pins: it strips the FEFF and
-    // turns the same draft into a goal command.
-    expect(parseThreadGoalCommand(rawDraft.trim())).toEqual({ action: "set", goal: "ship it" });
+  it("keeps a FEFF-joined /goal draft ordinary from the offline builder through the queued row", () => {
+    // buildPendingTaskMessage (offline creates and pending-task edit flushes)
+    // resolves its queue text through this exact seam. Native String.trim
+    // strips U+FEFF, which the /goal delimiter policy keeps as content, so
+    // the queued row would become "/goal ship it" — blocked forever.
+    const text = resolvePendingTaskDraftText("\uFEFF/goal ship it");
+    expect(text).toBe("\uFEFF/goal ship it");
+    expect(parseThreadGoalCommand(text ?? "")).toBeNull();
+    // Ordinary drafts keep the same shape the send path produces.
+    expect(resolvePendingTaskDraftText("  ship it  ")).toBe("ship it");
+    // An invisible-only flush (FEFF/zero-width edits) builds no queue text,
+    // so the stale queued payload is never rewritten with nothing.
+    expect(resolvePendingTaskDraftText("\uFEFF")).toBeNull();
+    expect(resolvePendingTaskDraftText(" \u200B\u2060 ")).toBeNull();
+  });
 
-    const feffDraftRow = {
+  it("drains queued creations with the queued text unchanged from classification to the wire", () => {
+    // The drain's delivery action classifies the raw queued text; the wire
+    // payload comes from this exact seam and must carry the same bytes. A
+    // native trim at the drain would strip the FEFF and deliver "/goal ship
+    // it", which the server decider treats as a goal command, not a turn.
+    const queuedRow = {
       ...queuedMessage({ messageId: "message-1", createdAt: "2026-06-08T10:00:01.000Z" }),
-      text: sentText,
-    };
-    expect(blockedQueuedThreadMessages([feffDraftRow])).toEqual([]);
+      text: "\uFEFF/goal ship it",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.4",
+      },
+      creation: {
+        projectId: ProjectId.make("project-1"),
+        workspaceMode: "local",
+        branch: null,
+        worktreePath: null,
+      },
+    } satisfies QueuedThreadMessage;
+
+    expect(blockedQueuedThreadMessages([queuedRow])).toEqual([]);
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: sentText,
+        text: queuedRow.text,
         isCreation: true,
         threadExists: false,
         shellStatus: "live",
@@ -667,8 +691,28 @@ describe("thread outbox", () => {
         threadBusy: false,
       }),
     ).toBe("send");
-    // A FEFF-only draft is not visible text: the empty guard stays a no-op.
-    expect(hasVisibleThreadGoalText(trimThreadGoalWhitespace("\uFEFF"))).toBe(false);
+
+    const input = buildQueuedCreationStartTurnInput({
+      message: queuedRow,
+      creation: queuedRow.creation,
+      projectCwd: "/repo",
+      worktreeBranchName: "t3/tmp-branch",
+    });
+    expect(input?.message.text).toBe("\uFEFF/goal ship it");
+    expect(parseThreadGoalCommand(input?.message.text ?? "")).toBeNull();
+
+    // A row that never carried a model selection never reaches the wire.
+    expect(
+      buildQueuedCreationStartTurnInput({
+        message: { ...queuedRow, modelSelection: undefined },
+        creation: queuedRow.creation,
+        projectCwd: "/repo",
+        worktreeBranchName: "t3/tmp-branch",
+      }),
+    ).toBeNull();
+    // An invisible-only row cannot be enqueued through the builder seam, and
+    // the drain's send gate keeps any stale one queued as a no-op.
+    expect(isQueuedThreadCreationSendable({ ...queuedRow, text: "\uFEFF" })).toBe(false);
   });
 
   it("sends queued creations once connected and live, removing already-created ones", () => {

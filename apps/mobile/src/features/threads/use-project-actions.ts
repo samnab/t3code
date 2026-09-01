@@ -10,6 +10,7 @@ import {
   type RuntimeMode,
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
+import { trimThreadGoalWhitespace } from "@t3tools/shared/composerTrigger";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 
@@ -42,7 +43,11 @@ export function useCreateProjectThread() {
     }) => {
       const metadata = input.turnMetadata ?? makeTurnCommandMetadata();
       const threadId = ThreadId.make(metadata.threadId);
-      const initialMessageText = input.initialMessageText.trim();
+      // Policy trim only: the caller already classified the raw draft, and a
+      // native trim here would strip a leading U+FEFF — turning the FEFF-joined
+      // ordinary text it classified into "/goal" on the wire. Idempotent for
+      // the already policy-trimmed input.
+      const initialMessageText = trimThreadGoalWhitespace(input.initialMessageText);
 
       const validationError = validateProjectThreadCreation({
         environmentId: input.project.environmentId,
