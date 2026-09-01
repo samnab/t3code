@@ -121,6 +121,19 @@ export const ServerProviderContinuation = Schema.Struct({
 });
 export type ServerProviderContinuation = typeof ServerProviderContinuation.Type;
 
+/**
+ * How manual context compaction is requested for this provider.
+ *
+ * - `prompt` — compaction is a normal provider turn (Claude's `/compact`).
+ * - `native` — T3 asks the provider to compact itself through its native
+ *   protocol; T3 never authors or stores the summary.
+ *
+ * Absent means the server does not support manual compaction for this
+ * provider (or is an older server); clients hide the control.
+ */
+export const ServerProviderContextCompaction = Schema.Literals(["prompt", "native"]);
+export type ServerProviderContextCompaction = typeof ServerProviderContextCompaction.Type;
+
 export const ServerProviderVersionAdvisoryStatus = Schema.Literals([
   "unknown",
   "current",
@@ -171,6 +184,8 @@ export const ServerProvider = Schema.Struct({
   continuation: Schema.optional(ServerProviderContinuation),
   showInteractionModeToggle: Schema.optional(Schema.Boolean),
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
+  // See ServerProviderContextCompaction. Absent = no manual compaction.
+  contextCompaction: Schema.optional(ServerProviderContextCompaction),
   enabled: Schema.Boolean,
   installed: Schema.Boolean,
   version: Schema.NullOr(TrimmedNonEmptyString),

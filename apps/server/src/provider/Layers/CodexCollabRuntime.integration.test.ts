@@ -451,3 +451,60 @@ describe("CodexSessionRuntime collab integration", () => {
     );
   }
 });
+
+describe("CodexSessionRuntime compaction", () => {
+  it.live("sends thread/compact/start for the provider thread and surfaces thread/compacted", () =>
+    Effect.gen(function* () {
+      const script = {
+        rootThreadId: ROOT,
+        notifications: [],
+        serverRequests: [],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      const compactsPath = `${scriptPath}.compacts`;
+      NodeFS.rmSync(compactsPath, { force: true });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scriptPath, { force: true });
+          NodeFS.rmSync(compactsPath, { force: true });
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-compact-integration"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+
+      const eventsFiber = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.method === "thread/compacted"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* runtime.start();
+      yield* runtime.compactThread;
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.include(
+        events.map((event) => event.method),
+        "thread/compacted",
+      );
+      const compacted = events.find((event) => event.method === "thread/compacted");
+      const compactedThreadId = (compacted?.payload ?? {}) as { threadId?: string };
+      assert.equal(compactedThreadId.threadId, ROOT);
+
+      const requested = NodeFS.readFileSync(compactsPath, "utf8")
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as { threadId?: string });
+      // The request must target the provider's own thread id, not T3's.
+      assert.deepEqual(requested, [{ threadId: ROOT }]);
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});

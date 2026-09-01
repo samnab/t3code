@@ -146,6 +146,15 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<ProviderUploadFeedbackResult, TError>;
 
   /**
+   * Ask the provider to compact its own context for one thread. Only
+   * adapters whose driver has a native compaction protocol define this;
+   * its absence is the truthful "unsupported" answer. Adapters must never
+   * abort an active turn: gate on the live session state and fail with a
+   * request error instead.
+   */
+  readonly compactContext?: (threadId: ThreadId) => Effect.Effect<void, TError>;
+
+  /**
    * Stop all sessions owned by this adapter.
    */
   readonly stopAll: () => Effect.Effect<void, TError>;

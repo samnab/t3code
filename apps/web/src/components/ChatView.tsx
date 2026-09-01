@@ -322,6 +322,7 @@ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/Compos
 import {
   hasAvailableClaudeCompactionProvider,
   hasDismissedResumeCompaction,
+  resolveContextCompactionMode,
   shouldOfferResumeCompaction,
 } from "./chat/ContextWindowMeter.logic";
 import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
@@ -1321,6 +1322,9 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
+    reportFailure: false,
+  });
+  const compactThreadContext = useAtomCommand(threadEnvironment.compactContext, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -4928,12 +4932,59 @@ function ChatViewContent(props: ChatViewProps) {
     activeThread && activeContextWindow
       ? `${activeThread.id}:${activeContextWindow.updatedAt}`
       : null;
+  // Server-declared compaction mode for the active provider: "prompt" keeps
+  // the Claude /compact turn path, "native" dispatches thread.context.compact,
+  // and null (unsupported or old server) hides the control.
+  const contextCompactionMode = useMemo(
+    () =>
+      resolveContextCompactionMode({
+        providers: applyProviderInstanceSettings(
+          deriveProviderInstanceEntries(providerStatuses),
+          settings,
+        ),
+        instanceId: activeProviderInstanceId,
+      }),
+    [activeProviderInstanceId, providerStatuses, settings],
+  );
+  const promptCompactionAvailable =
+    contextCompactionMode !== "prompt" || compactionProviderAvailable;
+  // In-flight guard for the native dispatch: the meter button stays disabled
+  // until the server accepts or rejects the request (a double-click must not
+  // send two commands).
+  const [isNativeCompacting, setIsNativeCompacting] = useState(false);
+  const handleCompactContext = useCallback(() => {
+    if (compactDisabledRef.current) return;
+    if (contextCompactionMode === "native") {
+      if (isNativeCompacting || !activeThread) return;
+      setIsNativeCompacting(true);
+      void compactThreadContext({
+        environmentId: activeThread.environmentId,
+        input: { threadId: activeThread.id },
+      }).then((result) => {
+        setIsNativeCompacting(false);
+        if (result._tag === "Failure") {
+          const failure = Cause.squash(result.cause);
+          toastManager.add({
+            type: "error",
+            title: "Context compaction failed",
+            description:
+              failure instanceof Error
+                ? failure.message
+                : "The provider did not compact the thread.",
+          });
+        }
+      });
+      return;
+    }
+    composerRef.current?.compactContext();
+  }, [activeThread, compactThreadContext, contextCompactionMode, isNativeCompacting]);
   const compactDisabled =
     !activeThread ||
     !activeProject ||
     !isServerThread ||
-    selectedProvider !== "claudeAgent" ||
-    !compactionProviderAvailable ||
+    contextCompactionMode === null ||
+    !promptCompactionAvailable ||
+    isNativeCompacting ||
     isWorking ||
     threadDetailLoading ||
     isPreparingWorktree ||
@@ -4948,10 +4999,16 @@ function ChatViewContent(props: ChatViewProps) {
       ? "Send or clear your draft before compacting"
       : !activeProject
         ? "Choose a project before compacting"
-        : !compactionProviderAvailable
+        : contextCompactionMode === "prompt" && !compactionProviderAvailable
           ? "Enable a Claude provider before compacting"
-          : "Compacting is unavailable right now"
+          : isNativeCompacting
+            ? "Compacting…"
+            : "Compacting is unavailable right now"
     : null;
+  // The callback closes over the derived disable state through a ref so the
+  // memoized banner action below and the composer both see the same guard.
+  const compactDisabledRef = useRef(compactDisabled);
+  compactDisabledRef.current = compactDisabled;
   const resumeCompactionBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (
       !activeThread ||
@@ -4981,7 +5038,7 @@ function ChatViewContent(props: ChatViewProps) {
         disabled={compactDisabled}
         onClick={() => {
           if (compactDisabled) return;
-          composerRef.current?.compactContext();
+          handleCompactContext();
         }}
       >
         Compact
@@ -7334,6 +7391,8 @@ function ChatViewContent(props: ChatViewProps) {
                             activeContextWindow={activeContextWindow}
                             compactDisabled={compactDisabled}
                             compactDisabledReason={compactDisabledReason}
+                            contextCompactionMode={contextCompactionMode}
+                            onCompactContext={handleCompactContext}
                             resolvedTheme={resolvedTheme}
                             settings={settings}
                             keybindings={keybindings}

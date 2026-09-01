@@ -608,6 +608,80 @@ export function useThreadComposerState() {
     });
   }, []);
 
+  const compactThreadContext = useAtomCommand(threadEnvironment.compactContext, {
+    reportFailure: false,
+  });
+  const compactInFlightRef = useRef(false);
+  /**
+   * Manual context compaction for the selected thread. Prompt mode sends
+   * `/compact` through the ordinary turn pipeline (the durable outbox);
+   * native mode dispatches `thread.context.compact` directly — disconnected
+   * requests fail here instead of queuing. The summary is always the
+   * provider's own; nothing is stored locally.
+   */
+  const onCompactContext = useCallback(
+    async (input: { readonly mode: "prompt" | "native" }) => {
+      if (!selectedThreadShell) {
+        return;
+      }
+      const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
+      const draft = getComposerDraftSnapshot(threadKey);
+      const session = selectedThreadDetail ?? selectedThreadShell;
+      if (
+        draft.text.trim().length > 0 ||
+        draft.attachments.length > 0 ||
+        session.session?.status === "running" ||
+        session.session?.status === "starting"
+      ) {
+        Alert.alert(
+          "Finish the current work first",
+          "Send or clear your message and stop the running turn before compacting.",
+        );
+        return;
+      }
+      if (input.mode === "prompt") {
+        const metadata = makeQueuedMessageMetadata();
+        const messageId = MessageId.make(metadata.messageId);
+        const enqueuePromise = enqueueThreadOutboxMessage({
+          environmentId: selectedThreadShell.environmentId,
+          threadId: selectedThreadShell.id,
+          messageId,
+          commandId: CommandId.make(metadata.commandId),
+          text: "/compact",
+          attachments: [],
+          modelSelection: session.modelSelection,
+          runtimeMode: session.runtimeMode,
+          interactionMode: session.interactionMode,
+          createdAt: metadata.createdAt,
+        });
+        enqueuePromise.catch((error: unknown) => {
+          Alert.alert(
+            "Could not queue /compact",
+            error instanceof Error ? error.message : "An error occurred.",
+          );
+        });
+        return;
+      }
+      if (compactInFlightRef.current) {
+        return;
+      }
+      compactInFlightRef.current = true;
+      const result = await compactThreadContext({
+        environmentId: selectedThreadShell.environmentId,
+        input: { threadId: selectedThreadShell.id },
+      });
+      compactInFlightRef.current = false;
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Context compaction failed",
+          error instanceof Error ? error.message : "The provider did not compact the thread.",
+        );
+      }
+    },
+    [compactThreadContext, selectedThreadDetail, selectedThreadShell],
+  );
+
   return {
     selectedThreadFeed,
     selectedThreadQueueCount,
@@ -630,6 +704,7 @@ export function useThreadComposerState() {
     onPasteIntoDraft,
     onNativePasteImages,
     onRemoveDraftImage,
+    onCompactContext,
     onSendMessage,
     onUpdateModelSelection,
     onUpdateRuntimeMode,

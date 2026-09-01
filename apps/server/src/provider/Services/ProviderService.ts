@@ -82,6 +82,14 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
+   * Ask the thread's provider to compact its own context. Fails truthfully
+   * when the driver has no native compaction support.
+   */
+  readonly compactContext: (input: {
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
    * List active provider sessions.
    *
    * Aggregates runtime session lists from all registered adapters.

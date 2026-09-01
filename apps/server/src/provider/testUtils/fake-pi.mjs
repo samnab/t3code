@@ -372,6 +372,49 @@ const handle = (req) => {
         ],
       });
       return;
+    case "compact": {
+      // Manual compaction lifecycle. FAKE_PI_COMPACT selects the outcome:
+      //   unset  — succeeds (start + end with a result + success response)
+      //   "fail" — compaction_end carries errorMessage, response fails
+      //   "abort" — compaction_end is aborted, response fails
+      const mode = process.env.FAKE_PI_COMPACT;
+      send({ type: "compaction_start", reason: "manual" });
+      if (mode === undefined) {
+        send({
+          type: "compaction_end",
+          reason: "manual",
+          result: {
+            summary: "Summary of conversation...",
+            firstKeptEntryId: "e1",
+            tokensBefore: 100,
+            estimatedTokensAfter: 20,
+          },
+          aborted: false,
+          willRetry: false,
+        });
+        respond(req.id, {
+          summary: "Summary of conversation...",
+          firstKeptEntryId: "e1",
+          tokensBefore: 100,
+          estimatedTokensAfter: 20,
+        });
+        return;
+      }
+      if (mode === "abort") {
+        send({ type: "compaction_end", reason: "manual", result: null, aborted: true });
+        reject(req, "compaction aborted");
+        return;
+      }
+      send({
+        type: "compaction_end",
+        reason: "manual",
+        result: null,
+        aborted: false,
+        errorMessage: "compaction failed (quota exceeded)",
+      });
+      reject(req, "compaction failed (quota exceeded)");
+      return;
+    }
     case "switch_session":
       if (process.env.FAKE_PI_VETO === "1") {
         respond(req.id, { cancelled: true });
@@ -442,6 +485,23 @@ const handle = (req) => {
       }
       send({ type: "response", id: req.id, command: "prompt", success: true });
       if (message.startsWith("/only")) return;
+      if (message === "AUTO_COMPACT") {
+        // Threshold compaction mid-turn: the turn must survive it and the
+        // adapter must still report the compacted state.
+        isStreaming = true;
+        send({ type: "agent_start" });
+        send({ type: "compaction_start", reason: "threshold" });
+        send({
+          type: "compaction_end",
+          reason: "threshold",
+          result: { summary: "Auto summary...", firstKeptEntryId: "e1" },
+          aborted: false,
+          willRetry: false,
+        });
+        isStreaming = false;
+        send({ type: "agent_settled" });
+        return;
+      }
       if (message === "WAIT_FOR_ABORT") {
         isStreaming = true;
         send({ type: "agent_start" });

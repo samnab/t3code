@@ -58,6 +58,7 @@ const makeFixture = (): Fixture => {
   process.env.FAKE_PI_LOG = logPath;
   process.env.FAKE_PI_SESSION_FILE = nativeSessionFile;
   delete process.env.FAKE_PI_BUSY;
+  delete process.env.FAKE_PI_COMPACT;
   delete process.env.FAKE_PI_FAIL_COMMAND;
   delete process.env.FAKE_PI_VETO;
   delete process.env.FAKE_PI_MANAGER;
@@ -1497,6 +1498,125 @@ describe("PiAdapter", () => {
         expect(unsupported.detail).toContain("not registered");
       }
       expect(controlEnvelopes(fixture)).toHaveLength(before);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+});
+
+describe("PiAdapter compaction", () => {
+  it.live("maps a manual compact into the canonical lifecycle without storing the summary", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.compactContext?.(THREAD_ID);
+
+      const itemStarted = yield* collector.waitFor(
+        (event) => event.type === "item.started" && event.payload.itemType === "context_compaction",
+      );
+      const itemCompleted = yield* collector.waitFor(
+        (event) =>
+          event.type === "item.completed" && event.payload.itemType === "context_compaction",
+      );
+      const stateChanged = yield* collector.waitFor(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+      );
+      expect((itemStarted.payload as { status?: string }).status).toBe("inProgress");
+      expect((itemCompleted.payload as { status?: string }).status).toBe("completed");
+      // Only the lifecycle and a reason travel into T3 — never the summary.
+      const compactedDetail = (
+        stateChanged.payload as { detail?: { reason?: string; summary?: string } }
+      ).detail;
+      expect(compactedDetail?.reason).toBe("manual");
+      expect(compactedDetail?.summary).toBeUndefined();
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("refuses to compact while a turn is active", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "WAIT_FOR_ABORT" });
+
+      const blocked = yield* adapter.compactContext?.(THREAD_ID).pipe(Effect.flip);
+      expect(blocked?._tag).toBe("ProviderAdapterRequestError");
+      if (blocked?._tag === "ProviderAdapterRequestError") {
+        expect(blocked.detail).toContain("cannot start while a turn is running");
+      }
+      yield* adapter.interruptTurn(THREAD_ID);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("fails truthfully when compaction errors and never reports compacted state", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_COMPACT = "fail";
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      const { events } = collector;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+
+      const failure = yield* adapter.compactContext?.(THREAD_ID).pipe(Effect.flip);
+      expect(failure?._tag).toBe("ProviderAdapterProcessError");
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "item.completed" && event.payload.itemType === "context_compaction",
+      );
+      expect(
+        events.some(
+          (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+        ),
+      ).toBe(false);
+      yield* adapter.stopSession(THREAD_ID);
+      delete process.env.FAKE_PI_COMPACT;
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("observes automatic threshold compaction inside a running turn", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "AUTO_COMPACT" });
+      const stateChanged = yield* collector.waitFor(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "compacted",
+      );
+      const turnCompleted = yield* collector.waitFor((event) => event.type === "turn.completed");
+      expect((turnCompleted.payload as { state?: string }).state).toBe("completed");
+      expect((stateChanged.payload as { detail?: { reason?: string } }).detail?.reason).toBe(
+        "threshold",
+      );
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
   );

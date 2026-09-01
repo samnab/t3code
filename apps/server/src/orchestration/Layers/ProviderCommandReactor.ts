@@ -15,6 +15,7 @@ import {
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -60,7 +61,8 @@ type ProviderIntentEvent = Extract<
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
-      | "thread.session-stop-requested";
+      | "thread.session-stop-requested"
+      | "thread.context-compact-requested";
   }
 >;
 
@@ -330,6 +332,14 @@ const make = Effect.gen(function* () {
 
   const threadModelSelections = new Map<string, ModelSelection>();
 
+  // Native compactions accepted but not yet observed complete, per thread.
+  // Codex's `thread/compact/start` returns before the compact turn finishes,
+  // so entries clear on the observed "Context compacted" activity, on
+  // failure, or on this TTL — whichever lands first.
+  const pendingCompactions = new Map<ThreadId, { readonly acceptedAt: number }>();
+  const PENDING_COMPACTION_TTL_MS = 10 * 60_000;
+  const nowMillis = Clock.currentTimeMillis;
+
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
     readonly kind:
@@ -337,7 +347,8 @@ const make = Effect.gen(function* () {
       | "provider.turn.interrupt.failed"
       | "provider.approval.respond.failed"
       | "provider.user-input.respond.failed"
-      | "provider.session.stop.failed";
+      | "provider.session.stop.failed"
+      | "provider.context.compact.failed";
     readonly summary: string;
     readonly detail: string;
     readonly turnId: TurnId | null;
@@ -1439,6 +1450,64 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const processContextCompactRequested = Effect.fn("processContextCompactRequested")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.context-compact-requested" }>,
+  ) {
+    const thread = yield* resolveThread(event.payload.threadId);
+    if (!thread) {
+      return;
+    }
+    // Duplicate / in-flight guard. A compaction already accepted needs no
+    // second request; the first is still the truthful state of the world.
+    if (pendingCompactions.has(event.payload.threadId)) {
+      return;
+    }
+    const session = thread.session;
+    if (!session || session.status === "stopped") {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.context.compact.failed",
+        summary: "Context compaction failed",
+        detail: "No active provider session is bound to this thread.",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+    // The decider gated on the read model; re-check live session state so a
+    // turn that started in between is protected, not aborted.
+    if (session.status === "running" || session.status === "starting") {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.context.compact.failed",
+        summary: "Context compaction failed",
+        detail: "Compaction cannot start while a turn is running.",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+    pendingCompactions.set(event.payload.threadId, {
+      acceptedAt: yield* nowMillis,
+    });
+    yield* providerService.compactContext({ threadId: event.payload.threadId }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.gen(function* () {
+          pendingCompactions.delete(event.payload.threadId);
+          if (Cause.hasInterruptsOnly(cause)) {
+            return yield* Effect.interrupt;
+          }
+          yield* appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.context.compact.failed",
+            summary: "Context compaction failed",
+            detail: formatFailureDetail(cause),
+            turnId: null,
+            createdAt: event.payload.createdAt,
+          });
+        }),
+      ),
+    );
+  });
+
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (
     event: ProviderIntentEvent,
   ) {
@@ -1482,6 +1551,9 @@ const make = Effect.gen(function* () {
       case "thread.session-stop-requested":
         yield* processSessionStopRequested(event);
         return;
+      case "thread.context-compact-requested":
+        yield* processContextCompactRequested(event);
+        return;
     }
   });
 
@@ -1513,6 +1585,24 @@ const make = Effect.gen(function* () {
       }),
     );
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
+      // Observed compaction completion clears the in-flight guard for that
+      // thread (ingestion appends the "Context compacted" activity when the
+      // provider reports compacted state).
+      if (
+        event.type === "thread.activity-appended" &&
+        event.payload.activity.kind === "context-compaction"
+      ) {
+        pendingCompactions.delete(event.payload.threadId);
+      }
+      // TTL sweep: a wedged provider must not block later compaction forever.
+      if (pendingCompactions.size > 0) {
+        const now = yield* nowMillis;
+        for (const [threadId, entry] of pendingCompactions) {
+          if (now - entry.acceptedAt > PENDING_COMPACTION_TTL_MS) {
+            pendingCompactions.delete(threadId);
+          }
+        }
+      }
       if (
         (event.type === "thread.meta-updated" && event.payload.regenerateTitle === true) ||
         event.type === "thread.runtime-mode-set" ||
@@ -1520,7 +1610,8 @@ const make = Effect.gen(function* () {
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
-        event.type === "thread.session-stop-requested"
+        event.type === "thread.session-stop-requested" ||
+        event.type === "thread.context-compact-requested"
       ) {
         return yield* worker.enqueue(event);
       }

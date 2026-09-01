@@ -87,6 +87,10 @@ const ProviderRollbackConversationInput = Schema.Struct({
   numTurns: NonNegativeInt,
 });
 
+const ProviderCompactContextInput = Schema.Struct({
+  threadId: ThreadId,
+});
+
 function toValidationError(
   operation: string,
   issue: string,
@@ -984,6 +988,47 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const compactContext: ProviderServiceMethod<"compactContext"> = Effect.fn("compactContext")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.compactContext",
+        schema: ProviderCompactContextInput,
+        payload: rawInput,
+      });
+      let metricProvider = "unknown";
+      return yield* Effect.gen(function* () {
+        // No recovery: compaction only makes sense against the live session a
+        // user is looking at, never as a side effect of resurrecting one.
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.compactContext",
+          allowRecovery: false,
+        });
+        metricProvider = routed.adapter.provider;
+        yield* Effect.annotateCurrentSpan({
+          "provider.operation": "compact-context",
+          "provider.kind": routed.adapter.provider,
+          "provider.thread_id": input.threadId,
+        });
+        if (routed.adapter.compactContext === undefined) {
+          return yield* toValidationError(
+            "ProviderService.compactContext",
+            `Provider '${routed.adapter.provider}' does not support native context compaction.`,
+          );
+        }
+        yield* routed.adapter.compactContext(routed.threadId);
+      }).pipe(
+        withMetrics({
+          counter: providerTurnsTotal,
+          outcomeAttributes: () =>
+            providerMetricAttributes(metricProvider, {
+              operation: "compact",
+            }),
+        }),
+      );
+    },
+  );
+
   const listSessions: ProviderServiceMethod<"listSessions"> = Effect.fn("listSessions")(
     function* () {
       const currentAdapters = yield* getAdapterEntries;
@@ -1226,6 +1271,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     respondToRequest,
     respondToUserInput,
     stopSession,
+    compactContext,
     listSessions,
     getCapabilities,
     getInstanceInfo,

@@ -3,6 +3,14 @@
 This guide is for people who want to use more than one Codex account in T3 Code. For Claude, see
 [Claude](./providers-claude.md). For first-time setup, see [Install T3 Code](./install.md).
 
+## Reduce Context Usage
+
+Choose **Compact context** in the context meter (web and desktop) or in the composer's expanded
+toolbar (mobile) to ask Codex to summarize the conversation and continue with the summary. T3 Code
+sends Codex's own compaction request — Codex writes the summary, and T3 Code never edits it or
+picks a summary model. Compaction only runs on an idle thread; while a turn is running the control
+waits. The thread's **Context compacted** activity appears when Codex finishes.
+
 Common reasons:
 
 - use a work account for work projects

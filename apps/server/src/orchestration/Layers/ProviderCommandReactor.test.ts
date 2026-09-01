@@ -151,6 +151,7 @@ describe("ProviderCommandReactor", () => {
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly compactContextEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly startSessionEffect?: (
       session: ProviderSession,
@@ -238,6 +239,9 @@ describe("ProviderCommandReactor", () => {
       }),
     );
     const interruptTurn = vi.fn((_: unknown) => input?.interruptTurnEffect?.() ?? Effect.void);
+    const compactContext = vi.fn<ProviderServiceShape["compactContext"]>(
+      (_: unknown) => input?.compactContextEffect?.() ?? Effect.void,
+    );
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
     const respondToUserInput = vi.fn<ProviderServiceShape["respondToUserInput"]>(() => Effect.void);
     const stopSession = vi.fn((stopInput: unknown) =>
@@ -323,6 +327,7 @@ describe("ProviderCommandReactor", () => {
       startSession: startSession as ProviderServiceShape["startSession"],
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
+      compactContext: compactContext as ProviderServiceShape["compactContext"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
@@ -518,6 +523,7 @@ describe("ProviderCommandReactor", () => {
       refreshStatus,
       generateBranchName,
       generateThreadTitle,
+      compactContext,
       runtimeSessions,
       stateDir,
       drain,
@@ -3249,5 +3255,211 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+  });
+
+  describe("context compaction", () => {
+    async function createCompactionHarness(input?: {
+      readonly compactContextEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    }) {
+      const harness = await createHarness(
+        input?.compactContextEffect
+          ? { compactContextEffect: input.compactContextEffect }
+          : undefined,
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-compact-ready"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      return harness;
+    }
+
+    it("compacts an idle session through the provider service", async () => {
+      const harness = await createCompactionHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.context.compact",
+          commandId: CommandId.make("cmd-context-compact-1"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+
+      expect(harness.compactContext).toHaveBeenCalledTimes(1);
+      expect(harness.compactContext).toHaveBeenCalledWith({ threadId: ThreadId.make("thread-1") });
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(thread?.activities.some((a) => a.kind === "provider.context.compact.failed")).toBe(
+        false,
+      );
+    });
+
+    it("no-ops duplicate requests while a compaction is pending", async () => {
+      const harness = await createCompactionHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+
+      for (const commandId of ["cmd-context-compact-dup-1", "cmd-context-compact-dup-2"]) {
+        await harness.runEffect(
+          harness.engine.dispatch({
+            type: "thread.context.compact",
+            commandId: CommandId.make(commandId),
+            threadId: ThreadId.make("thread-1"),
+            createdAt: now,
+          }),
+        );
+      }
+      await harness.drain();
+
+      expect(harness.compactContext).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports a failure activity when the provider rejects compaction", async () => {
+      const harness = await createCompactionHarness({
+        compactContextEffect: () =>
+          Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: "codex",
+              method: "thread/compact/start",
+              detail: "codex refused compaction",
+            }),
+          ),
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.context.compact",
+          commandId: CommandId.make("cmd-context-compact-fail"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        }),
+      );
+      await waitFor(async () => {
+        const thread = (await harness.readModel()).threads.find(
+          (entry) => entry.id === ThreadId.make("thread-1"),
+        );
+        return (
+          thread?.activities.some(
+            (activity) => activity.kind === "provider.context.compact.failed",
+          ) ?? false
+        );
+      });
+
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(
+        thread?.activities.find((activity) => activity.kind === "provider.context.compact.failed"),
+      ).toMatchObject({
+        summary: "Context compaction failed",
+        payload: { detail: "codex refused compaction" },
+      });
+    });
+
+    it("refuses to compact without an active session and while a turn runs", async () => {
+      // A stopped session exercises the same "no active provider session"
+      // reactor branch as a never-started one (session null vs stopped).
+      const noSessionHarness = await createCompactionHarness();
+      const now = "2026-01-01T00:00:00.000Z";
+      await noSessionHarness.runEffect(
+        noSessionHarness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-compact-stopped"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "stopped",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      await noSessionHarness.runEffect(
+        noSessionHarness.engine.dispatch({
+          type: "thread.context.compact",
+          commandId: CommandId.make("cmd-context-compact-no-session"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: now,
+        }),
+      );
+      await noSessionHarness.drain();
+      await waitFor(async () => {
+        const thread = (await noSessionHarness.readModel()).threads.find(
+          (entry) => entry.id === ThreadId.make("thread-1"),
+        );
+        return (
+          thread?.activities.some(
+            (activity) => activity.kind === "provider.context.compact.failed",
+          ) ?? false
+        );
+      });
+      const noSessionThread = (await noSessionHarness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(
+        noSessionThread?.activities.find((a) => a.kind === "provider.context.compact.failed"),
+      ).toMatchObject({
+        payload: { detail: "No active provider session is bound to this thread." },
+      });
+      expect(noSessionHarness.compactContext).not.toHaveBeenCalled();
+
+      const runningHarness = await createCompactionHarness();
+      await runningHarness.runEffect(
+        runningHarness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-session-set-compact-running"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-1"),
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      // The decider is the authoritative idle-only boundary: a running session
+      // rejects the command outright, so the provider is never asked.
+      const rejected = await runningHarness
+        .runEffect(
+          runningHarness.engine.dispatch({
+            type: "thread.context.compact",
+            commandId: CommandId.make("cmd-context-compact-running"),
+            threadId: ThreadId.make("thread-1"),
+            createdAt: now,
+          }),
+        )
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(String(rejected)).toContain("has an active session and cannot be compacted");
+      await runningHarness.drain();
+      expect(runningHarness.compactContext).not.toHaveBeenCalled();
+    });
   });
 });

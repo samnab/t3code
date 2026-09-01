@@ -703,6 +703,10 @@ export interface ChatComposerProps {
   activeContextWindow: ContextWindowSnapshot | null;
   compactDisabled: boolean;
   compactDisabledReason: string | null;
+  /** Server-declared compaction mode for the active provider; null = hide. */
+  contextCompactionMode: "prompt" | "native" | null;
+  /** Native-mode compact dispatch, owned by ChatView (command + guards). */
+  onCompactContext: () => void;
 
   // Misc
   resolvedTheme: "light" | "dark";
@@ -805,6 +809,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeContextWindow,
     compactDisabled,
     compactDisabledReason,
+    contextCompactionMode,
+    onCompactContext,
     resolvedTheme,
     settings,
     keybindings,
@@ -3773,9 +3779,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       compactDisabled || noProviderAvailable || isSendBusy || isConnecting
                     }
                     compactDisabledReason={resolvedCompactDisabledReason}
-                    {...(selectedProvider === "claudeAgent"
+                    {...(contextCompactionMode === "prompt"
                       ? { onCompactContext: compactThreadContext }
-                      : {})}
+                      : contextCompactionMode === "native"
+                        ? { onCompactContext }
+                        : {})}
                   />
                 </div>
               </div>

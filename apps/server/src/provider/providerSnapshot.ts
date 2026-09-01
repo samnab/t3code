@@ -3,6 +3,7 @@ import type {
   ModelCapabilities,
   ServerProvider,
   ServerProviderAuth,
+  ServerProviderContextCompaction,
   ServerProviderSkill,
   ServerProviderSlashCommand,
   ServerProviderModel,
@@ -57,6 +58,8 @@ export interface ServerProviderPresentation {
   readonly badgeLabel?: string;
   readonly showInteractionModeToggle?: boolean;
   readonly requiresNewThreadForModelChange?: boolean;
+  /** How manual context compaction is requested; absent = unsupported. */
+  readonly contextCompaction?: ServerProviderContextCompaction;
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
@@ -238,6 +241,9 @@ export function buildServerProvider(input: {
       : {}),
     ...(typeof input.presentation.requiresNewThreadForModelChange === "boolean"
       ? { requiresNewThreadForModelChange: input.presentation.requiresNewThreadForModelChange }
+      : {}),
+    ...(input.presentation.contextCompaction !== undefined
+      ? { contextCompaction: input.presentation.contextCompaction }
       : {}),
     enabled: input.enabled,
     installed: input.probe.installed,

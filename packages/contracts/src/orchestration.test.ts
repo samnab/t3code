@@ -262,6 +262,29 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
   }),
 );
 
+it.effect("decodes thread.context.compact and rejects summarizer fields", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.context.compact",
+      commandId: "cmd-compact-1",
+      threadId: "thread-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    if (command.type !== "thread.context.compact") {
+      throw new Error(`expected thread.context.compact, got ${command.type}`);
+    }
+    assert.strictEqual(String(command.threadId), "thread-1");
+    // The command schema carries no instructions/summary/model/threshold —
+    // T3 never authors the summary. Unknown keys never surface as fields.
+    assert.deepStrictEqual(Object.keys(command).sort(), [
+      "commandId",
+      "createdAt",
+      "threadId",
+      "type",
+    ]);
+  }),
+);
+
 it.effect("accepts both inline and uploaded image attachments from clients", () =>
   Effect.gen(function* () {
     const command = yield* decodeClientOrchestrationCommand({
@@ -499,6 +522,31 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
     assert.strictEqual(thread.settledAt, null);
     assert.strictEqual(shell.settledOverride, null);
     assert.strictEqual(shell.settledAt, null);
+  }),
+);
+
+it.effect("decodes thread.context-compact-requested events", () =>
+  Effect.gen(function* () {
+    const event = yield* decodeOrchestrationEvent({
+      sequence: 1,
+      eventId: "event-compact-1",
+      aggregateKind: "thread",
+      aggregateId: "thread-1",
+      type: "thread.context-compact-requested",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      commandId: "cmd-compact-1",
+      causationEventId: null,
+      correlationId: "cmd-compact-1",
+      metadata: {},
+      payload: {
+        threadId: "thread-1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    if (event.type !== "thread.context-compact-requested") {
+      assert.fail(`Expected thread.context-compact-requested, received ${event.type}.`);
+    }
+    assert.strictEqual(String(event.payload.threadId), "thread-1");
   }),
 );
 

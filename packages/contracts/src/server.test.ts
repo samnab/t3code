@@ -73,6 +73,19 @@ describe("ServerProvider", () => {
     expect(parsed.versionAdvisory?.canUpdate).toBe(false);
   });
 
+  it("decodes the compaction capability mode and keeps old-server snapshots without it", () => {
+    const decoded = decodeServerProvider({
+      ...baseProviderSnapshot,
+      contextCompaction: "native",
+    });
+    expect(decoded.contextCompaction).toBe("native");
+
+    // An older server never sends the field; absent must stay undefined so
+    // clients treat the provider as compaction-unsupported.
+    const legacy = decodeServerProvider({ ...baseProviderSnapshot });
+    expect(legacy.contextCompaction).toBeUndefined();
+  });
+
   it("decodes continuation group metadata", () => {
     const parsed = decodeServerProvider({
       instanceId: "codex_personal",

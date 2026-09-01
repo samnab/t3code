@@ -9,6 +9,7 @@ import {
 } from "./runtime.ts";
 import {
   type ArchiveThreadInput,
+  type CompactThreadContextInput,
   type CreateThreadInput,
   type DeleteThreadInput,
   type InterruptThreadTurnInput,
@@ -29,6 +30,7 @@ import {
   type UnsnoozeThreadInput,
   type UpdateThreadMetadataInput,
   archiveThread,
+  compactThreadContext,
   createThread,
   deleteThread,
   interruptThreadTurn,
@@ -53,6 +55,7 @@ import type { EnvironmentRegistry } from "../connection/registry.ts";
 
 export type {
   ArchiveThreadInput,
+  CompactThreadContextInput,
   CreateThreadInput,
   DeleteThreadInput,
   InterruptThreadTurnInput,
@@ -201,6 +204,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     stopSession: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:stop-session",
       execute: (input: StopThreadSessionInput) => stopThreadSession(input),
+      scheduler,
+      concurrency,
+    }),
+    compactContext: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:compact-context",
+      execute: (input: CompactThreadContextInput) => compactThreadContext(input),
       scheduler,
       concurrency,
     }),

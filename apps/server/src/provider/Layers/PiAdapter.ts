@@ -272,6 +272,8 @@ interface PiSessionContext {
   readonly pendingManagerRunUpserts: ManagerRunUpsert[];
   managerNegotiating: boolean;
   nativeSessionPath: string | undefined;
+  /** Item id of the compaction currently reported by Pi, if any. */
+  activeCompactionItemId: string | undefined;
 }
 
 export interface PiAdapterOptions {
@@ -282,6 +284,8 @@ export interface PiAdapterOptions {
 const SETTLE_PROBE_TIMEOUT_MS = 2_000;
 const SETTLE_PROBE_RETRY_DELAY_MILLIS = 100;
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
+/** Manual compaction runs an LLM summary call; it can legitimately take minutes. */
+const COMPACT_REQUEST_TIMEOUT_MS = 5 * 60_000;
 const MANAGED_SUBAGENT_SUMMARY_MAX_CODE_POINTS = 4_096;
 const MAX_PENDING_MANAGED_TERMINALS = 64;
 /**
@@ -1374,6 +1378,60 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 if (turn !== null) turn.sawAgentActivity = true;
                 return;
               }
+              case "compaction_start": {
+                // Manual and automatic compactions report the same lifecycle.
+                // T3 observes only; the summary text stays inside Pi.
+                const itemId = `compaction:${yield* nextUuid}`;
+                ctx.activeCompactionItemId = itemId;
+                const base = yield* makeEventBase(ctx.session);
+                yield* offerRuntimeEvent({
+                  ...base,
+                  type: "item.started",
+                  ...(turn !== null ? { turnId: turn.turnId } : {}),
+                  itemId: RuntimeItemId.make(itemId),
+                  payload: {
+                    itemType: "context_compaction",
+                    status: "inProgress",
+                    title: "Context compaction",
+                  },
+                });
+                return;
+              }
+              case "compaction_end": {
+                const itemId = ctx.activeCompactionItemId;
+                ctx.activeCompactionItemId = undefined;
+                const aborted = recordField(event, "aborted") === true;
+                const errorMessage = recordString(event, "errorMessage");
+                const succeeded = !aborted && errorMessage === undefined;
+                if (itemId !== undefined) {
+                  const base = yield* makeEventBase(ctx.session);
+                  yield* offerRuntimeEvent({
+                    ...base,
+                    type: "item.completed",
+                    ...(turn !== null ? { turnId: turn.turnId } : {}),
+                    itemId: RuntimeItemId.make(itemId),
+                    payload: {
+                      itemType: "context_compaction",
+                      status: succeeded ? "completed" : aborted ? "declined" : "failed",
+                      title: "Context compaction",
+                    },
+                  });
+                }
+                if (succeeded) {
+                  // The single canonical compaction observation: ingestion
+                  // turns this into the "Context compacted" activity.
+                  const base = yield* makeEventBase(ctx.session);
+                  yield* offerRuntimeEvent({
+                    ...base,
+                    type: "thread.state.changed",
+                    payload: {
+                      state: "compacted",
+                      detail: { reason: recordString(event, "reason") ?? "manual" },
+                    },
+                  });
+                }
+                return;
+              }
               case "message_update": {
                 if (turn === null) return;
                 turn.sawAgentActivity = true;
@@ -1678,6 +1736,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             pendingManagerRunUpserts: [],
             managerNegotiating: true,
             nativeSessionPath,
+            activeCompactionItemId: undefined,
           };
           sessions.set(input.threadId, ctx);
           // Negotiate only once the pump can route manager records to this
@@ -1811,6 +1870,38 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         );
       });
 
+    /**
+     * Provider-native manual compaction: send Pi's `compact` RPC and let the
+     * event pump report the lifecycle. The response data (summary text, token
+     * estimates) is deliberately discarded — T3 never stores a summary.
+     */
+    const compactContext = (threadId: ThreadId) =>
+      Effect.gen(function* () {
+        const ctx = yield* requireSession(threadId);
+        // Compacting mid-turn would abort the run; the idle-only rule is
+        // enforced here so every caller is protected.
+        if (ctx.activeTurn !== null) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "compactContext",
+            detail: "Pi compaction cannot start while a turn is running.",
+          });
+        }
+        if (ctx.activeCompactionItemId !== undefined) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "compactContext",
+            detail: "A Pi compaction is already in progress for this thread.",
+          });
+        }
+        // The transport fails the request on `success: false` (carrying
+        // Pi's error), so reaching here means compaction ran to completion.
+        // The response data — summary text and token estimates — is dropped.
+        yield* ctx.connection
+          .request({ type: "compact" }, COMPACT_REQUEST_TIMEOUT_MS)
+          .pipe(Effect.mapError((cause) => adapterError(threadId, "compact", cause)));
+      });
+
     const respondToExtensionUi = (
       threadId: ThreadId,
       requestId: ApprovalRequestId,
@@ -1927,6 +2018,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       startSession,
       sendTurn,
       interruptTurn,
+      compactContext,
       respondToRequest,
       respondToUserInput,
       stopSession,

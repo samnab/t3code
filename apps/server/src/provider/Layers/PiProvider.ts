@@ -58,6 +58,7 @@ const PI_PRESENTATION = {
   showInteractionModeToggle: false,
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
   requiresNewThreadForModelChange: false,
+  contextCompaction: "native",
 } as const;
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;

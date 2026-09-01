@@ -22,6 +22,7 @@ import type { ReactNode } from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Platform,
   Pressable,
@@ -59,6 +60,7 @@ import {
 } from "../../components/ComposerToolbar";
 import { ControlPill } from "../../components/ControlPill";
 import { ProviderIcon } from "../../components/ProviderIcon";
+import { resolveThreadCompactionControl } from "./thread-compaction";
 import type { DraftComposerImageAttachment } from "../../lib/composerImages";
 import { buildModelOptions, groupByProvider } from "../../lib/modelOptions";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
@@ -132,6 +134,11 @@ export interface ThreadComposerProps {
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
   readonly onSendMessage: () => Promise<MessageId | null>;
+  /** Manual context compaction; mode comes from the server capability. */
+  readonly onCompactContext: (input: { readonly mode: "prompt" | "native" }) => void;
+  /** Pending interactive requests block compaction (guarded server-side too). */
+  readonly hasPendingApproval: boolean;
+  readonly hasPendingUserInput: boolean;
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
@@ -396,6 +403,36 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+  const [compactionInFlight, setCompactionInFlight] = useState(false);
+  const compactionControl = resolveThreadCompactionControl({
+    provider: selectedProviderStatus,
+    sessionStatus: props.selectedThread.session?.status,
+    pendingApprovalCount: props.hasPendingApproval ? 1 : 0,
+    pendingUserInputCount: props.hasPendingUserInput ? 1 : 0,
+    draftHasContent: hasContent,
+    compactInFlight: compactionInFlight,
+    connected: props.connectionState === "connected",
+  });
+  const onCompactContext = props.onCompactContext;
+  const handleCompactContext = useCallback(() => {
+    if (compactionControl.mode === null) {
+      return;
+    }
+    if (compactionControl.disabled) {
+      if (compactionControl.disabledReason !== null) {
+        Alert.alert("Cannot compact context", compactionControl.disabledReason);
+      }
+      return;
+    }
+    if (compactionControl.mode === "native") {
+      setCompactionInFlight(true);
+      void Promise.resolve(onCompactContext({ mode: "native" }))
+        .catch(() => undefined)
+        .finally(() => setCompactionInFlight(false));
+      return;
+    }
+    onCompactContext({ mode: "prompt" });
+  }, [compactionControl, onCompactContext]);
   const supportsThreadGoals = props.serverConfig?.environment.capabilities.threadGoals === true;
 
   // Editing control only while expanded with known support; a durable goal
@@ -967,6 +1004,21 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                       showChevron={false}
                     />
                   )
+                ) : null}
+                {compactionControl.mode !== null ? (
+                  <ComposerToolbarButton
+                    accessibilityLabel="Compact context"
+                    accessibilityHint={
+                      compactionControl.disabledReason ??
+                      (compactionControl.mode === "prompt"
+                        ? "Sends /compact to the agent as a message."
+                        : "Asks the provider to compact its own context.")
+                    }
+                    disabled={compactionControl.disabled}
+                    icon="arrow.down.right.and.arrow.up.left"
+                    onPress={handleCompactContext}
+                    showChevron={false}
+                  />
                 ) : null}
                 {showStopAction ? (
                   <ComposerToolbarButton

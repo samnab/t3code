@@ -95,6 +95,24 @@ rl.on("line", (line) => {
     }
     return;
   }
+  if (method === "thread/compact/start") {
+    // Record the exact compact request (sidecar file the test reads) and
+    // answer like the real app server: accept immediately, then signal the
+    // compact turn's completion asynchronously.
+    NodeFS.appendFileSync(
+      `${process.env.T3_CODEX_COLLAB_SCRIPT}.compacts`,
+      `${JSON.stringify({ threadId: message.params?.threadId })}\n`,
+    );
+    write({ id, result: {} });
+    if (script.emitCompactedNotification !== false) {
+      write({
+        jsonrpc: "2.0",
+        method: "thread/compacted",
+        params: { threadId: message.params?.threadId, turnId: "compact-turn-1" },
+      });
+    }
+    return;
+  }
   if (method === "turn/interrupt") {
     // Record which thread/turn was interrupted (append-only sidecar file the
     // test reads) so Stop coverage can assert every live child was reached.

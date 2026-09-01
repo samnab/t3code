@@ -61,8 +61,18 @@ Clients never call a provider directly. They dispatch orchestration commands ove
 `orchestration.dispatchCommand`, defined with the rest of the orchestration surface in
 [`orchestration.ts`][contracts]. The client-dispatchable provider-facing commands are
 `thread.turn.start`, `thread.turn.interrupt`, `thread.approval.respond`,
-`thread.user-input.respond`, `thread.checkpoint.revert`, and `thread.session.stop`, plus the mode
-setters `thread.runtime-mode.set` and `thread.interaction-mode.set`.
+`thread.user-input.respond`, `thread.checkpoint.revert`, `thread.session.stop`, and
+`thread.context.compact`, plus the mode setters `thread.runtime-mode.set` and
+`thread.interaction-mode.set`.
+
+`thread.context.compact` requests provider-native manual context compaction. The decider rejects
+busy threads (running session, queued turn start, open approval or user-input request); the reactor
+re-checks live session state, de-duplicates in-flight requests, and reports failures as a
+`provider.context.compact.failed` activity. T3 only requests compaction — the provider authors and
+owns the summary, and nothing about it (text, model, threshold) crosses the command. Providers
+declare their mode on the `ServerProvider` snapshot: `contextCompaction: "prompt"` (Claude — the
+client sends `/compact` as a normal turn) or `"native"` (Codex `thread/compact/start`, Pi's
+`compact` RPC). Cursor, Grok, and OpenCode declare nothing and the control stays hidden.
 
 The engine persists an event for the command, and a server-side reactor performs the provider call.
 Provider output comes back as internal commands such as `thread.message.assistant.delta` and

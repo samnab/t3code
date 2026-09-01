@@ -88,6 +88,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     (_turnId?: TurnId): Promise<void> => Promise.resolve(undefined),
   );
 
+  public readonly compactThreadImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
+
   public readonly readThreadImpl = vi.fn(
     (): Promise<CodexThreadSnapshot> =>
       Promise.resolve({
@@ -139,6 +141,8 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   interruptTurn(turnId?: TurnId) {
     return Effect.promise(() => this.interruptTurnImpl(turnId));
   }
+
+  compactThread = Effect.promise(() => this.compactThreadImpl());
 
   readThread = Effect.promise(() => this.readThreadImpl());
 
@@ -1599,3 +1603,52 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
     }
   }),
 );
+
+const compactRuntimeFactory = makeRuntimeFactory();
+const compactLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        makeRuntime: compactRuntimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+compactLayer("CodexAdapter context compaction", (it) => {
+  it.effect("routes compactContext to the session runtime's compactThread", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+
+      const compactContext = adapter.compactContext;
+      NodeAssert.ok(compactContext);
+      yield* compactContext(asThreadId("thread-1"));
+
+      const runtime = compactRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime?.compactThreadImpl.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("fails truthfully when no live session owns the thread", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const compactContext = adapter.compactContext;
+      NodeAssert.ok(compactContext);
+      const result = yield* compactContext(asThreadId("thread-no-session")).pipe(Effect.result);
+      NodeAssert.equal(result._tag, "Failure");
+    }),
+  );
+});

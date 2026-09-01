@@ -36,6 +36,22 @@ export function hasAvailableClaudeCompactionProvider(input: {
   );
 }
 
+/**
+ * How manual context compaction is requested for a thread's provider.
+ *
+ * `"prompt"` — the provider compacts through a normal turn (Claude's
+ * `/compact`); `"native"` — T3 dispatches `thread.context.compact` and the
+ * server asks the provider to compact itself. `null` — the provider (or an
+ * older server) does not declare support, and the compact control hides.
+ */
+export function resolveContextCompactionMode(input: {
+  readonly providers: ReadonlyArray<ProviderInstanceEntry>;
+  readonly instanceId: ProviderInstanceId | null;
+}): "prompt" | "native" | null {
+  const provider = input.providers.find((entry) => entry.instanceId === input.instanceId);
+  return provider?.snapshot.contextCompaction ?? null;
+}
+
 export function hasDismissedResumeCompaction(
   activities: ReadonlyArray<{ readonly kind: string; readonly payload: unknown }>,
 ): boolean {

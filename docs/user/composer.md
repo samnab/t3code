@@ -37,3 +37,23 @@ On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from
 start it in the background. T3 Code opens another new thread and shows an **Open** action for the
 thread that started. The new thread keeps the selected workspace mode and base branch. If **New
 worktree** is selected, each background thread creates its own worktree.
+
+## Compact context
+
+When a thread's context grows, you can ask the provider to compact it: summarize the conversation
+so far and continue with the summary. On web and desktop, choose **Compact context** in the
+context meter next to the composer. On mobile, it lives in the composer's expanded toolbar.
+
+How the request is made depends on the provider:
+
+- **Claude** sends `/compact` as a normal message through the composer.
+- **Codex and Pi** use the provider's own compaction protocol. T3 Code only asks the provider to
+  compact; the provider writes the summary itself, and T3 Code never edits, stores, or chooses a
+  summary or a summary model.
+- **Cursor, Grok, and OpenCode** do not expose manual compaction in T3 Code, so the control stays
+  hidden for them.
+
+Compaction needs an idle thread: it cannot start while a turn is running, while an approval or
+input request is waiting, or while you have an unsent draft. When it finishes, the thread shows a
+**Context compacted** activity. If the provider refuses or the request fails, the thread shows the
+failure instead of pretending the context was compacted.
