@@ -1979,6 +1979,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
     const createdAt = codexGoalIsoDateTime(goal.createdAt);
     const updatedAt = codexGoalIsoDateTime(goal.updatedAt);
+    // Codex permits a raw string objective; the T3 snapshot requires a
+    // trimmed non-empty one. Normalize once here so whitespace-only fails
+    // truthfully instead of as a generic contract encode failure.
+    const objective = trimText(goal.objective);
     if (createdAt === null || updatedAt === null) {
       return Effect.fail(
         new ProviderAdapterRequestError({
@@ -1988,10 +1992,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         }),
       );
     }
+    if (objective === undefined) {
+      return Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/goal/get",
+          detail: `Codex reported an unusable goal objective for thread ${threadId}.`,
+        }),
+      );
+    }
     return Effect.succeed({
       goal: {
         threadId,
-        objective: goal.objective,
+        objective,
         status: goal.status,
         tokensUsed: goal.tokensUsed,
         ...(goal.tokenBudget !== undefined && goal.tokenBudget !== null

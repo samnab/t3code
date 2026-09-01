@@ -1917,6 +1917,60 @@ executionGoalLayer("CodexAdapter execution goal", (it) => {
     }),
   );
 
+  it.effect("rejects a whitespace-only goal objective truthfully", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = executionGoalRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime?.getExecutionGoalImpl.mockReturnValue(
+        Promise.resolve({ goal: { ...GOAL_THREAD_FIXTURE, objective: "   \t  " } }),
+      );
+
+      const getExecutionGoal = adapter.getExecutionGoal;
+      NodeAssert.ok(getExecutionGoal);
+      const error = yield* getExecutionGoal(asThreadId("thread-1")).pipe(Effect.flip);
+
+      NodeAssert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag === "ProviderAdapterRequestError") {
+        NodeAssert.equal(
+          error.detail,
+          "Codex reported an unusable goal objective for thread thread-1.",
+        );
+        NodeAssert.equal(error.method, "thread/goal/get");
+      }
+    }),
+  );
+
+  it.effect("trims surrounding whitespace from a valid goal objective", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = executionGoalRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime?.getExecutionGoalImpl.mockReturnValue(
+        Promise.resolve({ goal: { ...GOAL_THREAD_FIXTURE, objective: "  ship the login fix  " } }),
+      );
+
+      const getExecutionGoal = adapter.getExecutionGoal;
+      NodeAssert.ok(getExecutionGoal);
+      const result = yield* getExecutionGoal(asThreadId("thread-1"));
+
+      NodeAssert.equal(result.goal?.objective, "ship the login fix");
+      NodeAssert.equal(result.goal?.status, "active");
+      NodeAssert.equal(result.goal?.createdAt, "2026-04-15T17:00:00.000Z");
+      NodeAssert.equal(result.goal?.updatedAt, "2026-04-15T17:01:00.000Z");
+    }),
+  );
+
   it.effect("fails truthfully when no live session owns the thread", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
