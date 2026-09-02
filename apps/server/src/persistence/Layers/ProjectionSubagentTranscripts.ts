@@ -1,4 +1,6 @@
 import {
+  OrchestrationGetSubagentTranscriptResult,
+  SubagentTranscriptPageEntry,
   SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES,
   SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS,
   SUBAGENT_TRANSCRIPT_RETAINED_PER_RUN,
@@ -10,6 +12,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { toPersistenceSqlError } from "../Errors.ts";
@@ -47,6 +50,11 @@ interface ReplayWatermarkRow {
 
 type ReadEntry = ReadSubagentTranscriptPageResult["entries"][number];
 type MarkerEntry = Extract<ReadEntry, { readonly kind: "evicted" | "gap" }>;
+
+const encodePage = Schema.encodeSync(
+  Schema.fromJsonString(OrchestrationGetSubagentTranscriptResult),
+);
+const encodePageEntry = Schema.encodeSync(Schema.fromJsonString(SubagentTranscriptPageEntry));
 
 const isCovered = (ranges: ReadonlyArray<SequenceRangeRow>, sequence: number) =>
   ranges.some((range) => sequence >= range.fromSequence && sequence <= range.toSequence);
@@ -114,9 +122,6 @@ const clampEntry = (
   return { ...entry, fromSequence: visibleStart, toSequence: visibleEnd };
 };
 
-const encodedPageBytes = (page: ReadSubagentTranscriptPageResult) =>
-  Buffer.byteLength(JSON.stringify(page), "utf8");
-
 const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const runs = yield* ProjectionSubagentRunRepository;
@@ -125,22 +130,35 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
   // evicts them, so signal-before-wait and wait-before-signal both rendezvous.
   const startReceipts = new Map<string, Deferred.Deferred<boolean>>();
 
+  const evictOldestResolvedReceipt = Effect.fn("evictOldestResolvedReceipt")(function* () {
+    if (startReceipts.size <= MAX_TRACKED_START_RECEIPTS) return;
+    for (const [runId, deferred] of startReceipts) {
+      if (yield* Deferred.isDone(deferred)) {
+        startReceipts.delete(runId);
+        return;
+      }
+    }
+  });
+
   const receiptFor = (runId: string) =>
     Effect.gen(function* () {
       const existing = startReceipts.get(runId);
       if (existing !== undefined) return existing;
       const deferred = yield* Deferred.make<boolean>();
-      if (startReceipts.size >= MAX_TRACKED_START_RECEIPTS) {
-        const oldest = startReceipts.keys().next().value;
-        if (oldest !== undefined) startReceipts.delete(oldest);
-      }
       startReceipts.set(runId, deferred);
+      yield* evictOldestResolvedReceipt();
       return deferred;
     });
 
   const signalStartCommitted: ProjectionSubagentTranscriptStoreShape["signalStartCommitted"] = ({
     runId,
-  }) => receiptFor(runId).pipe(Effect.flatMap((deferred) => Deferred.succeed(deferred, true)));
+  }) =>
+    Effect.gen(function* () {
+      const deferred = yield* receiptFor(runId);
+      const completed = yield* Deferred.succeed(deferred, true);
+      yield* evictOldestResolvedReceipt();
+      return completed;
+    });
 
   const awaitStartCommitted: ProjectionSubagentTranscriptStoreShape["awaitStartCommitted"] = ({
     runId,
@@ -157,13 +175,6 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
   const evictionsOf = (runId: string) => sql<SequenceRangeRow>`
     SELECT from_sequence AS "fromSequence", to_sequence AS "toSequence"
     FROM subagent_transcript_evictions
-    WHERE run_id = ${runId}
-    ORDER BY from_sequence
-  `;
-
-  const gapsOf = (runId: string) => sql<SequenceRangeRow>`
-    SELECT from_sequence AS "fromSequence", to_sequence AS "toSequence"
-    FROM subagent_transcript_gaps
     WHERE run_id = ${runId}
     ORDER BY from_sequence
   `;
@@ -288,18 +299,6 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
             ORDER BY transcript_sequence
           `;
           const currentEvictions = yield* evictionsOf(input.runId);
-          const gaps = durableGaps(storedAfter, currentEvictions);
-          yield* sql`DELETE FROM subagent_transcript_gaps WHERE run_id = ${input.runId}`;
-          yield* Effect.forEach(
-            gaps,
-            (gap) => sql`
-              INSERT INTO subagent_transcript_gaps
-                (run_id, from_sequence, to_sequence, observed_at)
-              VALUES (${input.runId}, ${gap.fromSequence}, ${gap.toSequence}, ${input.observedAt})
-            `,
-            { concurrency: 1, discard: true },
-          );
-
           const watermark = contiguousWatermark(
             binding.lastTranscriptSequence ?? 0,
             storedAfter,
@@ -389,10 +388,12 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
         upstreamTruncated: row.upstreamTruncated === 1,
         createdAt: row.createdAt,
       }));
-      const evictions: ReadonlyArray<MarkerEntry> = (yield* evictionsOf(input.runId)).map(
-        (range) => ({ kind: "evicted", ...range }),
-      );
-      const gaps: ReadonlyArray<MarkerEntry> = (yield* gapsOf(input.runId)).map((range) => ({
+      const evictionRanges = yield* evictionsOf(input.runId);
+      const evictions: ReadonlyArray<MarkerEntry> = evictionRanges.map((range) => ({
+        kind: "evicted",
+        ...range,
+      }));
+      const gaps: ReadonlyArray<MarkerEntry> = durableGaps(rows, evictionRanges).map((range) => ({
         kind: "gap",
         ...range,
       }));
@@ -402,27 +403,33 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
         .sort((left, right) => entryBounds(left).start - entryBounds(right).start);
       const forward = input.afterSequence !== undefined;
       const ordered = forward ? ascending : ascending.toReversed();
+      const watermark = binding.lastTranscriptSequence ?? 0;
+      const envelopeBytes =
+        Buffer.byteLength(encodePage({ entries: [], watermark, hasMore: false }), "utf8") -
+        Buffer.byteLength("false", "utf8");
       const selected = new Array<ReadEntry>();
       let consumed = 0;
+      let entriesBytes = 0;
       for (const entry of ordered) {
         if (selected.length >= SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS) break;
-        const nextSelected = [...selected, entry];
-        const nextEntries = [...nextSelected].sort(
-          (left, right) => entryBounds(left).start - entryBounds(right).start,
-        );
-        const candidate = {
-          entries: nextEntries,
-          watermark: binding.lastTranscriptSequence ?? 0,
-          hasMore: consumed + 1 < ordered.length,
-        } satisfies ReadSubagentTranscriptPageResult;
-        if (encodedPageBytes(candidate) > SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES) break;
+        const entryBytes = Buffer.byteLength(encodePageEntry(entry), "utf8");
+        const hasMore = consumed + 1 < ordered.length;
+        const candidateBytes =
+          envelopeBytes +
+          entriesBytes +
+          (selected.length > 0 ? 1 : 0) +
+          entryBytes +
+          (hasMore ? 4 : 5);
+        if (candidateBytes > SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES) break;
         selected.push(entry);
+        entriesBytes += (selected.length > 1 ? 1 : 0) + entryBytes;
         consumed += 1;
       }
+      if (!forward) selected.reverse();
 
       const page = {
-        entries: selected.sort((left, right) => entryBounds(left).start - entryBounds(right).start),
-        watermark: binding.lastTranscriptSequence ?? 0,
+        entries: selected,
+        watermark,
         hasMore: consumed < ordered.length,
       } satisfies ReadSubagentTranscriptPageResult;
       return page;

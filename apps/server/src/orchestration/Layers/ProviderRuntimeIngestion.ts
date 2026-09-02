@@ -34,10 +34,16 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderAdapterRegistry } from "../../provider/Services/ProviderAdapterRegistry.ts";
 import { routeSubagentControlBindingResult } from "../../provider/subagentControlRouter.ts";
-import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
+import {
+  ProjectionSubagentRunRepository,
+  type ProjectionSubagentRunRepositoryShape,
+} from "../../persistence/Services/ProjectionSubagentRuns.ts";
 import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
 import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/ProjectionSubagentTranscripts.ts";
-import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
+import {
+  ProjectionSubagentTranscriptStore,
+  type ProjectionSubagentTranscriptStoreShape,
+} from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -108,6 +114,26 @@ const TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY = 10_000;
 const TASK_DESCRIPTION_BY_TASK_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+const BINDING_START_RECEIPT_TIMEOUT_MS = 10_000;
+
+export const awaitSubagentStartCommit = Effect.fn("awaitSubagentStartCommit")(function* (input: {
+  readonly runId: RuntimeTaskId;
+  readonly managerId: string;
+  readonly awaitCommitted: ProjectionSubagentTranscriptStoreShape["awaitStartCommitted"];
+  readonly readBinding: ProjectionSubagentRunRepositoryShape["getRunBinding"];
+}) {
+  const committed = yield* input.awaitCommitted({
+    runId: input.runId,
+    timeoutMs: BINDING_START_RECEIPT_TIMEOUT_MS,
+  });
+  if (committed) return true;
+
+  yield* Effect.logWarning(
+    "Subagent inventory start receipt timed out; rechecking the durable row once.",
+    { runId: input.runId, managerId: input.managerId },
+  );
+  return (yield* input.readBinding({ runId: input.runId })) !== null;
+});
 
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,
@@ -1513,7 +1539,6 @@ const make = Effect.gen(function* () {
    */
   const ROUTED_BINDING_RESULT_MAX_ATTEMPTS = 3;
   const ROUTED_BINDING_RESULT_RETRY_DELAY = Duration.millis(500);
-  const BINDING_START_RECEIPT_TIMEOUT_MS = 10_000;
 
   const routeSubagentRunBindingResult = (input: {
     readonly managerId: string;
@@ -1524,17 +1549,13 @@ const make = Effect.gen(function* () {
     readonly upsertSequence: number;
   }) =>
     Effect.gen(function* () {
-      const committed = yield* transcriptStore.awaitStartCommitted({
+      const committed = yield* awaitSubagentStartCommit({
         runId: input.runId,
-        timeoutMs: BINDING_START_RECEIPT_TIMEOUT_MS,
+        managerId: input.managerId,
+        awaitCommitted: transcriptStore.awaitStartCommitted,
+        readBinding: projectionSubagentRunRepository.getRunBinding,
       });
-      if (!committed) {
-        yield* Effect.logDebug(
-          "Subagent run binding result skipped: allocating row never committed.",
-          { runId: input.runId },
-        );
-        return;
-      }
+      if (!committed) return;
       for (let attempt = 1; attempt <= ROUTED_BINDING_RESULT_MAX_ATTEMPTS; attempt += 1) {
         const outcome = yield* Effect.result(
           routeSubagentControlBindingResult(adapterRegistry, input),

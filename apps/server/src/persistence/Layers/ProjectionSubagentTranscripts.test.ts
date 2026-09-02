@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -144,6 +145,11 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
     Effect.gen(function* () {
       const repository = yield* ProjectionSubagentRunRepository;
       const store = yield* ProjectionSubagentTranscriptStore;
+      const sql = yield* SqlClient.SqlClient;
+      const tables = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master WHERE type = 'table'
+      `;
+      assert.ok(!tables.some((table) => table.name === "subagent_transcript_gaps"));
       const runId = yield* seedRun(repository, { runId: "opaque-transcript-sanitize" });
 
       // Unknown opaque T3 run identity: rejected.
@@ -262,11 +268,11 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
       const heavyRunId = yield* seedRun(repository, { runId: "opaque-heavy-run" });
       const heavy = ingester(store, heavyRunId);
       for (let sequence = 1; sequence <= 100; sequence += 1) {
-        yield* heavy(sequence, "x".repeat(9_000));
+        yield* heavy(sequence, "🙂".repeat(9_000));
       }
       const heavyPage = pageOf(yield* readPage(store, heavyRunId));
       assert.ok(heavyPage.entries.length < 100);
-      assert.ok(heavyPage.entries.length > 50);
+      assert.ok(heavyPage.entries.length > 10);
       assert.ok(
         Buffer.byteLength(encodeUnknownJson(heavyPage), "utf8") <=
           SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -423,6 +429,21 @@ it.live("signals and awaits durable start receipts without polling", () =>
       }),
       false,
     );
+
+    // Cache pressure may discard completed receipts, never a deferred with a
+    // waiter that still needs the projector's signal.
+    const pendingRunId = RuntimeTaskId.make("opaque-pending-receipt");
+    const pending = yield* Effect.forkChild(
+      store.awaitStartCommitted({ runId: pendingRunId, timeoutMs: 2_000 }),
+    );
+    yield* Effect.yieldNow;
+    for (let index = 0; index < 1_024; index += 1) {
+      yield* store.signalStartCommitted({
+        runId: RuntimeTaskId.make(`opaque-completed-receipt-${index}`),
+      });
+    }
+    yield* store.signalStartCommitted({ runId: pendingRunId });
+    assert.strictEqual(yield* Fiber.join(pending), true);
   }).pipe(
     Effect.provide(
       ProjectionSubagentTranscriptStoreLive.pipe(

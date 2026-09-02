@@ -935,7 +935,7 @@ describe("subagent run metadata on the collapsed work-log row", () => {
     expect(JSON.stringify(row?.subagentRun)).not.toMatch(/transcript/i);
   });
 
-  it("keeps a durable active manager row so mobile can mount live transcript polling", () => {
+  it("keeps one durable start row so mobile can disclose live transcript history", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-subagent-active"),
       projectId: ProjectId.make("project-1"),
@@ -943,7 +943,7 @@ describe("subagent run metadata on the collapsed work-log row", () => {
       activities: [
         makeActivity({
           id: EventId.make("task-active"),
-          kind: "task.updated",
+          kind: "task.started",
           summary: "Task running",
           createdAt: "2026-04-01T00:00:02.000Z",
           payload: {
@@ -972,7 +972,7 @@ describe("subagent run metadata on the collapsed work-log row", () => {
     expect(row?.canExpand).toBe(true);
   });
 
-  it("keeps unrelated nonterminal timeline-bypass updates hidden", () => {
+  it("keeps nonterminal timeline-bypass updates hidden even with durable metadata", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-non-subagent-bypass"),
       projectId: ProjectId.make("project-1"),
@@ -987,6 +987,11 @@ describe("subagent run metadata on the collapsed work-log row", () => {
             taskId: "background-1",
             timelineBypass: true,
             status: "running",
+            subagentRun: {
+              runId: "background-1",
+              status: "active",
+              historyAvailability: "durable",
+            },
           },
         }),
       ],

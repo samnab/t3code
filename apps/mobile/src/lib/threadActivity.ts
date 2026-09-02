@@ -314,13 +314,20 @@ function isTerminalBypassUpdate(activity: OrchestrationThreadActivity): boolean 
   );
 }
 
+function isDurableDisclosureAnchor(
+  activity: OrchestrationThreadActivity,
+  payload: Record<string, unknown> | null,
+) {
+  return (
+    activity.kind === "task.started" &&
+    extractSubagentRunMetadata(payload)?.historyAvailability === "durable"
+  );
+}
+
 /**
- * Quiet-timeline guarantee (mirrors web's session-logic): agent-internal
- * activity lives in the Agents sheet, not the work log. Terminal rows are
- * kept — with no Agents surface on mobile they are the terminal signal
- * (a surface that hides rows must keep its own terminal signal). That means
- * task.completed (Claude) AND terminal bypassed task.updated (Codex, whose
- * children never emit task.completed — review finding).
+ * Keep Phase 1 parent-chat quieting intact. Mobile retains terminal agent rows
+ * as its completion signal and one durable task-start row as the transcript
+ * disclosure anchor; all other agent-internal activity stays out of the log.
  */
 function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean {
   const payload =
@@ -331,20 +338,17 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
     return false;
   }
   const isTerminalTaskRow = activity.kind === "task.completed" || isTerminalBypassUpdate(activity);
-  const durableSubagent = extractSubagentRunMetadata(payload)?.historyAvailability === "durable";
-  if (payload.timelineBypass === true && !isTerminalTaskRow && !durableSubagent) {
+  const durableDisclosureAnchor = isDurableDisclosureAnchor(activity, payload);
+  if (payload.timelineBypass === true && !isTerminalTaskRow && !durableDisclosureAnchor) {
     return true;
   }
-  // agentId marks ownership, not "hide me": a NESTED AGENT's terminal row is
-  // the only signal mobile gets (no Agents sheet), so it stays. Only an
-  // agent's own background work (stamped "background") is internal — same
-  // rule as web (review finding: hiding on agentId alone dropped nested
-  // completions with no replacement UI).
+  // agentId marks ownership, not "hide me": a nested agent's terminal row is
+  // the only signal mobile gets. Its background work remains internal.
   const ownedByAgent = typeof payload.agentId === "string" && payload.agentId.trim().length > 0;
   if (!ownedByAgent) {
     return false;
   }
-  return !(isTerminalTaskRow && payload.agentKind === "agent");
+  return !(durableDisclosureAnchor || (isTerminalTaskRow && payload.agentKind === "agent"));
 }
 
 function deriveWorkLogEntries(
@@ -358,13 +362,9 @@ function deriveWorkLogEntries(
       activity.payload && typeof activity.payload === "object"
         ? (activity.payload as Record<string, unknown>)
         : null;
-    const durableSubagent = extractSubagentRunMetadata(payload)?.historyAvailability === "durable";
-    if (activity.kind === "task.started" && !durableSubagent) continue;
-    // Terminal bypassed updates pass for Codex; durable active updates also
-    // pass so mobile can mount the live transcript disclosure.
-    if (activity.kind === "task.updated" && !isTerminalBypassUpdate(activity) && !durableSubagent) {
-      continue;
-    }
+    const durableDisclosureAnchor = isDurableDisclosureAnchor(activity, payload);
+    if (activity.kind === "task.started" && !durableDisclosureAnchor) continue;
+    if (activity.kind === "task.updated" && !isTerminalBypassUpdate(activity)) continue;
     if (activity.kind === "tool.progress") continue;
     if (activity.kind === "context-window.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;
@@ -490,13 +490,13 @@ function collapseDerivedWorkLogEntries(
   entries: ReadonlyArray<DerivedWorkLogEntry>,
 ): DerivedWorkLogEntry[] {
   const collapsed: DerivedWorkLogEntry[] = [];
-  // Subagent rows collapse by identity, not adjacency (quiet-timeline
-  // guarantee; mirrors web's session-logic).
+  // Subagent rows collapse by identity, not adjacency.
   const taskRowIndex = new Map<string, number>();
   for (const entry of entries) {
     const isTaskRow =
       entry.taskId !== undefined &&
-      (entry.activityKind === "task.progress" ||
+      (entry.activityKind === "task.started" ||
+        entry.activityKind === "task.progress" ||
         entry.activityKind === "task.completed" ||
         entry.activityKind === "task.updated");
     if (isTaskRow && entry.taskId !== undefined) {

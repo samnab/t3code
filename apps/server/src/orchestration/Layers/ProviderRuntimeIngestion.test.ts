@@ -53,7 +53,10 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
-import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import {
+  awaitSubagentStartCommit,
+  ProviderRuntimeIngestionLive,
+} from "./ProviderRuntimeIngestion.ts";
 import { DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
@@ -3729,6 +3732,41 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
   });
+
+  effectIt.effect("rechecks the durable row once when the start receipt times out", () =>
+    Effect.gen(function* () {
+      const runId = asRuntimeTaskId("pi:epoch:act-slow:sa-slow");
+      let waits = 0;
+      let rechecks = 0;
+      const committed = yield* awaitSubagentStartCommit({
+        runId,
+        managerId: "mgr-slow",
+        awaitCommitted: () =>
+          Effect.sync(() => {
+            waits += 1;
+            return false;
+          }),
+        readBinding: () =>
+          Effect.sync(() => {
+            rechecks += 1;
+            return {
+              runId,
+              threadId: asThreadId("thread-1"),
+              managerId: "mgr-slow",
+              managerRunId: "sa-slow",
+              activationId: "act-slow",
+              runBirth: `rb${"a".repeat(22)}`,
+              historyAvailability: "durable",
+              lastTranscriptSequence: null,
+            };
+          }),
+      });
+
+      expect(committed).toBe(true);
+      expect(waits).toBe(1);
+      expect(rechecks).toBe(1);
+    }),
+  );
 
   effectIt.live(
     "routes one exact post-commit run-upsert-result and retries identical tuples until ack",

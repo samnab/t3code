@@ -4,10 +4,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 /**
  * Phase 1.5 enhanced-manager child transcripts — additive side-store only.
  *
- * Nothing existing is rewritten: the item table plus durable gap and eviction
- * ranges are new, and the two run-table columns are nullable additions guarded
- * by presence checks. Rollback keeps every additive row; an older binary
- * ignores the additive schema.
+ * Nothing existing is rewritten: the item table plus durable eviction ranges
+ * are new, and the two run-table columns are nullable additions guarded by
+ * presence checks. Rollback keeps every additive row; an older binary ignores
+ * the additive schema.
  */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -23,21 +23,6 @@ export default Effect.gen(function* () {
       created_at TEXT,
       stored_at TEXT NOT NULL,
       PRIMARY KEY (run_id, transcript_sequence),
-      FOREIGN KEY (run_id)
-        REFERENCES projection_subagent_runs(run_id)
-        ON DELETE CASCADE
-    )
-  `;
-
-  // Inclusive never-observed gaps are recomputed from actual observations.
-  // No synthetic backfill is treated as an observation.
-  yield* sql`
-    CREATE TABLE IF NOT EXISTS subagent_transcript_gaps (
-      run_id TEXT NOT NULL,
-      from_sequence INTEGER NOT NULL CHECK (from_sequence > 0),
-      to_sequence INTEGER NOT NULL CHECK (to_sequence >= from_sequence),
-      observed_at TEXT NOT NULL,
-      PRIMARY KEY (run_id, from_sequence),
       FOREIGN KEY (run_id)
         REFERENCES projection_subagent_runs(run_id)
         ON DELETE CASCADE
