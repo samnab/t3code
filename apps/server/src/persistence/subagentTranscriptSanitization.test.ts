@@ -17,6 +17,12 @@ describe("subagentTranscriptSanitization", () => {
         "oauth_token=ya29.a0AfH6SMBx123456",
         "x-api-key: very-secret-key-value-987",
         "X-Secret-Key=hunter2hunter2hunter2",
+        "ANTHROPIC_API_KEY=anthropic-prefixed-secret",
+        "OPENAI_API_KEY=openai-prefixed-secret",
+        "ZAI_API_KEY=zai-prefixed-secret",
+        "GITHUB_API_KEY=github-prefixed-secret",
+        "HTTP_PROXY_TOKEN=proxy-prefixed-secret",
+        "SESSION_COOKIE=session-prefixed-secret",
         "clean text stays: the api key was rotated",
       ].join("\n"),
     );
@@ -27,6 +33,12 @@ describe("subagentTranscriptSanitization", () => {
     expect(redacted).not.toContain("ya29.a0AfH6SMBx123456");
     expect(redacted).not.toContain("very-secret-key-value-987");
     expect(redacted).not.toContain("hunter2hunter2hunter2");
+    expect(redacted).not.toContain("anthropic-prefixed-secret");
+    expect(redacted).not.toContain("openai-prefixed-secret");
+    expect(redacted).not.toContain("zai-prefixed-secret");
+    expect(redacted).not.toContain("github-prefixed-secret");
+    expect(redacted).not.toContain("proxy-prefixed-secret");
+    expect(redacted).not.toContain("session-prefixed-secret");
     expect(redacted).toContain("[REDACTED]");
     expect(redacted).toContain("clean text stays");
     expect(redacted).toContain("the api key was rotated");

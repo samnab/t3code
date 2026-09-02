@@ -2,7 +2,7 @@ import { SUBAGENT_TRANSCRIPT_FIELD_MAX_CODE_POINTS } from "@t3tools/contracts";
 
 const REDACTED = "[REDACTED]";
 
-const SECRET_KEY = String.raw`(?:proxy-authorization|authorization|set-cookie|cookies?|api[-_ ]?key|oauth(?:[-_ ]?(?:token|access[-_ ]?token))?|proxy[-_ ]?token|[a-z0-9_-]*(?:secret|auth[-_]?token|access[-_]?token)[a-z0-9_-]*)`;
+const SECRET_KEY = String.raw`(?:proxy-authorization|authorization|set-cookie|[a-z0-9_-]*(?:cookies?|api[-_ ]?key|oauth(?:[-_ ]?(?:token|access[-_ ]?token))?|proxy[-_ ]?token|secret|auth[-_]?token|access[-_]?token)[a-z0-9_-]*)`;
 
 // Authorization values often contain a scheme plus credential. Consume both
 // tokens without swallowing unrelated text later on the line.
