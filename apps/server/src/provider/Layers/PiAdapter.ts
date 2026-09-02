@@ -170,6 +170,20 @@ const PiSubagentToolResults = Schema.Struct({
 });
 const decodePiSubagentToolResults = Schema.decodeUnknownOption(PiSubagentToolResults);
 
+const PiAssistantMessageEnd = Schema.Struct({
+  role: Schema.Literal("assistant"),
+  content: Schema.optional(Schema.Array(Schema.Unknown)),
+  stopReason: Schema.optional(Schema.String),
+  errorMessage: Schema.optional(Schema.String),
+});
+const decodePiAssistantMessageEnd = Schema.decodeUnknownOption(PiAssistantMessageEnd);
+
+const PiAssistantTextBlock = Schema.Struct({
+  type: Schema.Literal("text"),
+  text: Schema.String,
+});
+const decodePiAssistantTextBlock = Schema.decodeUnknownOption(PiAssistantTextBlock);
+
 interface ManagedPiSubagent {
   readonly taskId: RuntimeTaskId;
   readonly nativeRunId: string;
@@ -1685,63 +1699,56 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
               }
               case "message_end": {
                 if (turn === null) return;
-                const message = event["message"];
-                if (recordString(message, "role") !== "assistant") return;
-                turn.sawAgentActivity = true;
-                const content = recordField(message, "content");
-                if (Array.isArray(content)) {
-                  for (const [contentIndex, block] of content.entries()) {
-                    const blockType = recordString(block, "type");
-                    const kind: StreamItemKind | undefined =
-                      blockType === "text"
-                        ? "assistant_message"
-                        : blockType === "thinking"
-                          ? "reasoning"
-                          : undefined;
-                    const text =
-                      blockType === "text"
-                        ? recordString(block, "text")
-                        : blockType === "thinking"
-                          ? recordString(block, "thinking")
-                          : undefined;
-                    if (kind === undefined || text === undefined || text.length === 0) continue;
-                    let item = [...ctx.streamItems.values()].find(
-                      (candidate) =>
-                        candidate.kind === kind && candidate.contentIndex === contentIndex,
-                    );
-                    if (item?.hasContent === true) continue;
-                    if (item === undefined) {
-                      const itemId = `msg:end:${yield* nextUuid}:${contentIndex}`;
-                      item = { itemId, kind, contentIndex, started: false, hasContent: false };
-                      ctx.streamItems.set(itemId, item);
-                    }
-                    if (!item.started) {
-                      item.started = true;
-                      yield* emitItem({
-                        ctx,
-                        turn,
-                        phase: "item.started",
-                        itemType: kind,
-                        status: "inProgress",
-                        nativeItemId: item.itemId,
-                      });
-                    }
-                    item.hasContent = true;
-                    yield* emitContentDelta({
+                const decoded = decodePiAssistantMessageEnd(event["message"]);
+                if (Option.isNone(decoded)) return;
+                const message = decoded.value;
+                const streamedTextItems = new Map(
+                  [...ctx.streamItems.values()]
+                    .filter((item) => item.kind === "assistant_message")
+                    .map((item) => [item.contentIndex, item]),
+                );
+                for (const [contentIndex, block] of (message.content ?? []).entries()) {
+                  const decodedBlock = decodePiAssistantTextBlock(block);
+                  if (Option.isNone(decodedBlock) || decodedBlock.value.text.length === 0) continue;
+                  const text = decodedBlock.value.text;
+                  let item = streamedTextItems.get(contentIndex);
+                  if (item?.hasContent === true) continue;
+                  if (item === undefined) {
+                    const key = `${yield* nextUuid}:${contentIndex}`;
+                    item = {
+                      itemId: `msg:${key}`,
+                      kind: "assistant_message",
+                      contentIndex,
+                      started: false,
+                      hasContent: false,
+                    };
+                    ctx.streamItems.set(key, item);
+                  }
+                  if (!item.started) {
+                    item.started = true;
+                    yield* emitItem({
                       ctx,
                       turn,
-                      streamKind:
-                        kind === "assistant_message" ? "assistant_text" : "reasoning_text",
-                      delta: text,
-                      contentIndex,
+                      phase: "item.started",
+                      itemType: item.kind,
+                      status: "inProgress",
                       nativeItemId: item.itemId,
                     });
                   }
+                  item.hasContent = true;
+                  yield* emitContentDelta({
+                    ctx,
+                    turn,
+                    streamKind: "assistant_text",
+                    delta: text,
+                    contentIndex,
+                    nativeItemId: item.itemId,
+                  });
                 }
                 yield* resolveSettledStreamItems(ctx, turn);
-                if (recordString(message, "stopReason") === "error" && turn.failure === null) {
+                if (message.stopReason === "error" && turn.failure === null) {
                   turn.failure = {
-                    message: recordString(message, "errorMessage") ?? "Pi reported a model error.",
+                    message: message.errorMessage ?? "Pi reported a model error.",
                   };
                 }
                 return;
