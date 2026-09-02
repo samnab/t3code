@@ -3,6 +3,9 @@ import {
   isToolLifecycleItemType,
   ProviderApprovalOption,
   ProviderRequestKind,
+  SubagentRunHistoryAvailability,
+  SubagentRunStatus,
+  SubagentRunTerminalReason,
 } from "@t3tools/contracts";
 import type {
   OrchestrationLatestTurn,
@@ -29,6 +32,23 @@ export interface PendingApproval {
 
 const isProviderRequestKind = Schema.is(ProviderRequestKind);
 const isProviderApprovalOption = Schema.is(ProviderApprovalOption);
+const isSubagentRunStatus = Schema.is(SubagentRunStatus);
+const isSubagentRunTerminalReason = Schema.is(SubagentRunTerminalReason);
+const isSubagentRunHistoryAvailability = Schema.is(SubagentRunHistoryAvailability);
+
+/**
+ * Body-free durable run identity/history/status metadata for one collapsed
+ * subagent work-log row (Phase 1 `payload.subagentRun` evidence, mirrored
+ * from `packages/client-runtime/src/state/subagentRuntime.ts`'s
+ * `fillRunInventoryMetadata`). Never carries transcript text.
+ */
+export interface SubagentRunMetadata {
+  readonly runId: string;
+  readonly runNumber: number | null;
+  readonly status: SubagentRunStatus | null;
+  readonly terminalReason: SubagentRunTerminalReason | null;
+  readonly historyAvailability: SubagentRunHistoryAvailability | null;
+}
 
 export interface PendingUserInput {
   readonly requestId: ApprovalRequestId;
@@ -65,6 +85,9 @@ export interface ThreadFeedActivity {
     | "zap";
   readonly toolLike: boolean;
   readonly status: "success" | "failure" | "neutral" | null;
+  /** Durable run identity/history/status for a collapsed subagent row; null
+   * for every other work-log row. Never carries transcript text. */
+  readonly subagentRun: SubagentRunMetadata | null;
 }
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 1;
@@ -86,6 +109,7 @@ interface WorkLogEntry {
   requestKind?: PendingApproval["requestKind"];
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   toolData?: unknown;
+  subagentRun?: SubagentRunMetadata;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -385,11 +409,13 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     isTaskActivity && typeof payload?.taskId === "string" && payload.taskId.length > 0
       ? payload.taskId
       : undefined;
+  const subagentRun = isTaskActivity ? extractSubagentRunMetadata(payload) : null;
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     createdAt: activity.createdAt,
     turnId: activity.turnId,
     ...(taskId ? { taskId } : {}),
+    ...(subagentRun ? { subagentRun } : {}),
     label: taskLabel || activity.summary,
     tone:
       activity.kind === "task.progress"
@@ -513,6 +539,10 @@ function mergeDerivedWorkLogEntries(
   const collapseKey = next.collapseKey ?? previous.collapseKey;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
+  // Per-field fill: a known fact never reverts to unknown just because a
+  // later event's snapshot omitted it (mirrors fillRunInventoryMetadata in
+  // subagentRuntime.ts).
+  const subagentRun = mergeSubagentRunMetadata(previous.subagentRun, next.subagentRun);
   return {
     ...previous,
     ...next,
@@ -526,6 +556,7 @@ function mergeDerivedWorkLogEntries(
     ...(collapseKey ? { collapseKey } : {}),
     ...(toolLifecycleStatus ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
+    ...(subagentRun ? { subagentRun } : {}),
   };
 }
 
@@ -682,7 +713,10 @@ function workEntryHasExpandedBody(entry: WorkLogEntry): boolean {
     (entry.itemType === "mcp_tool_call" && entry.toolData !== undefined) ||
     Boolean((entry.rawCommand ?? entry.command)?.trim()) ||
     Boolean(entry.detail?.trim()) ||
-    (entry.changedFiles?.some((path) => path.trim().length > 0) ?? false)
+    (entry.changedFiles?.some((path) => path.trim().length > 0) ?? false) ||
+    // Durable subagent history renders a transcript disclosure in place of
+    // the plain expanded body; see thread-work-log.tsx.
+    entry.subagentRun?.historyAvailability === "durable"
   );
 }
 
@@ -918,6 +952,50 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
   return {
     command: null,
     rawCommand: null,
+  };
+}
+
+/** Body-free: reads only identity/status enums off `payload.subagentRun`,
+ * never a transcript field. Mirrors fillRunInventoryMetadata's field guards
+ * in packages/client-runtime/src/state/subagentRuntime.ts. */
+function extractSubagentRunMetadata(
+  payload: Record<string, unknown> | null,
+): SubagentRunMetadata | null {
+  const evidence = asRecord(payload?.subagentRun);
+  const runId = asTrimmedString(evidence?.runId);
+  if (!evidence || !runId) {
+    return null;
+  }
+  const runNumber = evidence.runNumber;
+  const status = evidence.status;
+  const terminalReason = evidence.terminalReason;
+  const historyAvailability = evidence.historyAvailability;
+  return {
+    runId,
+    runNumber:
+      typeof runNumber === "number" && Number.isFinite(runNumber) && runNumber > 0
+        ? runNumber
+        : null,
+    status: isSubagentRunStatus(status) ? status : null,
+    terminalReason: isSubagentRunTerminalReason(terminalReason) ? terminalReason : null,
+    historyAvailability: isSubagentRunHistoryAvailability(historyAvailability)
+      ? historyAvailability
+      : null,
+  };
+}
+
+function mergeSubagentRunMetadata(
+  previous: SubagentRunMetadata | undefined,
+  next: SubagentRunMetadata | undefined,
+): SubagentRunMetadata | undefined {
+  if (!previous) return next;
+  if (!next) return previous;
+  return {
+    runId: next.runId,
+    runNumber: next.runNumber ?? previous.runNumber,
+    status: next.status ?? previous.status,
+    terminalReason: next.terminalReason ?? previous.terminalReason,
+    historyAvailability: next.historyAvailability ?? previous.historyAvailability,
   };
 }
 
@@ -1594,6 +1672,7 @@ export function buildThreadFeed(
               icon: workEntryIcon(entry),
               toolLike: workLogEntryIsToolLike(entry),
               status: workEntryStatus(entry),
+              subagentRun: entry.subagentRun ?? null,
             },
           };
         }),

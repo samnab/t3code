@@ -882,3 +882,147 @@ describe("quiet timeline: nested agents", () => {
     expect(ids).not.toContain("shell-done");
   });
 });
+
+describe("subagent run metadata on the collapsed work-log row", () => {
+  function activityGroupRow(feed: ReturnType<typeof buildThreadFeed>) {
+    const group = feed[0];
+    if (!group || group.type !== "activity-group") {
+      throw new Error("expected an activity-group entry");
+    }
+    return group.activities[0];
+  }
+
+  it("attaches durable run identity/history/status to the collapsed row and allows expand", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-subagent-durable"),
+      projectId: ProjectId.make("project-1"),
+      title: "Durable subagent",
+      activities: [
+        makeActivity({
+          id: EventId.make("task-durable"),
+          kind: "task.completed",
+          summary: "Task completed",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            taskId: "sub-1",
+            agentId: "owner",
+            agentKind: "agent",
+            status: "completed",
+            subagentRun: {
+              runId: "sub-1",
+              runNumber: 7,
+              status: "done",
+              terminalReason: "native-completed",
+              historyAvailability: "durable",
+            },
+          },
+        }),
+      ],
+    });
+
+    const row = activityGroupRow(buildThreadFeed(thread));
+    expect(row?.subagentRun).toEqual({
+      runId: "sub-1",
+      runNumber: 7,
+      status: "done",
+      terminalReason: "native-completed",
+      historyAvailability: "durable",
+    });
+    expect(row?.canExpand).toBe(true);
+    // Body-free: no transcript text ever rides on the feed row.
+    expect(row).not.toHaveProperty("transcript");
+    expect(JSON.stringify(row?.subagentRun)).not.toMatch(/transcript/i);
+  });
+
+  it("keeps summary-only rows without a durable-expand allowance", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-subagent-summary"),
+      projectId: ProjectId.make("project-1"),
+      title: "Summary-only subagent",
+      activities: [
+        makeActivity({
+          id: EventId.make("task-summary-only"),
+          kind: "task.completed",
+          summary: "Task completed",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            taskId: "sub-2",
+            agentId: "owner",
+            agentKind: "agent",
+            status: "completed",
+            subagentRun: {
+              runId: "sub-2",
+              status: "done",
+              historyAvailability: "summary-only",
+            },
+          },
+        }),
+      ],
+    });
+
+    const row = activityGroupRow(buildThreadFeed(thread));
+    expect(row?.subagentRun).toEqual({
+      runId: "sub-2",
+      runNumber: null,
+      status: "done",
+      terminalReason: null,
+      historyAvailability: "summary-only",
+    });
+    expect(row?.canExpand).toBe(false);
+  });
+
+  it("keeps a known run number when a later row omits it (Codex terminal-bypass then completion)", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-subagent-fill"),
+      projectId: ProjectId.make("project-1"),
+      title: "Progressive subagent evidence",
+      activities: [
+        makeActivity({
+          id: EventId.make("task-terminal-bypass"),
+          kind: "task.updated",
+          summary: "Task idle",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          payload: {
+            taskId: "sub-3",
+            agentId: "owner",
+            agentKind: "agent",
+            timelineBypass: true,
+            status: "completed",
+            subagentRun: {
+              runId: "sub-3",
+              runNumber: 4,
+              status: "active",
+              historyAvailability: "durable",
+            },
+          },
+        }),
+        makeActivity({
+          id: EventId.make("task-completed"),
+          kind: "task.completed",
+          summary: "Task completed",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            taskId: "sub-3",
+            agentId: "owner",
+            agentKind: "agent",
+            subagentRun: {
+              runId: "sub-3",
+              status: "done",
+              terminalReason: "native-completed",
+              historyAvailability: "durable",
+            },
+          },
+        }),
+      ],
+    });
+
+    const row = activityGroupRow(buildThreadFeed(thread));
+    expect(row?.subagentRun).toEqual({
+      runId: "sub-3",
+      runNumber: 4,
+      status: "done",
+      terminalReason: "native-completed",
+      historyAvailability: "durable",
+    });
+  });
+});

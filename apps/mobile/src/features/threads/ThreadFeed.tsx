@@ -974,7 +974,7 @@ function useMarkdownStyles(
 
 function renderFeedEntry(
   info: { item: ThreadFeedEntry; index: number },
-  props: Pick<ThreadFeedProps, "environmentId" | "skills"> & {
+  props: Pick<ThreadFeedProps, "environmentId" | "threadId" | "skills"> & {
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
@@ -1182,8 +1182,10 @@ function renderFeedEntry(
     <ThreadWorkLog
       activities={entry.activities}
       copiedRowId={props.copiedRowId}
+      environmentId={props.environmentId}
       expandedRows={props.expandedWorkRows}
       iconSubtleColor={iconSubtleColor}
+      threadId={props.threadId}
       onCopyRow={props.onCopyWorkRow}
       onToggleRow={props.onToggleWorkRow}
     />
@@ -2014,6 +2016,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     (info: { item: ThreadFeedEntry; index: number }) =>
       renderFeedEntry(info, {
         environmentId: props.environmentId,
+        threadId: props.threadId,
         copiedRowId,
         expandedWorkRows,
         terminalAssistantMessageIds,
@@ -2051,6 +2054,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       onToggleWorkGroup,
       onToggleWorkRow,
       props.environmentId,
+      props.threadId,
       props.skills,
       renderMarkdownImage,
     ],

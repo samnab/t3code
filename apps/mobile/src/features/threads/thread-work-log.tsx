@@ -1,6 +1,7 @@
 import * as Haptics from "expo-haptics";
 import { type AppSymbolName, SymbolView } from "../../components/AppSymbol";
-import { LayoutAnimation, Pressable, ScrollView, View } from "react-native";
+import { ActivityIndicator, LayoutAnimation, Pressable, ScrollView, View } from "react-native";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { AppText as Text } from "../../components/AppText";
 import { scaledTypographyLineHeight } from "../../lib/appearancePreferences";
@@ -8,6 +9,8 @@ import { cn } from "../../lib/cn";
 import type { ThreadFeedActivity } from "../../lib/threadActivity";
 import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
 import { useThemeColor } from "../../lib/useThemeColor";
+import { orchestrationEnvironment } from "../../state/orchestration";
+import { useEnvironmentQuery } from "../../state/query";
 import Animated, { FadeIn } from "react-native-reanimated";
 
 const WORK_LOG_LAYOUT_ANIMATION = {
@@ -120,11 +123,177 @@ export function collapsedWorkLogHeight(
   );
 }
 
+// ── Phase 1.5 subagent transcript disclosure ─────────────────────────────
+//
+// Renders inside the existing collapsed subagent work-log row's expanded
+// slot (see workEntryHasExpandedBody in threadActivity.ts). Only a row whose
+// durable run identity/history metadata reports `historyAvailability:
+// "durable"` gets a disclosure; every other row (capability absent, stock
+// Pi, summary-only, no subagent identity) renders no transcript detail, per
+// spec. Query state comes from the integrator-owned shared pull-only
+// page/catch-up/poll glue (packages/client-runtime/src/state/orchestration.ts);
+// this file never re-implements polling or multi-page catch-up locally.
+
+/** True only for a collapsed subagent row whose durable history is proved
+ * readable. Every other row (capability absent, summary-only, unavailable,
+ * no subagent identity) gets no transcript disclosure. */
+export function subagentTranscriptDisclosureAvailable(
+  activity: Pick<ThreadFeedActivity, "subagentRun">,
+): boolean {
+  return activity.subagentRun?.historyAvailability === "durable";
+}
+
+export type SubagentTranscriptItemKind = "user" | "assistant" | "tool-result";
+
+export interface SubagentTranscriptItemView {
+  readonly id: string;
+  readonly kind: SubagentTranscriptItemKind;
+  readonly text: string;
+  readonly truncated: boolean;
+  readonly upstreamTruncated: boolean;
+}
+
+/** Distinct from a never-observed gap: an eviction range proves the item was
+ * observed before its durable tombstone; a gap never was. */
+export type SubagentTranscriptMarkerView =
+  | { readonly kind: "eviction"; readonly id: string }
+  | { readonly kind: "gap"; readonly id: string };
+
+export type SubagentTranscriptRow =
+  | { readonly type: "item"; readonly item: SubagentTranscriptItemView }
+  | { readonly type: "marker"; readonly marker: SubagentTranscriptMarkerView };
+
+/** Resolved shape of the anticipated shared query glue's success value. */
+export interface SubagentTranscriptQueryData {
+  readonly rows: ReadonlyArray<SubagentTranscriptRow>;
+  readonly hasOlder: boolean;
+  readonly loadOlder: () => void;
+}
+
+function transcriptItemKindLabel(kind: SubagentTranscriptItemKind): string {
+  switch (kind) {
+    case "user":
+      return "User";
+    case "assistant":
+      return "Assistant";
+    case "tool-result":
+      return "Tool result";
+  }
+}
+
+/** Pure and testable independent of the query hook: renders whatever state
+ * (loading/error/empty/summary-only/items+markers/pagination) it is given. */
+export function SubagentTranscriptList(props: {
+  readonly data: SubagentTranscriptQueryData | null;
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly summaryOnly: boolean;
+}) {
+  if (props.summaryOnly) {
+    return (
+      <Text className="px-0.5 text-2xs text-foreground-muted opacity-70">
+        Transcript detail is unavailable for this run.
+      </Text>
+    );
+  }
+  if (props.error) {
+    return <Text className="px-0.5 text-2xs text-rose-600 dark:text-rose-400">{props.error}</Text>;
+  }
+  if (props.data === null) {
+    return props.loading ? (
+      <View className="px-0.5 py-1">
+        <ActivityIndicator size="small" />
+      </View>
+    ) : null;
+  }
+  if (props.data.rows.length === 0) {
+    return (
+      <Text className="px-0.5 text-2xs text-foreground-muted opacity-70">
+        {props.loading ? "Loading transcript…" : "No transcript items."}
+      </Text>
+    );
+  }
+
+  return (
+    <View className="gap-1.5 px-0.5">
+      {props.data.rows.map((row) => {
+        if (row.type === "marker") {
+          return (
+            <Text key={row.marker.id} className="text-2xs text-foreground-muted opacity-60">
+              {row.marker.kind === "eviction" ? "· evicted history ·" : "· not observed ·"}
+            </Text>
+          );
+        }
+        const { item } = row;
+        return (
+          <View key={item.id} className="gap-0.5">
+            <Text className="font-t3-medium text-2xs text-foreground-muted opacity-70">
+              {transcriptItemKindLabel(item.kind)}
+            </Text>
+            <Text selectable className="text-xs leading-normal text-foreground">
+              {item.text}
+              {item.truncated || item.upstreamTruncated ? (
+                <Text className="text-foreground-muted opacity-60"> (truncated)</Text>
+              ) : null}
+            </Text>
+          </View>
+        );
+      })}
+      {props.data.hasOlder ? (
+        <Pressable accessibilityRole="button" onPress={props.data.loadOlder} hitSlop={4}>
+          <Text className="font-t3-medium text-2xs text-foreground-muted opacity-80">
+            Load older
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+/**
+ * Mounted-only, non-continuous disclosure for one durable subagent run: fetch
+ * only while this row is expanded, via the integrator-owned shared
+ * pull-only page/catch-up/poll glue.
+ *
+ * ANTICIPATED SHARED ANCHOR: `orchestrationEnvironment.subagentTranscript`
+ * (added to `createOrchestrationEnvironmentAtoms`'s return in
+ * packages/client-runtime/src/state/orchestration.ts) must expose a query
+ * atom keyed by `{ environmentId, threadId, runId }` whose resolved success
+ * value is a `SubagentTranscriptQueryData` (rows already ordered/merged with
+ * eviction/gap markers, `hasOlder`, bound `loadOlder`). The atom owns
+ * negotiation-driven summary-only detection, >=1s polling while mounted and
+ * nonterminal, the one bounded terminal catch-up, and stopping on unmount —
+ * this component only renders whatever it returns.
+ */
+function SubagentTranscriptDisclosure(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly runId: string;
+}) {
+  const transcriptAtom = orchestrationEnvironment.subagentTranscript({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    runId: props.runId,
+  });
+  const result = useEnvironmentQuery<SubagentTranscriptQueryData, unknown>(transcriptAtom);
+
+  return (
+    <SubagentTranscriptList
+      data={result.data}
+      loading={result.isPending}
+      error={result.error}
+      summaryOnly={false}
+    />
+  );
+}
+
 export function ThreadWorkLog(props: {
   readonly activities: ReadonlyArray<ThreadFeedActivity>;
   readonly copiedRowId: string | null;
+  readonly environmentId: EnvironmentId;
   readonly expandedRows: Readonly<Record<string, boolean>>;
   readonly iconSubtleColor: import("react-native").ColorValue;
+  readonly threadId: ThreadId;
   readonly onCopyRow: (rowId: string, value: string) => void;
   readonly onToggleRow: (rowId: string) => void;
 }) {
@@ -152,7 +321,14 @@ export function ThreadWorkLog(props: {
         {rows.map((row) => {
           const expanded = props.expandedRows[row.id] ?? false;
           const canExpand = row.canExpand;
-          const fullDetail = expanded ? row.getFullDetail() : null;
+          // A durable subagent row's expanded slot renders its transcript
+          // disclosure, never the plain raw-text body (no transcript detail
+          // on a summary-only row, and no mixing the two for a durable one).
+          const transcriptRunId =
+            expanded && subagentTranscriptDisclosureAvailable(row)
+              ? (row.subagentRun?.runId ?? null)
+              : null;
+          const fullDetail = expanded && !transcriptRunId ? row.getFullDetail() : null;
           const displayText = row.detail ? `${row.summary} ${row.detail}` : row.summary;
           const iconIsDestructive = row.icon === "alert" || row.icon === "warning";
 
@@ -248,7 +424,15 @@ export function ThreadWorkLog(props: {
                 </View>
               </Pressable>
 
-              {fullDetail ? (
+              {transcriptRunId ? (
+                <View className="ml-7 border-l border-neutral-300/60 pb-1 pl-3 pt-0.5 dark:border-white/[0.12]">
+                  <SubagentTranscriptDisclosure
+                    environmentId={props.environmentId}
+                    threadId={props.threadId}
+                    runId={transcriptRunId}
+                  />
+                </View>
+              ) : fullDetail ? (
                 <View className="ml-7 border-l border-neutral-300/60 pb-1 pl-3 pt-0.5 dark:border-white/[0.12]">
                   <ScrollView
                     nestedScrollEnabled
