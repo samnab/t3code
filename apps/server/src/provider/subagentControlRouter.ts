@@ -24,7 +24,10 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import type { ProviderAdapterError, ProviderUnsupportedError } from "./Errors.ts";
-import type { ProviderSubagentControlPlaneShape } from "./Services/ProviderAdapter.ts";
+import type {
+  ProviderSubagentBindingResultInput,
+  ProviderSubagentControlPlaneShape,
+} from "./Services/ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./Services/ProviderAdapterRegistry.ts";
 
 /** The only adapter surface the router touches. */
@@ -191,3 +194,24 @@ export const routeSubagentControlCancel = (
   input: OrchestrationSubagentControlCancelInput,
 ): Effect.Effect<OrchestrationSubagentControlActionResult, SubagentControlError> =>
   routeToOwner(registry, input.managerId, (plane) => plane.cancel(input));
+
+/**
+ * Route one exact Phase 1.5 `run-upsert-result` to the live manager that
+ * declared ownership of the binding. The attempt fails truthfully on planes
+ * without the internal binding-result operation instead of inferring
+ * support, and an unknown manager surfaces exactly like steer/cancel.
+ */
+export const routeSubagentControlBindingResult = (
+  registry: SubagentControlAdapterLookup,
+  input: ProviderSubagentBindingResultInput,
+): Effect.Effect<OrchestrationSubagentControlActionResult, SubagentControlError> =>
+  routeToOwner(registry, input.managerId, (plane) =>
+    plane.bindingResult === undefined
+      ? Effect.fail(
+          new SubagentControlError({
+            reason: "unsupported",
+            detail: "This provider session cannot accept subagent run binding results.",
+          }),
+        )
+      : plane.bindingResult(input),
+  );

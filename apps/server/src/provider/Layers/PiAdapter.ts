@@ -35,6 +35,7 @@ import {
   ApprovalRequestId,
   EventId,
   type ModelSelection,
+  type OrchestrationSubagentControlActionResult,
   type PiSettings,
   ProviderDriverKind,
   type ProviderApprovalDecision,
@@ -90,6 +91,7 @@ import {
 } from "../piRpc.ts";
 import type {
   ProviderAdapterShape,
+  ProviderSubagentBindingResultInput,
   ProviderSubagentControlPlaneShape,
   ProviderThreadSnapshot,
 } from "../Services/ProviderAdapter.ts";
@@ -104,12 +106,16 @@ import {
   encodeControlEnvelope,
   exchangeManagerRecord,
   makeManagerRunRegistry,
+  makeRunBindingTracker,
   type ManagerRecord,
+  type ManagerRunBindingTracker,
   type ManagerRunRegistry,
   type ManagerRunUpsert,
+  type ManagerTranscriptItem,
   type NegotiatedManagerControl,
   negotiationFromRecord,
 } from "../PiSubagentControl.ts";
+import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 
 const PROVIDER = ProviderDriverKind.make("pi");
 
@@ -183,6 +189,9 @@ interface OpenManagerRun {
   readonly title?: string;
   readonly harness: string;
   readonly model?: string;
+  /** Present only on an enhanced-manager allocating start with binding evidence. */
+  readonly runBirth?: string;
+  readonly upsertSequence?: number;
 }
 
 interface PendingPiSubagentTerminal {
@@ -264,6 +273,8 @@ interface PiSessionContext {
   managerReason: string | undefined;
   /** Idempotent run-upsert state machine for the negotiated manager. */
   managerRegistry: ManagerRunRegistry;
+  /** Bounded Phase 1.5 binding tuples (open and terminal) for this session. */
+  runBindings: ManagerRunBindingTracker;
   /** Namespaced T3 task id → open manager run (steer/cancel lookup). */
   readonly managerRuns: Map<RuntimeTaskId, OpenManagerRun>;
   /** Correlated manager records awaiting a reply, by envelope id. */
@@ -313,6 +324,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const boundInstanceId = options?.instanceId;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const crypto = yield* Crypto.Crypto;
+    // Optional shared side-store sink. Absent means this build did not wire
+    // the Phase 1.5 transcript store: the negotiated capability stays off
+    // and every manager stays summary-only — the stock-Pi behavior.
+    const transcriptSinkOption = yield* Effect.serviceOption(ProjectionSubagentTranscriptStore);
     const serverConfig = yield* Effect.service(ServerConfig);
     const environment = options?.environment ?? process.env;
 
@@ -772,6 +787,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       readonly connection: PiRpcConnection;
       readonly extensionCommandNames: ReadonlySet<string>;
       readonly pendingManagerRecords: Map<string, Deferred.Deferred<ManagerRecord>>;
+      /** Durable per-run watermarks for reconnect replay, when known. */
+      readonly replay?: ReadonlyArray<{ readonly runId: string; readonly watermark: number }>;
     }) =>
       Effect.gen(function* () {
         if (!input.extensionCommandNames.has(SUBAGENT_MANAGER_COMMAND)) {
@@ -794,6 +811,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 v: MANAGER_PROTOCOL_VERSION,
                 op: "negotiate",
                 id: correlationId,
+                // T3's additive Phase 1.5 offer: active only when the
+                // manager's negotiation record declares it too.
+                ...(transcriptSinkOption._tag === "Some"
+                  ? { capabilities: { childTranscripts: true as const } }
+                  : {}),
+                ...(input.replay !== undefined && input.replay.length > 0
+                  ? { replay: input.replay }
+                  : {}),
               })}`,
             })
             .pipe(
@@ -835,6 +860,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ? { steer: { enabled: false }, cancel: { enabled: false } }
           : deriveControlAvailabilities(control.capabilities);
       const ownerRouted = controls.steer.enabled || controls.cancel.enabled;
+      const transcriptCapable = run.runBirth !== undefined && transcriptSinkOption._tag === "Some";
       return {
         taskType: "subagent" as const,
         ...(run.title !== undefined ? { title: run.title } : {}),
@@ -852,6 +878,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ownerEpoch: ctx.processEpoch,
           nativeRunId: run.nativeRunId,
           activationId: run.activationId,
+          // Phase 1.5 binding evidence rides only on enhanced-manager starts.
+          ...(run.runBirth !== undefined ? { runBirth: run.runBirth } : {}),
+          ...(run.upsertSequence !== undefined ? { upsertSequence: run.upsertSequence } : {}),
           status,
           ...(terminalReason !== undefined ? { terminalReason } : {}),
           controlAvailability:
@@ -862,7 +891,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
               : ownerRouted
                 ? "read-only"
                 : "unsupported",
-          historyAvailability: "summary-only",
+          historyAvailability: transcriptCapable ? "durable" : "summary-only",
           capabilities: {
             steer: control?.capabilities.steering ?? false,
             cancel: control?.capabilities.cancellation ?? false,
@@ -928,8 +957,34 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ...(record.title !== undefined ? { title: record.title } : {}),
           harness: record.harness ?? "pi",
           ...(record.model !== undefined ? { model: record.model } : {}),
+          ...(record.runBirth !== undefined ? { runBirth: record.runBirth } : {}),
+          ...(record.upsertSequence !== undefined ? { upsertSequence: record.upsertSequence } : {}),
         };
         ctx.managerRuns.set(taskId, run);
+        // Phase 1.5: an allocating start that carried binding evidence under
+        // an active childTranscripts negotiation installs the binding tuple
+        // the run-upsert-result and later transcript items validate against.
+        if (
+          record.runBirth !== undefined &&
+          record.upsertSequence !== undefined &&
+          ctx.managerControl?.capabilities.childTranscripts === true &&
+          transcriptSinkOption._tag === "Some"
+        ) {
+          const installed = ctx.runBindings.install({
+            managerId: ctx.managerControl.managerId,
+            nativeRunId: record.runId,
+            activationId: record.activationId,
+            runBirth: record.runBirth,
+            upsertSequence: record.upsertSequence,
+            t3RunId: taskId,
+          });
+          if (!installed.ok) {
+            yield* Effect.logDebug("Rejected conflicting Pi subagent run binding.", {
+              nativeRunId: record.runId,
+              conflict: installed.conflict,
+            });
+          }
+        }
         yield* offerRuntimeEvent({
           ...base,
           type: "task.started",
@@ -1001,6 +1056,54 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       });
     });
 
+    /**
+     * Validate one finalized transcript record as a five-member binding unit
+     * and, only then, hand it to the shared side-store writer. Terminal-late
+     * items follow the same path: acceptance may advance the watermark but
+     * never reopens lifecycle. No transcript body ever enters a runtime event.
+     */
+    const applyManagerTranscriptItem = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      record: ManagerTranscriptItem,
+    ) {
+      if (ctx.managerControl?.capabilities.childTranscripts !== true) return;
+      if (transcriptSinkOption._tag !== "Some") return;
+      if (ctx.managerControl.managerId !== record.managerId) return;
+      const tuple = ctx.runBindings.findByNativeBinding({
+        managerId: record.managerId,
+        nativeRunId: record.runId,
+        activationId: record.activationId,
+        runBirth: record.runBirth,
+      });
+      if (tuple === undefined) {
+        yield* Effect.logDebug("Dropped Pi subagent transcript item without a validated binding.", {
+          nativeRunId: record.runId,
+          transcriptSequence: record.transcriptSequence,
+        });
+        return;
+      }
+      const observedAt = yield* nowIso;
+      const ingested = yield* transcriptSinkOption.value.ingestItem({
+        runId: RuntimeTaskId.make(tuple.t3RunId),
+        runBirth: record.runBirth,
+        item: {
+          kind: record.item.kind,
+          transcriptSequence: record.transcriptSequence,
+          text: record.item.text,
+          truncated: record.item.truncated,
+          upstreamTruncated: record.item.upstreamTruncated,
+          createdAt: record.item.createdAt ?? null,
+        },
+        observedAt,
+      });
+      if (ingested.outcome === "rejected-binding") {
+        yield* Effect.logDebug("Rejected Pi subagent transcript item binding.", {
+          runId: tuple.t3RunId,
+          transcriptSequence: record.transcriptSequence,
+        });
+      }
+    });
+
     const handleManagerRecord = Effect.fnUntraced(function* (
       ctx: PiSessionContext,
       value: unknown,
@@ -1016,6 +1119,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           return;
         }
         yield* applyManagerRunUpsert(ctx, record);
+        return;
+      }
+      if (record.kind === "transcript-item") {
+        yield* applyManagerTranscriptItem(ctx, record);
         return;
       }
       // Negotiation and ack records resolve their awaited correlation.
@@ -1095,6 +1202,21 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         });
       });
 
+    /** Durable replay watermarks for the runs this session still tracks. */
+    const replayWatermarksFor = (
+      ctx: PiSessionContext,
+    ): Effect.Effect<ReadonlyArray<{ readonly runId: string; readonly watermark: number }>> =>
+      transcriptSinkOption._tag === "Some"
+        ? transcriptSinkOption.value.readWatermarks(Array.from(ctx.managerRuns.keys())).pipe(
+            Effect.map((entries) =>
+              entries
+                .filter((entry) => entry.watermark > 0)
+                .map((entry) => ({ runId: String(entry.runId), watermark: entry.watermark })),
+            ),
+            Effect.catchCause(() => Effect.succeed([])),
+          )
+        : Effect.succeed([]);
+
     const refreshManagerControl = (ctx: PiSessionContext, expectedManagerId: string) =>
       Effect.gen(function* () {
         const commandsData = yield* ctx.connection.request({ type: "get_commands" }).pipe(
@@ -1120,6 +1242,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           connection: ctx.connection,
           extensionCommandNames,
           pendingManagerRecords: ctx.pendingManagerRecords,
+          replay: yield* replayWatermarksFor(ctx),
         }).pipe(
           Effect.mapError(
             () =>
@@ -1178,6 +1301,75 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             ...(record.error !== undefined ? { detail: record.error } : {}),
           });
         }
+      });
+
+    /**
+     * Deliver one exact `run-upsert-result` to the live manager that owns the
+     * binding. Identical redelivery after a lost ack resolves from the
+     * tracker without another envelope; a conflicting tuple fails truthfully.
+     */
+    const deliverManagerBindingResult = (
+      input: ProviderSubagentBindingResultInput,
+    ): Effect.Effect<
+      OrchestrationSubagentControlActionResult,
+      ProviderAdapterError | SubagentControlError
+    > =>
+      Effect.gen(function* () {
+        let ownerSession: PiSessionContext | undefined;
+        for (const ctx of sessions.values()) {
+          if (ctx.managerControl?.managerId !== input.managerId) continue;
+          ownerSession = ctx;
+          const tuple = ctx.runBindings.findByT3RunId(String(input.runId));
+          if (tuple === undefined) {
+            return yield* new SubagentControlError({
+              reason: "unknown-run",
+              detail: `Manager '${input.managerId}' does not track a binding for run '${input.runId}'.`,
+            });
+          }
+          if (
+            tuple.nativeRunId !== input.nativeRunId ||
+            tuple.activationId !== input.activationId ||
+            tuple.runBirth !== input.runBirth ||
+            tuple.upsertSequence !== input.upsertSequence
+          ) {
+            return yield* new SubagentControlError({
+              reason: "manager-mismatch",
+              detail: "The binding result does not match the installed run binding tuple.",
+            });
+          }
+          if (ctx.runBindings.isAcked(String(input.runId))) {
+            return { accepted: true } as const;
+          }
+          const control = yield* refreshManagerControl(ctx, ctx.managerControl.managerId);
+          if (control.capabilities.childTranscripts !== true) {
+            return yield* new SubagentControlError({
+              reason: "control-disabled",
+              detail: "Pi subagent manager does not declare the childTranscripts capability.",
+            });
+          }
+          const correlationId = yield* nextUuid;
+          yield* sendManagerControlCommand(ctx, {
+            v: MANAGER_PROTOCOL_VERSION,
+            op: "run-upsert-result",
+            id: correlationId,
+            managerId: control.managerId,
+            runId: tuple.nativeRunId,
+            activationId: tuple.activationId,
+            runBirth: tuple.runBirth,
+            upsertSequence: tuple.upsertSequence,
+            t3RunId: String(input.runId),
+          });
+          ctx.runBindings.markAcked(String(input.runId));
+          return { accepted: true } as const;
+        }
+        return yield* new SubagentControlError({
+          reason: ownerSession === undefined ? "unknown-manager" : "unknown-run",
+          ...(ownerSession === undefined
+            ? {
+                detail: `This adapter does not declare subagent manager '${input.managerId}'.`,
+              }
+            : {}),
+        });
       });
 
     const steerManagerRun = (input: OrchestrationSubagentControlSteerInput) =>
@@ -1607,6 +1799,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           });
         }
         ctx.managerRuns.clear();
+        ctx.runBindings = makeRunBindingTracker();
         ctx.pendingManagerRunUpserts.length = 0;
         ctx.managerNegotiating = false;
         if (sessions.get(ctx.threadId) === ctx) {
@@ -1731,6 +1924,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             managerControl: null,
             managerReason: undefined,
             managerRegistry: makeManagerRunRegistry(""),
+            runBindings: makeRunBindingTracker(),
             managerRuns: new Map(),
             pendingManagerRecords,
             pendingManagerRunUpserts: [],
@@ -2008,6 +2202,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         Effect.sync(() => Array.from(sessions.values(), (ctx) => buildControlPlaneStatus(ctx))),
       steer: steerManagerRun,
       cancel: cancelManagerRun,
+      bindingResult: deliverManagerBindingResult,
     } satisfies ProviderSubagentControlPlaneShape<ProviderAdapterError>;
 
     yield* Effect.addFinalizer(() => Effect.ignore(stopAll()));

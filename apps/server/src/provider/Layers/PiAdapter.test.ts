@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - the fake pi fixture drives a real stdio process through Node spawn and filesystem APIs.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -22,6 +23,14 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
+import Migration046 from "../../persistence/Migrations/046_ProjectionSubagentTranscripts.ts";
+import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/ProjectionSubagentTranscripts.ts";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
+import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
+import type { ReadSubagentTranscriptPageResult } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
+import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
 import { decodeControlEnvelope } from "../PiSubagentControl.ts";
 import type {
@@ -68,6 +77,7 @@ const makeFixture = (): Fixture => {
   delete process.env.FAKE_PI_MANAGER_REMOVED_FILE;
   delete process.env.FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS;
   delete process.env.FAKE_PI_MANAGER_REJECT_FILE;
+  delete process.env.FAKE_PI_CHILD_TRANSCRIPTS;
   return { binaryPath: shimPath, closedPath, logPath, nativeSessionFile };
 };
 
@@ -1498,6 +1508,231 @@ describe("PiAdapter", () => {
         expect(unsupported.detail).toContain("not registered");
       }
       expect(controlEnvelopes(fixture)).toHaveLength(before);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  // ── Phase 1.5 child transcripts ─────────────────────────────────
+
+  const withMigration046 = Layer.effectDiscard(Migration046);
+
+  const transcriptStoreLayer = ProjectionSubagentTranscriptStoreLive.pipe(
+    Layer.provideMerge(ProjectionSubagentRunRepositoryLive),
+    Layer.provideMerge(withMigration046),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
+
+  const waitForStorePage = (
+    store: ProjectionSubagentTranscriptStore["Service"],
+    runId: RuntimeTaskId,
+    entries: number,
+  ) => {
+    type PageResult =
+      | ReadSubagentTranscriptPageResult
+      | { readonly unavailable: "unknown-run" | "unavailable" };
+    const attempt = (
+      page: PageResult,
+      deadline: number,
+    ): Effect.Effect<ReadSubagentTranscriptPageResult, ProjectionRepositoryError> =>
+      !("unavailable" in page) && page.entries.length >= entries
+        ? Effect.succeed(page)
+        : Clock.currentTimeMillis.pipe(
+            Effect.flatMap((now) =>
+              now >= deadline
+                ? Effect.die(new Error("Timed out waiting for transcript items"))
+                : Effect.sleep(50).pipe(
+                    Effect.andThen(store.readPage({ runId })),
+                    Effect.flatMap((next) => attempt(next, deadline)),
+                  ),
+            ),
+          );
+    return Clock.currentTimeMillis.pipe(
+      Effect.flatMap((now) =>
+        store.readPage({ runId }).pipe(Effect.flatMap((page) => attempt(page, now + 4_000))),
+      ),
+    );
+  };
+
+  it.live(
+    "offers childTranscripts, carries binding evidence, and ingests only validated finalized items",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeFixture();
+        process.env.FAKE_PI_MANAGER = "1";
+        process.env.FAKE_PI_CHILD_TRANSCRIPTS = "1";
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        const store = yield* ProjectionSubagentTranscriptStore;
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+
+        // The negotiation offer declares the additive capability only because
+        // the shared side-store sink is wired into this build.
+        const offered = controlEnvelopes(fixture).find((envelope) => envelope.op === "negotiate");
+        expect(offered).toMatchObject({
+          v: 1,
+          op: "negotiate",
+          capabilities: { childTranscripts: true },
+        });
+
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "MANAGER_TRANSCRIPT_FLOW" });
+        const started = yield* collector.waitFor(
+          (event) =>
+            event.type === "task.started" && event.payload.subagentRun?.runBirth !== undefined,
+        );
+        const evidence = (started.payload as { subagentRun?: Record<string, unknown> }).subagentRun;
+        const taskId = RuntimeTaskId.make(String(evidence?.["runId"] ?? ""));
+        expect(evidence).toMatchObject({
+          nativeRunId: "sa-1",
+          activationId: "act-1",
+          runBirth: `rb${"a".repeat(22)}`,
+          upsertSequence: 1,
+          historyAvailability: "durable",
+        });
+
+        // Post-commit result routing mirrors the server loop: the durable
+        // row is committed (here, by seeding the reservation and start row
+        // the side store validates against), then the exact tuple is
+        // acknowledged by the synthetic manager and installs idempotently.
+        const runs = yield* ProjectionSubagentRunRepository;
+        const runNumber = yield* runs.reserveRunNumber({
+          runId: taskId,
+          allocatedAt: started.createdAt,
+          ownerId: "fake-manager-1",
+          ownerEpoch: "epoch-test",
+          nativeRunId: "sa-1",
+          activationId: "act-1",
+        });
+        yield* runs.insertStart({
+          runId: taskId,
+          runNumber,
+          threadId: THREAD_ID,
+          parentRunId: null,
+          runtimeFamily: "pi-manager",
+          harness: "pi",
+          provider: PROVIDER,
+          providerInstanceId: null,
+          model: null,
+          effort: null,
+          title: null,
+          summary: null,
+          status: "active",
+          terminalReason: null,
+          controlAvailability: "owner-routed",
+          historyAvailability: "durable",
+          capabilities: { steer: true, cancel: true, resume: false },
+          createdAt: started.createdAt,
+          updatedAt: started.createdAt,
+          terminalAt: null,
+          runBirth: `rb${"a".repeat(22)}`,
+          ownerId: null,
+          ownerEpoch: "reserved",
+          nativeRunId: null,
+          activationId: null,
+          firstEventSequence: 1,
+          lastEventSequence: 1,
+        });
+        const result = yield* requireControlPlane(adapter).bindingResult!({
+          managerId: "fake-manager-1",
+          runId: taskId,
+          nativeRunId: "sa-1",
+          activationId: "act-1",
+          runBirth: `rb${"a".repeat(22)}`,
+          upsertSequence: 1,
+        });
+        expect(result).toEqual({ accepted: true });
+        const routed = controlEnvelopes(fixture).find(
+          (envelope) => envelope.op === "run-upsert-result",
+        );
+        expect(routed).toMatchObject({
+          managerId: "fake-manager-1",
+          runId: "sa-1",
+          t3RunId: taskId,
+          upsertSequence: 1,
+        });
+        // An identical redelivery resolves from the tracker with no new envelope.
+        const again = yield* requireControlPlane(adapter).bindingResult!({
+          managerId: "fake-manager-1",
+          runId: taskId,
+          nativeRunId: "sa-1",
+          activationId: "act-1",
+          runBirth: `rb${"a".repeat(22)}`,
+          upsertSequence: 1,
+        });
+        expect(again).toEqual({ accepted: true });
+        expect(
+          controlEnvelopes(fixture).filter((envelope) => envelope.op === "run-upsert-result"),
+        ).toHaveLength(1);
+
+        const page = yield* waitForStorePage(store, taskId, 3);
+        expect(page.entries.map((entry) => entry.kind)).toEqual([
+          "user",
+          "assistant",
+          "toolResult",
+        ]);
+        const userEntry = page.entries[0]!;
+        if (userEntry.kind === "user") {
+          expect(userEntry.text).toContain("[REDACTED]");
+          expect(userEntry.text).not.toContain("secret-token-value-123456");
+          expect(userEntry.truncated).toBe(false);
+        }
+        const toolEntry = page.entries[2]!;
+        if (toolEntry.kind === "toolResult") {
+          expect(toolEntry.upstreamTruncated).toBe(true);
+          expect(toolEntry.text).toContain("[REDACTED]");
+        }
+        expect(page.watermark).toBe(3);
+        expect(page.hasMore).toBe(false);
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(provideTestEnv, Effect.provide(transcriptStoreLayer)),
+  );
+
+  it.live("keeps the capability off and history summary-only when the sink is unwired", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_MANAGER = "1";
+      // The manager declares the capability, but this build provides no
+      // side-store sink: T3's own offer stays absent and runs stay
+      // summary-only.
+      process.env.FAKE_PI_CHILD_TRANSCRIPTS = "1";
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      const offered = controlEnvelopes(fixture).find((envelope) => envelope.op === "negotiate");
+      expect(
+        offered !== undefined && "capabilities" in offered ? offered.capabilities : undefined,
+      ).toBeUndefined();
+
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "MANAGER_RUN_OPEN" });
+      const started = yield* collector.waitFor((event) => event.type === "task.started");
+      const evidence = (started.payload as { subagentRun?: Record<string, unknown> }).subagentRun;
+      expect(evidence?.["runBirth"]).toBeUndefined();
+      expect(evidence?.["historyAvailability"]).toBe("summary-only");
+      // A binding result cannot validate against any installed tuple.
+      const rejected = yield* Effect.flip(
+        requireControlPlane(adapter).bindingResult!({
+          managerId: "fake-manager-1",
+          runId: RuntimeTaskId.make(String(evidence?.["runId"] ?? "")),
+          nativeRunId: "sa-1",
+          activationId: "act-1",
+          runBirth: `rb${"a".repeat(22)}`,
+          upsertSequence: 1,
+        }),
+      );
+      expect(rejected._tag === "SubagentControlError" && rejected.reason === "unknown-run").toBe(
+        true,
+      );
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
   );

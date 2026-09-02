@@ -10,6 +10,7 @@ import {
   classifyTaskAgentKind,
   EventId,
   isToolLifecycleItemType,
+  RuntimeTaskId,
   ThreadId,
   type ThreadTokenUsageSnapshot,
   TurnId,
@@ -26,12 +27,17 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { ProviderAdapterRegistry } from "../../provider/Services/ProviderAdapterRegistry.ts";
+import { routeSubagentControlBindingResult } from "../../provider/subagentControlRouter.ts";
 import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
 import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
+import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/ProjectionSubagentTranscripts.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
@@ -899,6 +905,8 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const projectionSubagentRunRepository = yield* ProjectionSubagentRunRepository;
+  const transcriptStore = yield* ProjectionSubagentTranscriptStore;
+  const adapterRegistry = yield* ProviderAdapterRegistry;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -1497,6 +1505,56 @@ const make = Effect.gen(function* () {
     },
   );
 
+  /**
+   * Bounded retries for the correlated `run-upsert-result`: the identical
+   * tuple is re-sent only while the manager acknowledgement is absent
+   * (timeout or unreachable manager). Any other failure is terminal and
+   * truthful — the producer keeps its retained items suppressed.
+   */
+  const ROUTED_BINDING_RESULT_MAX_ATTEMPTS = 3;
+  const ROUTED_BINDING_RESULT_RETRY_DELAY = Duration.millis(500);
+  const BINDING_START_RECEIPT_TIMEOUT_MS = 10_000;
+
+  const routeSubagentRunBindingResult = (input: {
+    readonly managerId: string;
+    readonly runId: RuntimeTaskId;
+    readonly nativeRunId: string;
+    readonly activationId: string;
+    readonly runBirth: string;
+    readonly upsertSequence: number;
+  }) =>
+    Effect.gen(function* () {
+      const committed = yield* transcriptStore.awaitStartCommitted({
+        runId: input.runId,
+        timeoutMs: BINDING_START_RECEIPT_TIMEOUT_MS,
+      });
+      if (!committed) {
+        yield* Effect.logDebug(
+          "Subagent run binding result skipped: allocating row never committed.",
+          { runId: input.runId },
+        );
+        return;
+      }
+      for (let attempt = 1; attempt <= ROUTED_BINDING_RESULT_MAX_ATTEMPTS; attempt += 1) {
+        const outcome = yield* Effect.result(
+          routeSubagentControlBindingResult(adapterRegistry, input),
+        );
+        if (Result.isSuccess(outcome)) return;
+        const cause = outcome.failure;
+        const retryable =
+          cause._tag === "SubagentControlError" &&
+          (cause.reason === "timeout" || cause.reason === "manager-unreachable");
+        if (!retryable || attempt === ROUTED_BINDING_RESULT_MAX_ATTEMPTS) {
+          yield* Effect.logWarning("Subagent run binding result was not acknowledged.", {
+            runId: input.runId,
+            reason: cause._tag === "SubagentControlError" ? cause.reason : cause._tag,
+          });
+          return;
+        }
+        yield* Effect.sleep(ROUTED_BINDING_RESULT_RETRY_DELAY);
+      }
+    });
+
   const processRuntimeEvent = (inputEvent: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const thread = yield* resolveThreadShell(inputEvent.threadId);
@@ -1524,6 +1582,37 @@ const make = Effect.gen(function* () {
               },
             } satisfies ProviderRuntimeEvent)
           : inputEvent;
+
+      // Phase 1.5: an allocating start that carried binding evidence routes
+      // exactly one `run-upsert-result` back to its live manager — but only
+      // after the run row is durably committed, which the projector signals.
+      // Identical retries happen only while the acknowledgement is absent;
+      // the routed tuple never contains transcript bodies.
+      if (event.type === "task.started") {
+        const evidence = event.payload.subagentRun;
+        const runBirth = evidence?.runBirth;
+        const upsertSequence = evidence?.upsertSequence;
+        const managerId = evidence?.ownerId;
+        const nativeRunId = evidence?.nativeRunId;
+        const activationId = evidence?.activationId;
+        if (
+          evidence !== undefined &&
+          runBirth !== undefined &&
+          upsertSequence !== undefined &&
+          managerId !== undefined &&
+          nativeRunId !== undefined &&
+          activationId !== undefined
+        ) {
+          yield* routeSubagentRunBindingResult({
+            managerId,
+            runId: evidence.runId,
+            nativeRunId,
+            activationId,
+            runBirth,
+            upsertSequence,
+          }).pipe(Effect.forkDetach);
+        }
+      }
 
       let loadedThreadDetail: OrchestrationThread | null | undefined;
       const getLoadedThreadDetail = () =>
@@ -2121,4 +2210,5 @@ export const ProviderRuntimeIngestionLive = Layer.effect(
 ).pipe(
   Layer.provide(ProjectionTurnRepositoryLive),
   Layer.provide(ProjectionSubagentRunRepositoryLive),
+  Layer.provide(ProjectionSubagentTranscriptStoreLive),
 );

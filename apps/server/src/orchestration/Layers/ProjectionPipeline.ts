@@ -22,6 +22,7 @@ import { ProjectionPendingApprovalRepository } from "../../persistence/Services/
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { type ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import {
@@ -42,6 +43,7 @@ import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layer
 import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/ProjectionSubagentTranscripts.ts";
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
@@ -542,6 +544,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
     const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
     const projectionSubagentRunRepository = yield* ProjectionSubagentRunRepository;
+    const transcriptStore = yield* ProjectionSubagentTranscriptStore;
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
@@ -1247,12 +1250,20 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             terminal && evidence.controlAvailability === "owner-routed"
               ? "read-only"
               : evidence.controlAvailability,
-          historyAvailability: evidence.historyAvailability,
+          // Truthful history: only a run that arrived with Phase 1.5 binding
+          // evidence can claim durable child history; anything else keeps
+          // its summary-only or unavailable truth.
+          historyAvailability:
+            evidence.historyAvailability === "durable" && evidence.runBirth === undefined
+              ? "summary-only"
+              : evidence.historyAvailability,
           capabilities: evidence.capabilities,
           createdAt: evidence.startedAt,
           updatedAt: activity.createdAt,
           terminalAt: terminal ? activity.createdAt : null,
-          // Private routing provenance comes from the durable reservation.
+          // Binding evidence from the allocating upsert; private routing
+          // provenance still comes from the durable reservation.
+          runBirth: evidence.runBirth ?? null,
           ownerId: null,
           ownerEpoch: "reserved",
           nativeRunId: null,
@@ -1260,6 +1271,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           firstEventSequence: event.sequence,
           lastEventSequence: event.sequence,
         });
+        // Durable start receipt: only now does the allocating row and its
+        // opaque T3 run id exist, so only now may a `run-upsert-result` be
+        // routed back to the manager. No transcript body is involved.
+        if (evidence.runBirth !== undefined) {
+          yield* transcriptStore.signalStartCommitted({ runId: evidence.runId });
+        }
         return;
       }
 
@@ -1898,6 +1915,7 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),
   Layer.provideMerge(ProjectionThreadActivityRepositoryLive),
   Layer.provideMerge(ProjectionSubagentRunRepositoryLive),
+  Layer.provideMerge(ProjectionSubagentTranscriptStoreLive),
   Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
   Layer.provideMerge(ProjectionTurnRepositoryLive),
   Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),

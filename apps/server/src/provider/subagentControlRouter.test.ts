@@ -16,6 +16,7 @@ import { ProviderUnsupportedError } from "./Errors.ts";
 import type { ProviderSubagentControlPlaneShape } from "./Services/ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./Services/ProviderAdapterRegistry.ts";
 import {
+  routeSubagentControlBindingResult,
   routeSubagentControlCancel,
   routeSubagentControlStatus,
   routeSubagentControlSteer,
@@ -266,4 +267,76 @@ describe("subagentControlRouter", () => {
       AuthOrchestrationOperateScope,
     );
   });
+});
+
+describe("subagentControlRouter binding results", () => {
+  const BINDING_INPUT = {
+    managerId: "mgr-1",
+    runId: RUN_ID,
+    nativeRunId: "sa-1",
+    activationId: "act-1",
+    runBirth: `rb${"c".repeat(22)}`,
+    upsertSequence: 4,
+  } as const;
+
+  it.effect("routes the exact binding tuple to the declaring manager", () =>
+    Effect.gen(function* () {
+      const events: string[] = [];
+      const ownerPlane: ProviderSubagentControlPlaneShape<never> = {
+        status: () =>
+          Effect.succeed([
+            {
+              supported: true,
+              managerId: "mgr-1",
+              protocolVersion: 1,
+              capabilities: { ...DECLARED_CAPABILITIES },
+              controls: { steer: { enabled: true }, cancel: { enabled: true } },
+            } satisfies SubagentControlPlaneStatus,
+          ]),
+        steer: () => Effect.succeed({ accepted: true } as const),
+        cancel: () => Effect.succeed({ accepted: true } as const),
+        bindingResult: (input) =>
+          Effect.sync(() => {
+            events.push(`binding:${input.managerId}:${input.runId}:${input.upsertSequence}`);
+            return { accepted: true } as const;
+          }),
+      };
+      const result = yield* routeSubagentControlBindingResult(
+        makeLookup([{ id: "pi-main", driver: ProviderDriverKind.make("pi"), plane: ownerPlane }]),
+        BINDING_INPUT,
+      );
+      expect(result).toEqual({ accepted: true });
+      expect(events).toEqual([`binding:mgr-1:${RUN_ID}:4`]);
+    }),
+  );
+
+  it.effect("fails truthfully when no live adapter declares the manager", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        routeSubagentControlBindingResult(
+          makeLookup([
+            { id: "pi-main", driver: ProviderDriverKind.make("pi"), plane: makePlane("mgr-1") },
+          ]),
+          { ...BINDING_INPUT, managerId: "ghost" },
+        ),
+      );
+      expect(error).toBeInstanceOf(SubagentControlError);
+      expect(error.reason).toBe("unknown-manager");
+    }),
+  );
+
+  it.effect("fails unsupported on planes without the internal operation", () =>
+    Effect.gen(function* () {
+      const error = yield* Effect.flip(
+        routeSubagentControlBindingResult(
+          makeLookup([
+            { id: "pi-main", driver: ProviderDriverKind.make("pi"), plane: makePlane("mgr-1") },
+          ]),
+          BINDING_INPUT,
+        ),
+      );
+      expect(error).toBeInstanceOf(SubagentControlError);
+      expect(error.reason).toBe("unsupported");
+    }),
+  );
 });

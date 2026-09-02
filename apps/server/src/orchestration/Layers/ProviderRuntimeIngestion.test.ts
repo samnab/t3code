@@ -9,6 +9,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  RuntimeTaskId,
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
@@ -20,6 +21,7 @@ import {
   ProjectId,
   ProviderItemId,
   type ServerSettings,
+  SubagentControlError,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -37,10 +39,13 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import Migration046 from "../../persistence/Migrations/046_ProjectionSubagentTranscripts.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import { ProviderAdapterRegistry } from "../../provider/Services/ProviderAdapterRegistry.ts";
+import type { ProviderSubagentBindingResultInput } from "../../provider/Services/ProviderAdapter.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
@@ -65,6 +70,7 @@ const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
+const asRuntimeTaskId = (value: string): RuntimeTaskId => RuntimeTaskId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 
 type LegacyProviderRuntimeEvent = {
@@ -170,6 +176,100 @@ function createProviderServiceHarness() {
   };
 }
 
+/**
+ * Recording adapter-registry fake for the Phase 1.5 binding-result route:
+ * one plane declaring a manager, an optional failure for the first attempt,
+ * and an ordered log of the exact tuples ingestion routed.
+ */
+function createRecordingAdapterRegistry() {
+  const routed: ProviderSubagentBindingResultInput[] = [];
+  let failFirstAttempts = 0;
+  let attempts = 0;
+  const managerId = "mgr-fake-1";
+  const plane = {
+    status: () =>
+      Effect.succeed([
+        {
+          supported: true as const,
+          managerId,
+          protocolVersion: 1,
+          controls: { steer: { enabled: true }, cancel: { enabled: true } },
+        },
+      ]),
+    steer: () => Effect.die(new Error("unused")) as never,
+    cancel: () => Effect.die(new Error("unused")) as never,
+    bindingResult: (input: ProviderSubagentBindingResultInput) =>
+      Effect.gen(function* () {
+        attempts += 1;
+        if (attempts <= failFirstAttempts) {
+          return yield* new SubagentControlError({ reason: "timeout" });
+        }
+        routed.push(input);
+        return { accepted: true } as const;
+      }),
+  };
+  const adapterRegistryShapeFail = () =>
+    Effect.die(new Error("Unsupported registry call in test")) as never;
+  const registryAdapter = {
+    provider: ProviderDriverKind.make("pi"),
+    capabilities: { sessionModelSwitch: "in-session" as const },
+    startSession: adapterRegistryShapeFail,
+    sendTurn: adapterRegistryShapeFail,
+    interruptTurn: adapterRegistryShapeFail,
+    respondToRequest: adapterRegistryShapeFail,
+    respondToUserInput: adapterRegistryShapeFail,
+    stopSession: adapterRegistryShapeFail,
+    listSessions: () => Effect.succeed([]),
+    hasSession: () => Effect.succeed(false),
+    readThread: adapterRegistryShapeFail,
+    rollbackThread: adapterRegistryShapeFail,
+    stopAll: () => Effect.void,
+    subagentControlPlane: plane,
+    streamEvents: Stream.fromPubSub(Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>())),
+  };
+  const changes = Effect.runSync(PubSub.unbounded<void>());
+  const service = {
+    listInstances: () => Effect.succeed([ProviderInstanceId.make("pi-main")]),
+    listProviders: () => Effect.succeed([ProviderDriverKind.make("pi")]),
+    getByInstance: () => Effect.succeed(registryAdapter),
+    getInstanceInfo: (instanceId: ProviderInstanceId) =>
+      Effect.succeed({
+        instanceId,
+        driverKind: ProviderDriverKind.make("pi"),
+        displayName: undefined,
+        enabled: true,
+        continuationIdentity: {
+          driverKind: ProviderDriverKind.make("pi"),
+          continuationKey: "pi-main",
+        },
+      }),
+    streamChanges: Stream.fromPubSub(changes),
+    subscribeChanges: PubSub.subscribe(changes),
+  };
+  const waitForRoutedCallsEffect = (count: number, timeoutMs = 4_000) =>
+    Effect.gen(function* () {
+      const deadline = (yield* Clock.currentTimeMillis) + timeoutMs;
+      while (routed.length < count) {
+        if ((yield* Clock.currentTimeMillis) >= deadline) {
+          return yield* Effect.die(
+            new Error(`Timed out waiting for ${count} routed binding results`),
+          );
+        }
+        yield* Effect.sleep(10);
+      }
+      return routed;
+    });
+  return {
+    service,
+    managerId,
+    routedCalls: () => [...routed],
+    waitForRoutedCallsEffect,
+    failFirst: (attempts: number) => {
+      failFirstAttempts = attempts;
+    },
+  };
+}
+
 type ProviderRuntimeTestReadModel = OrchestrationReadModel;
 type ProviderRuntimeTestThread = ProviderRuntimeTestReadModel["threads"][number];
 type ProviderRuntimeTestMessage = ProviderRuntimeTestThread["messages"][number];
@@ -234,6 +334,7 @@ describe("ProviderRuntimeIngestion", () => {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const adapterRegistry = createRecordingAdapterRegistry();
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -253,8 +354,12 @@ describe("ProviderRuntimeIngestion", () => {
       // engine, and the snapshot query (reader).
       Layer.provideMerge(ThreadBackgroundLiveness.layer),
       Layer.provideMerge(ThreadPlanProgress.layer),
+      // 046 is registered by the integrator in Migrations.ts; until then the
+      // harness applies the additive run-table columns itself.
+      Layer.provideMerge(Layer.effectDiscard(Migration046)),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      Layer.provideMerge(Layer.succeed(ProviderAdapterRegistry, adapterRegistry.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
@@ -327,6 +432,7 @@ describe("ProviderRuntimeIngestion", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      adapterRegistry,
       drain,
     };
   }
@@ -3628,4 +3734,138 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
   });
+
+  effectIt.live(
+    "routes one exact post-commit run-upsert-result and retries identical tuples until ack",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const now = "2026-01-01T00:00:00.000Z";
+        const runBirth = `rb${"e".repeat(22)}`;
+        const runId = asRuntimeTaskId("pi:epoch:act-1:sa-1");
+
+        const emitStarted = (eventId: string, overrides: Record<string, unknown> = {}) => {
+          harness.emit({
+            type: "task.started",
+            eventId: asEventId(eventId),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: asThreadId("thread-1"),
+            createdAt: now,
+            payload: {
+              taskId: runId,
+              subagentRun: {
+                runId,
+                runtimeFamily: "pi-manager",
+                harness: "pi",
+                provider: "pi",
+                ownerId: harness.adapterRegistry.managerId,
+                ownerEpoch: "epoch-1",
+                nativeRunId: "sa-1",
+                activationId: "act-1",
+                runBirth,
+                upsertSequence: 4,
+                status: "active",
+                controlAvailability: "owner-routed",
+                historyAvailability: "durable",
+                capabilities: { steer: true, cancel: true, resume: false },
+                startedAt: now,
+                ...overrides,
+              },
+            },
+          });
+        };
+
+        emitStarted("evt-binding-1");
+        const routed = yield* harness.adapterRegistry.waitForRoutedCallsEffect(1);
+        expect(routed).toEqual([
+          {
+            managerId: harness.adapterRegistry.managerId,
+            runId,
+            nativeRunId: "sa-1",
+            activationId: "act-1",
+            runBirth,
+            upsertSequence: 4,
+          },
+        ]);
+
+        // A duplicate start for the same opaque run re-delivers the identical
+        // tuple (ack tracking lives in the manager plane, not here).
+        emitStarted("evt-binding-2");
+        yield* harness.adapterRegistry.waitForRoutedCallsEffect(2);
+        expect(harness.adapterRegistry.routedCalls()[1]).toEqual(routed[0]);
+
+        // No binding evidence, no routing: capability-absent starts stay quiet.
+        harness.emit({
+          type: "task.started",
+          eventId: asEventId("evt-binding-plain"),
+          provider: ProviderDriverKind.make("pi"),
+          threadId: asThreadId("thread-1"),
+          createdAt: now,
+          payload: {
+            taskId: asRuntimeTaskId("pi:epoch:act-2:sa-2"),
+            subagentRun: {
+              runId: asRuntimeTaskId("pi:epoch:act-2:sa-2"),
+              runtimeFamily: "pi-stock",
+              harness: "pi",
+              provider: "pi",
+              ownerEpoch: "epoch-1",
+              status: "active",
+              controlAvailability: "unsupported",
+              historyAvailability: "summary-only",
+              capabilities: { steer: false, cancel: false, resume: false },
+              startedAt: now,
+            },
+          },
+        });
+        yield* Effect.promise(() => harness.drain());
+        expect(harness.adapterRegistry.routedCalls().length).toBe(2);
+        // Routed tuples carry exactly the five binding members and no transcript
+        // body; projection of the rows (including the summary-only clamp for the
+        // capability-absent run) is covered by the subagent-runs projection test.
+      }),
+  );
+
+  effectIt.live(
+    "retries the identical binding result only while the acknowledgement is absent",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        harness.adapterRegistry.failFirst(1);
+        const now = "2026-01-01T00:00:00.000Z";
+        const runBirth = `rb${"f".repeat(22)}`;
+        const runId = asRuntimeTaskId("pi:epoch:act-3:sa-3");
+
+        harness.emit({
+          type: "task.started",
+          eventId: asEventId("evt-binding-retry"),
+          provider: ProviderDriverKind.make("pi"),
+          threadId: asThreadId("thread-1"),
+          createdAt: now,
+          payload: {
+            taskId: runId,
+            subagentRun: {
+              runId,
+              runtimeFamily: "pi-manager",
+              harness: "pi",
+              provider: "pi",
+              ownerId: harness.adapterRegistry.managerId,
+              ownerEpoch: "epoch-1",
+              nativeRunId: "sa-3",
+              activationId: "act-3",
+              runBirth,
+              upsertSequence: 9,
+              status: "active",
+              controlAvailability: "owner-routed",
+              historyAvailability: "durable",
+              capabilities: { steer: true, cancel: true, resume: false },
+              startedAt: now,
+            },
+          },
+        });
+
+        const routed = yield* harness.adapterRegistry.waitForRoutedCallsEffect(1);
+        expect(routed.length).toBe(1);
+        expect(routed[0]).toMatchObject({ runBirth, upsertSequence: 9, nativeRunId: "sa-3" });
+      }),
+  );
 });

@@ -4,6 +4,7 @@ import {
   OrchestrationSubagentRun,
   PositiveInt,
   RuntimeTaskId,
+  SubagentRunHistoryAvailability,
   SubagentRunStatus,
   SubagentRunTerminalReason,
   ThreadId,
@@ -20,6 +21,8 @@ export const ProjectionSubagentRun = Schema.Struct({
   ownerEpoch: Schema.String,
   nativeRunId: Schema.NullOr(Schema.String),
   activationId: Schema.NullOr(Schema.String),
+  /** Phase 1.5 binding evidence; null on capability-absent runs. */
+  runBirth: Schema.NullOr(Schema.String),
   firstEventSequence: NonNegativeInt,
   lastEventSequence: NonNegativeInt,
 });
@@ -64,6 +67,27 @@ export const InterruptNonResumableSubagentRunsInput = Schema.Struct({
 export type InterruptNonResumableSubagentRunsInput =
   typeof InterruptNonResumableSubagentRunsInput.Type;
 
+/**
+ * Private Phase 1.5 binding facts for one durable run row: what the side
+ * store and the binding-result path need, and nothing a public inventory
+ * read exposes. `lastTranscriptSequence` is the read/replay watermark — a
+ * null value means no finalized item has been observed yet.
+ */
+export interface ProjectionSubagentRunBinding {
+  readonly runId: RuntimeTaskId;
+  readonly threadId: ThreadId;
+  readonly runBirth: string | null;
+  readonly historyAvailability: SubagentRunHistoryAvailability;
+  readonly lastTranscriptSequence: number | null;
+}
+
+export const AdvanceSubagentTranscriptWatermarkInput = Schema.Struct({
+  runId: RuntimeTaskId,
+  lastTranscriptSequence: PositiveInt,
+});
+export type AdvanceSubagentTranscriptWatermarkInput =
+  typeof AdvanceSubagentTranscriptWatermarkInput.Type;
+
 export interface ProjectionSubagentRunRepositoryShape {
   readonly reserveRunNumber: (
     input: ReserveSubagentRunNumberInput,
@@ -89,6 +113,17 @@ export interface ProjectionSubagentRunRepositoryShape {
   readonly interruptNonResumable: (
     input: InterruptNonResumableSubagentRunsInput,
   ) => Effect.Effect<number, ProjectionRepositoryError>;
+  /** Private Phase 1.5 binding read for the transcript side store. */
+  readonly getRunBinding: (
+    input: GetProjectionSubagentRunInput,
+  ) => Effect.Effect<ProjectionSubagentRunBinding | null, ProjectionRepositoryError>;
+  /**
+   * Advance the read watermark only. Never lowers it and never touches
+   * lifecycle, terminal, identity, or binding columns.
+   */
+  readonly advanceTranscriptWatermark: (
+    input: AdvanceSubagentTranscriptWatermarkInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
 }
 
 export class ProjectionSubagentRunRepository extends Context.Service<

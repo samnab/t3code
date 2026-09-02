@@ -44,8 +44,10 @@ const ManagerIdString = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-
 const ManagerSequence = Schema.Int.check(Schema.isGreaterThan(0));
 const ManagerStatus = Schema.Literals(["running", "done", "error", "cancelled"]);
 const ManagerHarness = Schema.Literals(["pi", "claude", "codex"]);
+/** `rb` + the first 22 base64url characters of the snapshot digest. */
+const ManagerRunBirth = Schema.String.check(Schema.isPattern(/^rb[A-Za-z0-9_-]{22}$/));
 
-/** The nine capability booleans a negotiation record must declare. */
+/** The capability booleans a negotiation record must declare. */
 export interface ManagerCapabilities {
   readonly normalizedEvents: boolean;
   readonly stableActivations: boolean;
@@ -56,6 +58,8 @@ export interface ManagerCapabilities {
   readonly scheduling: boolean;
   readonly nativeChildProjection: boolean;
   readonly deliveryAcknowledgements: boolean;
+  /** Phase 1.5; absent on managers that predate the capability. */
+  readonly childTranscripts: boolean;
 }
 
 const ManagerCapabilitiesSchema = Schema.Struct({
@@ -68,6 +72,7 @@ const ManagerCapabilitiesSchema = Schema.Struct({
   scheduling: Schema.Boolean,
   nativeChildProjection: Schema.Boolean,
   deliveryAcknowledgements: Schema.Boolean,
+  childTranscripts: Schema.optional(Schema.Boolean),
 });
 
 const NegotiationRecordSchema = Schema.Struct({
@@ -91,6 +96,29 @@ const RunUpsertRecordSchema = Schema.Struct({
   harness: Schema.optional(ManagerHarness),
   model: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
   summary: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(8_192))),
+  // Phase 1.5 binding evidence on the allocating upsert of an enhanced
+  // manager; absent on stock managers, which stay summary-only.
+  runBirth: Schema.optional(ManagerRunBirth),
+  upsertSequence: Schema.optional(ManagerSequence),
+});
+
+const TranscriptItemRecordSchema = Schema.Struct({
+  type: Schema.Literal(MANAGER_RECORD_TYPE),
+  kind: Schema.Literal("transcript-item"),
+  managerId: ManagerIdString,
+  runId: ManagerIdString,
+  activationId: ManagerIdString,
+  runBirth: ManagerRunBirth,
+  transcriptSequence: ManagerSequence,
+  item: Schema.Struct({
+    kind: Schema.Literals(["user", "assistant", "toolResult"]),
+    // Decoded length bound only: T3 re-redacts and re-truncates at its own
+    // boundary before anything is persisted.
+    text: Schema.String.check(Schema.isMaxLength(65_536)),
+    truncated: Schema.Boolean,
+    upstreamTruncated: Schema.Boolean,
+    createdAt: Schema.optional(Schema.String.check(Schema.isMaxLength(64))),
+  }),
 });
 
 const AckRecordSchema = Schema.Struct({
@@ -102,10 +130,12 @@ const AckRecordSchema = Schema.Struct({
 });
 
 export type ManagerRunUpsert = typeof RunUpsertRecordSchema.Type;
+export type ManagerTranscriptItem = typeof TranscriptItemRecordSchema.Type;
 
 export type ManagerRecord =
   | typeof NegotiationRecordSchema.Type
   | typeof RunUpsertRecordSchema.Type
+  | typeof TranscriptItemRecordSchema.Type
   | typeof AckRecordSchema.Type;
 
 export interface ManagerRunReplayState {
@@ -115,6 +145,7 @@ export interface ManagerRunReplayState {
 
 const decodeNegotiation = Schema.decodeUnknownOption(NegotiationRecordSchema);
 const decodeRunUpsert = Schema.decodeUnknownOption(RunUpsertRecordSchema);
+const decodeTranscriptItem = Schema.decodeUnknownOption(TranscriptItemRecordSchema);
 const decodeAck = Schema.decodeUnknownOption(AckRecordSchema);
 
 /**
@@ -130,6 +161,10 @@ export function decodeManagerRecord(record: unknown): ManagerRecord | undefined 
     }
     case "run-upsert": {
       const decoded = decodeRunUpsert(record);
+      return decoded._tag === "Some" ? decoded.value : undefined;
+    }
+    case "transcript-item": {
+      const decoded = decodeTranscriptItem(record);
       return decoded._tag === "Some" ? decoded.value : undefined;
     }
     case "ack": {
@@ -156,7 +191,19 @@ export const drainManagerRunReplay = <A, E, R>(
 // ── command envelopes ────────────────────────────────────────
 
 export type ControlEnvelope =
-  | { readonly v: 1; readonly op: "negotiate"; readonly id: string }
+  | {
+      readonly v: 1;
+      readonly op: "negotiate";
+      readonly id: string;
+      /** T3's Phase 1.5 offer; the capability is active only when both sides declare it. */
+      readonly capabilities?: { readonly childTranscripts: true };
+      /**
+       * Durable per-run replay watermarks T3 re-sends at negotiation,
+       * renegotiation, and reconnect so the producer re-emits retained
+       * finalized items above them.
+       */
+      readonly replay?: ReadonlyArray<{ readonly runId: string; readonly watermark: number }>;
+    }
   | {
       readonly v: 1;
       readonly op: "steer";
@@ -173,6 +220,17 @@ export type ControlEnvelope =
       readonly managerId: string;
       readonly runId: string;
       readonly activationId: string;
+    }
+  | {
+      readonly v: 1;
+      readonly op: "run-upsert-result";
+      readonly id: string;
+      readonly managerId: string;
+      readonly runId: string;
+      readonly activationId: string;
+      readonly runBirth: string;
+      readonly upsertSequence: number;
+      readonly t3RunId: string;
     };
 
 /**
@@ -194,6 +252,7 @@ export function decodeControlEnvelope(encoded: string): ControlEnvelope | undefi
       case "negotiate":
       case "steer":
       case "cancel":
+      case "run-upsert-result":
         return parsed as ControlEnvelope;
       default:
         return undefined;
@@ -256,7 +315,10 @@ export function negotiationFromRecord(
     control: {
       managerId: record.managerId,
       protocolVersion: record.protocolVersion,
-      capabilities: { ...record.capabilities },
+      capabilities: {
+        ...record.capabilities,
+        childTranscripts: record.capabilities.childTranscripts === true,
+      },
     },
   };
 }
@@ -424,3 +486,98 @@ export function makeManagerRunRegistry(managerId: string) {
 }
 
 export type ManagerRunRegistry = ReturnType<typeof makeManagerRunRegistry>;
+
+// ── Phase 1.5 run binding tuples ─────────────────────────────
+
+/** The five routing members plus the T3 id they resolved to. */
+export interface ManagerRunBindingTuple {
+  readonly managerId: string;
+  readonly nativeRunId: string;
+  readonly activationId: string;
+  readonly runBirth: string;
+  readonly upsertSequence: number;
+  readonly t3RunId: string;
+}
+
+/** Bindings are bounded; FIFO eviction keeps memory flat. */
+const MAX_TRACKED_RUN_BINDINGS = 256;
+
+/**
+ * Bounded open/terminal binding tuples for one adapter session. Installing
+ * is idempotent for an identical tuple and rejects a conflicting T3 id or
+ * tuple for the same native binding — the rule behind `run-upsert-result`
+ * retries. Lookup by native binding is what validates later transcript
+ * items and binding results as a five-member unit.
+ */
+export function makeRunBindingTracker() {
+  const byT3RunId = new Map<string, ManagerRunBindingTuple & { acked: boolean }>();
+
+  const evictIfNeeded = () => {
+    if (byT3RunId.size >= MAX_TRACKED_RUN_BINDINGS) {
+      const oldest = byT3RunId.keys().next().value;
+      if (oldest !== undefined) byT3RunId.delete(oldest);
+    }
+  };
+
+  const install = (
+    tuple: ManagerRunBindingTuple,
+  ): { readonly ok: true } | { readonly ok: false; readonly conflict: string } => {
+    for (const existing of byT3RunId.values()) {
+      if (
+        existing.managerId === tuple.managerId &&
+        existing.nativeRunId === tuple.nativeRunId &&
+        existing.activationId === tuple.activationId &&
+        existing.runBirth === tuple.runBirth &&
+        existing.upsertSequence === tuple.upsertSequence
+      ) {
+        return existing.t3RunId === tuple.t3RunId
+          ? { ok: true }
+          : { ok: false, conflict: `binding already resolved to T3 run ${existing.t3RunId}` };
+      }
+    }
+    evictIfNeeded();
+    byT3RunId.set(tuple.t3RunId, { ...tuple, acked: false });
+    return { ok: true };
+  };
+
+  const markAcked = (t3RunId: string) => {
+    const existing = byT3RunId.get(t3RunId);
+    if (existing === undefined) return false;
+    byT3RunId.set(t3RunId, { ...existing, acked: true });
+    return true;
+  };
+
+  const isAcked = (t3RunId: string) => byT3RunId.get(t3RunId)?.acked === true;
+
+  const findByT3RunId = (t3RunId: string) => byT3RunId.get(t3RunId);
+
+  /** Resolve a producer-side binding (manager + native run + activation + birth) to its tuple. */
+  const findByNativeBinding = (input: {
+    readonly managerId: string;
+    readonly nativeRunId: string;
+    readonly activationId: string;
+    readonly runBirth: string;
+  }) => {
+    for (const entry of byT3RunId.values()) {
+      if (
+        entry.managerId === input.managerId &&
+        entry.nativeRunId === input.nativeRunId &&
+        entry.activationId === input.activationId &&
+        entry.runBirth === input.runBirth
+      ) {
+        return entry;
+      }
+    }
+    return undefined;
+  };
+
+  const unackedT3RunIds = () =>
+    Array.from(byT3RunId.values())
+      .filter((entry) => !entry.acked)
+      .map((entry) => entry.t3RunId)
+      .slice(0, 64);
+
+  return { install, markAcked, isAcked, findByT3RunId, findByNativeBinding, unackedT3RunIds };
+}
+
+export type ManagerRunBindingTracker = ReturnType<typeof makeRunBindingTracker>;

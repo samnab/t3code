@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import {
@@ -11,14 +12,26 @@ import {
   OrchestrationDispatchCommandError,
   OrchestrationEvent,
   OrchestrationGetFullThreadDiffInput,
+  OrchestrationGetSubagentTranscriptError,
+  OrchestrationGetSubagentTranscriptInput,
+  OrchestrationGetSubagentTranscriptResult,
   OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
+  OrchestrationSubagentRun,
+  OrchestrationThread,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
+  ORCHESTRATION_WS_METHODS,
+  SUBAGENT_TRANSCRIPT_FIELD_MAX_CODE_POINTS,
+  SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES,
+  SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS,
+  SUBAGENT_TRANSCRIPT_RETAINED_PER_RUN,
   SubagentControlPlaneStatus,
+  SubagentManagerCapabilities,
+  SubagentTranscriptItem,
+  SubagentTranscriptMarker,
   OrchestrationSession,
-  OrchestrationThread,
   OrchestrationThreadShell,
   ProjectCreateCommand,
   THREAD_GOAL_MAX_CHARS,
@@ -61,6 +74,23 @@ const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 const decodeDispatchCommandError = Schema.decodeUnknownEffect(OrchestrationDispatchCommandError);
 const decodeSubagentControlPlaneStatus = Schema.decodeUnknownOption(SubagentControlPlaneStatus);
+const decodeSubagentManagerCapabilities = Schema.decodeUnknownOption(SubagentManagerCapabilities);
+const decodeSubagentTranscriptItem = Schema.decodeUnknownOption(SubagentTranscriptItem);
+const decodeSubagentTranscriptMarker = Schema.decodeUnknownOption(SubagentTranscriptMarker);
+const decodeGetSubagentTranscriptInput = Schema.decodeUnknownOption(
+  OrchestrationGetSubagentTranscriptInput,
+);
+const decodeGetSubagentTranscriptResult = Schema.decodeUnknownOption(
+  OrchestrationGetSubagentTranscriptResult,
+);
+const decodeGetSubagentTranscriptError = Schema.decodeUnknownOption(
+  OrchestrationGetSubagentTranscriptError,
+);
+
+function expectSome<A>(option: Option.Option<A>): A {
+  if (Option.isNone(option)) throw new Error("expected Some");
+  return option.value;
+}
 
 it("requires a reason when subagent control is unsupported", () => {
   const controls = {
@@ -1182,3 +1212,143 @@ it.effect("thread.meta-updated payload and thread state carry goal or drop it on
     assert.strictEqual(thread.goal, "Ship it");
   }),
 );
+
+// ── Phase 1.5 child transcript contracts ─────────────────────────────────
+
+it("registers the read-only transcript query as an orchestration WS method", () => {
+  assert.strictEqual(
+    ORCHESTRATION_WS_METHODS.getSubagentTranscript,
+    "orchestration.getSubagentTranscript",
+  );
+});
+
+it("keeps transcript bodies out of run and thread snapshots", () => {
+  const runFields = Object.keys(OrchestrationSubagentRun.fields);
+  for (const field of runFields) {
+    assert.match(field, /^(?!.*(transcript|items$|entries$)).*$/i);
+  }
+  assert.strictEqual(Object.keys(OrchestrationThread.fields).includes("subagentTranscript"), false);
+});
+
+it("decodes childTranscripts as an optional manager capability", () => {
+  const base = {
+    normalizedEvents: true,
+    stableActivations: true,
+    ownerRouting: true,
+    steering: true,
+    cancellation: true,
+    reloadRestore: true,
+    scheduling: true,
+    nativeChildProjection: true,
+    deliveryAcknowledgements: true,
+  };
+  const legacy = expectSome(decodeSubagentManagerCapabilities(base));
+  assert.strictEqual(legacy.childTranscripts, undefined);
+  const enhanced = expectSome(
+    decodeSubagentManagerCapabilities({ ...base, childTranscripts: true }),
+  );
+  assert.strictEqual(enhanced.childTranscripts, true);
+  assert.strictEqual(
+    decodeSubagentManagerCapabilities({ ...base, childTranscripts: "yes" })._tag,
+    "None",
+  );
+});
+
+it("decodes transcript items and markers and rejects unknown kinds", () => {
+  const item = expectSome(
+    decodeSubagentTranscriptItem({
+      kind: "toolResult",
+      transcriptSequence: 3,
+      text: "grep found 2 files",
+      truncated: false,
+      upstreamTruncated: true,
+      createdAt: null,
+    }),
+  );
+  assert.strictEqual(item.transcriptSequence, 3);
+  assert.strictEqual(item.upstreamTruncated, true);
+  assert.strictEqual(
+    decodeSubagentTranscriptItem({
+      kind: "reasoning",
+      transcriptSequence: 1,
+      text: "hidden",
+      truncated: false,
+      upstreamTruncated: false,
+      createdAt: null,
+    })._tag,
+    "None",
+  );
+  assert.strictEqual(
+    decodeSubagentTranscriptItem({
+      kind: "user",
+      transcriptSequence: 0,
+      text: "zero sequence",
+      truncated: false,
+      upstreamTruncated: false,
+      createdAt: null,
+    })._tag,
+    "None",
+  );
+  const evicted = expectSome(
+    decodeSubagentTranscriptMarker({ kind: "evicted", fromSequence: 1, toSequence: 4 }),
+  );
+  assert.strictEqual(evicted.kind, "evicted");
+  assert.strictEqual(evicted.fromSequence, 1);
+  assert.strictEqual(
+    decodeSubagentTranscriptMarker({ kind: "evicted", fromSequence: 4, toSequence: 1 })._tag,
+    "None",
+  );
+});
+
+it("bounds transcript pages and keeps query bounds exclusive and optional", () => {
+  assert.strictEqual(SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS, 200);
+  assert.strictEqual(SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES, 256 * 1024);
+  assert.strictEqual(SUBAGENT_TRANSCRIPT_RETAINED_PER_RUN, 500);
+  assert.strictEqual(SUBAGENT_TRANSCRIPT_FIELD_MAX_CODE_POINTS, 4_096);
+
+  const input = expectSome(decodeGetSubagentTranscriptInput({ runId: "pi:abc:act-1:sa-1" }));
+  assert.strictEqual(input.afterSequence, undefined);
+  assert.strictEqual(
+    decodeGetSubagentTranscriptInput({ runId: "pi:abc:act-1:sa-1", afterSequence: 5 })._tag,
+    "Some",
+  );
+  assert.strictEqual(
+    decodeGetSubagentTranscriptInput({ runId: "pi:abc:act-1:sa-1", afterSequence: -1 })._tag,
+    "None",
+  );
+
+  const page = expectSome(
+    decodeGetSubagentTranscriptResult({
+      entries: [
+        { kind: "evicted", fromSequence: 1, toSequence: 2 },
+        { kind: "gap", fromSequence: 3, toSequence: 3 },
+        {
+          kind: "assistant",
+          transcriptSequence: 4,
+          text: "done",
+          truncated: false,
+          upstreamTruncated: false,
+          createdAt: null,
+        },
+      ],
+      watermark: 4,
+      hasMore: false,
+    }),
+  );
+  assert.strictEqual(page.entries.length, 3);
+
+  assert.strictEqual(
+    decodeGetSubagentTranscriptError({
+      _tag: "OrchestrationGetSubagentTranscriptError",
+      reason: "unknown-run",
+    })._tag,
+    "Some",
+  );
+  assert.strictEqual(
+    decodeGetSubagentTranscriptError({
+      _tag: "OrchestrationGetSubagentTranscriptError",
+      reason: "empty-page",
+    })._tag,
+    "None",
+  );
+});

@@ -37,6 +37,7 @@ export const ORCHESTRATION_WS_METHODS = {
   subagentControlStatus: "orchestration.subagentControlStatus",
   subagentControlSteer: "orchestration.subagentControlSteer",
   subagentControlCancel: "orchestration.subagentControlCancel",
+  getSubagentTranscript: "orchestration.getSubagentTranscript",
 } as const;
 
 export const ProviderApprovalPolicy = Schema.Literals([
@@ -1855,6 +1856,12 @@ export const SubagentManagerCapabilities = Schema.Struct({
   scheduling: Schema.Boolean,
   nativeChildProjection: Schema.Boolean,
   deliveryAcknowledgements: Schema.Boolean,
+  /**
+   * Phase 1.5 child-transcript capability. Optional and absent on managers
+   * (and mirrored statuses) that predate it; absence means summary-only
+   * child history. Active only when both T3 and the manager declare it.
+   */
+  childTranscripts: Schema.optional(Schema.Boolean),
 });
 export type SubagentManagerCapabilities = typeof SubagentManagerCapabilities.Type;
 
@@ -1960,6 +1967,109 @@ export class SubagentControlError extends Schema.TaggedErrorClass<SubagentContro
   }
 }
 
+// ── Subagent transcript side-store query (Phase 1.5, pull-only) ──
+
+/** Finalized transcript item kinds extracted from enhanced-manager snapshots. */
+export const SubagentTranscriptItemKind = Schema.Literals(["user", "assistant", "toolResult"]);
+export type SubagentTranscriptItemKind = typeof SubagentTranscriptItemKind.Type;
+
+/** Per-field text cap, counted in Unicode code points, applied at T3 boundaries. */
+export const SUBAGENT_TRANSCRIPT_FIELD_MAX_CODE_POINTS = 4_096;
+/** Maximum item rows retained per run in the side store. */
+export const SUBAGENT_TRANSCRIPT_RETAINED_PER_RUN = 500;
+/** Maximum items in one transcript query page. */
+export const SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS = 200;
+/** Maximum UTF-8 encoded response payload of one transcript query page. */
+export const SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES = 256 * 1024;
+
+/**
+ * One finalized transcript item of an enhanced-manager run. Text is redacted
+ * and truncated at T3 boundaries before persistence; `truncated` marks T3's
+ * own code-point cap, `upstreamTruncated` marks a producer that only saw a
+ * pre-truncated preview.
+ */
+export const SubagentTranscriptItem = Schema.Struct({
+  kind: SubagentTranscriptItemKind,
+  transcriptSequence: PositiveInt,
+  text: Schema.String,
+  truncated: Schema.Boolean,
+  upstreamTruncated: Schema.Boolean,
+  createdAt: Schema.NullOr(IsoDateTime),
+});
+export type SubagentTranscriptItem = typeof SubagentTranscriptItem.Type;
+
+/**
+ * Durable range marker inside a transcript page. `evicted` ranges are
+ * inclusive sequences T3 stored and later evicted under retention; `gap`
+ * ranges are sequences that were never observed. Clients must render them
+ * as distinct markers.
+ */
+export const SubagentTranscriptMarker = Schema.Struct({
+  kind: Schema.Literals(["evicted", "gap"]),
+  fromSequence: PositiveInt,
+  toSequence: PositiveInt,
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      input.fromSequence <= input.toSequence ||
+      new SchemaIssue.InvalidValue({
+        message: "fromSequence must be less than or equal to toSequence",
+      }),
+    { identifier: "SubagentTranscriptMarker" },
+  ),
+);
+export type SubagentTranscriptMarker = typeof SubagentTranscriptMarker.Type;
+
+export const SubagentTranscriptPageEntry = Schema.Union([
+  SubagentTranscriptItem,
+  SubagentTranscriptMarker,
+]);
+export type SubagentTranscriptPageEntry = typeof SubagentTranscriptPageEntry.Type;
+
+/**
+ * Read-only, pull-only keyset page of one run's side-store transcript.
+ * `afterSequence` is an exclusive lower bound: each page returns the next
+ * strictly-higher sequences, oldest first. Pages are capped at
+ * {@link SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS} items and
+ * {@link SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES} encoded payload, whichever
+ * binds first.
+ */
+export const OrchestrationGetSubagentTranscriptInput = Schema.Struct({
+  runId: RuntimeTaskId,
+  afterSequence: Schema.optionalKey(NonNegativeInt),
+});
+export type OrchestrationGetSubagentTranscriptInput =
+  typeof OrchestrationGetSubagentTranscriptInput.Type;
+
+export const OrchestrationGetSubagentTranscriptResult = Schema.Struct({
+  entries: Schema.Array(SubagentTranscriptPageEntry),
+  /** Highest contiguously observed finalized sequence (read watermark). */
+  watermark: NonNegativeInt,
+  hasMore: Schema.Boolean,
+});
+export type OrchestrationGetSubagentTranscriptResult =
+  typeof OrchestrationGetSubagentTranscriptResult.Type;
+
+const SUBAGENT_TRANSCRIPT_ERROR_MESSAGES = {
+  "unknown-run": "No transcript is readable for that run.",
+  unavailable: "Child transcript detail is not available for that run.",
+} as const;
+
+/**
+ * Fails closed: an unknown, cross-thread, or cross-environment run and a
+ * summary-only run both return no transcript content, never an empty page.
+ */
+export class OrchestrationGetSubagentTranscriptError extends Schema.TaggedErrorClass<OrchestrationGetSubagentTranscriptError>()(
+  "OrchestrationGetSubagentTranscriptError",
+  {
+    reason: Schema.Literals(["unknown-run", "unavailable"]),
+  },
+) {
+  override get message(): string {
+    return SUBAGENT_TRANSCRIPT_ERROR_MESSAGES[this.reason];
+  }
+}
+
 export const OrchestrationRpcSchemas = {
   dispatchCommand: {
     input: ClientOrchestrationCommand,
@@ -2004,6 +2114,10 @@ export const OrchestrationRpcSchemas = {
   subagentControlCancel: {
     input: OrchestrationSubagentControlCancelInput,
     output: OrchestrationSubagentControlActionResult,
+  },
+  getSubagentTranscript: {
+    input: OrchestrationGetSubagentTranscriptInput,
+    output: OrchestrationGetSubagentTranscriptResult,
   },
 } as const;
 

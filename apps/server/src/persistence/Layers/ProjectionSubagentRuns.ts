@@ -23,6 +23,7 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
+  AdvanceSubagentTranscriptWatermarkInput,
   GetProjectionSubagentRunInput,
   InterruptNonResumableSubagentRunsInput,
   ListProjectionSubagentRunsInput,
@@ -35,6 +36,13 @@ import {
 
 const RunNumberRow = Schema.Struct({ runNumber: PositiveInt });
 const RunIdRow = Schema.Struct({ runId: RuntimeTaskId });
+const RunBindingRow = Schema.Struct({
+  runId: RuntimeTaskId,
+  threadId: ThreadId,
+  runBirth: Schema.NullOr(Schema.String),
+  historyAvailability: SubagentRunHistoryAvailability,
+  lastTranscriptSequence: Schema.NullOr(PositiveInt),
+});
 const ProjectionSubagentRunDbRow = Schema.Struct({
   runId: RuntimeTaskId,
   runNumber: PositiveInt,
@@ -135,6 +143,7 @@ const makeProjectionSubagentRunRepository = Effect.gen(function* () {
         owner_epoch,
         native_run_id,
         activation_id,
+        run_birth,
         model,
         effort,
         title,
@@ -164,6 +173,7 @@ const makeProjectionSubagentRunRepository = Effect.gen(function* () {
         reservation.owner_epoch,
         reservation.native_run_id,
         reservation.activation_id,
+        ${row.runBirth},
         ${row.model},
         ${row.effort},
         ${row.title},
@@ -314,6 +324,37 @@ const makeProjectionSubagentRunRepository = Effect.gen(function* () {
     `,
   });
 
+  // Private Phase 1.5 binding read: run existence plus run-birth and
+  // watermark columns only. Never exposes transcript content.
+  const getBindingRow = SqlSchema.findOneOption({
+    Request: GetProjectionSubagentRunInput,
+    Result: RunBindingRow,
+    execute: ({ runId }) => sql`
+      SELECT
+        run_id AS "runId",
+        thread_id AS "threadId",
+        run_birth AS "runBirth",
+        history_availability AS "historyAvailability",
+        last_transcript_sequence AS "lastTranscriptSequence"
+      FROM projection_subagent_runs
+      WHERE run_id = ${runId}
+    `,
+  });
+
+  // Monotone watermark advance: only last_transcript_sequence moves. No
+  // lifecycle, terminal, identity, or provenance column is writable here.
+  const advanceWatermarkRow = SqlSchema.void({
+    Request: AdvanceSubagentTranscriptWatermarkInput,
+    execute: ({ runId, lastTranscriptSequence }) => sql`
+      UPDATE projection_subagent_runs
+      SET last_transcript_sequence = MAX(
+        COALESCE(last_transcript_sequence, 0),
+        ${lastTranscriptSequence}
+      )
+      WHERE run_id = ${runId}
+    `,
+  });
+
   const reserveRunNumber: ProjectionSubagentRunRepositoryShape["reserveRunNumber"] = (input) =>
     reserveRunNumberRow(input).pipe(
       Effect.map((row) => row.runNumber),
@@ -380,6 +421,28 @@ const makeProjectionSubagentRunRepository = Effect.gen(function* () {
       ),
     );
 
+  const getRunBinding: ProjectionSubagentRunRepositoryShape["getRunBinding"] = (input) =>
+    getBindingRow(input).pipe(
+      Effect.map((row) => Option.match(row, { onNone: () => null, onSome: (binding) => binding })),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSubagentRunRepository.getRunBinding:query",
+          "ProjectionSubagentRunRepository.getRunBinding:decodeRow",
+        ),
+      ),
+    );
+
+  const advanceTranscriptWatermark: ProjectionSubagentRunRepositoryShape["advanceTranscriptWatermark"] =
+    (input) =>
+      advanceWatermarkRow(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSubagentRunRepository.advanceTranscriptWatermark:query",
+            "ProjectionSubagentRunRepository.advanceTranscriptWatermark:encodeRequest",
+          ),
+        ),
+      );
+
   return {
     reserveRunNumber,
     insertStart,
@@ -387,6 +450,8 @@ const makeProjectionSubagentRunRepository = Effect.gen(function* () {
     getByRunId,
     listByThreadId,
     interruptNonResumable,
+    getRunBinding,
+    advanceTranscriptWatermark,
   } satisfies ProjectionSubagentRunRepositoryShape;
 });
 

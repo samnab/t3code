@@ -569,6 +569,15 @@ export const SubagentRunEvidence = Schema.Struct({
   ownerEpoch: Schema.optional(TrimmedNonEmptyStringSchema),
   nativeRunId: Schema.optional(TrimmedNonEmptyStringSchema),
   activationId: Schema.optional(TrimmedNonEmptyStringSchema),
+  /**
+   * Phase 1.5 binding evidence: snapshot-derived run birth the enhanced
+   * manager attached to the allocating run upsert. Metadata only — never a
+   * transcript body — and validated only as part of the five-member binding
+   * tuple.
+   */
+  runBirth: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** Identifies the exact producer run upsert that caused the allocation. */
+  upsertSequence: Schema.optional(PositiveInt),
   status: SubagentRunStatus,
   terminalReason: Schema.optional(SubagentRunTerminalReason),
   controlAvailability: SubagentRunControlAvailability,

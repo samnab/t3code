@@ -22,6 +22,7 @@ import type {
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
   ProviderExecutionGoalGetResult,
+  RuntimeTaskId,
   SubagentControlError,
   SubagentControlPlaneStatus,
   ThreadId,
@@ -65,6 +66,28 @@ export interface ProviderSubagentControlPlaneShape<TError> {
   readonly cancel: (
     input: OrchestrationSubagentControlCancelInput,
   ) => Effect.Effect<OrchestrationSubagentControlActionResult, TError | SubagentControlError>;
+  /**
+   * Phase 1.5 internal routing: deliver one exact `run-upsert-result`
+   * (T3 run id for an allocating producer upsert) to the live manager that
+   * owns the binding, and confirm its acknowledgement. Never carries
+   * transcript bodies. Absent on adapters without an enhanced manager.
+   */
+  readonly bindingResult?: (
+    input: ProviderSubagentBindingResultInput,
+  ) => Effect.Effect<OrchestrationSubagentControlActionResult, TError | SubagentControlError>;
+}
+
+/** The five routing members of one `run-upsert-result` delivery. */
+export interface ProviderSubagentBindingResultInput {
+  /** Declared manager id that owns the binding. */
+  readonly managerId: string;
+  /** T3's opaque run id allocated by the upsert. */
+  readonly runId: RuntimeTaskId;
+  /** Producer's native run id for the same allocation. */
+  readonly nativeRunId: string;
+  readonly activationId: string;
+  readonly runBirth: string;
+  readonly upsertSequence: number;
 }
 
 export interface ProviderAdapterShape<TError> {

@@ -5,11 +5,19 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ProjectionSubagentRunRepositoryLive } from "./ProjectionSubagentRuns.ts";
+import Migration046 from "../Migrations/046_ProjectionSubagentTranscripts.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionSubagentRunRepository } from "../Services/ProjectionSubagentRuns.ts";
 
+// 046 is registered by the integrator in Migrations.ts; until then focused
+// tests apply the additive run-table columns on top of the memory database.
+const withMigration046 = Layer.effectDiscard(Migration046);
+
 const layer = it.layer(
-  ProjectionSubagentRunRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+  ProjectionSubagentRunRepositoryLive.pipe(
+    Layer.provideMerge(withMigration046),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  ),
 );
 
 const at = (minute: number) => `2026-06-15T00:${String(minute).padStart(2, "0")}:00.000Z`;
@@ -82,6 +90,7 @@ layer("ProjectionSubagentRunRepository", (it) => {
         createdAt: at(20),
         updatedAt: at(20),
         terminalAt: null,
+        runBirth: null,
         ownerId: null,
         ownerEpoch: "ignored",
         nativeRunId: null,
@@ -178,6 +187,7 @@ layer("ProjectionSubagentRunRepository", (it) => {
           createdAt: at(minute),
           updatedAt: at(minute),
           terminalAt,
+          runBirth: null,
           ownerId: null,
           ownerEpoch: "reserved",
           nativeRunId: null,
@@ -255,6 +265,7 @@ layer("ProjectionSubagentRunRepository", (it) => {
           createdAt: at(50),
           updatedAt: at(50),
           terminalAt: null,
+          runBirth: null,
           ownerId: null,
           ownerEpoch: "reserved",
           nativeRunId: null,
@@ -275,5 +286,79 @@ layer("ProjectionSubagentRunRepository", (it) => {
       });
       assert.ok(nextNumber > failedNumber);
     }),
+  );
+
+  it.effect(
+    "persists run-birth, keeps inventory body-free, and advances the watermark monotonically",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* ProjectionSubagentRunRepository;
+        const runId = RuntimeTaskId.make("opaque-binding-run");
+        const runNumber = yield* repository.reserveRunNumber({
+          runId,
+          allocatedAt: at(60),
+          ownerId: "manager-binding",
+          ownerEpoch: "epoch-binding",
+          nativeRunId: "sa-9",
+          activationId: "act-9",
+        });
+        yield* repository.insertStart({
+          runId,
+          runNumber,
+          threadId: ThreadId.make("thread-binding"),
+          parentRunId: null,
+          runtimeFamily: "pi-manager",
+          harness: "pi",
+          provider: ProviderDriverKind.make("pi"),
+          providerInstanceId: null,
+          model: null,
+          effort: null,
+          title: null,
+          summary: null,
+          status: "active",
+          terminalReason: null,
+          controlAvailability: "owner-routed",
+          historyAvailability: "durable",
+          capabilities: { steer: true, cancel: true, resume: false },
+          createdAt: at(60),
+          updatedAt: at(60),
+          terminalAt: null,
+          runBirth: "rbaaaaaaaaaaaaaaaaaaaaaa1",
+          ownerId: null,
+          ownerEpoch: "reserved",
+          nativeRunId: null,
+          activationId: null,
+          firstEventSequence: 60,
+          lastEventSequence: 60,
+        });
+
+        const binding = yield* repository.getRunBinding({ runId });
+        assert.deepStrictEqual(binding, {
+          runId,
+          threadId: ThreadId.make("thread-binding"),
+          runBirth: "rbaaaaaaaaaaaaaaaaaaaaaa1",
+          historyAvailability: "durable",
+          lastTranscriptSequence: null,
+        });
+
+        // The public inventory row stays free of binding metadata.
+        const publicRun = yield* repository.getByRunId({ runId });
+        assert.strictEqual("runBirth" in (publicRun ?? {}), false);
+
+        yield* repository.advanceTranscriptWatermark({
+          runId,
+          lastTranscriptSequence: 7,
+        });
+        yield* repository.advanceTranscriptWatermark({
+          runId,
+          lastTranscriptSequence: 3,
+        });
+        assert.strictEqual((yield* repository.getRunBinding({ runId }))?.lastTranscriptSequence, 7);
+
+        assert.strictEqual(
+          yield* repository.getRunBinding({ runId: RuntimeTaskId.make("opaque-unknown") }),
+          null,
+        );
+      }),
   );
 });

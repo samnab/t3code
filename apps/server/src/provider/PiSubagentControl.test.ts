@@ -14,6 +14,7 @@ import {
   encodeControlEnvelope,
   exchangeManagerRecord,
   makeManagerRunRegistry,
+  makeRunBindingTracker,
   type ManagerRunUpsert,
   negotiationFromRecord,
 } from "./PiSubagentControl.ts";
@@ -29,6 +30,7 @@ const ALL_CAPABILITIES = {
   scheduling: true,
   nativeChildProjection: true,
   deliveryAcknowledgements: true,
+  childTranscripts: true,
 } as const;
 
 const negotiationRecord = (overrides: Record<string, unknown> = {}) => ({
@@ -441,5 +443,133 @@ describe("PiSubagentControl", () => {
         effect: "start",
       });
     });
+  });
+});
+
+describe("Phase 1.5 child transcript protocol", () => {
+  const RUN_BIRTH = `rb${"c".repeat(22)}`;
+
+  it("normalizes an absent childTranscripts declaration to false", () => {
+    const { ...legacy } = ALL_CAPABILITIES;
+    delete (legacy as Record<string, boolean | undefined>).childTranscripts;
+    const parsed = negotiationFromRecord(
+      negotiationRecord({ capabilities: legacy }) as ManagerRecord & { kind: "negotiation" },
+    );
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.control.capabilities.childTranscripts).toBe(false);
+  });
+
+  it("decodes allocating upserts with run-birth evidence and rejects malformed births", () => {
+    expect(
+      decodeManagerRecord(runUpsert({ runBirth: RUN_BIRTH, upsertSequence: 4 })),
+    ).toMatchObject({ runBirth: RUN_BIRTH, upsertSequence: 4 });
+    expect(decodeManagerRecord(runUpsert({ runBirth: "not-a-birth" }))).toBeUndefined();
+    expect(decodeManagerRecord(runUpsert({ runBirth: "rb" }))).toBeUndefined();
+  });
+
+  it("decodes transcript-item records and drops malformed or oversized ones", () => {
+    const record = {
+      type: "t3.subagent.v1",
+      kind: "transcript-item",
+      managerId: "mgr-1",
+      runId: "sa-1",
+      activationId: "act-1",
+      runBirth: RUN_BIRTH,
+      transcriptSequence: 2,
+      item: {
+        kind: "toolResult",
+        text: "grep found 2 files",
+        truncated: false,
+        upstreamTruncated: true,
+      },
+    };
+    expect(decodeManagerRecord(record)).toMatchObject({
+      kind: "transcript-item",
+      transcriptSequence: 2,
+      item: { kind: "toolResult", upstreamTruncated: true },
+    });
+    expect(
+      decodeManagerRecord({ ...record, item: { ...record.item, kind: "reasoning" } }),
+    ).toBeUndefined();
+    expect(decodeManagerRecord({ ...record, transcriptSequence: 0 })).toBeUndefined();
+    expect(
+      decodeManagerRecord({ ...record, item: { ...record.item, text: "x".repeat(65_537) } }),
+    ).toBeUndefined();
+    expect(decodeManagerRecord({ ...record, runBirth: "rb" })).toBeUndefined();
+  });
+
+  it("round-trips the run-upsert-result envelope", () => {
+    const envelope = {
+      v: MANAGER_PROTOCOL_VERSION,
+      op: "run-upsert-result",
+      id: "corr-9",
+      managerId: "mgr-1",
+      runId: "sa-1",
+      activationId: "act-1",
+      runBirth: RUN_BIRTH,
+      upsertSequence: 4,
+      t3RunId: "pi:epoch:act-1:sa-1",
+    } as const;
+    const decoded = decodeControlEnvelope(encodeControlEnvelope(envelope));
+    expect(decoded).toMatchObject(envelope);
+  });
+
+  it("carries the childTranscripts offer and replay watermarks in the negotiate envelope", () => {
+    const envelope = {
+      v: MANAGER_PROTOCOL_VERSION,
+      op: "negotiate",
+      id: "corr-1",
+      capabilities: { childTranscripts: true as const },
+      replay: [{ runId: "pi:epoch:act-1:sa-1", watermark: 12 }],
+    } as const;
+    const decoded = decodeControlEnvelope(encodeControlEnvelope(envelope));
+    expect(decoded).toMatchObject({
+      op: "negotiate",
+      capabilities: { childTranscripts: true },
+      replay: [{ runId: "pi:epoch:act-1:sa-1", watermark: 12 }],
+    });
+  });
+
+  it("installs run bindings idempotently and rejects conflicting t3 ids", () => {
+    const tracker = makeRunBindingTracker();
+    const tuple = {
+      managerId: "mgr-1",
+      nativeRunId: "sa-1",
+      activationId: "act-1",
+      runBirth: RUN_BIRTH,
+      upsertSequence: 4,
+      t3RunId: "pi:a",
+    };
+    expect(tracker.install(tuple)).toEqual({ ok: true });
+    expect(tracker.install(tuple)).toEqual({ ok: true });
+    expect(tracker.install({ ...tuple, t3RunId: "pi:b" }).ok).toBe(false);
+    expect(tracker.isAcked("pi:a")).toBe(false);
+    expect(tracker.markAcked("pi:a")).toBe(true);
+    expect(tracker.isAcked("pi:a")).toBe(true);
+    expect(
+      tracker.findByNativeBinding({
+        managerId: "mgr-1",
+        nativeRunId: "sa-1",
+        activationId: "act-1",
+        runBirth: RUN_BIRTH,
+      })?.t3RunId,
+    ).toBe("pi:a");
+    expect(
+      tracker.findByNativeBinding({
+        managerId: "mgr-1",
+        nativeRunId: "sa-1",
+        activationId: "act-2",
+        runBirth: RUN_BIRTH,
+      }),
+    ).toBeUndefined();
+    // Wrong-manager or wrong-birth lookups never validate the five-member unit.
+    expect(
+      tracker.findByNativeBinding({
+        managerId: "rogue",
+        nativeRunId: "sa-1",
+        activationId: "act-1",
+        runBirth: RUN_BIRTH,
+      }),
+    ).toBeUndefined();
   });
 });

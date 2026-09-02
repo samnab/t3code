@@ -7,9 +7,11 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "../../config.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import Migration046 from "../../persistence/Migrations/046_ProjectionSubagentTranscripts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import {
   ORCHESTRATION_PROJECTOR_NAMES,
@@ -20,6 +22,9 @@ const layer = it.layer(
   OrchestrationProjectionPipelineLive.pipe(
     Layer.provideMerge(OrchestrationEventStoreLive),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "subagent-runs-" })),
+    // 046 is registered by the integrator in Migrations.ts; until then
+    // focused tests apply the additive run-table columns themselves.
+    Layer.provideMerge(Layer.effectDiscard(Migration046)),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(NodeServices.layer),
   ),
@@ -416,5 +421,120 @@ layer("subagent run projection", (it) => {
       ]);
       assert.ok(newNumber > oldNumber);
     }),
+  );
+
+  it.effect(
+    "persists run-birth, clamps unbacked durable history, and signals the durable start",
+    () =>
+      Effect.gen(function* () {
+        const eventStore = yield* OrchestrationEventStore;
+        const pipeline = yield* OrchestrationProjectionPipeline;
+        const transcriptStore = yield* ProjectionSubagentTranscriptStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-runbirth-projection");
+        const startedAt = "2026-06-15T03:00:00.000Z";
+        const runBirth = `rb${"d".repeat(22)}`;
+
+        const seed = (runId: string) =>
+          sql<{ readonly runNumber: number }>`
+          INSERT INTO subagent_run_number_reservations (
+            run_id, allocated_at, owner_id, owner_epoch, native_run_id, activation_id
+          ) VALUES (
+            ${runId}, ${startedAt}, 'manager-one', 'epoch-one', 'sa-1', 'act-1'
+          )
+          RETURNING run_number AS "runNumber"
+        `;
+
+        const appendStart = (
+          sequence: number,
+          runId: string,
+          runNumber: number,
+          evidenceOverrides: Record<string, unknown>,
+        ) => {
+          const occurredAt = `2026-06-15T03:0${sequence}:00.000Z`;
+          const commandId = CommandId.make(`cmd-runbirth-${sequence}`);
+          return eventStore.append({
+            type: "thread.activity-appended",
+            eventId: EventId.make(`event-runbirth-${sequence}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId,
+            causationEventId: null,
+            correlationId: CorrelationId.make(commandId),
+            metadata: {},
+            payload: {
+              threadId,
+              activity: {
+                id: EventId.make(`activity-runbirth-${sequence}`),
+                tone: "info",
+                kind: "task.started",
+                summary: "Started run",
+                payload: {
+                  taskId: runId,
+                  subagentRun: {
+                    runId,
+                    runNumber,
+                    runtimeFamily: "pi-manager",
+                    harness: "pi",
+                    provider: "pi",
+                    status: "active",
+                    controlAvailability: "owner-routed",
+                    historyAvailability: "durable",
+                    capabilities: { steer: true, cancel: true, resume: false },
+                    startedAt,
+                    ...evidenceOverrides,
+                  },
+                },
+                turnId: null,
+                createdAt: occurredAt,
+              },
+            },
+          });
+        };
+
+        const boundId = "opaque-runbirth-bound";
+        const boundNumber = (yield* seed(boundId))[0]!.runNumber;
+        const unbackedId = "opaque-runbirth-unbacked";
+        const unbackedNumber = (yield* seed(unbackedId))[0]!.runNumber;
+
+        yield* appendStart(1, boundId, boundNumber, { runBirth, upsertSequence: 4 });
+        yield* appendStart(2, unbackedId, unbackedNumber, {});
+        yield* pipeline.bootstrap;
+
+        const rows = yield* sql<{
+          readonly runId: string;
+          readonly runBirth: string | null;
+          readonly historyAvailability: string;
+        }>`
+        SELECT run_id AS "runId", run_birth AS "runBirth",
+          history_availability AS "historyAvailability"
+        FROM projection_subagent_runs
+        WHERE run_id IN (${boundId}, ${unbackedId})
+      `;
+        assert.deepStrictEqual(rows, [
+          {
+            runId: boundId,
+            runBirth,
+            historyAvailability: "durable",
+          },
+          {
+            runId: unbackedId,
+            runBirth: null,
+            // Truthful history: without binding evidence a durable claim clamps
+            // to summary-only — stock managers never gain transcript history.
+            historyAvailability: "summary-only",
+          },
+        ]);
+
+        // The durable start receipt fired for the bound run only.
+        assert.strictEqual(
+          yield* transcriptStore.awaitStartCommitted({
+            runId: RuntimeTaskId.make(boundId),
+            timeoutMs: 50,
+          }),
+          true,
+        );
+      }),
   );
 });

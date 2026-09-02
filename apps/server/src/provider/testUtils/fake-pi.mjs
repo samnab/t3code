@@ -150,10 +150,31 @@ const negotiatedCapabilities = () => {
     scheduling: true,
     nativeChildProjection: true,
     deliveryAcknowledgements: true,
+    // Phase 1.5 synthetic emulation only — this fixture is a test double,
+    // never a shippable enhanced-manager producer.
+    ...(process.env.FAKE_PI_CHILD_TRANSCRIPTS === "1" ? { childTranscripts: true } : {}),
     ...JSON.parse(process.env.FAKE_PI_MANAGER_CAPABILITIES ?? "{}"),
     ...livePatch,
   };
 };
+
+// Synthetic Phase 1.5 state: t3 bindings acknowledged by run-upsert-result.
+const childTranscriptsEnabled = () => process.env.FAKE_PI_CHILD_TRANSCRIPTS === "1";
+const t3Bindings = new Map();
+const FAKE_RUN_BIRTH = `rb${"a".repeat(22)}`;
+// Finalized items retained before the T3 id arrives; emitted only after the
+// run-upsert-result is accepted, mirroring the specified producer behavior.
+let retainedTranscriptItems = [];
+
+const transcriptItemRecord = (fields) =>
+  managerRecord({
+    kind: "transcript-item",
+    managerId: managerId(),
+    runId: "sa-1",
+    activationId: "act-1",
+    runBirth: FAKE_RUN_BIRTH,
+    ...fields,
+  });
 
 const handleManagerControl = (req, message) => {
   const arg = message.slice(`/${MANAGER_COMMAND} `.length).trim();
@@ -183,6 +204,24 @@ const handleManagerControl = (req, message) => {
       protocolVersion: 1,
       capabilities: negotiatedCapabilities(),
     });
+    return;
+  }
+  if (envelope.op === "run-upsert-result") {
+    const key = `${envelope.managerId}:${envelope.runId}:${envelope.activationId}:${envelope.runBirth}`;
+    const existing = t3Bindings.get(key);
+    if (existing !== undefined && existing !== envelope.t3RunId) {
+      managerRecord({
+        kind: "ack",
+        id: envelope.id,
+        accepted: false,
+        error: `binding already resolved to ${existing}`,
+      });
+      return;
+    }
+    t3Bindings.set(key, envelope.t3RunId);
+    managerRecord({ kind: "ack", id: envelope.id, accepted: true });
+    // Retained finalized items are emitted only after the accepted result.
+    for (const emit of retainedTranscriptItems.splice(0)) emit();
     return;
   }
   if (envelope.op === "steer" || envelope.op === "cancel") {
@@ -471,6 +510,57 @@ const handle = (req) => {
             model: "zai/glm-5.3-flash",
           });
         }
+        send({ type: "agent_settled" });
+        return;
+      }
+      if (message === "MANAGER_TRANSCRIPT_FLOW" && childTranscriptsEnabled()) {
+        // Synthetic enhanced-manager flow: an allocating upsert carrying
+        // binding evidence retains its finalized items until T3's
+        // run-upsert-result is accepted.
+        send({ type: "response", id: req.id, command: "prompt", success: true });
+        managerUpsert({
+          sequence: 1,
+          runId: "sa-1",
+          activationId: "act-1",
+          status: "running",
+          title: "map auth",
+          harness: "pi",
+          model: "zai/glm-5.3-flash",
+          runBirth: FAKE_RUN_BIRTH,
+          upsertSequence: 1,
+        });
+        retainedTranscriptItems = [
+          () =>
+            transcriptItemRecord({
+              transcriptSequence: 1,
+              item: {
+                kind: "user",
+                text: "Authorization: Bearer secret-token-value-123456 map the auth flow",
+                truncated: false,
+                upstreamTruncated: false,
+              },
+            }),
+          () =>
+            transcriptItemRecord({
+              transcriptSequence: 2,
+              item: {
+                kind: "assistant",
+                text: "Mapped the auth flow.",
+                truncated: false,
+                upstreamTruncated: false,
+              },
+            }),
+          () =>
+            transcriptItemRecord({
+              transcriptSequence: 3,
+              item: {
+                kind: "toolResult",
+                text: "api_key=sk-live-abcdef0123456789",
+                truncated: false,
+                upstreamTruncated: true,
+              },
+            }),
+        ];
         send({ type: "agent_settled" });
         return;
       }
