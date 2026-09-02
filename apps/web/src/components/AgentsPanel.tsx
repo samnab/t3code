@@ -20,13 +20,15 @@ import type {
 import {
   formatSubagentModelLabel,
   formatSubagentTokenCount,
+  isTerminalSubagentStatus,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { RuntimeTaskId, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
 import { Bot, Braces, Check, ChevronDown, ChevronRight, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
+import { useEnvironmentQuery } from "~/state/query";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
 
@@ -138,8 +140,187 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
   );
 }
 
-/** Flat, non-interactive agent status line. No unfold. */
-function AgentRow({ agent }: { agent: RuntimeSubagent }) {
+export function canShowTranscriptDetail(
+  agent: Pick<RuntimeSubagent, "historyAvailability">,
+): boolean {
+  return agent.historyAvailability === "durable";
+}
+
+export function transcriptMarkerText(
+  kind: "eviction" | "gap",
+  startSequence: number,
+  endSequence: number,
+) {
+  const range =
+    startSequence === endSequence ? `#${startSequence}` : `#${startSequence}–#${endSequence}`;
+  return kind === "eviction"
+    ? `Earlier transcript items were evicted (${range}).`
+    : `Never-observed transcript gap (${range}).`;
+}
+
+export function transcriptFlagLabels(flags: {
+  readonly truncated: boolean;
+  readonly upstreamTruncated: boolean;
+}) {
+  return [
+    flags.truncated ? "truncated" : null,
+    flags.upstreamTruncated ? "upstream truncated" : null,
+  ].filter((label): label is string => label !== null);
+}
+
+export function transcriptDisplayState(input: {
+  readonly hasError: boolean;
+  readonly isPending: boolean;
+  readonly terminal: boolean;
+  readonly terminalCatchUpComplete: boolean;
+}) {
+  if (input.hasError) {
+    return "error";
+  }
+  if (input.isPending || (input.terminal && !input.terminalCatchUpComplete)) {
+    return "loading";
+  }
+  return "ready";
+}
+
+function AgentTranscript({
+  agent,
+  environmentId,
+  threadId,
+  transcriptId,
+}: {
+  agent: RuntimeSubagent;
+  environmentId: EnvironmentId;
+  threadId: ThreadId;
+  transcriptId: string;
+}) {
+  const runId = RuntimeTaskId.make(agent.id);
+  const terminal = isTerminalSubagentStatus(agent.status);
+  const queryAtom = orchestrationEnvironment.subagentTranscript({
+    environmentId,
+    input: { threadId, runId, terminal },
+  });
+  const { data: view, error, isPending } = useEnvironmentQuery(queryAtom);
+  const displayState = transcriptDisplayState({
+    hasError: error !== null,
+    isPending: isPending || view === null,
+    terminal,
+    terminalCatchUpComplete: view?.terminalCatchUpComplete ?? false,
+  });
+  const entries = view?.entries ?? [];
+
+  return (
+    <div
+      id={transcriptId}
+      className="mx-1.5 mb-1 rounded-md border border-border/60 bg-background/60"
+      data-transcript-state={displayState}
+    >
+      <div className="flex items-center gap-2 border-b border-border/50 px-2 py-1">
+        <span className="text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
+          Child transcript
+        </span>
+        <span className="font-mono text-[.65rem] text-muted-foreground/70">
+          {terminal ? "finalized" : "live"}
+        </span>
+      </div>
+      <div className="max-h-80 overflow-auto p-2">
+        {displayState === "error" ? (
+          <p role="alert" className="text-xs text-destructive-foreground">
+            Could not load the child transcript.
+          </p>
+        ) : null}
+        {displayState === "loading" && entries.length === 0 ? (
+          <p role="status" className="text-xs text-muted-foreground">
+            Loading child transcript…
+          </p>
+        ) : null}
+        {displayState === "loading" && entries.length > 0 ? (
+          <p role="status" className="mb-2 text-[.65rem] text-muted-foreground">
+            {terminal ? "Finishing transcript…" : "Refreshing transcript…"}
+          </p>
+        ) : null}
+        {entries.length > 0 ? (
+          <div className="flex flex-col gap-2">
+            {entries.map((entry) => {
+              if (entry.kind === "eviction" || entry.kind === "gap") {
+                return (
+                  <p
+                    key={`${entry.kind}-${entry.startSequence}-${entry.endSequence}`}
+                    role="note"
+                    data-transcript-marker={entry.kind}
+                    className="border-l border-border px-2 text-[.7rem] text-muted-foreground"
+                  >
+                    {transcriptMarkerText(entry.kind, entry.startSequence, entry.endSequence)}
+                  </p>
+                );
+              }
+
+              const flags = transcriptFlagLabels(entry);
+              const label =
+                entry.kind === "toolResult"
+                  ? (entry.toolName ?? "Tool result")
+                  : entry.kind === "user"
+                    ? "User"
+                    : "Assistant";
+              return (
+                <article
+                  key={`${entry.kind}-${entry.sequence}`}
+                  data-transcript-entry={entry.kind}
+                  data-sequence={entry.sequence}
+                  className="rounded-sm border border-border/50 px-2 py-1.5"
+                >
+                  <div className="mb-1 flex items-center gap-2 text-[.65rem] font-medium text-muted-foreground">
+                    <span>{label}</span>
+                    {flags.map((flag) => (
+                      <span
+                        key={flag}
+                        className="rounded-sm border border-warning/40 px-1 text-warning-foreground"
+                      >
+                        {flag}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="whitespace-pre-wrap break-words text-xs text-foreground/90">
+                    {entry.text}
+                  </p>
+                </article>
+              );
+            })}
+          </div>
+        ) : null}
+        {displayState === "ready" && entries.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No finalized transcript items.</p>
+        ) : null}
+        {displayState === "ready" && view?.hasOlder ? (
+          <button
+            type="button"
+            disabled={view.isLoadingOlder}
+            onClick={() => {
+              orchestrationEnvironment.requestOlderSubagentTranscript({
+                environmentId,
+                input: { threadId, runId },
+              });
+            }}
+            className="mt-2 rounded-sm border border-border/60 px-2 py-1 text-[.7rem] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {view.isLoadingOlder ? "Loading older…" : "Load older"}
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** Agent status row with an optional durable-transcript disclosure. */
+function AgentRow({
+  agent,
+  environmentId,
+  threadId,
+}: {
+  agent: RuntimeSubagent;
+  environmentId: EnvironmentId | null;
+  threadId: ThreadId | null;
+}) {
   const visuals = STATUS_VISUALS[agent.status];
   const activity = agentActivityText(agent);
   const modelLabel = formatSubagentModelLabel(agent.model, agent.effort);
@@ -172,40 +353,70 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
     agent.usage?.toolUses !== undefined ? `${agent.usage.toolUses} tools` : null,
     agent.activationCount > 1 ? `run ${agent.activationCount}` : null,
   ].filter((value): value is string => value !== null);
+  const transcriptAvailable =
+    canShowTranscriptDetail(agent) && environmentId !== null && threadId !== null;
+  const transcriptId = useId();
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
 
   return (
-    <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
-      <span className="col-start-1 row-start-1 flex items-center">
-        <StatusDot status={agent.status} />
-      </span>
-      <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
-        <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
-        {role ? (
-          <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
-            {role}
-          </span>
-        ) : null}
-      </span>
-      <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
-        <span className="inline-flex items-center gap-1">
-          <AgentElapsed agent={agent} />
-          {agent.status === "completed" ? (
-            <Check aria-hidden className="size-3 text-success" />
+    <div>
+      <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
+        <span className="col-start-1 row-start-1 flex items-center">
+          <StatusDot status={agent.status} />
+        </span>
+        <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
+          <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
+          {role ? (
+            <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
+              {role}
+            </span>
           ) : null}
         </span>
-      </span>
-      <span
-        className={cn(
-          "col-start-2 col-end-4 row-start-2 block truncate text-xs",
-          agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
-        )}
-      >
-        {activity ?? visuals.label}
-      </span>
-      <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
-        {metadata.join(" · ")}
-      </span>
-      <span className="sr-only">{visuals.label}</span>
+        <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
+          <span className="inline-flex items-center gap-1">
+            <AgentElapsed agent={agent} />
+            {agent.status === "completed" ? (
+              <Check aria-hidden className="size-3 text-success" />
+            ) : null}
+            {transcriptAvailable ? (
+              <button
+                type="button"
+                aria-controls={transcriptId}
+                aria-expanded={transcriptOpen}
+                aria-label={transcriptOpen ? "Hide child transcript" : "Show child transcript"}
+                onClick={() => setTranscriptOpen((value) => !value)}
+                className="rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {transcriptOpen ? (
+                  <ChevronDown aria-hidden className="size-3" />
+                ) : (
+                  <ChevronRight aria-hidden className="size-3" />
+                )}
+              </button>
+            ) : null}
+          </span>
+        </span>
+        <span
+          className={cn(
+            "col-start-2 col-end-4 row-start-2 block truncate text-xs",
+            agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+          )}
+        >
+          {activity ?? visuals.label}
+        </span>
+        <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
+          {metadata.join(" · ")}
+        </span>
+        <span className="sr-only">{visuals.label}</span>
+      </div>
+      {transcriptAvailable && transcriptOpen && environmentId !== null && threadId !== null ? (
+        <AgentTranscript
+          agent={agent}
+          environmentId={environmentId}
+          threadId={threadId}
+          transcriptId={transcriptId}
+        />
+      ) : null}
     </div>
   );
 }
@@ -337,9 +548,13 @@ function WorkflowScriptView({
 function PhaseSection({
   phase,
   defaultOpen = false,
+  environmentId,
+  threadId,
 }: {
   phase: AgentPanelWorkflowGroup["phases"][number];
   defaultOpen?: boolean;
+  environmentId: EnvironmentId | null;
+  threadId: ThreadId | null;
 }) {
   const [open, setOpen] = useState(defaultOpen || phase.state === "running");
   const previousState = useRef(phase.state);
@@ -388,7 +603,16 @@ function PhaseSection({
           </span>
         ) : null}
       </button>
-      {open ? phase.members.map((member) => <AgentRow key={member.id} agent={member} />) : null}
+      {open
+        ? phase.members.map((member) => (
+            <AgentRow
+              key={member.id}
+              agent={member}
+              environmentId={environmentId}
+              threadId={threadId}
+            />
+          ))
+        : null}
     </div>
   );
 }
@@ -458,13 +682,24 @@ function ExpandedWorkflowSection({
         />
       ) : null}
       {group.phases.map((phase) => (
-        <PhaseSection key={phase.index} phase={phase} defaultOpen={!workflowIsLive(group)} />
+        <PhaseSection
+          key={phase.index}
+          phase={phase}
+          defaultOpen={!workflowIsLive(group)}
+          environmentId={environmentId}
+          threadId={threadId}
+        />
       ))}
       {group.unphasedMembers.map((member) => (
-        <AgentRow key={member.id} agent={member} />
+        <AgentRow
+          key={member.id}
+          agent={member}
+          environmentId={environmentId}
+          threadId={threadId}
+        />
       ))}
       {group.phases.length === 0 && group.unphasedMembers.length === 0 ? (
-        <AgentRow agent={group.workflow} />
+        <AgentRow agent={group.workflow} environmentId={environmentId} threadId={threadId} />
       ) : null}
     </section>
   );
@@ -580,7 +815,12 @@ export function AgentsPanel({
                 Direct spawns
               </div>
               {model.directAgents.map((agent) => (
-                <AgentRow key={agent.id} agent={agent} />
+                <AgentRow
+                  key={agent.id}
+                  agent={agent}
+                  environmentId={environmentId}
+                  threadId={threadId}
+                />
               ))}
             </section>
           ) : null}
