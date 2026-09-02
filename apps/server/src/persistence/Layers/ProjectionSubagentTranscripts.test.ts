@@ -1,6 +1,7 @@
 import {
   ProviderDriverKind,
   RuntimeTaskId,
+  SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES,
   SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS,
   SUBAGENT_TRANSCRIPT_RETAINED_PER_RUN,
   ThreadId,
@@ -8,6 +9,7 @@ import {
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import Migration046 from "../Migrations/046_ProjectionSubagentTranscripts.ts";
@@ -24,9 +26,10 @@ import {
   type ReadSubagentTranscriptPageResult,
 } from "../Services/ProjectionSubagentTranscripts.ts";
 
-// 046 is registered by the integrator in Migrations.ts; until then focused
-// tests apply the additive migration on top of the memory database.
+// Apply 046 directly so this focused store test stays isolated from the full
+// migration manifest.
 const withMigration046 = Layer.effectDiscard(Migration046);
+const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const layer = it.layer(
   ProjectionSubagentTranscriptStoreLive.pipe(
@@ -38,6 +41,10 @@ const layer = it.layer(
 
 const RUN_BIRTH = "rbaaaaaaaaaaaaaaaaaaaaaa1";
 const OTHER_RUN_BIRTH = "rbbbbbbbbbbbbbbbbbbbbbbb2";
+const THREAD_ID = ThreadId.make("thread-transcript");
+const MANAGER_ID = "manager-one";
+const MANAGER_RUN_ID = "sa-1";
+const ACTIVATION_ID = "act-1";
 const at = (second: number) => `2026-06-15T00:00:${String(second).padStart(2, "0")}.000Z`;
 
 const seedRun = (
@@ -53,15 +60,15 @@ const seedRun = (
     const runNumber = yield* repository.reserveRunNumber({
       runId,
       allocatedAt: at(0),
-      ownerId: "manager-one",
+      ownerId: MANAGER_ID,
       ownerEpoch: "epoch-one",
-      nativeRunId: "sa-1",
-      activationId: "act-1",
+      nativeRunId: MANAGER_RUN_ID,
+      activationId: ACTIVATION_ID,
     });
     yield* repository.insertStart({
       runId,
       runNumber,
-      threadId: ThreadId.make("thread-transcript"),
+      threadId: THREAD_ID,
       parentRunId: null,
       runtimeFamily: "pi-manager",
       harness: "pi",
@@ -108,10 +115,19 @@ const ingester =
   (sequence: number, text?: string) =>
     store.ingestItem({
       runId,
+      managerId: MANAGER_ID,
+      managerRunId: MANAGER_RUN_ID,
+      activationId: ACTIVATION_ID,
       runBirth,
       item: item(sequence, text),
       observedAt: at(1),
     });
+
+const readPage = (
+  store: ProjectionSubagentTranscriptStoreShape,
+  runId: RuntimeTaskId,
+  cursor?: { readonly afterSequence?: number; readonly beforeSequence?: number },
+) => store.readPage({ threadId: THREAD_ID, runId, ...cursor });
 
 const pageOf = (
   result:
@@ -133,13 +149,26 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
       // Unknown opaque T3 run identity: rejected.
       const foreign = yield* store.ingestItem({
         runId: RuntimeTaskId.make("opaque-never-allocated"),
+        managerId: MANAGER_ID,
+        managerRunId: MANAGER_RUN_ID,
+        activationId: ACTIVATION_ID,
         runBirth: RUN_BIRTH,
         item: item(1),
         observedAt: at(1),
       });
       assert.strictEqual(foreign.outcome, "rejected-binding");
 
-      // Mismatched run birth for a known run: rejected.
+      // Every producer/T3 tuple member is validated at the store boundary.
+      const mismatchedManager = yield* store.ingestItem({
+        runId,
+        managerId: "other-manager",
+        managerRunId: MANAGER_RUN_ID,
+        activationId: ACTIVATION_ID,
+        runBirth: RUN_BIRTH,
+        item: item(1),
+        observedAt: at(1),
+      });
+      assert.strictEqual(mismatchedManager.outcome, "rejected-binding");
       const mismatched = yield* ingester(store, runId, OTHER_RUN_BIRTH)(1);
       assert.strictEqual(mismatched.outcome, "rejected-binding");
 
@@ -151,7 +180,7 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
       const plain = yield* ingester(store, plainRunId)(1);
       assert.strictEqual(plain.outcome, "rejected-binding");
 
-      const page = pageOf(yield* store.readPage({ runId }));
+      const page = pageOf(yield* readPage(store, runId));
       assert.deepStrictEqual(page.entries, []);
       assert.strictEqual(page.watermark, 0);
     }),
@@ -177,12 +206,18 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
       assert.strictEqual(gapped.outcome, "stored");
       assert.strictEqual(gapped.watermark, 1);
       assert.strictEqual(yield* store.getWatermark({ runId }), 1);
+      const gappedPage = pageOf(yield* readPage(store, runId));
+      assert.deepStrictEqual(gappedPage.entries[1], {
+        kind: "gap",
+        fromSequence: 2,
+        toSequence: 2,
+      });
 
       const filled = yield* put(2, "item two");
       assert.strictEqual(filled.outcome, "stored");
       assert.strictEqual(filled.watermark, 3);
 
-      const page = pageOf(yield* store.readPage({ runId }));
+      const page = pageOf(yield* readPage(store, runId));
       assert.strictEqual(page.entries.length, 3);
       const firstEntry = page.entries[0]!;
       assert.ok(firstEntry.kind === "assistant");
@@ -192,7 +227,7 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
       assert.strictEqual(page.hasMore, false);
 
       // Keyset bound is exclusive.
-      const tail = pageOf(yield* store.readPage({ runId, afterSequence: 2 }));
+      const tail = pageOf(yield* readPage(store, runId, { afterSequence: 2 }));
       assert.strictEqual(tail.entries.length, 1);
       assert.strictEqual(
         tail.entries[0]!.kind === "assistant" ? tail.entries[0]!.transcriptSequence : 0,
@@ -210,12 +245,16 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
       for (let sequence = 1; sequence <= 205; sequence += 1) {
         yield* put(sequence);
       }
-      const page = pageOf(yield* store.readPage({ runId }));
+      const page = pageOf(yield* readPage(store, runId));
       assert.strictEqual(page.entries.length, SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS);
       assert.strictEqual(page.hasMore, true);
-      const next = pageOf(yield* store.readPage({ runId, afterSequence: 200 }));
-      assert.strictEqual(next.entries.length, 5);
-      assert.strictEqual(next.hasMore, false);
+      assert.strictEqual(
+        page.entries[0]?.kind === "assistant" ? page.entries[0].transcriptSequence : 0,
+        6,
+      );
+      const older = pageOf(yield* readPage(store, runId, { beforeSequence: 6 }));
+      assert.strictEqual(older.entries.length, 5);
+      assert.strictEqual(older.hasMore, false);
 
       // Payload cap: fields are capped at 4 096 code points at the T3
       // boundary, so 100 heavy items encode to well over 256 KiB — the page
@@ -225,9 +264,13 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
       for (let sequence = 1; sequence <= 100; sequence += 1) {
         yield* heavy(sequence, "x".repeat(9_000));
       }
-      const heavyPage = pageOf(yield* store.readPage({ runId: heavyRunId }));
+      const heavyPage = pageOf(yield* readPage(store, heavyRunId));
       assert.ok(heavyPage.entries.length < 100);
       assert.ok(heavyPage.entries.length > 50);
+      assert.ok(
+        Buffer.byteLength(encodeUnknownJson(heavyPage), "utf8") <=
+          SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES,
+      );
       assert.strictEqual(heavyPage.hasMore, true);
     }),
   );
@@ -272,7 +315,7 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
         // The never-observed gap at 4 still holds the watermark at 3, yet the
         // eviction marker renders distinctly from the gap marker.
         assert.strictEqual(yield* store.getWatermark({ runId }), 3);
-        const page = pageOf(yield* store.readPage({ runId }));
+        const page = pageOf(yield* readPage(store, runId, { beforeSequence: 5 }));
         const evictionMarker = page.entries[0]!;
         assert.strictEqual(evictionMarker.kind, "evicted");
         if (evictionMarker.kind === "evicted") {
@@ -315,16 +358,24 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
 
       // A run that does not exist in this state store is invisible: no content.
       const invisible = yield* store.readPage({
+        threadId: THREAD_ID,
         runId: RuntimeTaskId.make("opaque-other-store"),
       });
       assert.deepStrictEqual(invisible, { unavailable: "unknown-run" });
+
+      // A valid run requested through another thread is indistinguishable from unknown.
+      const crossThread = yield* store.readPage({
+        threadId: ThreadId.make("thread-other"),
+        runId,
+      });
+      assert.deepStrictEqual(crossThread, { unavailable: "unknown-run" });
 
       // Summary-only runs never return content either.
       const summaryRunId = yield* seedRun(repository, {
         runId: "opaque-summary-run",
         historyAvailability: "summary-only",
       });
-      const summaryPage = yield* store.readPage({ runId: summaryRunId });
+      const summaryPage = yield* readPage(store, summaryRunId);
       assert.deepStrictEqual(summaryPage, { unavailable: "unavailable" });
     }),
   );
@@ -336,12 +387,21 @@ layer("ProjectionSubagentTranscriptStore", (it) => {
       const runId = yield* seedRun(repository, { runId: "opaque-transcript-watermarks" });
       yield* ingester(store, runId)(1);
       yield* ingester(store, runId)(2);
-      const emptyRunId = RuntimeTaskId.make("opaque-empty");
+      const emptyRunId = yield* seedRun(repository, { runId: "opaque-empty" });
       const watermarks = yield* store.readWatermarks([runId, emptyRunId]);
       assert.deepStrictEqual(watermarks, [
         { runId, watermark: 2 },
         { runId: emptyRunId, watermark: 0 },
       ]);
+      const managerWatermarks = yield* store.readWatermarksForManager({
+        threadId: THREAD_ID,
+        managerId: MANAGER_ID,
+      });
+      assert.deepStrictEqual(managerWatermarks.slice(-2), [
+        { runId, watermark: 2 },
+        { runId: emptyRunId, watermark: 0 },
+      ]);
+      assert.ok(!managerWatermarks.some((entry) => entry.runId === "opaque-summary-run"));
     }),
   );
 });

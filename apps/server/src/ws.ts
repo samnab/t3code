@@ -32,6 +32,7 @@ import {
   type OrchestrationThreadStreamItem,
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetSnapshotError,
+  OrchestrationGetSubagentTranscriptError,
   OrchestrationSearchThreadsError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
@@ -473,6 +474,7 @@ const makeWsRpcLayer = (
       const currentSessionId = currentSession.sessionId;
       const crypto = yield* Crypto.Crypto;
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      const getSubagentTranscript = projectionSnapshotQuery.getSubagentTranscript;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const analytics = yield* AnalyticsService.AnalyticsService;
       // Every command dispatched on this connection carries the connecting
@@ -1641,6 +1643,23 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.subagentControlCancel,
             routeSubagentControlCancel(providerAdapterRegistry, input),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.getSubagentTranscript]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.getSubagentTranscript,
+            getSubagentTranscript === undefined
+              ? new OrchestrationGetSubagentTranscriptError({ reason: "unavailable" })
+              : getSubagentTranscript(input).pipe(
+                  Effect.mapError(
+                    () => new OrchestrationGetSubagentTranscriptError({ reason: "unavailable" }),
+                  ),
+                  Effect.flatMap((result) =>
+                    "unavailable" in result
+                      ? new OrchestrationGetSubagentTranscriptError({ reason: result.unavailable })
+                      : Effect.succeed(result),
+                  ),
+                ),
             { "rpc.aggregate": "orchestration" },
           ),
         [WS_METHODS.serverProbe]: (_input) =>

@@ -3,6 +3,7 @@ import * as Layer from "effect/Layer";
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
 import { ProjectionSubagentRunRepositoryLive } from "../persistence/Layers/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentTranscriptStoreLive } from "../persistence/Layers/ProjectionSubagentTranscripts.ts";
 import { OrchestrationEngineLive } from "./Layers/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./Layers/ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
@@ -13,10 +14,11 @@ export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
   OrchestrationEventStoreLive,
   OrchestrationCommandReceiptRepositoryLive,
   ProjectionSubagentRunRepositoryLive,
+  ProjectionSubagentTranscriptStoreLive,
 );
 
 export const OrchestrationProjectionPipelineLayerLive = OrchestrationProjectionPipelineLive.pipe(
-  Layer.provide(OrchestrationEventStoreLive),
+  Layer.provide(OrchestrationEventInfrastructureLayerLive),
 );
 
 export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(

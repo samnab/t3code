@@ -76,6 +76,9 @@ export type InterruptNonResumableSubagentRunsInput =
 export interface ProjectionSubagentRunBinding {
   readonly runId: RuntimeTaskId;
   readonly threadId: ThreadId;
+  readonly managerId: string | null;
+  readonly managerRunId: string | null;
+  readonly activationId: string | null;
   readonly runBirth: string | null;
   readonly historyAvailability: SubagentRunHistoryAvailability;
   readonly lastTranscriptSequence: number | null;

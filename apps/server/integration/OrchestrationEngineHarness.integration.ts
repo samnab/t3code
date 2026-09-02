@@ -290,13 +290,13 @@ export const makeOrchestrationIntegrationHarness = (
     const providerLayer = useRealCodex
       ? makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
-          Layer.provide(realCodexRegistry),
+          Layer.provideMerge(realCodexRegistry),
           Layer.provide(AnalyticsService.layerTest),
           Layer.provide(providerEventLoggersLayer),
         )
       : makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
-          Layer.provide(fakeRegistry!),
+          Layer.provideMerge(fakeRegistry!),
           Layer.provide(AnalyticsService.layerTest),
           Layer.provide(providerEventLoggersLayer),
         );

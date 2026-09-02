@@ -36,8 +36,8 @@ import { ProviderAdapterRegistry } from "../../provider/Services/ProviderAdapter
 import { routeSubagentControlBindingResult } from "../../provider/subagentControlRouter.ts";
 import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
 import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
-import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/ProjectionSubagentTranscripts.ts";
+import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";

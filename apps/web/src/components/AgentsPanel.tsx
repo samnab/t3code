@@ -147,13 +147,13 @@ export function canShowTranscriptDetail(
 }
 
 export function transcriptMarkerText(
-  kind: "eviction" | "gap",
+  kind: "evicted" | "gap",
   startSequence: number,
   endSequence: number,
 ) {
   const range =
     startSequence === endSequence ? `#${startSequence}` : `#${startSequence}–#${endSequence}`;
-  return kind === "eviction"
+  return kind === "evicted"
     ? `Earlier transcript items were evicted (${range}).`
     : `Never-observed transcript gap (${range}).`;
 }
@@ -212,6 +212,8 @@ function AgentTranscript({
   return (
     <div
       id={transcriptId}
+      role="region"
+      aria-label="Child transcript"
       className="mx-1.5 mb-1 rounded-md border border-border/60 bg-background/60"
       data-transcript-state={displayState}
     >
@@ -242,15 +244,15 @@ function AgentTranscript({
         {entries.length > 0 ? (
           <div className="flex flex-col gap-2">
             {entries.map((entry) => {
-              if (entry.kind === "eviction" || entry.kind === "gap") {
+              if ("fromSequence" in entry) {
                 return (
                   <p
-                    key={`${entry.kind}-${entry.startSequence}-${entry.endSequence}`}
+                    key={`${entry.kind}-${entry.fromSequence}-${entry.toSequence}`}
                     role="note"
                     data-transcript-marker={entry.kind}
                     className="border-l border-border px-2 text-[.7rem] text-muted-foreground"
                   >
-                    {transcriptMarkerText(entry.kind, entry.startSequence, entry.endSequence)}
+                    {transcriptMarkerText(entry.kind, entry.fromSequence, entry.toSequence)}
                   </p>
                 );
               }
@@ -258,15 +260,15 @@ function AgentTranscript({
               const flags = transcriptFlagLabels(entry);
               const label =
                 entry.kind === "toolResult"
-                  ? (entry.toolName ?? "Tool result")
+                  ? "Tool result"
                   : entry.kind === "user"
                     ? "User"
                     : "Assistant";
               return (
                 <article
-                  key={`${entry.kind}-${entry.sequence}`}
+                  key={`${entry.kind}-${entry.transcriptSequence}`}
                   data-transcript-entry={entry.kind}
-                  data-sequence={entry.sequence}
+                  data-sequence={entry.transcriptSequence}
                   className="rounded-sm border border-border/50 px-2 py-1.5"
                 >
                   <div className="mb-1 flex items-center gap-2 text-[.65rem] font-medium text-muted-foreground">
@@ -385,7 +387,7 @@ function AgentRow({
                 aria-expanded={transcriptOpen}
                 aria-label={transcriptOpen ? "Hide child transcript" : "Show child transcript"}
                 onClick={() => setTranscriptOpen((value) => !value)}
-                className="rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="rounded-sm p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {transcriptOpen ? (
                   <ChevronDown aria-hidden className="size-3" />

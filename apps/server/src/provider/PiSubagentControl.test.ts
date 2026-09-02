@@ -475,6 +475,7 @@ describe("Phase 1.5 child transcript protocol", () => {
       runId: "sa-1",
       activationId: "act-1",
       runBirth: RUN_BIRTH,
+      t3RunId: "opaque-t3-run",
       transcriptSequence: 2,
       item: {
         kind: "toolResult",
@@ -530,7 +531,7 @@ describe("Phase 1.5 child transcript protocol", () => {
     });
   });
 
-  it("installs run bindings idempotently and rejects conflicting t3 ids", () => {
+  it("installs run bindings idempotently and rejects conflicts on either identity", () => {
     const tracker = makeRunBindingTracker();
     const tuple = {
       managerId: "mgr-1",
@@ -543,6 +544,9 @@ describe("Phase 1.5 child transcript protocol", () => {
     expect(tracker.install(tuple)).toEqual({ ok: true });
     expect(tracker.install(tuple)).toEqual({ ok: true });
     expect(tracker.install({ ...tuple, t3RunId: "pi:b" }).ok).toBe(false);
+    expect(tracker.install({ ...tuple, upsertSequence: 5, t3RunId: "pi:c" }).ok).toBe(false);
+    expect(tracker.install({ ...tuple, nativeRunId: "sa-2" }).ok).toBe(false);
+    expect(tracker.findByT3RunId("pi:a")?.nativeRunId).toBe("sa-1");
     expect(tracker.isAcked("pi:a")).toBe(false);
     expect(tracker.markAcked("pi:a")).toBe(true);
     expect(tracker.isAcked("pi:a")).toBe(true);

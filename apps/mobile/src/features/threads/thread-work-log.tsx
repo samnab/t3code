@@ -1,7 +1,15 @@
+import type { SubagentTranscriptView } from "@t3tools/client-runtime/state/orchestration";
+import {
+  RuntimeTaskId,
+  type EnvironmentId,
+  type SubagentRunStatus,
+  type SubagentTranscriptPageEntry,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
+import { FlatList, LayoutAnimation, Pressable, ScrollView, View } from "react-native";
+
 import { type AppSymbolName, SymbolView } from "../../components/AppSymbol";
-import { ActivityIndicator, LayoutAnimation, Pressable, ScrollView, View } from "react-native";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { AppText as Text } from "../../components/AppText";
 import { scaledTypographyLineHeight } from "../../lib/appearancePreferences";
@@ -87,7 +95,11 @@ function isFreshRow(createdAt: string): boolean {
 export function visibleWorkLogActivities(
   activities: ReadonlyArray<ThreadFeedActivity>,
 ): ReadonlyArray<ThreadFeedActivity> {
-  return activities.filter((activity) => !(activity.toolLike && activity.status === "neutral"));
+  return activities.filter(
+    (activity) =>
+      activity.subagentRun?.historyAvailability === "durable" ||
+      !(activity.toolLike && activity.status === "neutral"),
+  );
 }
 
 // Pre-measurement heights for the feed's getFixedItemSize. Collapsed work-log
@@ -143,70 +155,90 @@ export function subagentTranscriptDisclosureAvailable(
   return activity.subagentRun?.historyAvailability === "durable";
 }
 
-export type SubagentTranscriptItemKind = "user" | "assistant" | "tool-result";
-
-export interface SubagentTranscriptItemView {
-  readonly id: string;
-  readonly kind: SubagentTranscriptItemKind;
-  readonly text: string;
-  readonly truncated: boolean;
-  readonly upstreamTruncated: boolean;
-}
-
-/** Distinct from a never-observed gap: an eviction range proves the item was
- * observed before its durable tombstone; a gap never was. */
-export type SubagentTranscriptMarkerView =
-  | { readonly kind: "eviction"; readonly id: string }
-  | { readonly kind: "gap"; readonly id: string };
-
-export type SubagentTranscriptRow =
-  | { readonly type: "item"; readonly item: SubagentTranscriptItemView }
-  | { readonly type: "marker"; readonly marker: SubagentTranscriptMarkerView };
-
-/** Resolved shape of the anticipated shared query glue's success value. */
-export interface SubagentTranscriptQueryData {
-  readonly rows: ReadonlyArray<SubagentTranscriptRow>;
-  readonly hasOlder: boolean;
-  readonly loadOlder: () => void;
-}
-
-function transcriptItemKindLabel(kind: SubagentTranscriptItemKind): string {
+function transcriptItemKindLabel(kind: "user" | "assistant" | "toolResult") {
   switch (kind) {
     case "user":
       return "User";
     case "assistant":
       return "Assistant";
-    case "tool-result":
+    case "toolResult":
       return "Tool result";
   }
 }
 
-/** Pure and testable independent of the query hook: renders whatever state
- * (loading/error/empty/summary-only/items+markers/pagination) it is given. */
-export function SubagentTranscriptList(props: {
-  readonly data: SubagentTranscriptQueryData | null;
-  readonly loading: boolean;
-  readonly error: string | null;
-  readonly summaryOnly: boolean;
-}) {
-  if (props.summaryOnly) {
+function transcriptEntryKey(entry: SubagentTranscriptPageEntry) {
+  return "transcriptSequence" in entry
+    ? `item:${entry.transcriptSequence}`
+    : `${entry.kind}:${entry.fromSequence}:${entry.toSequence}`;
+}
+
+function transcriptRangeLabel(
+  entry: Extract<SubagentTranscriptPageEntry, { kind: "evicted" | "gap" }>,
+) {
+  const range =
+    entry.fromSequence === entry.toSequence
+      ? `#${entry.fromSequence}`
+      : `#${entry.fromSequence}–#${entry.toSequence}`;
+  return entry.kind === "evicted"
+    ? `Evicted transcript history (${range})`
+    : `Never-observed transcript gap (${range})`;
+}
+
+function isTerminalSubagentRunStatus(status: SubagentRunStatus | null) {
+  return (
+    status === "done" || status === "error" || status === "cancelled" || status === "interrupted"
+  );
+}
+
+function TranscriptEntry({ entry }: { readonly entry: SubagentTranscriptPageEntry }) {
+  if ("fromSequence" in entry) {
     return (
-      <Text className="px-0.5 text-2xs text-foreground-muted opacity-70">
-        Transcript detail is unavailable for this run.
+      <Text className="py-1 text-2xs text-foreground-muted opacity-60">
+        · {transcriptRangeLabel(entry)} ·
       </Text>
     );
   }
+  return (
+    <View className="gap-0.5 py-1">
+      <Text className="font-t3-medium text-2xs text-foreground-muted opacity-70">
+        {transcriptItemKindLabel(entry.kind)}
+      </Text>
+      <Text selectable className="text-xs leading-normal text-foreground">
+        {entry.text}
+      </Text>
+      {entry.truncated || entry.upstreamTruncated ? (
+        <Text className="text-3xs text-foreground-muted opacity-60">
+          {[
+            entry.truncated ? "truncated" : null,
+            entry.upstreamTruncated ? "upstream truncated" : null,
+          ]
+            .filter((label): label is string => label !== null)
+            .join(" · ")}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+/** Pure renderer for static loading/error feedback, a bounded virtualized
+ * transcript window, distinct durable markers, and explicit older paging. */
+export function SubagentTranscriptList(props: {
+  readonly data: SubagentTranscriptView | null;
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly onLoadOlder: () => void;
+}) {
   if (props.error) {
     return <Text className="px-0.5 text-2xs text-rose-600 dark:text-rose-400">{props.error}</Text>;
   }
   if (props.data === null) {
     return props.loading ? (
-      <View className="px-0.5 py-1">
-        <ActivityIndicator size="small" />
-      </View>
+      <Text className="px-0.5 py-1 text-2xs text-foreground-muted opacity-70">
+        Loading transcript…
+      </Text>
     ) : null;
   }
-  if (props.data.rows.length === 0) {
+  if (props.data.entries.length === 0) {
     return (
       <Text className="px-0.5 text-2xs text-foreground-muted opacity-70">
         {props.loading ? "Loading transcript…" : "No transcript items."}
@@ -216,33 +248,30 @@ export function SubagentTranscriptList(props: {
 
   return (
     <View className="gap-1.5 px-0.5">
-      {props.data.rows.map((row) => {
-        if (row.type === "marker") {
-          return (
-            <Text key={row.marker.id} className="text-2xs text-foreground-muted opacity-60">
-              {row.marker.kind === "eviction" ? "· evicted history ·" : "· not observed ·"}
-            </Text>
-          );
-        }
-        const { item } = row;
-        return (
-          <View key={item.id} className="gap-0.5">
-            <Text className="font-t3-medium text-2xs text-foreground-muted opacity-70">
-              {transcriptItemKindLabel(item.kind)}
-            </Text>
-            <Text selectable className="text-xs leading-normal text-foreground">
-              {item.text}
-              {item.truncated || item.upstreamTruncated ? (
-                <Text className="text-foreground-muted opacity-60"> (truncated)</Text>
-              ) : null}
-            </Text>
-          </View>
-        );
-      })}
+      {props.loading ? (
+        <Text className="text-2xs text-foreground-muted opacity-70">Finishing transcript…</Text>
+      ) : null}
+      <FlatList
+        data={props.data.entries}
+        keyExtractor={transcriptEntryKey}
+        renderItem={({ item }) => <TranscriptEntry entry={item} />}
+        initialNumToRender={12}
+        maxToRenderPerBatch={12}
+        nestedScrollEnabled
+        removeClippedSubviews
+        showsVerticalScrollIndicator
+        style={{ maxHeight: 320 }}
+        windowSize={5}
+      />
       {props.data.hasOlder ? (
-        <Pressable accessibilityRole="button" onPress={props.data.loadOlder} hitSlop={4}>
+        <Pressable
+          accessibilityRole="button"
+          disabled={props.data.isLoadingOlder}
+          onPress={props.onLoadOlder}
+          hitSlop={4}
+        >
           <Text className="font-t3-medium text-2xs text-foreground-muted opacity-80">
-            Load older
+            {props.data.isLoadingOlder ? "Loading older…" : "Load older"}
           </Text>
         </Pressable>
       ) : null}
@@ -250,39 +279,35 @@ export function SubagentTranscriptList(props: {
   );
 }
 
-/**
- * Mounted-only, non-continuous disclosure for one durable subagent run: fetch
- * only while this row is expanded, via the integrator-owned shared
- * pull-only page/catch-up/poll glue.
- *
- * ANTICIPATED SHARED ANCHOR: `orchestrationEnvironment.subagentTranscript`
- * (added to `createOrchestrationEnvironmentAtoms`'s return in
- * packages/client-runtime/src/state/orchestration.ts) must expose a query
- * atom keyed by `{ environmentId, threadId, runId }` whose resolved success
- * value is a `SubagentTranscriptQueryData` (rows already ordered/merged with
- * eviction/gap markers, `hasOlder`, bound `loadOlder`). The atom owns
- * negotiation-driven summary-only detection, >=1s polling while mounted and
- * nonterminal, the one bounded terminal catch-up, and stopping on unmount —
- * this component only renders whatever it returns.
- */
+/** Mounted-only disclosure backed by the shared pull-only transcript state
+ * machine. Summary-only rows never mount this component. */
 function SubagentTranscriptDisclosure(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly runId: string;
+  readonly status: SubagentRunStatus | null;
 }) {
+  const runId = RuntimeTaskId.make(props.runId);
+  const terminal = isTerminalSubagentRunStatus(props.status);
   const transcriptAtom = orchestrationEnvironment.subagentTranscript({
     environmentId: props.environmentId,
-    threadId: props.threadId,
-    runId: props.runId,
+    input: { threadId: props.threadId, runId, terminal },
   });
-  const result = useEnvironmentQuery<SubagentTranscriptQueryData, unknown>(transcriptAtom);
+  const result = useEnvironmentQuery(transcriptAtom);
+  const loading =
+    result.isPending || (terminal && result.data !== null && !result.data.terminalCatchUpComplete);
 
   return (
     <SubagentTranscriptList
       data={result.data}
-      loading={result.isPending}
+      loading={loading}
       error={result.error}
-      summaryOnly={false}
+      onLoadOlder={() => {
+        orchestrationEnvironment.requestOlderSubagentTranscript({
+          environmentId: props.environmentId,
+          input: { threadId: props.threadId, runId },
+        });
+      }}
     />
   );
 }
@@ -324,12 +349,12 @@ export function ThreadWorkLog(props: {
           // A durable subagent row's expanded slot renders its transcript
           // disclosure, never the plain raw-text body (no transcript detail
           // on a summary-only row, and no mixing the two for a durable one).
-          const transcriptRunId =
-            expanded && subagentTranscriptDisclosureAvailable(row)
-              ? (row.subagentRun?.runId ?? null)
-              : null;
-          const fullDetail = expanded && !transcriptRunId ? row.getFullDetail() : null;
-          const displayText = row.detail ? `${row.summary} ${row.detail}` : row.summary;
+          const transcriptRun =
+            expanded && subagentTranscriptDisclosureAvailable(row) ? row.subagentRun : null;
+          const fullDetail = expanded && !transcriptRun ? row.getFullDetail() : null;
+          const summaryOnly = row.subagentRun?.historyAvailability === "summary-only";
+          const rowText = row.detail ? `${row.summary} ${row.detail}` : row.summary;
+          const displayText = summaryOnly ? `${rowText}. Transcript summary only.` : rowText;
           const iconIsDestructive = row.icon === "alert" || row.icon === "warning";
 
           return (
@@ -385,6 +410,11 @@ export function ThreadWorkLog(props: {
                   </Text>
 
                   <View className="shrink-0 flex-row items-center gap-px">
+                    {summaryOnly ? (
+                      <Text className="pr-1 font-t3-medium text-3xs text-foreground-muted opacity-70">
+                        Summary only
+                      </Text>
+                    ) : null}
                     {props.copiedRowId === row.id ? (
                       <Text className="pr-1 font-t3-medium text-3xs text-emerald-600 dark:text-emerald-400">
                         Copied
@@ -424,12 +454,13 @@ export function ThreadWorkLog(props: {
                 </View>
               </Pressable>
 
-              {transcriptRunId ? (
+              {transcriptRun ? (
                 <View className="ml-7 border-l border-neutral-300/60 pb-1 pl-3 pt-0.5 dark:border-white/[0.12]">
                   <SubagentTranscriptDisclosure
                     environmentId={props.environmentId}
                     threadId={props.threadId}
-                    runId={transcriptRunId}
+                    runId={transcriptRun.runId}
+                    status={transcriptRun.status}
                   />
                 </View>
               ) : fullDetail ? (

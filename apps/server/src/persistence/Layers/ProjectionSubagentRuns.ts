@@ -39,6 +39,9 @@ const RunIdRow = Schema.Struct({ runId: RuntimeTaskId });
 const RunBindingRow = Schema.Struct({
   runId: RuntimeTaskId,
   threadId: ThreadId,
+  managerId: Schema.NullOr(Schema.String),
+  managerRunId: Schema.NullOr(Schema.String),
+  activationId: Schema.NullOr(Schema.String),
   runBirth: Schema.NullOr(Schema.String),
   historyAvailability: SubagentRunHistoryAvailability,
   lastTranscriptSequence: Schema.NullOr(PositiveInt),
@@ -324,8 +327,8 @@ const makeProjectionSubagentRunRepository = Effect.gen(function* () {
     `,
   });
 
-  // Private Phase 1.5 binding read: run existence plus run-birth and
-  // watermark columns only. Never exposes transcript content.
+  // Private Phase 1.5 binding read: complete producer/T3 tuple plus run-birth
+  // and watermark columns only. Never exposes transcript content.
   const getBindingRow = SqlSchema.findOneOption({
     Request: GetProjectionSubagentRunInput,
     Result: RunBindingRow,
@@ -333,6 +336,9 @@ const makeProjectionSubagentRunRepository = Effect.gen(function* () {
       SELECT
         run_id AS "runId",
         thread_id AS "threadId",
+        owner_id AS "managerId",
+        native_run_id AS "managerRunId",
+        activation_id AS "activationId",
         run_birth AS "runBirth",
         history_availability AS "historyAvailability",
         last_transcript_sequence AS "lastTranscriptSequence"

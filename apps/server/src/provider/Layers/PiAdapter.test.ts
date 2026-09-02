@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - the fake pi fixture drives a real stdio process through Node spawn and filesystem APIs.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -29,8 +28,6 @@ import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
-import type { ReadSubagentTranscriptPageResult } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
-import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
 import { decodeControlEnvelope } from "../PiSubagentControl.ts";
 import type {
@@ -1522,36 +1519,71 @@ describe("PiAdapter", () => {
     Layer.provideMerge(SqlitePersistenceMemory),
   );
 
-  const waitForStorePage = (
-    store: ProjectionSubagentTranscriptStore["Service"],
-    runId: RuntimeTaskId,
-    entries: number,
-  ) => {
-    type PageResult =
-      | ReadSubagentTranscriptPageResult
-      | { readonly unavailable: "unknown-run" | "unavailable" };
-    const attempt = (
-      page: PageResult,
-      deadline: number,
-    ): Effect.Effect<ReadSubagentTranscriptPageResult, ProjectionRepositoryError> =>
-      !("unavailable" in page) && page.entries.length >= entries
-        ? Effect.succeed(page)
-        : Clock.currentTimeMillis.pipe(
-            Effect.flatMap((now) =>
-              now >= deadline
-                ? Effect.die(new Error("Timed out waiting for transcript items"))
-                : Effect.sleep(50).pipe(
-                    Effect.andThen(store.readPage({ runId })),
-                    Effect.flatMap((next) => attempt(next, deadline)),
-                  ),
-            ),
-          );
-    return Clock.currentTimeMillis.pipe(
-      Effect.flatMap((now) =>
-        store.readPage({ runId }).pipe(Effect.flatMap((page) => attempt(page, now + 4_000))),
-      ),
-    );
-  };
+  it.live("replays terminal and zero-watermark durable bindings during negotiation", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      process.env.FAKE_PI_MANAGER = "1";
+      process.env.FAKE_PI_CHILD_TRANSCRIPTS = "1";
+      const runs = yield* ProjectionSubagentRunRepository;
+      const priorRunId = RuntimeTaskId.make("prior-terminal-run");
+      const occurredAt = "2026-09-02T00:00:00.000Z";
+      const runNumber = yield* runs.reserveRunNumber({
+        runId: priorRunId,
+        allocatedAt: occurredAt,
+        ownerId: "fake-manager-1",
+        ownerEpoch: "epoch-prior",
+        nativeRunId: "sa-prior",
+        activationId: "act-prior",
+      });
+      yield* runs.insertStart({
+        runId: priorRunId,
+        runNumber,
+        threadId: THREAD_ID,
+        parentRunId: null,
+        runtimeFamily: "pi-manager",
+        harness: "pi",
+        provider: PROVIDER,
+        providerInstanceId: null,
+        model: null,
+        effort: null,
+        title: null,
+        summary: null,
+        status: "done",
+        terminalReason: "native-completed",
+        controlAvailability: "read-only",
+        historyAvailability: "durable",
+        capabilities: { steer: true, cancel: true, resume: false },
+        createdAt: occurredAt,
+        updatedAt: occurredAt,
+        terminalAt: occurredAt,
+        runBirth: `rb${"b".repeat(22)}`,
+        ownerId: null,
+        ownerEpoch: "reserved",
+        nativeRunId: null,
+        activationId: null,
+        firstEventSequence: 1,
+        lastEventSequence: 1,
+      });
+
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+
+      const negotiations = controlEnvelopes(fixture).filter(
+        (envelope) => envelope.op === "negotiate",
+      );
+      expect(negotiations).toHaveLength(2);
+      expect(negotiations[1]).toMatchObject({
+        replay: [{ runId: priorRunId, watermark: 0 }],
+      });
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv, Effect.provide(transcriptStoreLayer)),
+  );
 
   it.live(
     "offers childTranscripts, carries binding evidence, and ingests only validated finalized items",
@@ -1669,7 +1701,11 @@ describe("PiAdapter", () => {
           controlEnvelopes(fixture).filter((envelope) => envelope.op === "run-upsert-result"),
         ).toHaveLength(1);
 
-        const page = yield* waitForStorePage(store, taskId, 3);
+        const pageResult = yield* store.readPage({ threadId: THREAD_ID, runId: taskId });
+        if ("unavailable" in pageResult) {
+          return yield* Effect.die(new Error("Transcript page was unavailable after the ack"));
+        }
+        const page = pageResult;
         expect(page.entries.map((entry) => entry.kind)).toEqual([
           "user",
           "assistant",
@@ -1688,6 +1724,49 @@ describe("PiAdapter", () => {
         }
         expect(page.watermark).toBe(3);
         expect(page.hasMore).toBe(false);
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(provideTestEnv, Effect.provide(transcriptStoreLayer)),
+  );
+
+  it.live(
+    "keeps malformed run-birth evidence summary-only when the manager omitted childTranscripts",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeFixture();
+        process.env.FAKE_PI_MANAGER = "1";
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "MANAGER_RUNBIRTH_WITHOUT_CAPABILITY",
+        });
+        const started = yield* collector.waitFor((event) => event.type === "task.started");
+        const evidence = (started.payload as { subagentRun?: Record<string, unknown> }).subagentRun;
+        expect(evidence?.["runBirth"]).toBeUndefined();
+        expect(evidence?.["upsertSequence"]).toBeUndefined();
+        expect(evidence?.["historyAvailability"]).toBe("summary-only");
+
+        const rejected = yield* Effect.flip(
+          requireControlPlane(adapter).bindingResult!({
+            managerId: "fake-manager-1",
+            runId: RuntimeTaskId.make(String(evidence?.["runId"] ?? "")),
+            nativeRunId: "sa-1",
+            activationId: "act-1",
+            runBirth: `rb${"a".repeat(22)}`,
+            upsertSequence: 1,
+          }),
+        );
+        expect(rejected._tag === "SubagentControlError" && rejected.reason === "unknown-run").toBe(
+          true,
+        );
         yield* adapter.stopSession(THREAD_ID);
       }).pipe(provideTestEnv, Effect.provide(transcriptStoreLayer)),
   );

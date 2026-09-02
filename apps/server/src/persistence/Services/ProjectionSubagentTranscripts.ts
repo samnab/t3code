@@ -1,8 +1,9 @@
 import {
-  NonNegativeInt,
+  OrchestrationGetSubagentTranscriptInput,
   PositiveInt,
   RuntimeTaskId,
   SubagentTranscriptItemKind,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -12,8 +13,12 @@ import type { ProjectionRepositoryError } from "../Errors.ts";
 
 /** Input item exactly as the enhanced manager emitted it (pre-sanitization). */
 export const IngestSubagentTranscriptItemInput = Schema.Struct({
+  /** T3's opaque run id, returned only after the allocating row commits. */
   runId: RuntimeTaskId,
-  /** Binding evidence carried by the record; validated against the durable row. */
+  /** Complete producer binding evidence, validated at the durable store boundary. */
+  managerId: Schema.String,
+  managerRunId: Schema.String,
+  activationId: Schema.String,
   runBirth: Schema.String,
   item: Schema.Struct({
     kind: SubagentTranscriptItemKind,
@@ -42,10 +47,7 @@ export interface IngestSubagentTranscriptResult {
   readonly watermark: number;
 }
 
-export const ReadSubagentTranscriptPageInput = Schema.Struct({
-  runId: RuntimeTaskId,
-  afterSequence: Schema.optionalKey(NonNegativeInt),
-});
+export const ReadSubagentTranscriptPageInput = OrchestrationGetSubagentTranscriptInput;
 export type ReadSubagentTranscriptPageInput = typeof ReadSubagentTranscriptPageInput.Type;
 
 export interface ReadSubagentTranscriptPageResult {
@@ -97,10 +99,21 @@ export interface ProjectionSubagentTranscriptStoreShape {
   readonly getWatermark: (
     input: GetSubagentTranscriptWatermarkInput,
   ) => Effect.Effect<number, ProjectionRepositoryError>;
-  /** Bounded open-run watermarks for the reconnect replay envelope. */
+  /** Watermarks for explicit run ids, including zero-watermark runs. */
   readonly readWatermarks: (
     runIds: ReadonlyArray<RuntimeTaskId>,
   ) => Effect.Effect<
+    ReadonlyArray<{ readonly runId: RuntimeTaskId; readonly watermark: number }>,
+    ProjectionRepositoryError
+  >;
+  /**
+   * Every durable binding for this manager in the current thread, including
+   * terminal and zero-watermark runs, for negotiation/reconnect replay.
+   */
+  readonly readWatermarksForManager: (input: {
+    readonly threadId: ThreadId;
+    readonly managerId: string;
+  }) => Effect.Effect<
     ReadonlyArray<{ readonly runId: RuntimeTaskId; readonly watermark: number }>,
     ProjectionRepositoryError
   >;

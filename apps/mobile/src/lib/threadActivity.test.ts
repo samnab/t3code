@@ -808,6 +808,7 @@ describe("buildThreadFeed", () => {
       icon: "command",
       toolLike: true,
       status,
+      subagentRun: null,
     });
     const feed: ThreadFeedEntry[] = [
       {
@@ -932,6 +933,66 @@ describe("subagent run metadata on the collapsed work-log row", () => {
     // Body-free: no transcript text ever rides on the feed row.
     expect(row).not.toHaveProperty("transcript");
     expect(JSON.stringify(row?.subagentRun)).not.toMatch(/transcript/i);
+  });
+
+  it("keeps a durable active manager row so mobile can mount live transcript polling", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-subagent-active"),
+      projectId: ProjectId.make("project-1"),
+      title: "Active durable subagent",
+      activities: [
+        makeActivity({
+          id: EventId.make("task-active"),
+          kind: "task.updated",
+          summary: "Task running",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            taskId: "sub-active",
+            timelineBypass: true,
+            status: "running",
+            subagentRun: {
+              runId: "sub-active",
+              runNumber: 8,
+              status: "active",
+              historyAvailability: "durable",
+            },
+          },
+        }),
+      ],
+    });
+
+    const row = activityGroupRow(buildThreadFeed(thread));
+    expect(row?.subagentRun).toEqual({
+      runId: "sub-active",
+      runNumber: 8,
+      status: "active",
+      terminalReason: null,
+      historyAvailability: "durable",
+    });
+    expect(row?.canExpand).toBe(true);
+  });
+
+  it("keeps unrelated nonterminal timeline-bypass updates hidden", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-non-subagent-bypass"),
+      projectId: ProjectId.make("project-1"),
+      title: "Background update",
+      activities: [
+        makeActivity({
+          id: EventId.make("task-background"),
+          kind: "task.updated",
+          summary: "Background task running",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: {
+            taskId: "background-1",
+            timelineBypass: true,
+            status: "running",
+          },
+        }),
+      ],
+    });
+
+    expect(buildThreadFeed(thread)).toHaveLength(0);
   });
 
   it("keeps summary-only rows without a durable-expand allowance", () => {

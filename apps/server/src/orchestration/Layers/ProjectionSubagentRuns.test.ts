@@ -22,8 +22,8 @@ const layer = it.layer(
   OrchestrationProjectionPipelineLive.pipe(
     Layer.provideMerge(OrchestrationEventStoreLive),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "subagent-runs-" })),
-    // 046 is registered by the integrator in Migrations.ts; until then
-    // focused tests apply the additive run-table columns themselves.
+    // Apply 046 directly so this focused projector test stays isolated from
+    // the full migration manifest.
     Layer.provideMerge(Layer.effectDiscard(Migration046)),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(NodeServices.layer),

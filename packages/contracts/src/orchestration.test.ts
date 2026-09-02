@@ -1306,14 +1306,24 @@ it("bounds transcript pages and keeps query bounds exclusive and optional", () =
   assert.strictEqual(SUBAGENT_TRANSCRIPT_RETAINED_PER_RUN, 500);
   assert.strictEqual(SUBAGENT_TRANSCRIPT_FIELD_MAX_CODE_POINTS, 4_096);
 
-  const input = expectSome(decodeGetSubagentTranscriptInput({ runId: "pi:abc:act-1:sa-1" }));
+  const target = { threadId: "thread-1", runId: "pi:abc:act-1:sa-1" };
+  const input = expectSome(decodeGetSubagentTranscriptInput(target));
   assert.strictEqual(input.afterSequence, undefined);
+  assert.strictEqual(input.beforeSequence, undefined);
   assert.strictEqual(
-    decodeGetSubagentTranscriptInput({ runId: "pi:abc:act-1:sa-1", afterSequence: 5 })._tag,
+    decodeGetSubagentTranscriptInput({ ...target, afterSequence: 5 })._tag,
     "Some",
   );
   assert.strictEqual(
-    decodeGetSubagentTranscriptInput({ runId: "pi:abc:act-1:sa-1", afterSequence: -1 })._tag,
+    decodeGetSubagentTranscriptInput({ ...target, beforeSequence: 5 })._tag,
+    "Some",
+  );
+  assert.strictEqual(
+    decodeGetSubagentTranscriptInput({ ...target, afterSequence: -1 })._tag,
+    "None",
+  );
+  assert.strictEqual(
+    decodeGetSubagentTranscriptInput({ ...target, afterSequence: 1, beforeSequence: 2 })._tag,
     "None",
   );
 

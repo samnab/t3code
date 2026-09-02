@@ -50,6 +50,8 @@ import { ProjectionProject } from "../../persistence/Services/ProjectionProjects
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
 import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
+import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/ProjectionSubagentTranscripts.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
@@ -359,6 +361,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const sql = yield* SqlClient.SqlClient;
   const projectionSubagentRunRepository = yield* ProjectionSubagentRunRepository;
+  const projectionSubagentTranscriptStore = yield* ProjectionSubagentTranscriptStore;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const repositoryIdentityResolutionConcurrency = 4;
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
@@ -2868,6 +2871,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getShellSnapshot,
     getArchivedShellSnapshot,
     searchThreads,
+    getSubagentTranscript: projectionSubagentTranscriptStore.readPage,
     getSnapshotSequence,
     getCounts,
     getActiveProjectByWorkspaceRoot,
@@ -2884,4 +2888,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 export const OrchestrationProjectionSnapshotQueryLive = Layer.effect(
   ProjectionSnapshotQuery,
   makeProjectionSnapshotQuery,
-).pipe(Layer.provide(ProjectionSubagentRunRepositoryLive));
+).pipe(
+  Layer.provide(ProjectionSubagentRunRepositoryLive),
+  Layer.provide(ProjectionSubagentTranscriptStoreLive),
+);

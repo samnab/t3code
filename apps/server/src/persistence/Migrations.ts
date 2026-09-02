@@ -58,6 +58,7 @@ import Migration0042 from "./Migrations/042_ProjectionThreadLinkedPullRequest.ts
 import Migration0043 from "./Migrations/043_ProjectionThreadsUnsettledAt.ts";
 import Migration0044 from "./Migrations/044_ProjectionSubagentRuns.ts";
 import Migration0045 from "./Migrations/045_ProjectionThreadGoal.ts";
+import Migration0046 from "./Migrations/046_ProjectionSubagentTranscripts.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -115,6 +116,7 @@ export const migrationEntries = [
   [43, "ProjectionThreadsUnsettledAt", Migration0043],
   [44, "ProjectionSubagentRuns", Migration0044],
   [45, "ProjectionThreadGoal", Migration0045],
+  [46, "ProjectionSubagentTranscripts", Migration0046],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

@@ -31,6 +31,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { it as effectIt } from "@effect/vitest";
@@ -183,6 +184,7 @@ function createProviderServiceHarness() {
  */
 function createRecordingAdapterRegistry() {
   const routed: ProviderSubagentBindingResultInput[] = [];
+  const routedReceipts = Effect.runSync(Queue.unbounded<void>());
   let failFirstAttempts = 0;
   let attempts = 0;
   const managerId = "mgr-fake-1";
@@ -205,6 +207,7 @@ function createRecordingAdapterRegistry() {
           return yield* new SubagentControlError({ reason: "timeout" });
         }
         routed.push(input);
+        yield* Queue.offer(routedReceipts, undefined);
         return { accepted: true } as const;
       }),
   };
@@ -246,17 +249,9 @@ function createRecordingAdapterRegistry() {
     streamChanges: Stream.fromPubSub(changes),
     subscribeChanges: PubSub.subscribe(changes),
   };
-  const waitForRoutedCallsEffect = (count: number, timeoutMs = 4_000) =>
+  const waitForRoutedCallsEffect = (count: number) =>
     Effect.gen(function* () {
-      const deadline = (yield* Clock.currentTimeMillis) + timeoutMs;
-      while (routed.length < count) {
-        if ((yield* Clock.currentTimeMillis) >= deadline) {
-          return yield* Effect.die(
-            new Error(`Timed out waiting for ${count} routed binding results`),
-          );
-        }
-        yield* Effect.sleep(10);
-      }
+      while (routed.length < count) yield* Queue.take(routedReceipts);
       return routed;
     });
   return {
@@ -354,8 +349,8 @@ describe("ProviderRuntimeIngestion", () => {
       // engine, and the snapshot query (reader).
       Layer.provideMerge(ThreadBackgroundLiveness.layer),
       Layer.provideMerge(ThreadPlanProgress.layer),
-      // 046 is registered by the integrator in Migrations.ts; until then the
-      // harness applies the additive run-table columns itself.
+      // Apply 046 directly so this focused ingestion harness stays isolated
+      // from the full migration manifest.
       Layer.provideMerge(Layer.effectDiscard(Migration046)),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
@@ -2715,7 +2710,7 @@ describe("ProviderRuntimeIngestion", () => {
         ),
     );
 
-    const events = await Effect.runPromise(
+    const events = await runtime!.runPromise(
       Stream.runCollect(harness.engine.readEvents(0)).pipe(
         Effect.map((chunk) => Array.from(chunk)),
       ),

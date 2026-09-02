@@ -112,6 +112,7 @@ interface ProjectorDefinition {
 interface AttachmentSideEffects {
   readonly deletedThreadIds: Set<string>;
   readonly prunedThreadRelativePaths: Map<string, Set<string>>;
+  readonly postCommitEffects: Array<Effect.Effect<void>>;
 }
 
 const materializeAttachmentsForProjection = Effect.fn("materializeAttachmentsForProjection")(
@@ -1214,7 +1215,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
     const applySubagentRunsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applySubagentRunsProjection",
-    )(function* (event, _attachmentSideEffects) {
+    )(function* (event, attachmentSideEffects) {
       const runActivity = readSubagentRunActivity(event);
       if (runActivity === null) return;
 
@@ -1275,7 +1276,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         // opaque T3 run id exist, so only now may a `run-upsert-result` be
         // routed back to the manager. No transcript body is involved.
         if (evidence.runBirth !== undefined) {
-          yield* transcriptStore.signalStartCommitted({ runId: evidence.runId });
+          attachmentSideEffects.postCommitEffects.push(
+            transcriptStore.signalStartCommitted({ runId: evidence.runId }),
+          );
         }
         return;
       }
@@ -1823,6 +1826,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       const attachmentSideEffects: AttachmentSideEffects = {
         deletedThreadIds: new Set<string>(),
         prunedThreadRelativePaths: new Map<string, Set<string>>(),
+        postCommitEffects: [],
       };
 
       yield* sql.withTransaction(
@@ -1836,6 +1840,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           ),
         ),
       );
+
+      yield* Effect.forEach(attachmentSideEffects.postCommitEffects, (effect) => effect, {
+        concurrency: 1,
+        discard: true,
+      });
 
       yield* runAttachmentSideEffects(attachmentSideEffects).pipe(
         Effect.catch((cause) =>

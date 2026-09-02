@@ -331,7 +331,8 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
     return false;
   }
   const isTerminalTaskRow = activity.kind === "task.completed" || isTerminalBypassUpdate(activity);
-  if (payload.timelineBypass === true && !isTerminalTaskRow) {
+  const durableSubagent = extractSubagentRunMetadata(payload)?.historyAvailability === "durable";
+  if (payload.timelineBypass === true && !isTerminalTaskRow && !durableSubagent) {
     return true;
   }
   // agentId marks ownership, not "hide me": a NESTED AGENT's terminal row is
@@ -353,9 +354,17 @@ function deriveWorkLogEntries(
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
     if (activity.kind === "tool.started") continue;
-    if (activity.kind === "task.started") continue;
-    // Terminal bypassed updates pass: Codex children's only terminal signal.
-    if (activity.kind === "task.updated" && !isTerminalBypassUpdate(activity)) continue;
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : null;
+    const durableSubagent = extractSubagentRunMetadata(payload)?.historyAvailability === "durable";
+    if (activity.kind === "task.started" && !durableSubagent) continue;
+    // Terminal bypassed updates pass for Codex; durable active updates also
+    // pass so mobile can mount the live transcript disclosure.
+    if (activity.kind === "task.updated" && !isTerminalBypassUpdate(activity) && !durableSubagent) {
+      continue;
+    }
     if (activity.kind === "tool.progress") continue;
     if (activity.kind === "context-window.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;
@@ -386,10 +395,11 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   const commandPreview = extractToolCommand(payload);
   const changedFiles = extractChangedFiles(payload);
   const title = extractToolTitle(payload);
-  // task.updated included: terminal bypassed updates (Codex children's only
-  // terminal signal) must carry task identity so they collapse per child
-  // instead of stacking anonymous "Task idle" rows.
+  // task.started preserves allocating identity/history metadata; task.updated
+  // preserves terminal bypassed updates (Codex children's only terminal signal)
+  // so every lifecycle row collapses onto the same child without losing facts.
   const isTaskActivity =
+    activity.kind === "task.started" ||
     activity.kind === "task.progress" ||
     activity.kind === "task.completed" ||
     activity.kind === "task.updated";

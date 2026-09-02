@@ -9,6 +9,7 @@
 import type {
   CheckpointRef,
   OrchestrationCheckpointSummary,
+  OrchestrationGetSubagentTranscriptInput,
   OrchestrationProject,
   OrchestrationProjectShell,
   OrchestrationReadModel,
@@ -27,6 +28,7 @@ import type * as Option from "effect/Option";
 import type * as Effect from "effect/Effect";
 
 import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
+import type { ReadSubagentTranscriptPageResult } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 
 export interface ProjectionSnapshotCounts {
   readonly projectCount: number;
@@ -104,6 +106,14 @@ export interface ProjectionSnapshotQueryShape {
   readonly searchThreads: (
     input: OrchestrationSearchThreadsInput,
   ) => Effect.Effect<OrchestrationSearchThreadsResult, ProjectionRepositoryError>;
+
+  /** Pull-only child transcript side-store read with durable thread isolation. */
+  readonly getSubagentTranscript?: (
+    input: OrchestrationGetSubagentTranscriptInput,
+  ) => Effect.Effect<
+    ReadSubagentTranscriptPageResult | { readonly unavailable: "unknown-run" | "unavailable" },
+    ProjectionRepositoryError
+  >;
 
   /**
    * Read the latest projection snapshot sequence without hydrating read-model

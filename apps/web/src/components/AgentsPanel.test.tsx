@@ -91,7 +91,7 @@ describe("AgentsPanel child transcript disclosure", () => {
 
 describe("AgentsPanel transcript rendering semantics", () => {
   it("distinguishes eviction from never-observed gaps", () => {
-    expect(transcriptMarkerText("eviction", 4, 6)).toBe(
+    expect(transcriptMarkerText("evicted", 4, 6)).toBe(
       "Earlier transcript items were evicted (#4–#6).",
     );
     expect(transcriptMarkerText("gap", 4, 6)).toBe("Never-observed transcript gap (#4–#6).");

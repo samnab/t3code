@@ -67,6 +67,7 @@ import {
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetSnapshotError,
+  OrchestrationGetSubagentTranscriptError,
   OrchestrationSearchThreadsError,
   OrchestrationSearchThreadsInput,
   OrchestrationGetTurnDiffError,
@@ -1023,6 +1024,15 @@ export const WsOrchestrationSubagentControlCancelRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationGetSubagentTranscriptRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.getSubagentTranscript,
+  {
+    payload: OrchestrationRpcSchemas.getSubagentTranscript.input,
+    success: OrchestrationRpcSchemas.getSubagentTranscript.output,
+    error: Schema.Union([OrchestrationGetSubagentTranscriptError, EnvironmentAuthorizationError]),
+  },
+);
+
 export const WsSubscribeTerminalEventsRpc = Rpc.make(WS_METHODS.subscribeTerminalEvents, {
   payload: Schema.Struct({}),
   success: TerminalEvent,
@@ -1181,4 +1191,5 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationSubagentControlStatusRpc,
   WsOrchestrationSubagentControlSteerRpc,
   WsOrchestrationSubagentControlCancelRpc,
+  WsOrchestrationGetSubagentTranscriptRpc,
 );

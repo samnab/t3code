@@ -165,6 +165,7 @@ const FAKE_RUN_BIRTH = `rb${"a".repeat(22)}`;
 // Finalized items retained before the T3 id arrives; emitted only after the
 // run-upsert-result is accepted, mirroring the specified producer behavior.
 let retainedTranscriptItems = [];
+let boundTranscriptT3RunId = null;
 
 const transcriptItemRecord = (fields) =>
   managerRecord({
@@ -173,6 +174,7 @@ const transcriptItemRecord = (fields) =>
     runId: "sa-1",
     activationId: "act-1",
     runBirth: FAKE_RUN_BIRTH,
+    t3RunId: boundTranscriptT3RunId,
     ...fields,
   });
 
@@ -219,9 +221,12 @@ const handleManagerControl = (req, message) => {
       return;
     }
     t3Bindings.set(key, envelope.t3RunId);
-    managerRecord({ kind: "ack", id: envelope.id, accepted: true });
-    // Retained finalized items are emitted only after the accepted result.
+    boundTranscriptT3RunId = envelope.t3RunId;
+    // Retained finalized items are emitted only after the binding is accepted.
+    // The correlated ack follows those emissions, so a successful exchange
+    // proves that every pre-bind finalized item was flushed first.
     for (const emit of retainedTranscriptItems.splice(0)) emit();
+    managerRecord({ kind: "ack", id: envelope.id, accepted: true });
     return;
   }
   if (envelope.op === "steer" || envelope.op === "cancel") {
@@ -510,6 +515,22 @@ const handle = (req) => {
             model: "zai/glm-5.3-flash",
           });
         }
+        send({ type: "agent_settled" });
+        return;
+      }
+      if (message === "MANAGER_RUNBIRTH_WITHOUT_CAPABILITY") {
+        send({ type: "response", id: req.id, command: "prompt", success: true });
+        managerUpsert({
+          sequence: 1,
+          runId: "sa-1",
+          activationId: "act-1",
+          status: "running",
+          title: "malformed capability-absent run",
+          harness: "pi",
+          model: "zai/glm-5.3-flash",
+          runBirth: FAKE_RUN_BIRTH,
+          upsertSequence: 1,
+        });
         send({ type: "agent_settled" });
         return;
       }

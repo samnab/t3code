@@ -1984,9 +1984,9 @@ export const SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES = 256 * 1024;
 
 /**
  * One finalized transcript item of an enhanced-manager run. Text is redacted
- * and truncated at T3 boundaries before persistence; `truncated` marks T3's
- * own code-point cap, `upstreamTruncated` marks a producer that only saw a
- * pre-truncated preview.
+ * and truncated at T3 boundaries before persistence; `truncated` marks text
+ * capped at 4096 code points by the producer or T3, while `upstreamTruncated`
+ * marks a producer that only observed a pre-truncated preview.
  */
 export const SubagentTranscriptItem = Schema.Struct({
   kind: SubagentTranscriptItemKind,
@@ -2028,16 +2028,29 @@ export type SubagentTranscriptPageEntry = typeof SubagentTranscriptPageEntry.Typ
 
 /**
  * Read-only, pull-only keyset page of one run's side-store transcript.
- * `afterSequence` is an exclusive lower bound: each page returns the next
- * strictly-higher sequences, oldest first. Pages are capped at
+ * `afterSequence` is an exclusive lower bound for forward catch-up;
+ * `beforeSequence` is an exclusive upper bound for older navigation. They are
+ * mutually exclusive. Returned entries are always oldest first. Pages are capped at
  * {@link SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS} items and
  * {@link SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES} encoded payload, whichever
  * binds first.
  */
 export const OrchestrationGetSubagentTranscriptInput = Schema.Struct({
+  threadId: ThreadId,
   runId: RuntimeTaskId,
   afterSequence: Schema.optionalKey(NonNegativeInt),
-});
+  beforeSequence: Schema.optionalKey(NonNegativeInt),
+}).check(
+  Schema.makeFilter(
+    (input) =>
+      input.afterSequence === undefined ||
+      input.beforeSequence === undefined ||
+      new SchemaIssue.InvalidValue({
+        message: "afterSequence and beforeSequence are mutually exclusive",
+      }),
+    { identifier: "OrchestrationGetSubagentTranscriptInput" },
+  ),
+);
 export type OrchestrationGetSubagentTranscriptInput =
   typeof OrchestrationGetSubagentTranscriptInput.Type;
 

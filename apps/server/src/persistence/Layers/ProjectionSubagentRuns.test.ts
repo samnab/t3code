@@ -9,8 +9,8 @@ import Migration046 from "../Migrations/046_ProjectionSubagentTranscripts.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionSubagentRunRepository } from "../Services/ProjectionSubagentRuns.ts";
 
-// 046 is registered by the integrator in Migrations.ts; until then focused
-// tests apply the additive run-table columns on top of the memory database.
+// Apply 046 directly so this focused repository test stays isolated from the
+// full migration manifest.
 const withMigration046 = Layer.effectDiscard(Migration046);
 
 const layer = it.layer(
@@ -336,6 +336,9 @@ layer("ProjectionSubagentRunRepository", (it) => {
         assert.deepStrictEqual(binding, {
           runId,
           threadId: ThreadId.make("thread-binding"),
+          managerId: "manager-binding",
+          managerRunId: "sa-9",
+          activationId: "act-9",
           runBirth: "rbaaaaaaaaaaaaaaaaaaaaaa1",
           historyAvailability: "durable",
           lastTranscriptSequence: null,

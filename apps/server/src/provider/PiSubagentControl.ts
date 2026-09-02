@@ -17,7 +17,7 @@
  *
  * @module provider/PiSubagentControl
  */
-import { TrimmedNonEmptyString } from "@t3tools/contracts";
+import { RuntimeTaskId, TrimmedNonEmptyString } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -109,6 +109,8 @@ const TranscriptItemRecordSchema = Schema.Struct({
   runId: ManagerIdString,
   activationId: ManagerIdString,
   runBirth: ManagerRunBirth,
+  /** T3's opaque id from the accepted allocating run-upsert result. */
+  t3RunId: RuntimeTaskId,
   transcriptSequence: ManagerSequence,
   item: Schema.Struct({
     kind: Schema.Literals(["user", "assistant", "toolResult"]),
@@ -522,15 +524,27 @@ export function makeRunBindingTracker() {
   const install = (
     tuple: ManagerRunBindingTuple,
   ): { readonly ok: true } | { readonly ok: false; readonly conflict: string } => {
+    const existingT3Binding = byT3RunId.get(tuple.t3RunId);
+    if (existingT3Binding !== undefined) {
+      const identical =
+        existingT3Binding.managerId === tuple.managerId &&
+        existingT3Binding.nativeRunId === tuple.nativeRunId &&
+        existingT3Binding.activationId === tuple.activationId &&
+        existingT3Binding.runBirth === tuple.runBirth &&
+        existingT3Binding.upsertSequence === tuple.upsertSequence;
+      return identical
+        ? { ok: true }
+        : { ok: false, conflict: `T3 run ${tuple.t3RunId} already has a different binding` };
+    }
     for (const existing of byT3RunId.values()) {
       if (
         existing.managerId === tuple.managerId &&
         existing.nativeRunId === tuple.nativeRunId &&
         existing.activationId === tuple.activationId &&
-        existing.runBirth === tuple.runBirth &&
-        existing.upsertSequence === tuple.upsertSequence
+        existing.runBirth === tuple.runBirth
       ) {
-        return existing.t3RunId === tuple.t3RunId
+        return existing.upsertSequence === tuple.upsertSequence &&
+          existing.t3RunId === tuple.t3RunId
           ? { ok: true }
           : { ok: false, conflict: `binding already resolved to T3 run ${existing.t3RunId}` };
       }

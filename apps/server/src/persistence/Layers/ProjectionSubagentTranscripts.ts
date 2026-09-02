@@ -1,8 +1,8 @@
 import {
-  SUBAGENT_TRANSCRIPT_FIELD_MAX_CODE_POINTS,
   SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES,
   SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS,
   SUBAGENT_TRANSCRIPT_RETAINED_PER_RUN,
+  type RuntimeTaskId,
   type SubagentTranscriptItemKind,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
@@ -10,10 +10,9 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
+import { toPersistenceSqlError } from "../Errors.ts";
 import { ProjectionSubagentRunRepository } from "../Services/ProjectionSubagentRuns.ts";
 import {
   ProjectionSubagentTranscriptStore,
@@ -21,11 +20,11 @@ import {
   type ProjectionSubagentTranscriptStoreShape,
   type ReadSubagentTranscriptPageResult,
 } from "../Services/ProjectionSubagentTranscripts.ts";
-import { sanitizeSubagentTranscriptField } from "../subagentTranscriptSanitization.ts";
+import { sanitizeSubagentTranscriptText } from "../subagentTranscriptSanitization.ts";
 import { ProjectionSubagentRunRepositoryLive } from "./ProjectionSubagentRuns.ts";
 
-/** Receipts are bounded; late waiters resolve through completed deferreds. */
 const MAX_TRACKED_START_RECEIPTS = 1_024;
+const MAX_DURABLE_GAP_RANGES_PER_RUN = 128;
 
 interface StoredItemRow {
   readonly kind: SubagentTranscriptItemKind;
@@ -36,41 +35,94 @@ interface StoredItemRow {
   readonly createdAt: string | null;
 }
 
-interface EvictionRangeRow {
+interface SequenceRangeRow {
   readonly fromSequence: number;
   readonly toSequence: number;
 }
 
+interface ReplayWatermarkRow {
+  readonly runId: RuntimeTaskId;
+  readonly watermark: number;
+}
+
 type ReadEntry = ReadSubagentTranscriptPageResult["entries"][number];
-type EvictionMarker = Extract<ReadEntry, { readonly kind: "evicted" | "gap" }>;
-type ItemEntry = Exclude<ReadEntry, EvictionMarker>;
+type MarkerEntry = Extract<ReadEntry, { readonly kind: "evicted" | "gap" }>;
 
-const encodedEntryBytes = (entries: ReadonlyArray<ReadEntry>, candidate: ReadEntry) =>
-  Buffer.byteLength(JSON.stringify([...entries, candidate]), "utf8");
-
-const isEvicted = (ranges: ReadonlyArray<EvictionRangeRow>, sequence: number) =>
+const isCovered = (ranges: ReadonlyArray<SequenceRangeRow>, sequence: number) =>
   ranges.some((range) => sequence >= range.fromSequence && sequence <= range.toSequence);
 
-/** Highest contiguously covered sequence: stored row or eviction tombstone. */
 const contiguousWatermark = (
   watermark: number,
   stored: ReadonlyArray<{ readonly transcriptSequence: number }>,
-  ranges: ReadonlyArray<EvictionRangeRow>,
+  evictions: ReadonlyArray<SequenceRangeRow>,
 ) => {
   const storedSet = new Set(stored.map((row) => row.transcriptSequence));
   let candidate = watermark + 1;
-  while (storedSet.has(candidate) || isEvicted(ranges, candidate)) {
-    candidate += 1;
-  }
+  while (storedSet.has(candidate) || isCovered(evictions, candidate)) candidate += 1;
   return candidate - 1;
 };
+
+const durableGaps = (
+  stored: ReadonlyArray<{ readonly transcriptSequence: number }>,
+  evictions: ReadonlyArray<SequenceRangeRow>,
+) => {
+  const coverage = [
+    ...stored.map((row) => ({
+      fromSequence: row.transcriptSequence,
+      toSequence: row.transcriptSequence,
+    })),
+    ...evictions,
+  ].sort((left, right) => left.fromSequence - right.fromSequence);
+
+  const merged: Array<{ fromSequence: number; toSequence: number }> = [];
+  for (const range of coverage) {
+    const previous = merged.at(-1);
+    if (previous !== undefined && range.fromSequence <= previous.toSequence + 1) {
+      previous.toSequence = Math.max(previous.toSequence, range.toSequence);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+
+  const gaps: Array<{ fromSequence: number; toSequence: number }> = [];
+  let nextExpected = 1;
+  for (const range of merged) {
+    if (range.fromSequence > nextExpected) {
+      gaps.push({ fromSequence: nextExpected, toSequence: range.fromSequence - 1 });
+      if (gaps.length >= MAX_DURABLE_GAP_RANGES_PER_RUN) break;
+    }
+    nextExpected = Math.max(nextExpected, range.toSequence + 1);
+  }
+  return gaps;
+};
+
+const entryBounds = (entry: ReadEntry) =>
+  "transcriptSequence" in entry
+    ? { start: entry.transcriptSequence, end: entry.transcriptSequence }
+    : { start: entry.fromSequence, end: entry.toSequence };
+
+const clampEntry = (
+  entry: ReadEntry,
+  afterSequence: number | undefined,
+  beforeSequence: number | undefined,
+): ReadEntry | undefined => {
+  const { start, end } = entryBounds(entry);
+  const visibleStart = Math.max(start, (afterSequence ?? 0) + 1);
+  const visibleEnd = Math.min(end, (beforeSequence ?? Number.POSITIVE_INFINITY) - 1);
+  if (visibleStart > visibleEnd) return undefined;
+  if ("transcriptSequence" in entry) return entry;
+  return { ...entry, fromSequence: visibleStart, toSequence: visibleEnd };
+};
+
+const encodedPageBytes = (page: ReadSubagentTranscriptPageResult) =>
+  Buffer.byteLength(JSON.stringify(page), "utf8");
 
 const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const runs = yield* ProjectionSubagentRunRepository;
 
-  // ── durable-start receipts (the projector signals, ingestion waits) ──
-
+  // Completed deferreds remain available to late waiters until the bounded map
+  // evicts them, so signal-before-wait and wait-before-signal both rendezvous.
   const startReceipts = new Map<string, Deferred.Deferred<boolean>>();
 
   const receiptFor = (runId: string) =>
@@ -98,16 +150,22 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
       const deferred = yield* receiptFor(runId);
       return yield* Deferred.await(deferred).pipe(
         Effect.timeoutOption(Duration.millis(timeoutMs)),
-        Effect.map((settled) => Option.isSome(settled) && settled.value === true),
+        Effect.map((settled) => Option.isSome(settled) && settled.value),
       );
     });
 
-  // ── ingest ────────────────────────────────────────────────────
-
-  const evictionsOf = (runId: string) => sql<EvictionRangeRow>`
+  const evictionsOf = (runId: string) => sql<SequenceRangeRow>`
     SELECT from_sequence AS "fromSequence", to_sequence AS "toSequence"
     FROM subagent_transcript_evictions
     WHERE run_id = ${runId}
+    ORDER BY from_sequence
+  `;
+
+  const gapsOf = (runId: string) => sql<SequenceRangeRow>`
+    SELECT from_sequence AS "fromSequence", to_sequence AS "toSequence"
+    FROM subagent_transcript_gaps
+    WHERE run_id = ${runId}
+    ORDER BY from_sequence
   `;
 
   const recordEvictionRange = (
@@ -117,9 +175,6 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
     evictedAt: string,
     known: Array<{ fromSequence: number; toSequence: number }>,
   ) => {
-    // Coalesce with an adjacent predecessor range; ranges only ever cover
-    // observed sequences, so adjacency (to == from - 1) can never bridge a
-    // never-observed gap.
     const adjacent = known.find((range) => range.toSequence === fromSequence - 1);
     if (adjacent !== undefined) {
       adjacent.toSequence = toSequence;
@@ -145,7 +200,13 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
       .withTransaction(
         Effect.gen(function* () {
           const binding = yield* runs.getRunBinding({ runId: input.runId });
-          if (binding === null || binding.runBirth !== input.runBirth) {
+          const bindingMatches =
+            binding !== null &&
+            binding.managerId === input.managerId &&
+            binding.managerRunId === input.managerRunId &&
+            binding.activationId === input.activationId &&
+            binding.runBirth === input.runBirth;
+          if (!bindingMatches) {
             return {
               outcome: "rejected-binding",
               watermark: binding?.lastTranscriptSequence ?? 0,
@@ -154,52 +215,46 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
 
           const evictions = yield* evictionsOf(input.runId);
           const knownRanges = evictions.map((range) => ({ ...range }));
-          if (isEvicted(evictions, input.item.transcriptSequence)) {
+          if (isCovered(evictions, input.item.transcriptSequence)) {
             return {
               outcome: "dropped-evicted",
               watermark: binding.lastTranscriptSequence ?? 0,
             } satisfies IngestSubagentTranscriptResult;
           }
 
-          // T3-boundary redaction before the code-point cap; the producer's
-          // own truncation flags are preserved alongside T3's.
-          const sanitized = sanitizeSubagentTranscriptField(
-            input.item.text,
-            SUBAGENT_TRANSCRIPT_FIELD_MAX_CODE_POINTS,
-          );
+          const sanitized = sanitizeSubagentTranscriptText({
+            text: input.item.text,
+            upstreamTruncated: input.item.upstreamTruncated,
+          });
           const inserted = yield* sql`
-          INSERT OR IGNORE INTO subagent_transcript_items (
-            run_id,
-            transcript_sequence,
-            kind,
-            text,
-            truncated,
-            upstream_truncated,
-            created_at,
-            stored_at
-          ) VALUES (
-            ${input.runId},
-            ${input.item.transcriptSequence},
-            ${input.item.kind},
-            ${sanitized.text},
-            ${sanitized.truncated || input.item.truncated ? 1 : 0},
-            ${input.item.upstreamTruncated ? 1 : 0},
-            ${input.item.createdAt},
-            ${input.observedAt}
-          )
-          RETURNING transcript_sequence
-        `;
+            INSERT OR IGNORE INTO subagent_transcript_items (
+              run_id,
+              transcript_sequence,
+              kind,
+              text,
+              truncated,
+              upstream_truncated,
+              created_at,
+              stored_at
+            ) VALUES (
+              ${input.runId},
+              ${input.item.transcriptSequence},
+              ${input.item.kind},
+              ${sanitized.text},
+              ${sanitized.truncated || input.item.truncated ? 1 : 0},
+              ${sanitized.upstreamTruncated ? 1 : 0},
+              ${input.item.createdAt},
+              ${input.observedAt}
+            )
+            RETURNING transcript_sequence
+          `;
 
-          // Retention: when the cap is exceeded, evict the lowest retained
-          // sequences and tombstone them in the same transaction. Ranges only
-          // ever cover stored (observed) sequences, so they never bridge a
-          // never-observed gap; adjacent evicted rows coalesce into one range.
           const retained = yield* sql<{ readonly transcriptSequence: number }>`
-          SELECT transcript_sequence AS "transcriptSequence"
-          FROM subagent_transcript_items
-          WHERE run_id = ${input.runId}
-          ORDER BY transcript_sequence
-        `;
+            SELECT transcript_sequence AS "transcriptSequence"
+            FROM subagent_transcript_items
+            WHERE run_id = ${input.runId}
+            ORDER BY transcript_sequence
+          `;
           if (retained.length > SUBAGENT_TRANSCRIPT_RETAINED_PER_RUN) {
             const evictedRows = retained.slice(
               0,
@@ -212,30 +267,43 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
             for (const row of evictedRows.slice(1)) {
               if (row.transcriptSequence === rangeEnd + 1) {
                 rangeEnd = row.transcriptSequence;
-                continue;
+              } else {
+                yield* flushRange();
+                rangeStart = row.transcriptSequence;
+                rangeEnd = rangeStart;
               }
-              yield* flushRange();
-              rangeStart = row.transcriptSequence;
-              rangeEnd = rangeStart;
             }
             yield* flushRange();
             yield* sql`
-            DELETE FROM subagent_transcript_items
-            WHERE run_id = ${input.runId}
-              AND transcript_sequence <= ${evictedRows[evictedRows.length - 1]!.transcriptSequence}
-          `;
+              DELETE FROM subagent_transcript_items
+              WHERE run_id = ${input.runId}
+                AND transcript_sequence <= ${evictedRows.at(-1)!.transcriptSequence}
+            `;
           }
 
           const storedAfter = yield* sql<{ readonly transcriptSequence: number }>`
-          SELECT transcript_sequence AS "transcriptSequence"
-          FROM subagent_transcript_items
-          WHERE run_id = ${input.runId}
-            AND transcript_sequence > ${binding.lastTranscriptSequence ?? 0}
-        `;
+            SELECT transcript_sequence AS "transcriptSequence"
+            FROM subagent_transcript_items
+            WHERE run_id = ${input.runId}
+            ORDER BY transcript_sequence
+          `;
+          const currentEvictions = yield* evictionsOf(input.runId);
+          const gaps = durableGaps(storedAfter, currentEvictions);
+          yield* sql`DELETE FROM subagent_transcript_gaps WHERE run_id = ${input.runId}`;
+          yield* Effect.forEach(
+            gaps,
+            (gap) => sql`
+              INSERT INTO subagent_transcript_gaps
+                (run_id, from_sequence, to_sequence, observed_at)
+              VALUES (${input.runId}, ${gap.fromSequence}, ${gap.toSequence}, ${input.observedAt})
+            `,
+            { concurrency: 1, discard: true },
+          );
+
           const watermark = contiguousWatermark(
             binding.lastTranscriptSequence ?? 0,
             storedAfter,
-            yield* evictionsOf(input.runId),
+            currentEvictions,
           );
           if (watermark > (binding.lastTranscriptSequence ?? 0)) {
             yield* runs.advanceTranscriptWatermark({
@@ -251,12 +319,8 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
         }),
       )
       .pipe(
-        Effect.mapError((cause) =>
-          Schema.isSchemaError(cause)
-            ? toPersistenceDecodeError("ProjectionSubagentTranscriptStore.ingestItem:decodeRow")(
-                cause,
-              )
-            : toPersistenceSqlError("ProjectionSubagentTranscriptStore.ingestItem:query")(cause),
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSubagentTranscriptStore.ingestItem:query"),
         ),
       );
 
@@ -269,22 +333,42 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
         runId,
         watermark: binding?.lastTranscriptSequence ?? 0,
       })),
-    ).pipe(
-      Effect.mapError(
-        toPersistenceSqlError("ProjectionSubagentTranscriptStore.readWatermarks:query"),
-      ),
     );
+
+  const readWatermarksForManager: ProjectionSubagentTranscriptStoreShape["readWatermarksForManager"] =
+    (input) =>
+      sql<ReplayWatermarkRow>`
+        SELECT
+          run_id AS "runId",
+          COALESCE(last_transcript_sequence, 0) AS "watermark"
+        FROM projection_subagent_runs
+        WHERE thread_id = ${input.threadId}
+          AND owner_id = ${input.managerId}
+          AND run_birth IS NOT NULL
+          AND history_availability = 'durable'
+        ORDER BY run_number
+      `.pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            runId: row.runId,
+            watermark: row.watermark,
+          })),
+        ),
+        Effect.mapError(
+          toPersistenceSqlError("ProjectionSubagentTranscriptStore.readWatermarksForManager:query"),
+        ),
+      );
 
   const readPage: ProjectionSubagentTranscriptStoreShape["readPage"] = (input) =>
     Effect.gen(function* () {
       const binding = yield* runs.getRunBinding({ runId: input.runId });
-      if (binding === null) {
+      if (binding === null || binding.threadId !== input.threadId) {
         return { unavailable: "unknown-run" } as const;
       }
       if (binding.historyAvailability !== "durable") {
         return { unavailable: "unavailable" } as const;
       }
-      const after = input.afterSequence ?? 0;
+
       const rows = yield* sql<StoredItemRow>`
         SELECT
           kind,
@@ -295,76 +379,52 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
           created_at AS "createdAt"
         FROM subagent_transcript_items
         WHERE run_id = ${input.runId}
-          AND transcript_sequence > ${after}
         ORDER BY transcript_sequence
-        LIMIT ${SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS + 1}
       `;
-      const rawEvictions = yield* evictionsOf(input.runId);
-      // Clamp ranges to the exclusive bound so a range overlapping the bound
-      // renders only its visible part.
-      const evictions = rawEvictions
-        .filter((range) => range.toSequence > after)
-        .map(
-          (range): EvictionMarker => ({
-            kind: "evicted",
-            fromSequence: Math.max(range.fromSequence, after + 1),
-            toSequence: range.toSequence,
-          }),
+      const items: ReadonlyArray<ReadEntry> = rows.map((row) => ({
+        kind: row.kind,
+        transcriptSequence: row.transcriptSequence,
+        text: row.text,
+        truncated: row.truncated === 1,
+        upstreamTruncated: row.upstreamTruncated === 1,
+        createdAt: row.createdAt,
+      }));
+      const evictions: ReadonlyArray<MarkerEntry> = (yield* evictionsOf(input.runId)).map(
+        (range) => ({ kind: "evicted", ...range }),
+      );
+      const gaps: ReadonlyArray<MarkerEntry> = (yield* gapsOf(input.runId)).map((range) => ({
+        kind: "gap",
+        ...range,
+      }));
+      const ascending = [...items, ...evictions, ...gaps]
+        .map((entry) => clampEntry(entry, input.afterSequence, input.beforeSequence))
+        .filter((entry): entry is ReadEntry => entry !== undefined)
+        .sort((left, right) => entryBounds(left).start - entryBounds(right).start);
+      const forward = input.afterSequence !== undefined;
+      const ordered = forward ? ascending : ascending.toReversed();
+      const selected = new Array<ReadEntry>();
+      let consumed = 0;
+      for (const entry of ordered) {
+        if (selected.length >= SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS) break;
+        const nextSelected = [...selected, entry];
+        const nextEntries = [...nextSelected].sort(
+          (left, right) => entryBounds(left).start - entryBounds(right).start,
         );
-
-      const entries = new Array<ReadEntry>();
-      // Merge stored items with eviction and gap markers in sequence order. A
-      // gap marker covers never-observed sequences between two covered
-      // positions; the unknown tail above the last entry is never a gap.
-      let lastCovered = after;
-      let itemIndex = 0;
-      let evictionIndex = 0;
-      let capped = false;
-      while (itemIndex < rows.length || evictionIndex < evictions.length) {
-        const item: ItemEntry | undefined =
-          itemIndex < rows.length
-            ? {
-                kind: rows[itemIndex]!.kind,
-                transcriptSequence: rows[itemIndex]!.transcriptSequence,
-                text: rows[itemIndex]!.text,
-                truncated: rows[itemIndex]!.truncated === 1,
-                upstreamTruncated: rows[itemIndex]!.upstreamTruncated === 1,
-                createdAt: rows[itemIndex]!.createdAt,
-              }
-            : undefined;
-        const eviction = evictions[evictionIndex];
-        const itemIsNext =
-          item !== undefined &&
-          (eviction === undefined || item.transcriptSequence < eviction.fromSequence);
-        const next: ReadEntry = itemIsNext ? item! : eviction!;
-        const nextSequence = itemIsNext ? item!.transcriptSequence : eviction!.fromSequence;
-        if (nextSequence > lastCovered + 1 && entries.length > 0) {
-          entries.push({
-            kind: "gap",
-            fromSequence: lastCovered + 1,
-            toSequence: nextSequence - 1,
-          });
-        }
-        if (
-          entries.length >= SUBAGENT_TRANSCRIPT_MAX_PAGE_ITEMS ||
-          encodedEntryBytes(entries, next) > SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES
-        ) {
-          capped = entries.length > 0;
-          break;
-        }
-        entries.push(next);
-        lastCovered = itemIsNext
-          ? item!.transcriptSequence
-          : Math.max(lastCovered, eviction!.toSequence);
-        if (itemIsNext) itemIndex += 1;
-        else evictionIndex += 1;
+        const candidate = {
+          entries: nextEntries,
+          watermark: binding.lastTranscriptSequence ?? 0,
+          hasMore: consumed + 1 < ordered.length,
+        } satisfies ReadSubagentTranscriptPageResult;
+        if (encodedPageBytes(candidate) > SUBAGENT_TRANSCRIPT_MAX_PAGE_BYTES) break;
+        selected.push(entry);
+        consumed += 1;
       }
 
-      const page: ReadSubagentTranscriptPageResult = {
-        entries,
+      const page = {
+        entries: selected.sort((left, right) => entryBounds(left).start - entryBounds(right).start),
         watermark: binding.lastTranscriptSequence ?? 0,
-        hasMore: capped || itemIndex < rows.length || evictionIndex < evictions.length,
-      };
+        hasMore: consumed < ordered.length,
+      } satisfies ReadSubagentTranscriptPageResult;
       return page;
     }).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionSubagentTranscriptStore.readPage:query")),
@@ -376,6 +436,7 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
     ingestItem,
     getWatermark,
     readWatermarks,
+    readWatermarksForManager,
     readPage,
   } satisfies ProjectionSubagentTranscriptStoreShape;
 });

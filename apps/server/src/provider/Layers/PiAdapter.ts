@@ -860,7 +860,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ? { steer: { enabled: false }, cancel: { enabled: false } }
           : deriveControlAvailabilities(control.capabilities);
       const ownerRouted = controls.steer.enabled || controls.cancel.enabled;
-      const transcriptCapable = run.runBirth !== undefined && transcriptSinkOption._tag === "Some";
+      const transcriptCapable =
+        control?.capabilities.childTranscripts === true &&
+        run.runBirth !== undefined &&
+        transcriptSinkOption._tag === "Some";
       return {
         taskType: "subagent" as const,
         ...(run.title !== undefined ? { title: run.title } : {}),
@@ -878,9 +881,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           ownerEpoch: ctx.processEpoch,
           nativeRunId: run.nativeRunId,
           activationId: run.activationId,
-          // Phase 1.5 binding evidence rides only on enhanced-manager starts.
-          ...(run.runBirth !== undefined ? { runBirth: run.runBirth } : {}),
-          ...(run.upsertSequence !== undefined ? { upsertSequence: run.upsertSequence } : {}),
+          // Phase 1.5 binding evidence rides only when both sides activated
+          // child transcripts; malformed capability-absent upserts remain
+          // summary-only and cannot trigger a binding-result route.
+          ...(transcriptCapable && run.runBirth !== undefined ? { runBirth: run.runBirth } : {}),
+          ...(transcriptCapable && run.upsertSequence !== undefined
+            ? { upsertSequence: run.upsertSequence }
+            : {}),
           status,
           ...(terminalReason !== undefined ? { terminalReason } : {}),
           controlAvailability:
@@ -1069,22 +1076,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       if (ctx.managerControl?.capabilities.childTranscripts !== true) return;
       if (transcriptSinkOption._tag !== "Some") return;
       if (ctx.managerControl.managerId !== record.managerId) return;
-      const tuple = ctx.runBindings.findByNativeBinding({
-        managerId: record.managerId,
-        nativeRunId: record.runId,
-        activationId: record.activationId,
-        runBirth: record.runBirth,
-      });
-      if (tuple === undefined) {
-        yield* Effect.logDebug("Dropped Pi subagent transcript item without a validated binding.", {
-          nativeRunId: record.runId,
-          transcriptSequence: record.transcriptSequence,
-        });
-        return;
-      }
       const observedAt = yield* nowIso;
       const ingested = yield* transcriptSinkOption.value.ingestItem({
-        runId: RuntimeTaskId.make(tuple.t3RunId),
+        runId: RuntimeTaskId.make(record.t3RunId),
+        managerId: record.managerId,
+        managerRunId: record.runId,
+        activationId: record.activationId,
         runBirth: record.runBirth,
         item: {
           kind: record.item.kind,
@@ -1098,7 +1095,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       });
       if (ingested.outcome === "rejected-binding") {
         yield* Effect.logDebug("Rejected Pi subagent transcript item binding.", {
-          runId: tuple.t3RunId,
+          runId: record.t3RunId,
           transcriptSequence: record.transcriptSequence,
         });
       }
@@ -1202,19 +1199,26 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         });
       });
 
-    /** Durable replay watermarks for the runs this session still tracks. */
+    /**
+     * Durable replay watermarks for every binding owned by this manager in
+     * the current thread, including terminal and zero-watermark runs.
+     */
     const replayWatermarksFor = (
       ctx: PiSessionContext,
+      managerId: string | undefined = ctx.managerControl?.managerId,
     ): Effect.Effect<ReadonlyArray<{ readonly runId: string; readonly watermark: number }>> =>
-      transcriptSinkOption._tag === "Some"
-        ? transcriptSinkOption.value.readWatermarks(Array.from(ctx.managerRuns.keys())).pipe(
-            Effect.map((entries) =>
-              entries
-                .filter((entry) => entry.watermark > 0)
-                .map((entry) => ({ runId: String(entry.runId), watermark: entry.watermark })),
-            ),
-            Effect.catchCause(() => Effect.succeed([])),
-          )
+      transcriptSinkOption._tag === "Some" && managerId !== undefined
+        ? transcriptSinkOption.value
+            .readWatermarksForManager({ threadId: ctx.threadId, managerId })
+            .pipe(
+              Effect.map((entries) =>
+                entries.map((entry) => ({
+                  runId: String(entry.runId),
+                  watermark: entry.watermark,
+                })),
+              ),
+              Effect.catchCause(() => Effect.succeed([])),
+            )
         : Effect.succeed([]);
 
     const refreshManagerControl = (ctx: PiSessionContext, expectedManagerId: string) =>
@@ -1943,8 +1947,33 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           });
           ctx.managerControl = managerNegotiation.control;
           ctx.managerReason = managerNegotiation.reason;
-          ctx.managerRegistry = makeManagerRunRegistry(managerNegotiation.control?.managerId ?? "");
-          if (managerNegotiation.control === null) {
+          if (ctx.managerControl?.capabilities.childTranscripts === true) {
+            const replayManagerId = ctx.managerControl.managerId;
+            const replay = yield* replayWatermarksFor(ctx, replayManagerId);
+            if (replay.length > 0) {
+              const replayNegotiation = yield* negotiateManagerControl({
+                threadId: input.threadId,
+                connection,
+                extensionCommandNames,
+                pendingManagerRecords,
+                replay,
+              });
+              if (
+                replayNegotiation.control !== null &&
+                replayNegotiation.control.managerId === replayManagerId
+              ) {
+                ctx.managerControl = replayNegotiation.control;
+                ctx.managerReason = replayNegotiation.reason;
+              } else {
+                ctx.managerControl = null;
+                ctx.managerReason =
+                  replayNegotiation.reason ??
+                  "Pi subagent manager identity changed during replay negotiation.";
+              }
+            }
+          }
+          ctx.managerRegistry = makeManagerRunRegistry(ctx.managerControl?.managerId ?? "");
+          if (ctx.managerControl === null) {
             ctx.pendingManagerRunUpserts.length = 0;
             ctx.managerNegotiating = false;
           } else {
