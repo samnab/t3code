@@ -200,7 +200,16 @@ interface PendingPiSubagentTerminal {
 }
 
 /** assistant/reasoning streaming items keyed by `messageId:contentIndex`. */
-type StreamItemsMap = Map<string, { itemId: string; kind: StreamItemKind; started: boolean }>;
+type StreamItemsMap = Map<
+  string,
+  {
+    itemId: string;
+    kind: StreamItemKind;
+    contentIndex: number;
+    started: boolean;
+    hasContent: boolean;
+  }
+>;
 
 interface PiResumeCursor {
   readonly sessionPath: string;
@@ -1642,7 +1651,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 const key = `${messageId}:${contentIndex}`;
                 let item = ctx.streamItems.get(key);
                 if (item === undefined) {
-                  item = { itemId: `msg:${key}`, kind, started: false };
+                  item = {
+                    itemId: `msg:${key}`,
+                    kind,
+                    contentIndex,
+                    started: false,
+                    hasContent: false,
+                  };
                   ctx.streamItems.set(key, item);
                 }
                 if (!item.started) {
@@ -1656,11 +1671,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                     nativeItemId: item.itemId,
                   });
                 }
+                const text = recordString(delta, "delta") ?? "";
+                if (text.length > 0) item.hasContent = true;
                 yield* emitContentDelta({
                   ctx,
                   turn,
                   streamKind: kind === "assistant_message" ? "assistant_text" : "reasoning_text",
-                  delta: recordString(delta, "delta") ?? "",
+                  delta: text,
                   contentIndex,
                   nativeItemId: item.itemId,
                 });
@@ -1670,6 +1687,57 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 if (turn === null) return;
                 const message = event["message"];
                 if (recordString(message, "role") !== "assistant") return;
+                turn.sawAgentActivity = true;
+                const content = recordField(message, "content");
+                if (Array.isArray(content)) {
+                  for (const [contentIndex, block] of content.entries()) {
+                    const blockType = recordString(block, "type");
+                    const kind: StreamItemKind | undefined =
+                      blockType === "text"
+                        ? "assistant_message"
+                        : blockType === "thinking"
+                          ? "reasoning"
+                          : undefined;
+                    const text =
+                      blockType === "text"
+                        ? recordString(block, "text")
+                        : blockType === "thinking"
+                          ? recordString(block, "thinking")
+                          : undefined;
+                    if (kind === undefined || text === undefined || text.length === 0) continue;
+                    let item = [...ctx.streamItems.values()].find(
+                      (candidate) =>
+                        candidate.kind === kind && candidate.contentIndex === contentIndex,
+                    );
+                    if (item?.hasContent === true) continue;
+                    if (item === undefined) {
+                      const itemId = `msg:end:${yield* nextUuid}:${contentIndex}`;
+                      item = { itemId, kind, contentIndex, started: false, hasContent: false };
+                      ctx.streamItems.set(itemId, item);
+                    }
+                    if (!item.started) {
+                      item.started = true;
+                      yield* emitItem({
+                        ctx,
+                        turn,
+                        phase: "item.started",
+                        itemType: kind,
+                        status: "inProgress",
+                        nativeItemId: item.itemId,
+                      });
+                    }
+                    item.hasContent = true;
+                    yield* emitContentDelta({
+                      ctx,
+                      turn,
+                      streamKind:
+                        kind === "assistant_message" ? "assistant_text" : "reasoning_text",
+                      delta: text,
+                      contentIndex,
+                      nativeItemId: item.itemId,
+                    });
+                  }
+                }
                 yield* resolveSettledStreamItems(ctx, turn);
                 if (recordString(message, "stopReason") === "error" && turn.failure === null) {
                   turn.failure = {

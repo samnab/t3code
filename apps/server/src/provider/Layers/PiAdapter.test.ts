@@ -255,6 +255,30 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
+  it.live("projects assistant content delivered only by message_end", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "MESSAGE_END_ONLY" });
+      yield* collector.waitFor(
+        (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
+      );
+      const deltas = collector.events
+        .filter((event) => event.type === "content.delta")
+        .map((event) => payloadOf(event).delta);
+      expect(deltas).toEqual(["Non-streamed reply"]);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
   it.live("projects manager-owned subagent lifecycle through task events", () =>
     Effect.gen(function* () {
       const fixture = makeFixture();

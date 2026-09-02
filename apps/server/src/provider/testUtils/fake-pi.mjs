@@ -77,7 +77,14 @@ const emitAgentRun = () => {
       delta: "world",
     },
   });
-  send({ type: "message_end", message: { role: "assistant", stopReason: "stop" } });
+  send({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "Hello world" }],
+      stopReason: "stop",
+    },
+  });
   send({
     type: "tool_execution_start",
     toolCallId: "t1",
@@ -616,6 +623,21 @@ const handle = (req) => {
       if (message === "WAIT_FOR_ABORT") {
         isStreaming = true;
         send({ type: "agent_start" });
+        return;
+      }
+      if (message === "MESSAGE_END_ONLY") {
+        isStreaming = true;
+        send({ type: "agent_start" });
+        send({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Non-streamed reply" }],
+            stopReason: "stop",
+          },
+        });
+        isStreaming = false;
+        send({ type: "agent_settled" });
         return;
       }
       if (message === "UI_WAIT_FOR_ABORT") {
