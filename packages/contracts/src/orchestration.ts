@@ -650,6 +650,12 @@ export const OrchestrationThreadShell = Schema.Struct({
    */
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
   /**
+   * Count of live background shells/watch loops (the "monitors" bucket
+   * behind backgroundLiveness), for a sidebar badge. Optional/absent = 0 so
+   * old servers still decode.
+   */
+  backgroundProcessCount: Schema.optional(Schema.Number),
+  /**
    * Current plan step while a turn runs, for the Working indicators
    * (sidebar row, in-chat working line). Cleared when the turn settles —
    * never persists as stale UI. Optional so old servers/clients interop.

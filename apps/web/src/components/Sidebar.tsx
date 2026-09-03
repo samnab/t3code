@@ -269,6 +269,10 @@ function terminalProcessLabel(count: number): string {
   return `${count} terminal ${count === 1 ? "process" : "processes"} running`;
 }
 
+function backgroundProcessLabel(count: number): string {
+  return `${count} background ${count === 1 ? "process" : "processes"} running`;
+}
+
 function SidebarThreadTooltip({
   thread,
   projectTitle,
@@ -1218,6 +1222,23 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       <TerminalIcon className={cn("size-3.5", terminalStatus.pulse && "animate-status-pulse")} />
     </span>
   ) : null;
+  // Distinct from terminalStatusIcon (open terminal panes): this counts live
+  // agent-launched background shells/watch loops, and shows alongside the
+  // status label regardless of Working/Monitoring/Ready (#backgroundLiveness).
+  const backgroundProcessCount = thread.backgroundProcessCount ?? 0;
+  const backgroundProcessIcon =
+    backgroundProcessCount > 0 ? (
+      <span
+        role="img"
+        aria-label={backgroundProcessLabel(backgroundProcessCount)}
+        title={backgroundProcessLabel(backgroundProcessCount)}
+        data-testid={`sidebar-background-process-count-${thread.id}`}
+        className="inline-flex shrink-0 items-center gap-0.5 text-muted-foreground/65"
+      >
+        <TerminalIcon aria-hidden className="size-3.5" />
+        <span className="text-xs tabular-nums">{backgroundProcessCount}</span>
+      </span>
+    ) : null;
   const pinIndicator = props.isPinned ? (
     props.pinningSupported ? (
       <Tooltip>
@@ -1287,6 +1308,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {title}
             {pinIndicator}
             {terminalStatusIcon}
+            {backgroundProcessIcon}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
                 Regenerating title
@@ -1578,6 +1600,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 <span className="flex-1" />
               )}
               {terminalStatusIcon}
+              {backgroundProcessIcon}
               {prBadge}
               {diff ? (
                 <span className="shrink-0 font-mono">

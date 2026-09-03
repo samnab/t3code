@@ -69,6 +69,9 @@ export class ThreadBackgroundLivenessService extends Context.Service<
      * "monitoring" only when watch loops are the ONLY live work.
      */
     readonly getThreadBackgroundLiveness: (threadId: string) => ThreadBackgroundLiveness;
+
+    /** Live watch-loop/background-shell count for the sidebar badge. */
+    readonly getThreadBackgroundProcessCount: (threadId: string) => number;
   }
 >()("t3/orchestration/ThreadBackgroundLiveness/ThreadBackgroundLivenessService") {}
 
@@ -166,6 +169,9 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       }
       return null;
     },
+
+    getThreadBackgroundProcessCount: (threadId) =>
+      stateByThreadId.get(threadId)?.monitors.size ?? 0,
   };
 }
 

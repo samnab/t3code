@@ -226,4 +226,37 @@ describe("ThreadBackgroundLiveness", () => {
     a.clearThreadLiveness("t");
     expect(a.getThreadBackgroundLiveness("t")).toBeNull();
   });
+
+  it("counts live background shells, drops on completion, ignores agent-owned shells", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const threadId = "t-count-1";
+    expect(liveness.getThreadBackgroundProcessCount(threadId)).toBe(0);
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "sh1",
+      taskType: "local_bash",
+      status: undefined,
+      kind: "started",
+    });
+    expect(liveness.getThreadBackgroundProcessCount(threadId)).toBe(1);
+    // A subagent-owned shell is covered by its owning agent's liveness and
+    // must not inflate the thread-level count.
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "sh2",
+      taskType: "local_bash",
+      status: undefined,
+      kind: "started",
+      agentId: "owner",
+    });
+    expect(liveness.getThreadBackgroundProcessCount(threadId)).toBe(1);
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "sh1",
+      taskType: "local_bash",
+      status: "completed",
+      kind: "completed",
+    });
+    expect(liveness.getThreadBackgroundProcessCount(threadId)).toBe(0);
+  });
 });

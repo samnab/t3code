@@ -42,6 +42,13 @@ If reordering is unavailable for one environment, update the T3 Code server runn
 environment. Older servers can still pin and unpin threads, but do not understand synced ordering;
 their pinned threads keep the default newest-first order below the ones you have arranged.
 
+## Status pill
+
+A thread shows **Working** while it runs, and **Monitoring** once the turn settles but a watch loop
+(such as a PR check babysitter) is still running. When background processes are running, a small
+count badge appears next to the status so you can see how many are active without opening the
+thread.
+
 ## Panel motion
 
 The main sidebar, right panel, and terminal drawer open and close immediately by default. Under
