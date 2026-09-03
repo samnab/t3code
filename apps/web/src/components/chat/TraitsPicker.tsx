@@ -17,7 +17,7 @@ import {
 } from "@t3tools/shared/model";
 import { memo, useCallback, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
-import { ZapIcon, type LucideIcon } from "lucide-react";
+import { ZapIcon } from "lucide-react";
 import { buttonVariants } from "../ui/button";
 import {
   Menu,
@@ -33,7 +33,7 @@ import { getProviderModelCapabilities } from "../../providerModels";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { BrainFoldIcons } from "../Icons";
+import { BrainGaugeIcon } from "../Icons";
 import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from "./ComposerControl";
 
 type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
@@ -476,8 +476,10 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
 
 const EFFORT_DESCRIPTOR_IDS = new Set(["effort", "reasoningEffort", "reasoning", "thinking"]);
 
-/** Fold density per effort value; unknown or default values read as medium. */
-const EFFORT_FOLD_LEVELS: Record<string, number> = {
+type EffortLevel = 0 | 1 | 2 | 3 | 4;
+
+/** Gauge level per effort value; unknown or default values read as medium. */
+const EFFORT_LEVELS: Record<string, EffortLevel> = {
   none: 0,
   minimal: 0,
   low: 1,
@@ -488,13 +490,19 @@ const EFFORT_FOLD_LEVELS: Record<string, number> = {
   ultrathink: 4,
 };
 
-/** Icon-only trigger glyph: a brain whose folds scale with the selected effort. */
-function effortIcon(descriptorId: string | null, effort: string | null): LucideIcon {
-  const level =
-    descriptorId !== null && EFFORT_DESCRIPTOR_IDS.has(descriptorId) && effort !== null
-      ? (EFFORT_FOLD_LEVELS[effort] ?? 2)
-      : 2;
-  return BrainFoldIcons[level] ?? BrainFoldIcons[2]!;
+/** Color ramp per level: dim for low effort, provider accent at max. */
+const EFFORT_LEVEL_CLASSNAMES: Record<EffortLevel, string> = {
+  0: "text-muted-foreground/60",
+  1: "text-muted-foreground",
+  2: "",
+  3: "text-foreground",
+  4: "",
+};
+
+function effortLevel(descriptorId: string | null, effort: string | null): EffortLevel {
+  return descriptorId !== null && EFFORT_DESCRIPTOR_IDS.has(descriptorId) && effort !== null
+    ? (EFFORT_LEVELS[effort] ?? 2)
+    : 2;
 }
 
 /**
@@ -601,14 +609,13 @@ export const TraitsPicker = memo(function TraitsPicker({
     primarySelectDescriptorId: primarySelectDescriptor?.id ?? null,
     ultrathinkPromptControlled,
   });
+  const accentClassName = provider === "claudeAgent" ? "text-[#d97757]" : "text-foreground";
+  const level = effortLevel(primarySelectDescriptor?.id ?? null, effort);
   const fastModeIcon = showFastModeIcon ? (
     <>
       <ComposerControlIcon
         icon={ZapIcon}
-        className={cn(
-          "fill-current opacity-80",
-          provider === "claudeAgent" ? "text-[#d97757]" : "text-foreground",
-        )}
+        className={cn("fill-current opacity-80", accentClassName)}
       />
       <span className="sr-only">Fast mode on</span>
     </>
@@ -651,7 +658,15 @@ export const TraitsPicker = memo(function TraitsPicker({
             }
           >
             {fastModeIcon ?? (
-              <ComposerControlIcon icon={effortIcon(primarySelectDescriptor?.id ?? null, effort)} />
+              <BrainGaugeIcon
+                aria-hidden="true"
+                data-composer-control-icon
+                level={level}
+                className={cn(
+                  "size-4 shrink-0",
+                  level === 4 ? accentClassName : EFFORT_LEVEL_CLASSNAMES[level],
+                )}
+              />
             )}
             <ComposerControlChevron />
           </TooltipTrigger>

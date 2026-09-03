@@ -1,4 +1,4 @@
-import { createLucideIcon, type IconNode } from "lucide-react";
+import { createLucideIcon } from "lucide-react";
 import React, { type SVGProps, useId } from "react";
 import { cn } from "~/lib/utils";
 
@@ -727,35 +727,44 @@ export const TargetArrowIcon = createLucideIcon("TargetArrow", [
   ["path", { d: "M16.5 3H21v4.5", key: "head" }],
 ]);
 
-const brainFoldPaths = [
-  [],
-  ["M12 3v18"],
-  ["M12 3v18", "M7.5 7c2 1.5 2 3.5 0 5", "M16.5 7c-2 1.5-2 3.5 0 5"],
-  [
-    "M12 3v18",
-    "M7.5 6c2 1.5 2 3 0 4.5",
-    "M16.5 6c-2 1.5-2 3 0 4.5",
-    "M6 13.5c2.5 0 3.5 1.5 3 4",
-    "M18 13.5c-2.5 0-3.5 1.5-3 4",
-  ],
-  [
-    "M12 3v18",
-    "M8 4.5c1.5 1 1.5 2.5 0 3.5",
-    "M16 4.5c-1.5 1-1.5 2.5 0 3.5",
-    "M5 9.5c2.5 0 3.5 1 3.5 3",
-    "M19 9.5c-2.5 0-3.5 1-3.5 3",
-    "M6 15c2 0 3 1 3 3.5",
-    "M18 15c-2 0-3 1-3 3.5",
-  ],
-] as const;
-
 /**
- * Round brain glyphs whose fold density scales with reasoning effort: index 0
- * is an empty outline, index 4 is densely folded. Used by the composer's
- * icon-only model-options trigger.
+ * Round brain gauge for the composer's icon-only model-options trigger: the
+ * outline fills from the bottom in proportion to `level` (0 empty, 4 full).
+ * Color comes from `currentColor`, so callers ramp it with text classes.
  */
-export const BrainFoldIcons = brainFoldPaths.map((folds, level) => {
-  const node: IconNode = [["circle", { cx: "12", cy: "12", r: "9", key: "outline" }]];
-  folds.forEach((d, index) => node.push(["path", { d, key: `fold-${index}` }]));
-  return createLucideIcon(`BrainFold${level}`, node);
-});
+export const BrainGaugeIcon = ({
+  level,
+  ...props
+}: SVGProps<SVGSVGElement> & { level: 0 | 1 | 2 | 3 | 4 }) => {
+  const clipId = useId();
+  const fillHeight = (18 * level) / 4;
+  return (
+    <svg
+      {...props}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <clipPath id={clipId}>
+        <circle cx="12" cy="12" r="9" />
+      </clipPath>
+      {level > 0 ? (
+        <rect
+          x="3"
+          y={21 - fillHeight}
+          width="18"
+          height={fillHeight}
+          fill="currentColor"
+          fillOpacity={0.45}
+          stroke="none"
+          clipPath={`url(#${clipId})`}
+        />
+      ) : null}
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3v18" />
+    </svg>
+  );
+};
