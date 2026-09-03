@@ -17,7 +17,16 @@ import {
 } from "@t3tools/shared/model";
 import { memo, useCallback, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
-import { BrainIcon, ZapIcon } from "lucide-react";
+import {
+  BrainIcon,
+  SignalHighIcon,
+  SignalIcon,
+  SignalLowIcon,
+  SignalMediumIcon,
+  SignalZeroIcon,
+  ZapIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { buttonVariants } from "../ui/button";
 import {
   Menu,
@@ -481,6 +490,27 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
  * fast mode is the only trait, where a bare bolt (or bare chevron) would leave
  * the trigger unreadable.
  */
+const EFFORT_DESCRIPTOR_IDS = new Set(["effort", "reasoningEffort", "reasoning", "thinking"]);
+
+const EFFORT_ICONS: Record<string, LucideIcon> = {
+  none: SignalZeroIcon,
+  minimal: SignalZeroIcon,
+  low: SignalLowIcon,
+  medium: SignalMediumIcon,
+  high: SignalHighIcon,
+  xhigh: SignalIcon,
+  max: SignalIcon,
+  ultrathink: SignalIcon,
+};
+
+/** Icon-only trigger glyph: signal bars for a known effort level, brain otherwise. */
+function effortIcon(descriptorId: string | null, effort: string | null): LucideIcon {
+  if (descriptorId === null || !EFFORT_DESCRIPTOR_IDS.has(descriptorId) || effort === null) {
+    return BrainIcon;
+  }
+  return EFFORT_ICONS[effort] ?? BrainIcon;
+}
+
 export function buildTraitsTriggerDisplay(input: {
   provider: ProviderDriverKind;
   descriptors: ReadonlyArray<ProviderOptionDescriptor>;
@@ -547,7 +577,7 @@ export const TraitsPicker = memo(function TraitsPicker({
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled } =
+  const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled, effort } =
     getTraitsSectionVisibility({
       provider,
       models,
@@ -626,7 +656,11 @@ export const TraitsPicker = memo(function TraitsPicker({
               />
             }
           >
-            {fastModeIcon ?? <ComposerControlIcon icon={BrainIcon} />}
+            {fastModeIcon ?? (
+              <ComposerControlIcon
+                icon={effortIcon(primarySelectDescriptor?.id ?? null, effort)}
+              />
+            )}
             <ComposerControlChevron />
           </TooltipTrigger>
           {menuContent}
