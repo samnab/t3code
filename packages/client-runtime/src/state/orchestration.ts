@@ -16,6 +16,7 @@ import { Atom } from "effect/unstable/reactivity";
 import { type EnvironmentRegistry } from "../connection/registry.ts";
 import { request } from "../rpc/client.ts";
 import {
+  createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   environmentRpcKey,
   followStreamInEnvironment,
@@ -357,5 +358,19 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
     }),
     subagentTranscript,
     requestOlderSubagentTranscript,
+    // Live provider sessions' declared control planes, keyed by the manager
+    // that owns each thread's subagents. Steer resolves a run's manager by
+    // matching this thread's own status entry rather than a per-run lookup:
+    // one manager owns all of a thread's runs today.
+    subagentControlStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:orchestration:subagent-control-status",
+      tag: ORCHESTRATION_WS_METHODS.subagentControlStatus,
+      staleTimeMs: 5_000,
+      idleTtlMs: 30_000,
+    }),
+    subagentControlSteer: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:subagent-control-steer",
+      tag: ORCHESTRATION_WS_METHODS.subagentControlSteer,
+    }),
   };
 }

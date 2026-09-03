@@ -64,17 +64,16 @@ function panel(directAgent: RuntimeSubagent): AgentPanelModel {
 }
 
 describe("AgentsPanel child transcript disclosure", () => {
-  it("keeps summary-only rows truthful and non-disclosive", () => {
+  it("keeps summary-only rows truthful in the roster", () => {
     const summaryOnly = agent();
     const markup = renderToStaticMarkup(<AgentsPanel model={panel(summaryOnly)} />);
 
     expect(canShowTranscriptDetail(summaryOnly)).toBe(false);
     expect(canShowTranscriptDetail(agent({ historyAvailability: "unavailable" }))).toBe(false);
     expect(markup).toContain("Child transcript detail unavailable");
-    expect(markup).not.toContain("Show child transcript");
   });
 
-  it("offers a disclosure only for durable history", () => {
+  it("renders every row as an openable button regardless of history availability", () => {
     const durable = agent({ historyAvailability: "durable" });
     const markup = renderToStaticMarkup(
       <AgentsPanel
@@ -85,7 +84,10 @@ describe("AgentsPanel child transcript disclosure", () => {
     );
 
     expect(canShowTranscriptDetail(durable)).toBe(true);
-    expect(markup).toContain("Show child transcript");
+    // The roster row itself is the click target that opens the detail view;
+    // there's no separate inline-disclosure affordance to assert on here.
+    expect(markup).toContain("<button");
+    expect(markup).toContain("History available");
   });
 });
 

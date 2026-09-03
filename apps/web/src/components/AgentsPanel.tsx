@@ -23,14 +23,16 @@ import {
   isTerminalSubagentStatus,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import { RuntimeTaskId, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
-import { Bot, Braces, Check, ChevronDown, ChevronRight, X } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { ArrowLeft, Bot, Braces, Check, ChevronDown, ChevronRight, Send, X } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { useEnvironmentQuery } from "~/state/query";
+import { useAtomCommand } from "~/state/use-atom-command";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
+import { Textarea } from "~/components/ui/textarea";
 
 /**
  * In-flight states all present as Working (one steady state, per the
@@ -188,11 +190,15 @@ function AgentTranscript({
   environmentId,
   threadId,
   transcriptId,
+  fill = false,
 }: {
   agent: RuntimeSubagent;
   environmentId: EnvironmentId;
   threadId: ThreadId;
   transcriptId: string;
+  /** Detail-view mode: fill the available height instead of the bounded
+   * inline-disclosure card. */
+  fill?: boolean;
 }) {
   const runId = RuntimeTaskId.make(agent.id);
   const terminal = isTerminalSubagentStatus(agent.status);
@@ -208,13 +214,25 @@ function AgentTranscript({
     terminalCatchUpComplete: view?.terminalCatchUpComplete ?? false,
   });
   const entries = view?.entries ?? [];
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to the newest item while the run is live; a finished run
+  // keeps whatever scroll position the user left it at.
+  useEffect(() => {
+    if (fill && !terminal && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [fill, terminal, entries.length]);
 
   return (
     <div
       id={transcriptId}
       role="region"
       aria-label="Child transcript"
-      className="mx-1.5 mb-1 rounded-md border border-border/60 bg-background/60"
+      className={cn(
+        "rounded-md border border-border/60 bg-background/60",
+        fill ? "flex h-full min-h-0 flex-col border-x-0 border-t-0 rounded-none" : "mx-1.5 mb-1",
+      )}
       data-transcript-state={displayState}
     >
       <div className="flex items-center gap-2 border-b border-border/50 px-2 py-1">
@@ -225,7 +243,10 @@ function AgentTranscript({
           {terminal ? "finalized" : "live"}
         </span>
       </div>
-      <div className="max-h-80 overflow-auto p-2">
+      <div
+        ref={scrollRef}
+        className={cn("overflow-auto p-2", fill ? "min-h-0 flex-1" : "max-h-80")}
+      >
         {displayState === "error" ? (
           <p role="alert" className="text-xs text-destructive-foreground">
             Could not load the child transcript.
@@ -313,15 +334,13 @@ function AgentTranscript({
   );
 }
 
-/** Agent status row with an optional durable-transcript disclosure. */
+/** Agent status row. Clicking it opens the agent's own session detail view. */
 function AgentRow({
   agent,
-  environmentId,
-  threadId,
+  onSelect,
 }: {
   agent: RuntimeSubagent;
-  environmentId: EnvironmentId | null;
-  threadId: ThreadId | null;
+  onSelect: (agentId: string) => void;
 }) {
   const visuals = STATUS_VISUALS[agent.status];
   const activity = agentActivityText(agent);
@@ -355,71 +374,46 @@ function AgentRow({
     agent.usage?.toolUses !== undefined ? `${agent.usage.toolUses} tools` : null,
     agent.activationCount > 1 ? `run ${agent.activationCount}` : null,
   ].filter((value): value is string => value !== null);
-  const transcriptAvailable =
-    canShowTranscriptDetail(agent) && environmentId !== null && threadId !== null;
-  const transcriptId = useId();
-  const [transcriptOpen, setTranscriptOpen] = useState(false);
 
   return (
-    <div>
-      <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
-        <span className="col-start-1 row-start-1 flex items-center">
-          <StatusDot status={agent.status} />
-        </span>
-        <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
-          <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
-          {role ? (
-            <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
-              {role}
-            </span>
-          ) : null}
-        </span>
-        <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
-          <span className="inline-flex items-center gap-1">
-            <AgentElapsed agent={agent} />
-            {agent.status === "completed" ? (
-              <Check aria-hidden className="size-3 text-success" />
-            ) : null}
-            {transcriptAvailable ? (
-              <button
-                type="button"
-                aria-controls={transcriptId}
-                aria-expanded={transcriptOpen}
-                aria-label={transcriptOpen ? "Hide child transcript" : "Show child transcript"}
-                onClick={() => setTranscriptOpen((value) => !value)}
-                className="rounded-sm p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {transcriptOpen ? (
-                  <ChevronDown aria-hidden className="size-3" />
-                ) : (
-                  <ChevronRight aria-hidden className="size-3" />
-                )}
-              </button>
-            ) : null}
+    <button
+      type="button"
+      onClick={() => onSelect(agent.id)}
+      className="grid h-[3.875rem] w-full grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1 text-left hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <span className="col-start-1 row-start-1 flex items-center">
+        <StatusDot status={agent.status} />
+      </span>
+      <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
+        <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
+        {role ? (
+          <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
+            {role}
           </span>
+        ) : null}
+      </span>
+      <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
+        <span className="inline-flex items-center gap-1">
+          <AgentElapsed agent={agent} />
+          {agent.status === "completed" ? (
+            <Check aria-hidden className="size-3 text-success" />
+          ) : null}
+          <ChevronRight aria-hidden className="size-3 text-muted-foreground/60" />
         </span>
-        <span
-          className={cn(
-            "col-start-2 col-end-4 row-start-2 block truncate text-xs",
-            agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
-          )}
-        >
-          {activity ?? visuals.label}
-        </span>
-        <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
-          {metadata.join(" · ")}
-        </span>
-        <span className="sr-only">{visuals.label}</span>
-      </div>
-      {transcriptAvailable && transcriptOpen && environmentId !== null && threadId !== null ? (
-        <AgentTranscript
-          agent={agent}
-          environmentId={environmentId}
-          threadId={threadId}
-          transcriptId={transcriptId}
-        />
-      ) : null}
-    </div>
+      </span>
+      <span
+        className={cn(
+          "col-start-2 col-end-4 row-start-2 block truncate text-xs",
+          agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+        )}
+      >
+        {activity ?? visuals.label}
+      </span>
+      <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
+        {metadata.join(" · ")}
+      </span>
+      <span className="sr-only">{visuals.label}</span>
+    </button>
   );
 }
 
@@ -550,13 +544,11 @@ function WorkflowScriptView({
 function PhaseSection({
   phase,
   defaultOpen = false,
-  environmentId,
-  threadId,
+  onSelect,
 }: {
   phase: AgentPanelWorkflowGroup["phases"][number];
   defaultOpen?: boolean;
-  environmentId: EnvironmentId | null;
-  threadId: ThreadId | null;
+  onSelect: (agentId: string) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen || phase.state === "running");
   const previousState = useRef(phase.state);
@@ -607,12 +599,7 @@ function PhaseSection({
       </button>
       {open
         ? phase.members.map((member) => (
-            <AgentRow
-              key={member.id}
-              agent={member}
-              environmentId={environmentId}
-              threadId={threadId}
-            />
+            <AgentRow key={member.id} agent={member} onSelect={onSelect} />
           ))
         : null}
     </div>
@@ -625,11 +612,13 @@ function ExpandedWorkflowSection({
   environmentId,
   threadId,
   onCollapse,
+  onSelect,
 }: {
   group: AgentPanelWorkflowGroup;
   environmentId: EnvironmentId | null;
   threadId: ThreadId | null;
   onCollapse: () => void;
+  onSelect: (agentId: string) => void;
 }) {
   const [scriptOpen, setScriptOpen] = useState(false);
   const members = workflowMembers(group);
@@ -688,20 +677,14 @@ function ExpandedWorkflowSection({
           key={phase.index}
           phase={phase}
           defaultOpen={!workflowIsLive(group)}
-          environmentId={environmentId}
-          threadId={threadId}
+          onSelect={onSelect}
         />
       ))}
       {group.unphasedMembers.map((member) => (
-        <AgentRow
-          key={member.id}
-          agent={member}
-          environmentId={environmentId}
-          threadId={threadId}
-        />
+        <AgentRow key={member.id} agent={member} onSelect={onSelect} />
       ))}
       {group.phases.length === 0 && group.unphasedMembers.length === 0 ? (
-        <AgentRow agent={group.workflow} environmentId={environmentId} threadId={threadId} />
+        <AgentRow agent={group.workflow} onSelect={onSelect} />
       ) : null}
     </section>
   );
@@ -759,10 +742,12 @@ function WorkflowSection({
   group,
   environmentId,
   threadId,
+  onSelect,
 }: {
   group: AgentPanelWorkflowGroup;
   environmentId: EnvironmentId | null;
   threadId: ThreadId | null;
+  onSelect: (agentId: string) => void;
 }) {
   const [open, setOpen] = useState(() => workflowIsLive(group));
   return open ? (
@@ -771,9 +756,157 @@ function WorkflowSection({
       environmentId={environmentId}
       threadId={threadId}
       onCollapse={() => setOpen(false)}
+      onSelect={onSelect}
     />
   ) : (
     <CollapsedWorkflowSection group={group} onExpand={() => setOpen(true)} />
+  );
+}
+
+/**
+ * One subagent's own session: its transcript plus a composer to steer it,
+ * replacing the roster in the same right-pane surface (mirrors how the Codex
+ * app opens a child's own conversation).
+ */
+function AgentDetailView({
+  agent,
+  environmentId,
+  threadId,
+  onBack,
+}: {
+  agent: RuntimeSubagent;
+  environmentId: EnvironmentId;
+  threadId: ThreadId;
+  onBack: () => void;
+}) {
+  const transcriptId = useId();
+  const visuals = STATUS_VISUALS[agent.status];
+  const modelLabel = formatSubagentModelLabel(agent.model, agent.effort);
+  const terminal = isTerminalSubagentStatus(agent.status);
+
+  const { data: controlStatus } = useEnvironmentQuery(
+    orchestrationEnvironment.subagentControlStatus({ environmentId, input: {} }),
+  );
+  // One manager owns all of a thread's subagent runs today: resolve it by
+  // matching this thread against the live adapters' declared status, rather
+  // than a per-run lookup.
+  const managerId = useMemo(() => {
+    const match = controlStatus?.statuses.find(
+      (status) =>
+        status.supported && status.threadId === threadId && status.managerId !== undefined,
+    );
+    return match?.managerId ?? null;
+  }, [controlStatus, threadId]);
+
+  const steer = useAtomCommand(orchestrationEnvironment.subagentControlSteer, {
+    reportFailure: false,
+  });
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  const disabledReason =
+    agent.controlAvailability === "read-only"
+      ? "This agent's session is read-only."
+      : agent.controlAvailability === "unsupported"
+        ? "Sending messages isn't supported for this agent."
+        : terminal
+          ? "This agent has already finished."
+          : managerId === null
+            ? "No live session currently owns this agent."
+            : null;
+
+  const handleSend = async () => {
+    const trimmed = text.trim();
+    if (trimmed === "" || managerId === null || sending) return;
+    setSending(true);
+    setSendError(null);
+    const result = await steer({
+      environmentId,
+      input: { managerId, runId: RuntimeTaskId.make(agent.id), text: trimmed },
+    });
+    setSending(false);
+    if (result._tag === "Success") {
+      setText("");
+    } else {
+      setSendError("Could not send the message. Try again.");
+    }
+  };
+
+  const historyUnavailable =
+    agent.historyAvailability === "summary-only" || agent.historyAvailability === "unavailable";
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <header className="flex items-center gap-2 border-b border-border/60 px-2 py-1.5">
+        <Button
+          size="icon-micro"
+          variant="ghost-muted"
+          onClick={onBack}
+          aria-label="Back to agents"
+        >
+          <ArrowLeft aria-hidden className="size-3.5" />
+        </Button>
+        <StatusDot status={agent.status} />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium">{agent.title}</div>
+          <div className="truncate font-mono text-[.7rem] text-muted-foreground/80">
+            {[agent.role, modelLabel, visuals.label].filter(Boolean).join(" · ")}
+          </div>
+        </div>
+      </header>
+      <div className="min-h-0 flex-1">
+        {historyUnavailable ? (
+          <p className="p-3 text-xs text-muted-foreground">
+            {agent.historyAvailability === "summary-only"
+              ? "Child transcript detail unavailable for this agent."
+              : "History unavailable for this agent."}
+          </p>
+        ) : (
+          <AgentTranscript
+            agent={agent}
+            environmentId={environmentId}
+            threadId={threadId}
+            transcriptId={transcriptId}
+            fill
+          />
+        )}
+      </div>
+      <footer className="border-t border-border/60 p-2">
+        {disabledReason ? (
+          <p className="mb-1.5 text-[.7rem] text-muted-foreground">{disabledReason}</p>
+        ) : null}
+        {sendError ? (
+          <p role="alert" className="mb-1.5 text-[.7rem] text-destructive-foreground">
+            {sendError}
+          </p>
+        ) : null}
+        <div className="flex items-end gap-1.5">
+          <Textarea
+            size="sm"
+            value={text}
+            disabled={disabledReason !== null || sending}
+            placeholder="Message this agent…"
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void handleSend();
+              }
+            }}
+          />
+          <Button
+            size="icon-micro"
+            variant="ghost-muted"
+            aria-label="Send message"
+            disabled={disabledReason !== null || sending || text.trim() === ""}
+            onClick={() => void handleSend()}
+          >
+            <Send aria-hidden className="size-3.5" />
+          </Button>
+        </div>
+      </footer>
+    </div>
   );
 }
 
@@ -786,6 +919,37 @@ export function AgentsPanel({
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
 }) {
+  const allAgents = useMemo(() => {
+    const list: Array<RuntimeSubagent> = [...model.directAgents];
+    for (const group of model.workflows) {
+      list.push(group.workflow, ...workflowMembers(group));
+    }
+    return list;
+  }, [model]);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const selectedAgent = selectedAgentId
+    ? (allAgents.find((agent) => agent.id === selectedAgentId) ?? null)
+    : null;
+
+  // The selected agent can vanish from the model (roster eviction, thread
+  // switch): fall back to the roster rather than showing a stale detail view.
+  useEffect(() => {
+    if (selectedAgentId !== null && selectedAgent === null) {
+      setSelectedAgentId(null);
+    }
+  }, [selectedAgentId, selectedAgent]);
+
+  if (selectedAgent !== null && environmentId !== null && threadId !== null) {
+    return (
+      <AgentDetailView
+        agent={selectedAgent}
+        environmentId={environmentId}
+        threadId={threadId}
+        onBack={() => setSelectedAgentId(null)}
+      />
+    );
+  }
+
   if (!model.hasAgents) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
@@ -809,6 +973,7 @@ export function AgentsPanel({
               group={group}
               environmentId={environmentId}
               threadId={threadId}
+              onSelect={setSelectedAgentId}
             />
           ))}
           {model.directAgents.length > 0 ? (
@@ -817,12 +982,7 @@ export function AgentsPanel({
                 Direct spawns
               </div>
               {model.directAgents.map((agent) => (
-                <AgentRow
-                  key={agent.id}
-                  agent={agent}
-                  environmentId={environmentId}
-                  threadId={threadId}
-                />
+                <AgentRow key={agent.id} agent={agent} onSelect={setSelectedAgentId} />
               ))}
             </section>
           ) : null}
