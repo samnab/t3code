@@ -214,6 +214,8 @@ describe("instance-scoped model selection", () => {
         [ProviderInstanceId.make("claudeAgent")]: {
           hiddenModels: ["claude-opus-4-6"],
           modelOrder: [],
+          defaultModel: null,
+          defaultOptions: [],
         },
       },
     };
@@ -262,6 +264,8 @@ describe("instance-scoped model selection", () => {
         [ProviderInstanceId.make("claudeAgent")]: {
           hiddenModels: [],
           modelOrder: ["claude-haiku-4-5", "claude-opus-4-6"],
+          defaultModel: null,
+          defaultOptions: [],
         },
       },
     };
@@ -289,6 +293,8 @@ describe("instance-scoped model selection", () => {
         [ProviderInstanceId.make("claudeAgent")]: {
           hiddenModels: ["claude-opus-4-6"],
           modelOrder: [],
+          defaultModel: null,
+          defaultOptions: [],
         },
       },
     };
@@ -450,6 +456,8 @@ describe("instance-scoped model selection", () => {
         [instanceId]: {
           hiddenModels: ["opencode/kimi-k3"],
           modelOrder: [],
+          defaultModel: null,
+          defaultOptions: [],
         },
       },
     };

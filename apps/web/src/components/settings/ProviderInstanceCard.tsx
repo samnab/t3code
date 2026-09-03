@@ -25,9 +25,14 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 
+import type { ProviderOptionSelections } from "@t3tools/contracts";
+
 import { cn } from "../../lib/utils";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
-import { normalizeProviderAccentColor } from "../../providerInstances";
+import {
+  deriveProviderInstanceEntries,
+  normalizeProviderAccentColor,
+} from "../../providerInstances";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
@@ -38,9 +43,12 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
 import { providerSettingsTabClassName } from "./providerSettingsTabs";
+import { SETTINGS_PICKER_TRIGGER_CLASSNAME, SettingResetButton } from "./settingsLayout";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon, providerInstanceInitials } from "../chat/ProviderInstanceIcon";
+import { ProviderModelPicker } from "../chat/ProviderModelPicker";
+import { TraitsPicker } from "../chat/TraitsPicker";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import {
@@ -375,6 +383,11 @@ interface ProviderInstanceCardProps {
   readonly onHiddenModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onFavoriteModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
+  /** Model + options a new draft on this instance starts from when nothing more specific picks one. */
+  readonly defaultModel: string | null;
+  readonly defaultOptions: ProviderOptionSelections;
+  readonly onDefaultModelChange: (model: string | null) => void;
+  readonly onDefaultOptionsChange: (options: ProviderOptionSelections) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
 }
@@ -416,6 +429,10 @@ export function ProviderInstanceCard({
   onHiddenModelsChange,
   onFavoriteModelsChange,
   onModelOrderChange,
+  defaultModel,
+  defaultOptions,
+  onDefaultModelChange,
+  onDefaultOptionsChange,
   onRunUpdate,
   isUpdating = false,
 }: ProviderInstanceCardProps) {
@@ -485,6 +502,20 @@ export function ProviderInstanceCard({
   const hiddenModelCount = modelsForDisplay.filter(
     (model) => !model.isCustom && hiddenModels.includes(model.slug),
   ).length;
+
+  // Single-instance entry for the "Default model" picker below, built from
+  // the live provider snapshot so it carries the same icon/status metadata
+  // as the composer's own picker. Absent until the server has probed this
+  // instance at least once.
+  const defaultModelEntry = liveProvider
+    ? deriveProviderInstanceEntries([liveProvider])[0]
+    : undefined;
+  const resolvedDefaultModel =
+    defaultModel && modelsForDisplay.some((model) => model.slug === defaultModel)
+      ? defaultModel
+      : (modelsForDisplay.find((model) => model.isDefault)?.slug ??
+        modelsForDisplay[0]?.slug ??
+        null);
 
   const updateDisplayName = (value: string) => {
     const trimmed = value.trim();
@@ -910,6 +941,60 @@ export function ProviderInstanceCard({
             className={cn("px-4 py-5 lg:h-full lg:min-h-0", readOnly && "opacity-50 select-none")}
             hidden={visibleTab !== "models"}
           >
+            {driverKind ? (
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-2.5">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">Default model</div>
+                  <div className="text-xs text-muted-foreground">
+                    New threads on this provider start here.
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {defaultModel !== null ? (
+                    <SettingResetButton
+                      label="default model"
+                      onClick={() => {
+                        onDefaultModelChange(null);
+                        onDefaultOptionsChange([]);
+                      }}
+                    />
+                  ) : null}
+                  {defaultModelEntry && resolvedDefaultModel ? (
+                    <>
+                      <ProviderModelPicker
+                        activeInstanceId={instanceId}
+                        model={resolvedDefaultModel}
+                        lockedProvider={driverKind}
+                        instanceEntries={[defaultModelEntry]}
+                        modelOptionsByInstance={new Map([[instanceId, defaultModelEntry.models]])}
+                        triggerVariant="outline"
+                        triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                        onInstanceModelChange={(_instanceId, model) => onDefaultModelChange(model)}
+                      />
+                      <TraitsPicker
+                        provider={driverKind}
+                        models={defaultModelEntry.models}
+                        model={resolvedDefaultModel}
+                        prompt=""
+                        onPromptChange={() => {}}
+                        modelOptions={defaultOptions}
+                        allowPromptInjectedEffort={false}
+                        planModeEnabled={false}
+                        triggerVariant="outline"
+                        triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                        onModelOptionsChange={(nextOptions) =>
+                          onDefaultOptionsChange(nextOptions ?? [])
+                        }
+                      />
+                    </>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      Waiting for provider status…
+                    </span>
+                  )}
+                </div>
+              </div>
+            ) : null}
             <ProviderModelsSection
               instanceId={instanceId}
               driverKind={driverKind}

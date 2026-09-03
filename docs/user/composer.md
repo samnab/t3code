@@ -58,6 +58,11 @@ T3 Code remembers the last provider, model, and model options you selected and r
 selection for new threads. A model configured in a project's settings overrides the remembered
 selection for that project; resetting the project setting returns it to the remembered selection.
 
+In Settings → Providers, each provider instance can also have its own default model and options
+(such as effort). New threads on that provider start from its configured default when nothing more
+specific — an explicit choice, a project default — already picked one. Clear the default from the
+same place to fall back to T3 Code's built-in default.
+
 Model options shown as provider defaults remain display values until you choose them in T3 Code.
 T3 Code only sends options you selected explicitly, so an unset reasoning level or service tier can
 still come from the provider's own configuration.

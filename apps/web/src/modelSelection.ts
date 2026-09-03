@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderOptionSelections,
   type ServerProvider,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -121,11 +122,18 @@ function toAppModelOption(model: ServerProvider["models"][number]): AppModelOpti
 function readInstanceModelPreferences(
   settings: UnifiedSettings,
   instanceId: ProviderInstanceId,
-): { readonly hiddenModels: ReadonlyArray<string>; readonly modelOrder: ReadonlyArray<string> } {
+): {
+  readonly hiddenModels: ReadonlyArray<string>;
+  readonly modelOrder: ReadonlyArray<string>;
+  readonly defaultModel: string | null;
+  readonly defaultOptions: ProviderOptionSelections;
+} {
   return (
     settings.providerModelPreferences?.[instanceId] ?? {
       hiddenModels: [],
       modelOrder: [],
+      defaultModel: null,
+      defaultOptions: [],
     }
   );
 }
@@ -310,6 +318,15 @@ export function resolveAppModelSelectionForInstance(
       return unavailableSelection;
     }
   }
+  // Nothing more specific (draft/thread/project) picked a model for this
+  // instance: fall back to the user's configured per-instance default,
+  // provided it's still a model this instance actually offers.
+  if (selectedModel == null) {
+    const instanceDefault = readInstanceModelPreferences(settings, entry.instanceId).defaultModel;
+    if (instanceDefault && options.some((option) => option.slug === instanceDefault)) {
+      return instanceDefault;
+    }
+  }
   return (
     options.find((option) => option.isDefault)?.slug ??
     options[0]?.slug ??
@@ -317,6 +334,17 @@ export function resolveAppModelSelectionForInstance(
     entry.models[0]?.slug ??
     null
   );
+}
+
+/**
+ * The configured default options (e.g. effort) for a provider instance, to
+ * use when a draft/thread/project supplies none. Empty when unset.
+ */
+export function getDefaultProviderInstanceOptions(
+  settings: UnifiedSettings,
+  instanceId: ProviderInstanceId,
+): ProviderOptionSelections {
+  return readInstanceModelPreferences(settings, instanceId).defaultOptions;
 }
 
 /**

@@ -290,6 +290,12 @@ export const ClientSettingsSchema = Schema.Struct({
         Schema.withDecodingDefault(Effect.succeed([])),
       ),
       modelOrder: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+      // Per-instance default model + options a new draft on this instance
+      // starts from, when nothing more specific (thread/draft/project) picks one.
+      defaultModel: Schema.NullOr(Schema.String).pipe(
+        Schema.withDecodingDefault(Effect.succeed(null)),
+      ),
+      defaultOptions: ProviderOptionSelections.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
     }),
   ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // Legacy plan mode. The composer's Build/Plan toggle was removed from the
@@ -1065,6 +1071,12 @@ export const ClientSettingsPatch = Schema.Struct({
           Schema.withDecodingDefault(Effect.succeed([])),
         ),
         modelOrder: Schema.Array(Schema.String).pipe(
+          Schema.withDecodingDefault(Effect.succeed([])),
+        ),
+        defaultModel: Schema.NullOr(Schema.String).pipe(
+          Schema.withDecodingDefault(Effect.succeed(null)),
+        ),
+        defaultOptions: ProviderOptionSelections.pipe(
           Schema.withDecodingDefault(Effect.succeed([])),
         ),
       }),

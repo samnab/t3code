@@ -33,7 +33,11 @@ import { DeepMutable } from "effect/Types";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
-import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
+import {
+  getDefaultProviderInstanceOptions,
+  resolveAppModelSelection,
+  resolveAppModelSelectionForInstance,
+} from "./modelSelection";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -1183,11 +1187,17 @@ export function deriveEffectiveComposerModelState(input: {
         activeSelection.model,
       ))
     : baseModel;
+  const instanceIdForDefaultOptions =
+    input.selectedInstanceId ?? ProviderInstanceId.make(input.selectedProvider);
+  const defaultOptions = getDefaultProviderInstanceOptions(
+    input.settings,
+    instanceIdForDefaultOptions,
+  );
   const modelOptions =
     modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
     providerSelectionsFromModelSelection(input.threadModelSelection) ??
     providerSelectionsFromModelSelection(input.projectModelSelection) ??
-    null;
+    (defaultOptions.length > 0 ? { [instanceIdForDefaultOptions]: defaultOptions } : null);
 
   return {
     selectedModel,

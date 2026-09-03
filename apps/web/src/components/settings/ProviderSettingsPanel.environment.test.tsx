@@ -295,7 +295,12 @@ describe("EnvironmentProviderSettings routing", () => {
         },
       },
       providerModelPreferences: {
-        [customId]: { hiddenModels: ["hidden"], modelOrder: ["model"] },
+        [customId]: {
+          hiddenModels: ["hidden"],
+          modelOrder: ["model"],
+          defaultModel: null,
+          defaultOptions: [],
+        },
       },
       favorites: [{ provider: customId, model: "favorite" }],
     };

@@ -72,6 +72,10 @@ describe("deriveProviderModelsForDisplay", () => {
         onHiddenModelsChange: () => undefined,
         onFavoriteModelsChange: () => undefined,
         onModelOrderChange: () => undefined,
+        defaultModel: null,
+        defaultOptions: [],
+        onDefaultModelChange: () => undefined,
+        onDefaultOptionsChange: () => undefined,
       }),
     );
 
@@ -111,6 +115,10 @@ describe("deriveProviderModelsForDisplay", () => {
       onHiddenModelsChange: () => undefined,
       onFavoriteModelsChange: () => undefined,
       onModelOrderChange: () => undefined,
+      defaultModel: null,
+      defaultOptions: [],
+      onDefaultModelChange: () => undefined,
+      onDefaultOptionsChange: () => undefined,
     } as const;
 
     for (const mode of ["list", "editor"] as const) {

@@ -12,6 +12,7 @@ import {
   ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceId,
+  type ProviderOptionSelections,
   resolveProviderInstanceEnabled,
 } from "@t3tools/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
@@ -698,20 +699,29 @@ export function EnvironmentProviderSettings({
     next: {
       readonly hiddenModels: ReadonlyArray<string>;
       readonly modelOrder: ReadonlyArray<string>;
+      readonly defaultModel?: string | null;
+      readonly defaultOptions?: ProviderOptionSelections;
     },
   ) => {
     const hiddenModels = [...new Set(next.hiddenModels.filter((slug) => slug.trim().length > 0))];
     const modelOrder = [...new Set(next.modelOrder.filter((slug) => slug.trim().length > 0))];
+    const defaultModel = next.defaultModel ?? null;
+    const defaultOptions = next.defaultOptions ?? [];
     const rest = withoutProviderInstanceKey(settings.providerModelPreferences, instanceId);
     updateSettings({
       providerModelPreferences:
-        hiddenModels.length === 0 && modelOrder.length === 0
+        hiddenModels.length === 0 &&
+        modelOrder.length === 0 &&
+        defaultModel === null &&
+        defaultOptions.length === 0
           ? rest
           : {
               ...rest,
               [instanceId]: {
                 hiddenModels,
                 modelOrder,
+                defaultModel,
+                defaultOptions,
               },
             },
     });
@@ -780,6 +790,8 @@ export function EnvironmentProviderSettings({
     const modelPreferences = settings.providerModelPreferences?.[row.instanceId] ?? {
       hiddenModels: [],
       modelOrder: [],
+      defaultModel: null,
+      defaultOptions: [],
     };
     const favoriteModels = Arr.filterMap(settings.favorites ?? [], (favorite) =>
       favorite.provider === row.instanceId ? Result.succeed(favorite.model) : Result.failVoid,
@@ -839,6 +851,20 @@ export function EnvironmentProviderSettings({
           updateProviderModelPreferences(row.instanceId, {
             ...modelPreferences,
             modelOrder,
+          })
+        }
+        defaultModel={modelPreferences.defaultModel}
+        defaultOptions={modelPreferences.defaultOptions}
+        onDefaultModelChange={(defaultModel) =>
+          updateProviderModelPreferences(row.instanceId, {
+            ...modelPreferences,
+            defaultModel,
+          })
+        }
+        onDefaultOptionsChange={(defaultOptions) =>
+          updateProviderModelPreferences(row.instanceId, {
+            ...modelPreferences,
+            defaultOptions,
           })
         }
         onRunUpdate={
