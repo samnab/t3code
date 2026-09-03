@@ -119,7 +119,7 @@ function toAppModelOption(model: ServerProvider["models"][number]): AppModelOpti
   return option;
 }
 
-function readInstanceModelPreferences(
+export function readInstanceModelPreferences(
   settings: UnifiedSettings,
   instanceId: ProviderInstanceId,
 ): {

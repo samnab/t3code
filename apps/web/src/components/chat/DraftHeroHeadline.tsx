@@ -6,7 +6,7 @@ import { FolderPlusIcon } from "lucide-react";
 import { useCallback, useMemo } from "react";
 
 import { openCommandPalette } from "~/commandPaletteBus";
-import { useClientSettings } from "~/hooks/useSettings";
+import { useClientSettings, usePrimarySettings } from "~/hooks/useSettings";
 import { hasExplicitComposerModelSelection } from "~/lib/chatThreadActions";
 import { selectProjectGroupingSettings } from "~/logicalProject";
 import {
@@ -49,6 +49,7 @@ export function DraftHeroHeadline({
   );
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
   const applyStickyState = useComposerDraftStore((store) => store.applyStickyState);
+  const primarySettings = usePrimarySettings();
   const setModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const openAddProject = useCallback(() => openCommandPalette({ open: "add-project" }), []);
 
@@ -148,7 +149,7 @@ export function DraftHeroHeadline({
               draftId,
             );
             if (!hasExplicitComposerModelSelection(currentDraft)) {
-              applyStickyState(draftId);
+              applyStickyState(draftId, primarySettings);
               if (project.defaultModelSelection) {
                 setModelSelection(draftId, project.defaultModelSelection, {
                   replaceOptions: true,

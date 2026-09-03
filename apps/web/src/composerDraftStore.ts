@@ -35,6 +35,7 @@ import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import {
   getDefaultProviderInstanceOptions,
+  readInstanceModelPreferences,
   resolveAppModelSelection,
   resolveAppModelSelectionForInstance,
 } from "./modelSelection";
@@ -555,7 +556,14 @@ interface ComposerDraftStoreState {
       | null
       | undefined,
   ) => void;
-  applyStickyState: (threadRef: ComposerThreadTarget) => void;
+  /**
+   * Seed a fresh draft from the sticky (last-used) provider/model state.
+   * `settings` is optional so existing callers keep compiling; when passed,
+   * instances with a configured per-instance default model are left out of
+   * the sticky seed so `deriveEffectiveComposerModelState` falls through to
+   * that default instead of the last-used model.
+   */
+  applyStickyState: (threadRef: ComposerThreadTarget, settings?: UnifiedSettings) => void;
   setProviderModelOptions: (
     threadRef: ComposerThreadTarget,
     provider: ProviderDriverKind,
@@ -2881,7 +2889,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
-        applyStickyState: (threadRef) => {
+        applyStickyState: (threadRef, settings) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
             return;
@@ -2891,7 +2899,19 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const stickyActiveProvider = state.stickyActiveProvider;
             const existing = state.draftsByThreadKey[threadKey];
             const base = existing ?? createEmptyThreadDraft();
-            const nextMap = compactModelSelectionByProvider(stickyMap);
+            // A configured per-instance default beats the last-used (sticky)
+            // model, so drop sticky entries for instances that have one and
+            // let deriveEffectiveComposerModelState fall through to it.
+            const stickyMapWithoutConfiguredDefaults = settings
+              ? Object.fromEntries(
+                  Object.entries(stickyMap).filter(
+                    ([instanceId]) =>
+                      readInstanceModelPreferences(settings, ProviderInstanceId.make(instanceId))
+                        .defaultModel === null,
+                  ),
+                )
+              : stickyMap;
+            const nextMap = compactModelSelectionByProvider(stickyMapWithoutConfiguredDefaults);
             if (
               Equal.equals(base.modelSelectionByProvider, nextMap) &&
               base.activeProvider === stickyActiveProvider &&

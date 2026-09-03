@@ -22,6 +22,7 @@ import {
   collectAssistantCitations,
   serializeAssistantCitation,
 } from "@t3tools/shared/assistantCitations";
+import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts/settings";
 
 // The composer draft's `modelSelectionByProvider` and
 // `stickyModelSelectionByProvider` maps are keyed by `ProviderInstanceId`
@@ -2168,6 +2169,30 @@ describe("composerDraftStore sticky composer settings", () => {
     store.applyStickyState(draftId);
 
     expect(draftByKey(draftId)).toBeUndefined();
+  });
+
+  it("omits a sticky selection for an instance with a configured default model", () => {
+    const store = useComposerDraftStore.getState();
+    const draftId = DraftId.make("draft-configured-default-beats-sticky");
+
+    store.setStickyModelSelection(
+      modelSelection(CODEX_DRIVER, "sticky-model", { reasoningEffort: "xhigh" }),
+    );
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerModelPreferences: {
+        [CODEX_INSTANCE]: {
+          hiddenModels: [],
+          modelOrder: [],
+          defaultModel: "configured-default-model",
+          defaultOptions: [],
+        },
+      },
+    };
+
+    store.applyStickyState(draftId, settings);
+
+    expect(draftByKey(draftId)?.modelSelectionByProvider?.[CODEX_INSTANCE]).toBeUndefined();
   });
 });
 
