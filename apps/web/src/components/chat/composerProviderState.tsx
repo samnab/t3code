@@ -12,16 +12,11 @@ import {
   isClaudeUltrathinkPrompt,
   normalizeModelSlug,
 } from "@t3tools/shared/model";
-import { type ComponentProps, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import type { DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
 import { shouldRenderTraitsControls, TraitsMenuContent, TraitsPicker } from "./TraitsPicker";
-
-/** Footer variant: icon-only trigger, current values in the tooltip. */
-function ComposerTraitsPicker(props: ComponentProps<typeof TraitsPicker>) {
-  return <TraitsPicker {...props} iconOnly />;
-}
 
 export type ComposerProviderStateInput = {
   provider: ProviderDriverKind;
@@ -114,7 +109,7 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
 }
 
 function renderTraitsControl(
-  Component: typeof TraitsMenuContent | typeof TraitsPicker | typeof ComposerTraitsPicker,
+  Component: typeof TraitsMenuContent | typeof TraitsPicker,
   input: TraitsRenderInput,
 ): ReactNode {
   const {
@@ -164,5 +159,5 @@ export function renderProviderTraitsMenuContent(input: TraitsRenderInput): React
 }
 
 export function renderProviderTraitsPicker(input: TraitsRenderInput): ReactNode {
-  return renderTraitsControl(ComposerTraitsPicker, input);
+  return renderTraitsControl(TraitsPicker, input);
 }

@@ -32,8 +32,6 @@ import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { BrainGaugeIcon } from "../Icons";
 import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from "./ComposerControl";
 
 type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
@@ -276,8 +274,6 @@ export interface TraitsMenuContentProps {
   planModeEnabled: boolean;
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
-  /** Collapse the trigger to an icon; the current values move to the tooltip. */
-  iconOnly?: boolean;
 }
 
 export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
@@ -474,37 +470,6 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   );
 });
 
-const EFFORT_DESCRIPTOR_IDS = new Set(["effort", "reasoningEffort", "reasoning", "thinking"]);
-
-type EffortLevel = 0 | 1 | 2 | 3 | 4;
-
-/** Gauge level per effort value; unknown or default values read as medium. */
-const EFFORT_LEVELS: Record<string, EffortLevel> = {
-  none: 0,
-  minimal: 0,
-  low: 1,
-  medium: 2,
-  high: 3,
-  xhigh: 4,
-  max: 4,
-  ultrathink: 4,
-};
-
-/** Color ramp per level: dim for low effort, provider accent at max. */
-const EFFORT_LEVEL_CLASSNAMES: Record<EffortLevel, string> = {
-  0: "text-muted-foreground/60",
-  1: "text-muted-foreground",
-  2: "",
-  3: "text-foreground",
-  4: "",
-};
-
-function effortLevel(descriptorId: string | null, effort: string | null): EffortLevel {
-  return descriptorId !== null && EFFORT_DESCRIPTOR_IDS.has(descriptorId) && effort !== null
-    ? (EFFORT_LEVELS[effort] ?? 2)
-    : 2;
-}
-
 /**
  * Build the traits trigger's text label plus whether the fast-mode bolt should
  * render. Claude and Cursor expose fast mode as a boolean, while Codex exposes
@@ -575,11 +540,10 @@ export const TraitsPicker = memo(function TraitsPicker({
   planModeEnabled,
   triggerVariant,
   triggerClassName,
-  iconOnly = false,
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled, effort } =
+  const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled } =
     getTraitsSectionVisibility({
       provider,
       models,
@@ -609,73 +573,20 @@ export const TraitsPicker = memo(function TraitsPicker({
     primarySelectDescriptorId: primarySelectDescriptor?.id ?? null,
     ultrathinkPromptControlled,
   });
-  const accentClassName = provider === "claudeAgent" ? "text-[#d97757]" : "text-foreground";
-  const level = effortLevel(primarySelectDescriptor?.id ?? null, effort);
   const fastModeIcon = showFastModeIcon ? (
     <>
       <ComposerControlIcon
         icon={ZapIcon}
-        className={cn("fill-current opacity-80", accentClassName)}
+        className={cn(
+          "fill-current opacity-80",
+          provider === "claudeAgent" ? "text-[#d97757]" : "text-foreground",
+        )}
       />
       <span className="sr-only">Fast mode on</span>
     </>
   ) : null;
 
   const isCodexStyle = provider === "codex";
-
-  const menuContent = (
-    <MenuPopup align="start">
-      <TraitsMenuContent
-        provider={provider}
-        {...(instanceId ? { instanceId } : {})}
-        models={models}
-        model={model}
-        prompt={prompt}
-        onPromptChange={onPromptChange}
-        modelOptions={modelOptions}
-        allowPromptInjectedEffort={allowPromptInjectedEffort}
-        planModeEnabled={planModeEnabled}
-        {...persistence}
-      />
-    </MenuPopup>
-  );
-
-  if (iconOnly) {
-    return (
-      <Tooltip>
-        <Menu open={isMenuOpen} onOpenChange={setIsMenuOpen}>
-          <TooltipTrigger
-            render={
-              <MenuTrigger
-                render={
-                  <ComposerControl
-                    variant={triggerVariant ?? "ghost"}
-                    className={cn("shrink-0 whitespace-nowrap font-medium", triggerClassName)}
-                    aria-label={`Model options: ${triggerLabel}`}
-                  />
-                }
-              />
-            }
-          >
-            {fastModeIcon ?? (
-              <BrainGaugeIcon
-                aria-hidden="true"
-                data-composer-control-icon
-                level={level}
-                className={cn(
-                  "size-4 shrink-0",
-                  level === 4 ? accentClassName : EFFORT_LEVEL_CLASSNAMES[level],
-                )}
-              />
-            )}
-            <ComposerControlChevron />
-          </TooltipTrigger>
-          {menuContent}
-        </Menu>
-        <TooltipPopup side="top">{triggerLabel}</TooltipPopup>
-      </Tooltip>
-    );
-  }
 
   return (
     <Menu
@@ -711,7 +622,20 @@ export const TraitsPicker = memo(function TraitsPicker({
           </>
         )}
       </MenuTrigger>
-      {menuContent}
+      <MenuPopup align="start">
+        <TraitsMenuContent
+          provider={provider}
+          {...(instanceId ? { instanceId } : {})}
+          models={models}
+          model={model}
+          prompt={prompt}
+          onPromptChange={onPromptChange}
+          modelOptions={modelOptions}
+          allowPromptInjectedEffort={allowPromptInjectedEffort}
+          planModeEnabled={planModeEnabled}
+          {...persistence}
+        />
+      </MenuPopup>
     </Menu>
   );
 });
