@@ -828,28 +828,30 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
-  it.live("interrupts an active turn with abort and reports turn.aborted", () =>
-    Effect.gen(function* () {
-      const fixture = makeFixture();
-      const adapter = yield* makeTestAdapter(
-        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
-      );
-      const collector = yield* collectEvents(adapter.streamEvents);
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: PROVIDER,
-        runtimeMode: "full-access",
-      });
-      const started = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "WAIT_FOR_ABORT" });
-      yield* collector.waitFor((event) => event.type === "turn.started");
-      yield* adapter.interruptTurn(THREAD_ID, started.turnId);
-      yield* collector.waitFor(
-        (event) => event.type === "turn.aborted" && payloadOf(event).reason === "interrupted",
-      );
-      const received = readLogLines(fixture);
-      expect(received.some((line) => line.type === "abort")).toBe(true);
-      yield* adapter.stopSession(THREAD_ID);
-    }).pipe(provideTestEnv),
+  it.live(
+    "interrupts an active turn with abort and reports turn.completed with state interrupted",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeFixture();
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+        );
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: PROVIDER,
+          runtimeMode: "full-access",
+        });
+        const started = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "WAIT_FOR_ABORT" });
+        yield* collector.waitFor((event) => event.type === "turn.started");
+        yield* adapter.interruptTurn(THREAD_ID, started.turnId);
+        yield* collector.waitFor(
+          (event) => event.type === "turn.completed" && payloadOf(event).state === "interrupted",
+        );
+        const received = readLogLines(fixture);
+        expect(received.some((line) => line.type === "abort")).toBe(true);
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(provideTestEnv),
   );
 
   it.live("cancels a pending native extension dialog when an interrupted turn settles", () =>
@@ -877,7 +879,7 @@ describe("PiAdapter", () => {
       // The fake acknowledges abort only after receiving this dialog cancellation.
       yield* adapter.interruptTurn(THREAD_ID, started.turnId);
       yield* collector.waitFor(
-        (event) => event.type === "turn.aborted" && payloadOf(event).reason === "interrupted",
+        (event) => event.type === "turn.completed" && payloadOf(event).state === "interrupted",
       );
 
       expect(

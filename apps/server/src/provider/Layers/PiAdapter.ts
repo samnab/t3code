@@ -619,19 +619,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             turnId: turn.turnId,
             payload: { state: "failed", errorMessage: failure.message },
           });
-        } else if (interrupted) {
-          yield* offerRuntimeEvent({
-            ...base,
-            type: "turn.aborted",
-            turnId: turn.turnId,
-            payload: { reason: "interrupted" },
-          });
         } else {
           yield* offerRuntimeEvent({
             ...base,
             type: "turn.completed",
             turnId: turn.turnId,
-            payload: { state: "completed" },
+            payload: { state: interrupted ? "interrupted" : "completed" },
           });
         }
         yield* emitZaiUsageLimits(ctx);
