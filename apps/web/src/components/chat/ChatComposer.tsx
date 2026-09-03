@@ -860,7 +860,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
     isServerThread,
-    isLocalDraftThread: _isLocalDraftThread,
+    isLocalDraftThread,
     forceExpandedOnMobile,
     projectSelectionRequired,
     phase,
@@ -1733,7 +1733,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const threadGoalDisplay = resolveThreadGoalDisplay({
     goal: activeThreadGoal,
     controlsVisible:
-      isServerThread &&
+      (isServerThread || isLocalDraftThread) &&
       !isComposerCollapsedMobile &&
       !isComposerApprovalState &&
       !showMobilePendingAnswerActions,

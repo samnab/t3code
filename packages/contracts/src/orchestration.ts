@@ -841,6 +841,10 @@ const ThreadCreateCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
+  // Chosen in the composer before the thread exists. See ThreadGoal and
+  // OrchestrationThread.voiceNotifications; omitted means goal-less / on.
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+  voiceNotifications: Schema.optional(Schema.Boolean),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
@@ -974,6 +978,9 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   projectId: ProjectId,
+  // See ThreadCreateCommand: composer choices made before the first send.
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+  voiceNotifications: Schema.optional(Schema.Boolean),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -1318,6 +1325,8 @@ export const ProjectDeletedPayload = Schema.Struct({
 
 export const ThreadCreatedPayload = Schema.Struct({
   threadId: ThreadId,
+  // See ThreadGoal: set from the composer when the first send creates the thread.
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,

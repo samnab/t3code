@@ -1133,6 +1133,12 @@ const makeWsRpcLayer = (
                 modelSelection: bootstrap.createThread.modelSelection,
                 runtimeMode: bootstrap.createThread.runtimeMode,
                 interactionMode: bootstrap.createThread.interactionMode,
+                ...(bootstrap.createThread.goal === undefined
+                  ? {}
+                  : { goal: bootstrap.createThread.goal }),
+                ...(bootstrap.createThread.voiceNotifications === undefined
+                  ? {}
+                  : { voiceNotifications: bootstrap.createThread.voiceNotifications }),
                 branch: bootstrap.createThread.branch,
                 worktreePath: bootstrap.createThread.worktreePath,
                 createdAt: bootstrap.createThread.createdAt,

@@ -229,6 +229,9 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   modelSelectionExplicit: Schema.optionalKey(Schema.Boolean),
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
+  // Draft-only thread settings applied when the first send creates the thread.
+  goal: Schema.optionalKey(Schema.String),
+  voiceNotifications: Schema.optionalKey(Schema.Boolean),
 });
 type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
 
@@ -364,6 +367,13 @@ export interface ComposerThreadDraftState {
   modelSelectionExplicit?: boolean;
   runtimeMode: RuntimeMode | null;
   interactionMode: ProviderInteractionMode | null;
+  /**
+   * Thread settings chosen in the composer before the thread exists. Null
+   * means "not chosen": the goal stays unset and voice notifications keep
+   * the server default. Both ride along in the first send's bootstrap.
+   */
+  goal: string | null;
+  voiceNotifications: boolean | null;
 }
 
 /**
@@ -564,6 +574,14 @@ interface ComposerDraftStoreState {
     threadRef: ComposerThreadTarget,
     interactionMode: ProviderInteractionMode | null | undefined,
   ) => void;
+  /**
+   * Draft-only thread settings (goal, voice notifications) chosen before the
+   * thread exists; the first send carries them in its bootstrap.
+   */
+  setComposerThreadSettings: (
+    threadRef: ComposerThreadTarget,
+    settings: { goal?: string | null; voiceNotifications?: boolean | null },
+  ) => void;
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => void;
   addImages: (threadRef: ComposerThreadTarget, images: ComposerImageAttachment[]) => void;
   removeImage: (threadRef: ComposerThreadTarget, imageId: string) => void;
@@ -737,6 +755,8 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   activeProvider: null,
   runtimeMode: null,
   interactionMode: null,
+  goal: null,
+  voiceNotifications: null,
 });
 
 /**
@@ -760,6 +780,8 @@ export function createEmptyThreadDraft(): ComposerThreadDraftState {
     activeProvider: null,
     runtimeMode: null,
     interactionMode: null,
+    goal: null,
+    voiceNotifications: null,
   };
 }
 
@@ -853,7 +875,9 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
-    draft.interactionMode === null
+    draft.interactionMode === null &&
+    draft.goal === null &&
+    draft.voiceNotifications === null
   );
 }
 
@@ -1998,7 +2022,12 @@ function stripLegacyModelSeedsFromEmptyDraftSessions(
         modelSelectionExplicit: _modelSelectionExplicit,
         ...retained
       } = draft;
-      return retained.runtimeMode || retained.interactionMode ? [[threadKey, retained]] : [];
+      return retained.runtimeMode ||
+        retained.interactionMode ||
+        retained.goal !== undefined ||
+        retained.voiceNotifications !== undefined
+        ? [[threadKey, retained]]
+        : [];
     }),
   );
 }
@@ -2061,7 +2090,9 @@ function partializeComposerDraftStoreState(
       draft.reviewComments.length === 0 &&
       !hasModelData &&
       draft.runtimeMode === null &&
-      draft.interactionMode === null
+      draft.interactionMode === null &&
+      draft.goal === null &&
+      draft.voiceNotifications === null
     ) {
       continue;
     }
@@ -2140,6 +2171,10 @@ function partializeComposerDraftStoreState(
         : {}),
       ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
       ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
+      ...(draft.goal === null ? {} : { goal: draft.goal }),
+      ...(draft.voiceNotifications === null
+        ? {}
+        : { voiceNotifications: draft.voiceNotifications }),
     };
     persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
@@ -2402,6 +2437,8 @@ function toHydratedThreadDraft(
     ...(persistedDraft.modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
     runtimeMode: persistedDraft.runtimeMode ?? null,
     interactionMode: persistedDraft.interactionMode ?? null,
+    goal: persistedDraft.goal ?? null,
+    voiceNotifications: persistedDraft.voiceNotifications ?? null,
   };
 }
 
@@ -3166,6 +3203,30 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...base,
               interactionMode: nextInteractionMode,
             };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        setComposerThreadSettings: (threadRef, settings) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey];
+            const base = existing ?? createEmptyThreadDraft();
+            const nextDraft: ComposerThreadDraftState = { ...base, ...settings };
+            if (
+              nextDraft.goal === base.goal &&
+              nextDraft.voiceNotifications === base.voiceNotifications
+            ) {
+              return state;
+            }
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
               delete nextDraftsByThreadKey[threadKey];

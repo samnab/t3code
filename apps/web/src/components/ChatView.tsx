@@ -1417,6 +1417,19 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const activeServerThread = serverThread ?? loadingServerThread;
 
+  // Draft threads keep their goal and voice choice in the composer draft
+  // until the first send creates the thread (see bootstrap.createThread).
+  const composerDraftGoal = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.goal ?? null,
+  );
+  const composerDraftVoiceNotifications = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.voiceNotifications ?? null,
+  );
+  const setComposerThreadSettings = useComposerDraftStore(
+    (store) => store.setComposerThreadSettings,
+  );
+  const isDraftGoalTarget = activeServerThread === null && draftThread !== null;
+
   // ── Thread goal editor ── State is keyed by the thread it opened for, so
   // switching threads cannot save into the old one, and remote goal updates
   // (another device) only follow the editor while its draft is clean.
@@ -1424,10 +1437,15 @@ function ChatViewContent(props: ChatViewProps) {
     threadGoalEditorReducer,
     null,
   );
-  const activeServerThreadGoal = activeServerThread?.goal ?? null;
-  const activeServerThreadKey = activeServerThread
-    ? scopedThreadKey(scopeThreadRef(activeServerThread.environmentId, activeServerThread.id))
-    : null;
+  const goalThreadRef = activeServerThread
+    ? scopeThreadRef(activeServerThread.environmentId, activeServerThread.id)
+    : draftThread
+      ? scopeThreadRef(draftThread.environmentId, draftThread.threadId)
+      : null;
+  const activeServerThreadGoal = isDraftGoalTarget
+    ? composerDraftGoal
+    : (activeServerThread?.goal ?? null);
+  const activeServerThreadKey = goalThreadRef ? scopedThreadKey(goalThreadRef) : null;
   useEffect(() => {
     if (!threadGoalEditorState) return;
     // The user navigated away: the editor belongs to the old thread's
@@ -1444,18 +1462,16 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeServerThreadGoal, activeServerThreadKey, threadGoalEditorState]);
 
   const openThreadGoalEditor = useCallback(() => {
-    if (!activeServerThread) return;
+    if (!goalThreadRef) return;
     dispatchThreadGoalEditor({
       type: "open",
       epoch: nextThreadGoalEditorEpoch(),
-      threadKey: scopedThreadKey(
-        scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
-      ),
-      environmentId: activeServerThread.environmentId,
-      threadId: activeServerThread.id,
-      goal: activeServerThread.goal ?? null,
+      threadKey: scopedThreadKey(goalThreadRef),
+      environmentId: goalThreadRef.environmentId,
+      threadId: goalThreadRef.threadId,
+      goal: activeServerThreadGoal,
     });
-  }, [activeServerThread]);
+  }, [activeServerThreadGoal, goalThreadRef]);
 
   const changeThreadGoalDraft = useCallback((text: string) => {
     dispatchThreadGoalEditor({ type: "setDraft", text });
@@ -1473,6 +1489,25 @@ function ChatViewContent(props: ChatViewProps) {
         goalMetadataInFlightRef.current === state.epoch ||
         goalMetadataInFlightRef.current === COMMAND_GOAL_WRITE
       ) {
+        return;
+      }
+      // A draft thread has nothing to write to yet: the goal lives in the
+      // composer draft and rides along in the first send's bootstrap.
+      if (isDraftGoalTarget) {
+        setComposerThreadSettings(composerDraftTarget, { goal });
+        dispatchThreadGoalEditor({
+          type: "saveSuccess",
+          threadKey: state.threadKey,
+          epoch: state.epoch,
+          goal,
+        });
+        if (goal !== null) {
+          dispatchThreadGoalEditor({
+            type: "close",
+            threadKey: state.threadKey,
+            epoch: state.epoch,
+          });
+        }
         return;
       }
       dispatchThreadGoalEditor({ type: "beginSave" });
@@ -1519,7 +1554,13 @@ function ChatViewContent(props: ChatViewProps) {
         dispatchThreadGoalEditor({ type: "close", threadKey: saveThreadKey, epoch: saveEpoch });
       }
     },
-    [threadGoalEditorState, updateThreadMetadata],
+    [
+      composerDraftTarget,
+      isDraftGoalTarget,
+      setComposerThreadSettings,
+      threadGoalEditorState,
+      updateThreadMetadata,
+    ],
   );
 
   const saveThreadGoalFromEditor = useCallback(() => {
@@ -3784,6 +3825,36 @@ function ChatViewContent(props: ChatViewProps) {
   const toggleInteractionMode = useCallback(() => {
     handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
   }, [handleInteractionModeChange, interactionMode]);
+  const handleVoiceNotificationsChange = useCallback(
+    (enabled: boolean) => {
+      // Before the thread exists the choice is draft state; the first send's
+      // bootstrap creates the thread with it already applied.
+      if (isLocalDraftThread) {
+        setComposerThreadSettings(composerDraftTarget, { voiceNotifications: enabled });
+        scheduleComposerFocus();
+        return;
+      }
+      if (!serverThread || (serverThread.voiceNotifications ?? true) === enabled) return;
+      void setThreadVoiceNotifications({
+        environmentId,
+        input: {
+          threadId: serverThread.id,
+          voiceNotifications: enabled,
+          createdAt: new Date().toISOString(),
+        },
+      });
+      scheduleComposerFocus();
+    },
+    [
+      composerDraftTarget,
+      environmentId,
+      isLocalDraftThread,
+      scheduleComposerFocus,
+      serverThread,
+      setComposerThreadSettings,
+      setThreadVoiceNotifications,
+    ],
+  );
   const createBrowserSurface = useCallback(
     (profileId?: string) => {
       if (!activeThreadRef) return;
@@ -6716,6 +6787,10 @@ function ChatViewContent(props: ChatViewProps) {
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode,
+                      ...(composerDraftGoal === null ? {} : { goal: composerDraftGoal }),
+                      ...(composerDraftVoiceNotifications === null
+                        ? {}
+                        : { voiceNotifications: composerDraftVoiceNotifications }),
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
@@ -7947,7 +8022,9 @@ function ChatViewContent(props: ChatViewProps) {
                             supportsAttachmentUploads={supportsAttachmentUploads}
                             supportsThreadGoals={supportsThreadGoals}
                             activeThreadGoal={
-                              isServerThread ? (activeServerThread?.goal ?? null) : null
+                              isServerThread
+                                ? (activeServerThread?.goal ?? null)
+                                : composerDraftGoal
                             }
                             threadGoalEditor={threadGoalEditorState}
                             onThreadGoalEditorOpen={openThreadGoalEditor}
@@ -7997,6 +8074,14 @@ function ChatViewContent(props: ChatViewProps) {
                             threadSyncPhase={activeEnvironmentUnavailable ? null : threadSyncPhase}
                             runtimeMode={runtimeMode}
                             interactionMode={interactionMode}
+                            voiceNotifications={
+                              isLocalDraftThread
+                                ? (composerDraftVoiceNotifications ?? true)
+                                : (serverThread?.voiceNotifications ?? true)
+                            }
+                            showVoiceNotificationsToggle={
+                              Boolean(serverThread) || isLocalDraftThread
+                            }
                             lockedProvider={lockedProvider}
                             providerStatuses={providerStatuses as ServerProvider[]}
                             activeProjectDefaultModelSelection={

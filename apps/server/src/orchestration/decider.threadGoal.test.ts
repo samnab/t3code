@@ -48,6 +48,92 @@ const readModel: OrchestrationReadModel = {
 };
 
 it.layer(NodeServices.layer)("thread goal decider", (it) => {
+  it.effect("creates a thread with the composer's goal and voice choice", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.create",
+          commandId: CommandId.make("cmd-create-with-goal"),
+          threadId: ThreadId.make("thread-2"),
+          projectId: ProjectId.make("project-1"),
+          title: "Draft thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          goal: "Ship the login fix",
+          voiceNotifications: false,
+          branch: null,
+          worktreePath: null,
+          createdAt: UPDATED_AT,
+        },
+        readModel: {
+          ...readModel,
+          projects: [
+            {
+              id: ProjectId.make("project-1"),
+              title: "Project",
+              workspaceRoot: "/tmp/project",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: UPDATED_AT,
+              updatedAt: UPDATED_AT,
+              deletedAt: null,
+            },
+          ],
+        },
+      });
+      const event = Array.isArray(result) ? result[0] : result;
+
+      expect(event.type).toBe("thread.created");
+      if (event.type === "thread.created") {
+        expect(event.payload.goal).toBe("Ship the login fix");
+        expect(event.payload.voiceNotifications).toBe(false);
+      }
+    }),
+  );
+
+  it.effect("defaults a created thread to no goal and voice notifications on", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.create",
+          commandId: CommandId.make("cmd-create-plain"),
+          threadId: ThreadId.make("thread-3"),
+          projectId: ProjectId.make("project-1"),
+          title: "Draft thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: UPDATED_AT,
+        },
+        readModel: {
+          ...readModel,
+          projects: [
+            {
+              id: ProjectId.make("project-1"),
+              title: "Project",
+              workspaceRoot: "/tmp/project",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: UPDATED_AT,
+              updatedAt: UPDATED_AT,
+              deletedAt: null,
+            },
+          ],
+        },
+      });
+      const event = Array.isArray(result) ? result[0] : result;
+
+      expect(event.type).toBe("thread.created");
+      if (event.type === "thread.created") {
+        expect(event.payload.goal).toBeNull();
+        expect(event.payload.voiceNotifications).toBe(true);
+      }
+    }),
+  );
+
   it.effect("propagates a goal set through thread.meta.update", () =>
     Effect.gen(function* () {
       const result = yield* decideOrchestrationCommand({
