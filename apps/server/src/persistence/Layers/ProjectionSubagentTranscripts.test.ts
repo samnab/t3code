@@ -13,7 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import Migration046 from "../Migrations/046_ProjectionSubagentTranscripts.ts";
+import Migration048 from "../Migrations/048_ProjectionSubagentTranscripts.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionSubagentRunRepositoryLive } from "./ProjectionSubagentRuns.ts";
 import { ProjectionSubagentTranscriptStoreLive } from "./ProjectionSubagentTranscripts.ts";
@@ -27,15 +27,15 @@ import {
   type ReadSubagentTranscriptPageResult,
 } from "../Services/ProjectionSubagentTranscripts.ts";
 
-// Apply 046 directly so this focused store test stays isolated from the full
+// Apply 048 directly so this focused store test stays isolated from the full
 // migration manifest.
-const withMigration046 = Layer.effectDiscard(Migration046);
+const withMigration048 = Layer.effectDiscard(Migration048);
 const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const layer = it.layer(
   ProjectionSubagentTranscriptStoreLive.pipe(
     Layer.provideMerge(ProjectionSubagentRunRepositoryLive),
-    Layer.provideMerge(withMigration046),
+    Layer.provideMerge(withMigration048),
     Layer.provideMerge(SqlitePersistenceMemory),
   ),
 );
@@ -448,7 +448,7 @@ it.live("signals and awaits durable start receipts without polling", () =>
     Effect.provide(
       ProjectionSubagentTranscriptStoreLive.pipe(
         Layer.provideMerge(ProjectionSubagentRunRepositoryLive),
-        Layer.provideMerge(withMigration046),
+        Layer.provideMerge(withMigration048),
         Layer.provideMerge(SqlitePersistenceMemory),
       ),
     ),

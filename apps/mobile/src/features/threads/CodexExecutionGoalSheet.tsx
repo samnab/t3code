@@ -14,7 +14,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
-import { useThemeColor } from "../../lib/useThemeColor";
 
 /**
  * Bottom-sheet view of the Codex-native execution goal (transparent Modal,
@@ -31,8 +30,6 @@ export function CodexExecutionGoalSheet(props: {
 }) {
   const { state } = props;
   const insets = useSafeAreaInsets();
-  const pressedOverlay = useThemeColor("--color-subtle");
-  const mutedColor = useThemeColor("--color-foreground-muted");
   const errorCopy = state.error !== null ? executionGoalErrorCopy(state.error) : null;
   const snapshot = state.snapshot;
 
@@ -46,8 +43,7 @@ export function CodexExecutionGoalSheet(props: {
       <Pressable
         accessibilityLabel={label}
         accessibilityRole="button"
-        android_ripple={{ color: pressedOverlay }}
-        className="min-h-11 items-center justify-center px-4"
+        className="min-h-11 items-center justify-center px-4 active:bg-subtle"
         disabled={options?.disabled}
         onPress={onPress}
       >
@@ -99,7 +95,12 @@ export function CodexExecutionGoalSheet(props: {
         >
           <View className="mb-1 flex-row items-center justify-between">
             <View className="flex-row items-center gap-1.5">
-              <SymbolView name="flag" size={14} tintColor={mutedColor} type="monochrome" />
+              <SymbolView
+                name="flag"
+                size={14}
+                tintColorClassName="accent-foreground-muted"
+                type="monochrome"
+              />
               <Text className="text-sm font-t3-bold text-foreground-muted">
                 Codex execution goal
               </Text>

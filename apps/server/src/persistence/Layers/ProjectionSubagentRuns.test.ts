@@ -5,17 +5,17 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ProjectionSubagentRunRepositoryLive } from "./ProjectionSubagentRuns.ts";
-import Migration046 from "../Migrations/046_ProjectionSubagentTranscripts.ts";
+import Migration048 from "../Migrations/048_ProjectionSubagentTranscripts.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionSubagentRunRepository } from "../Services/ProjectionSubagentRuns.ts";
 
-// Apply 046 directly so this focused repository test stays isolated from the
+// Apply 048 directly so this focused repository test stays isolated from the
 // full migration manifest.
-const withMigration046 = Layer.effectDiscard(Migration046);
+const withMigration048 = Layer.effectDiscard(Migration048);
 
 const layer = it.layer(
   ProjectionSubagentRunRepositoryLive.pipe(
-    Layer.provideMerge(withMigration046),
+    Layer.provideMerge(withMigration048),
     Layer.provideMerge(SqlitePersistenceMemory),
   ),
 );

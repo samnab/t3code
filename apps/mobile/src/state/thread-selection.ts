@@ -26,6 +26,7 @@ export function threadDetailToShell(
     interactionMode: thread.interactionMode,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
+    linkedPullRequest: thread.linkedPullRequest ?? null,
     ...(thread.goal !== undefined ? { goal: thread.goal } : {}),
     latestTurn: thread.latestTurn,
     createdAt: thread.createdAt,

@@ -21,8 +21,9 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 
+import { createAttachmentId, resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
-import Migration046 from "../../persistence/Migrations/046_ProjectionSubagentTranscripts.ts";
+import Migration048 from "../../persistence/Migrations/048_ProjectionSubagentTranscripts.ts";
 import { ProjectionSubagentRunRepositoryLive } from "../../persistence/Layers/ProjectionSubagentRuns.ts";
 import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/ProjectionSubagentTranscripts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -43,6 +44,7 @@ const THREAD_ID = ThreadId.make("pi-adapter-test-thread");
 const FIXTURE_SCRIPT_PATH = NodePath.join(import.meta.dirname, "../testUtils/fake-pi.mjs");
 
 interface Fixture {
+  readonly root: string;
   readonly binaryPath: string;
   readonly closedPath: string;
   readonly logPath: string;
@@ -75,7 +77,7 @@ const makeFixture = (): Fixture => {
   delete process.env.FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS;
   delete process.env.FAKE_PI_MANAGER_REJECT_FILE;
   delete process.env.FAKE_PI_CHILD_TRANSCRIPTS;
-  return { binaryPath: shimPath, closedPath, logPath, nativeSessionFile };
+  return { root: fixtureRoot, binaryPath: shimPath, closedPath, logPath, nativeSessionFile };
 };
 
 const testLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
@@ -254,6 +256,71 @@ describe("PiAdapter", () => {
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
   );
+
+  it.live("forwards images to Pi RPC and leaves generic files on the prompt path", () => {
+    const fixture = makeFixture();
+    const layer = ServerConfig.layerTest(process.cwd(), fixture.root).pipe(
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const imageId = createAttachmentId(THREAD_ID);
+      const fileId = createAttachmentId(THREAD_ID, "txt");
+      if (imageId === null || fileId === null) throw new Error("Expected safe attachment ids.");
+      const image = {
+        type: "image" as const,
+        id: imageId,
+        name: "sample.png",
+        mimeType: "image/png",
+        sizeBytes: 6,
+      };
+      const file = {
+        type: "file" as const,
+        id: fileId,
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 5,
+      };
+      const imagePath = resolveAttachmentPath({
+        attachmentsDir: config.attachmentsDir,
+        attachment: image,
+      });
+      const filePath = resolveAttachmentPath({
+        attachmentsDir: config.attachmentsDir,
+        attachment: file,
+      });
+      if (imagePath === null || filePath === null) throw new Error("Expected attachment paths.");
+      NodeFS.writeFileSync(imagePath, "pixels");
+      NodeFS.writeFileSync(filePath, "notes");
+
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: `Inspect the attachments.\n\n[Attached file "notes.txt" is saved at: ${filePath}]`,
+        attachments: [image, file],
+      });
+      yield* collector.waitFor(
+        (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
+      );
+
+      const prompt = readLogLines(fixture).find(
+        (line) => line["type"] === "prompt" && String(line["message"] ?? "").startsWith("Inspect"),
+      );
+      expect(prompt?.["images"]).toEqual([
+        { type: "image", data: Buffer.from("pixels").toString("base64"), mimeType: "image/png" },
+      ]);
+      expect(prompt?.["message"]).toContain(filePath);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(Effect.provide(layer));
+  });
 
   it.live("projects assistant content delivered only by message_end", () =>
     Effect.gen(function* () {
@@ -1535,11 +1602,11 @@ describe("PiAdapter", () => {
 
   // ── Phase 1.5 child transcripts ─────────────────────────────────
 
-  const withMigration046 = Layer.effectDiscard(Migration046);
+  const withMigration048 = Layer.effectDiscard(Migration048);
 
   const transcriptStoreLayer = ProjectionSubagentTranscriptStoreLive.pipe(
     Layer.provideMerge(ProjectionSubagentRunRepositoryLive),
-    Layer.provideMerge(withMigration046),
+    Layer.provideMerge(withMigration048),
     Layer.provideMerge(SqlitePersistenceMemory),
   );
 

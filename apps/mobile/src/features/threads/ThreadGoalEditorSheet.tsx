@@ -11,7 +11,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
-import { useThemeColor } from "../../lib/useThemeColor";
 
 // Hidden until the draft approaches the cap, matching the web editor.
 const GOAL_COUNTER_THRESHOLD = THREAD_GOAL_MAX_CHARS - 128;
@@ -30,8 +29,6 @@ export function ThreadGoalEditorSheet(props: {
 }) {
   const { state } = props;
   const insets = useSafeAreaInsets();
-  const pressedOverlay = useThemeColor("--color-subtle");
-  const mutedColor = useThemeColor("--color-foreground-muted");
   const draftError = threadGoalEditorDraftError(state.draft);
   const canSave = threadGoalEditorCanSave(state);
 
@@ -43,8 +40,7 @@ export function ThreadGoalEditorSheet(props: {
     <View className="overflow-hidden rounded-full">
       <Pressable
         accessibilityRole="button"
-        android_ripple={{ color: pressedOverlay }}
-        className="min-h-11 items-center justify-center px-4"
+        className="min-h-11 items-center justify-center px-4 active:bg-subtle"
         disabled={options?.disabled}
         onPress={onPress}
       >
@@ -88,7 +84,12 @@ export function ThreadGoalEditorSheet(props: {
           >
             <View className="mb-2 flex-row items-center justify-between">
               <View className="flex-row items-center gap-1.5">
-                <SymbolView name="scope" size={14} tintColor={mutedColor} type="monochrome" />
+                <SymbolView
+                  name="scope"
+                  size={14}
+                  tintColorClassName="accent-foreground-muted"
+                  type="monochrome"
+                />
                 <Text className="text-sm font-t3-bold text-foreground-muted">Thread goal</Text>
               </View>
               {actionButton("Close", props.onClose)}
@@ -101,7 +102,7 @@ export function ThreadGoalEditorSheet(props: {
               textAlignVertical="top"
               className="max-h-40 min-h-24 rounded-2xl bg-subtle px-3.5 py-3 text-base text-foreground"
               placeholder="What should this thread accomplish?"
-              placeholderTextColor={mutedColor}
+              placeholderTextColorClassName="accent-placeholder"
               value={state.draft}
               onChangeText={props.onDraftChange}
             />

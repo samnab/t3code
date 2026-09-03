@@ -78,6 +78,7 @@ const makeHarness = Effect.fn("SubagentTranscriptTest.makeHarness")(function* (
   const session: RpcSession = {
     client,
     initialConfig: Effect.die("unused"),
+    subscribeServerConfig: (input) => client.subscribeServerConfig(input),
     ready: Effect.void,
     probe: Effect.void,
     closed: Effect.never,

@@ -33,7 +33,9 @@
  */
 import {
   ApprovalRequestId,
+  type ChatImageAttachment,
   EventId,
+  isProviderSendTurnSupportedImageMimeType,
   type ModelSelection,
   type OrchestrationSubagentControlActionResult,
   type PiSettings,
@@ -62,6 +64,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -70,6 +73,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   ProviderAdapterProcessError,
@@ -331,6 +335,72 @@ const MANAGER_NEGOTIATION_TIMEOUT_MS = 5_000;
 const MANAGER_CONTROL_ACK_TIMEOUT_MS = 10_000;
 const MAX_PENDING_MANAGER_RUN_UPSERTS = 64;
 
+type PiRpcImageContent = Readonly<{
+  type: "image";
+  data: string;
+  mimeType: string;
+}>;
+
+const readPiRpcImage = Effect.fn("readPiRpcImage")(function* (
+  attachment: ChatImageAttachment,
+  dependencies: {
+    readonly attachmentsDir: string;
+    readonly fileSystem: FileSystem.FileSystem;
+  },
+) {
+  if (!isProviderSendTurnSupportedImageMimeType(attachment.mimeType)) {
+    return yield* new ProviderAdapterRequestError({
+      provider: PROVIDER,
+      method: "prompt",
+      detail: `Unsupported Pi image attachment type '${attachment.mimeType}'.`,
+    });
+  }
+
+  const attachmentPath = resolveAttachmentPath({
+    attachmentsDir: dependencies.attachmentsDir,
+    attachment,
+  });
+  if (attachmentPath === null) {
+    return yield* new ProviderAdapterRequestError({
+      provider: PROVIDER,
+      method: "prompt",
+      detail: `Invalid attachment id '${attachment.id}'.`,
+    });
+  }
+
+  const bytes = yield* dependencies.fileSystem.readFile(attachmentPath).pipe(
+    Effect.mapError(
+      (cause) =>
+        new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "prompt",
+          detail: "Failed to read attachment file.",
+          cause,
+        }),
+    ),
+  );
+  return {
+    type: "image",
+    data: Buffer.from(bytes).toString("base64"),
+    mimeType: attachment.mimeType,
+  } satisfies PiRpcImageContent;
+});
+
+function buildPiPromptRecord(input: {
+  readonly message: string;
+  readonly images: ReadonlyArray<PiRpcImageContent>;
+  readonly streamingBehavior?: "steer";
+}) {
+  return {
+    type: "prompt",
+    message: input.message,
+    ...(input.images.length > 0 ? { images: input.images } : {}),
+    ...(input.streamingBehavior === undefined
+      ? {}
+      : { streamingBehavior: input.streamingBehavior }),
+  } satisfies PiRpcRecord;
+}
+
 function truncateCodePoints(value: string, limit: number) {
   let codePoints = 0;
   let end = 0;
@@ -347,6 +417,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const boundInstanceId = options?.instanceId;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const crypto = yield* Crypto.Crypto;
+    const fileSystem = yield* FileSystem.FileSystem;
     // Optional shared side-store sink. Absent means this build did not wire
     // the Phase 1.5 transcript store: the negotiated capability stays off
     // and every manager stays summary-only — the stock-Pi behavior.
@@ -2104,12 +2175,26 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         // T3's composer inserts skills as `$name` chips; Pi expands skills
         // only through leading `/skill:name` commands, so hoist them here.
         const promptText = expandPiSkillReference(input.input, ctx.skillNames);
+        // Pi RPC accepts images as native ImageContent. Generic files stay out
+        // of this array and reach Pi through the path lines ProviderService
+        // appends to the prompt.
+        const images = yield* Effect.forEach(
+          (input.attachments ?? []).filter(
+            (attachment): attachment is ChatImageAttachment => attachment.type === "image",
+          ),
+          (attachment) =>
+            readPiRpcImage(attachment, {
+              attachmentsDir: serverConfig.attachmentsDir,
+              fileSystem,
+            }),
+          { concurrency: 1 },
+        );
         // A sendTurn while a turn is active is a steer: the message queues on
         // Pi's side and lands inside the active run. No new turn starts.
         const activeTurn = ctx.activeTurn;
         if (activeTurn !== null) {
           yield* ctx.connection
-            .send({ type: "prompt", message: promptText, streamingBehavior: "steer" })
+            .send(buildPiPromptRecord({ message: promptText, images, streamingBehavior: "steer" }))
             .pipe(Effect.mapError((cause) => adapterError(input.threadId, "steer", cause)));
           activeTurn.settleProbeGeneration += 1;
           return {
@@ -2146,7 +2231,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         // dialogs indefinitely. Rejections arrive later as id-less response
         // records handled by the event pump.
         yield* ctx.connection
-          .send({ type: "prompt", message: promptText })
+          .send(buildPiPromptRecord({ message: promptText, images }))
           .pipe(Effect.mapError((cause) => adapterError(input.threadId, "prompt", cause)));
         return {
           threadId: input.threadId,

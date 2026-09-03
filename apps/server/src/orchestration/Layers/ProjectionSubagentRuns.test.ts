@@ -7,7 +7,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "../../config.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
-import Migration046 from "../../persistence/Migrations/046_ProjectionSubagentTranscripts.ts";
+import Migration048 from "../../persistence/Migrations/048_ProjectionSubagentTranscripts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
@@ -22,9 +22,9 @@ const layer = it.layer(
   OrchestrationProjectionPipelineLive.pipe(
     Layer.provideMerge(OrchestrationEventStoreLive),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "subagent-runs-" })),
-    // Apply 046 directly so this focused projector test stays isolated from
+    // Apply 048 directly so this focused projector test stays isolated from
     // the full migration manifest.
-    Layer.provideMerge(Layer.effectDiscard(Migration046)),
+    Layer.provideMerge(Layer.effectDiscard(Migration048)),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(NodeServices.layer),
   ),
