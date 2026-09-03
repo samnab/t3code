@@ -529,7 +529,6 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
                 }
               >
                 <ComposerControlIcon icon={props.voiceNotifications ? Volume2Icon : VolumeXIcon} />
-                <SelectValue>{props.voiceNotifications ? "Voice on" : "Voice off"}</SelectValue>
               </TooltipTrigger>
               <SelectPopup alignItemWithTrigger={false}>
                 <SelectItem value="on" hideIndicator className="min-w-48 py-2">
