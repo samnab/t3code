@@ -17,7 +17,7 @@ import {
 } from "@t3tools/shared/model";
 import { memo, useCallback, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
-import { ZapIcon } from "lucide-react";
+import { BrainIcon, ZapIcon } from "lucide-react";
 import { buttonVariants } from "../ui/button";
 import {
   Menu,
@@ -32,6 +32,7 @@ import { useComposerDraftStore, DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from "./ComposerControl";
 
 type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
@@ -274,6 +275,8 @@ export interface TraitsMenuContentProps {
   planModeEnabled: boolean;
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
+  /** Collapse the trigger to an icon; the current values move to the tooltip. */
+  iconOnly?: boolean;
 }
 
 export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
@@ -540,6 +543,7 @@ export const TraitsPicker = memo(function TraitsPicker({
   planModeEnabled,
   triggerVariant,
   triggerClassName,
+  iconOnly = false,
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -588,6 +592,50 @@ export const TraitsPicker = memo(function TraitsPicker({
 
   const isCodexStyle = provider === "codex";
 
+  const menuContent = (
+    <MenuPopup align="start">
+      <TraitsMenuContent
+        provider={provider}
+        {...(instanceId ? { instanceId } : {})}
+        models={models}
+        model={model}
+        prompt={prompt}
+        onPromptChange={onPromptChange}
+        modelOptions={modelOptions}
+        allowPromptInjectedEffort={allowPromptInjectedEffort}
+        planModeEnabled={planModeEnabled}
+        {...persistence}
+      />
+    </MenuPopup>
+  );
+
+  if (iconOnly) {
+    return (
+      <Tooltip>
+        <Menu open={isMenuOpen} onOpenChange={setIsMenuOpen}>
+          <TooltipTrigger
+            render={
+              <MenuTrigger
+                render={
+                  <ComposerControl
+                    variant={triggerVariant ?? "ghost"}
+                    className={cn("shrink-0 whitespace-nowrap font-medium", triggerClassName)}
+                    aria-label={`Model options: ${triggerLabel}`}
+                  />
+                }
+              />
+            }
+          >
+            {fastModeIcon ?? <ComposerControlIcon icon={BrainIcon} />}
+            <ComposerControlChevron />
+          </TooltipTrigger>
+          {menuContent}
+        </Menu>
+        <TooltipPopup side="top">{triggerLabel}</TooltipPopup>
+      </Tooltip>
+    );
+  }
+
   return (
     <Menu
       open={isMenuOpen}
@@ -622,20 +670,7 @@ export const TraitsPicker = memo(function TraitsPicker({
           </>
         )}
       </MenuTrigger>
-      <MenuPopup align="start">
-        <TraitsMenuContent
-          provider={provider}
-          {...(instanceId ? { instanceId } : {})}
-          models={models}
-          model={model}
-          prompt={prompt}
-          onPromptChange={onPromptChange}
-          modelOptions={modelOptions}
-          allowPromptInjectedEffort={allowPromptInjectedEffort}
-          planModeEnabled={planModeEnabled}
-          {...persistence}
-        />
-      </MenuPopup>
+      {menuContent}
     </Menu>
   );
 });
