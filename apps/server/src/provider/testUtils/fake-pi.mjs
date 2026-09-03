@@ -18,6 +18,9 @@
  *  - FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS — emit this many restore upserts before negotiation.
  *  - FAKE_PI_MANAGER_REJECT_FILE — when this file exists, ack steer/cancel
  *    envelopes with accepted:false.
+ *  - FAKE_PI_UNSOLICITED_TRIGGER — when this file appears, run the standard
+ *    agent_start/message_end/agent_settled sequence without any prompt in
+ *    flight, simulating an extension-initiated turn (e.g. subagents follow-up).
  */
 import * as NodeFS from "node:fs";
 
@@ -43,6 +46,15 @@ process.on("SIGTERM", () => {
 });
 
 record({ type: "launch", args, t3VoiceNotifications: process.env.T3_VOICE_NOTIFICATIONS });
+
+const unsolicitedTriggerPath = process.env.FAKE_PI_UNSOLICITED_TRIGGER;
+if (unsolicitedTriggerPath) {
+  const poll = setInterval(() => {
+    if (!NodeFS.existsSync(unsolicitedTriggerPath)) return;
+    clearInterval(poll);
+    emitAgentRun();
+  }, 10);
+}
 
 let buffer = "";
 let nextEntryId = 1;

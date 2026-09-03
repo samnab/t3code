@@ -77,6 +77,7 @@ const makeFixture = (): Fixture => {
   delete process.env.FAKE_PI_MANAGER_PRENEGOTIATION_UPSERTS;
   delete process.env.FAKE_PI_MANAGER_REJECT_FILE;
   delete process.env.FAKE_PI_CHILD_TRANSCRIPTS;
+  delete process.env.FAKE_PI_UNSOLICITED_TRIGGER;
   return { root: fixtureRoot, binaryPath: shimPath, closedPath, logPath, nativeSessionFile };
 };
 
@@ -284,6 +285,39 @@ describe("PiAdapter", () => {
       const sessions = yield* adapter.listSessions();
       expect(sessions).toHaveLength(1);
       expect(sessions[0]?.status).toBe("ready");
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("opens a turn for an extension-initiated agent run with no sendTurn in flight", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const triggerPath = NodePath.join(fixture.root, "unsolicited-trigger");
+      process.env.FAKE_PI_UNSOLICITED_TRIGGER = triggerPath;
+      const collector = yield* collectEvents(adapter.streamEvents);
+      const { events } = collector;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      // No sendTurn call here: the fake pi process fires the standard
+      // agent_start/message_end/agent_settled sequence on its own, the way
+      // the subagents extension delivers a settled follow-up while the
+      // thread is idle.
+      NodeFS.writeFileSync(triggerPath, "go");
+      yield* collector.waitFor(
+        (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
+      );
+      expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
+      const deltas = events
+        .filter((event) => event.type === "content.delta")
+        .map((event) => payloadOf(event).delta);
+      expect(deltas.join("")).toBe("Hello world");
+      expect(events.some((event) => event.type === "item.completed")).toBe(true);
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
   );

@@ -503,6 +503,37 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         ctx.session = { ...ctx.session, ...patch, updatedAt: yield* nowIso };
       });
 
+    /**
+     * Open a new active turn and emit `turn.started`. Shared by sendTurn
+     * (T3-initiated) and the `agent_start` pump case (extension-initiated,
+     * e.g. a subagents follow-up delivered while the thread was idle).
+     */
+    const openTurn = Effect.fnUntraced(function* (
+      ctx: PiSessionContext,
+      options: { readonly mayBeCommandOnly: boolean; readonly sawAgentActivity: boolean },
+    ) {
+      const turnId = TurnId.make(yield* nextUuid);
+      const turn: ActivePiTurn = {
+        turnId,
+        interrupted: false,
+        sawAgentActivity: options.sawAgentActivity,
+        mayBeCommandOnly: options.mayBeCommandOnly,
+        settleProbeGeneration: 0,
+        failure: null,
+      };
+      ctx.activeTurn = turn;
+      ctx.streamItems.clear();
+      yield* updateSession(ctx, { status: "running", activeTurnId: turnId });
+      const base = yield* makeEventBase(ctx.session);
+      yield* offerRuntimeEvent({
+        ...base,
+        type: "turn.started",
+        turnId,
+        payload: ctx.session.model !== undefined ? { model: ctx.session.model } : {},
+      });
+      return turn;
+    });
+
     // ── event emission ──────────────────────────────────────────
 
     const emitItem = Effect.fnUntraced(function* (input: {
@@ -1685,7 +1716,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             const turn = ctx.activeTurn;
             switch (recordString(event, "type") ?? "") {
               case "agent_start": {
-                if (turn !== null) turn.sawAgentActivity = true;
+                if (turn !== null) {
+                  turn.sawAgentActivity = true;
+                  return;
+                }
+                // No T3 sendTurn in flight: an extension (e.g. subagents
+                // delivering a settled follow-up) started this agent run on
+                // its own. Open a turn so the reply is not dropped.
+                yield* openTurn(ctx, { mayBeCommandOnly: false, sawAgentActivity: true });
                 return;
               }
               case "compaction_start": {
@@ -2227,26 +2265,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         if (input.modelSelection !== undefined) {
           yield* applyModelSelection(ctx, input.modelSelection);
         }
-        const turnId = TurnId.make(yield* nextUuid);
         const commandName = input.input.trimStart().match(/^\/([^\s]+)/)?.[1];
-        const turn: ActivePiTurn = {
-          turnId,
-          interrupted: false,
-          sawAgentActivity: false,
+        const turn = yield* openTurn(ctx, {
           mayBeCommandOnly: commandName !== undefined && ctx.extensionCommandNames.has(commandName),
-          settleProbeGeneration: 0,
-          failure: null,
-        };
-        ctx.activeTurn = turn;
-        ctx.streamItems.clear();
-        yield* updateSession(ctx, { status: "running", activeTurnId: turnId });
-        const base = yield* makeEventBase(ctx.session);
-        yield* offerRuntimeEvent({
-          ...base,
-          type: "turn.started",
-          turnId,
-          payload: ctx.session.model !== undefined ? { model: ctx.session.model } : {},
+          sawAgentActivity: false,
         });
+        const turnId = turn.turnId;
         // Fire-and-forget: Pi acks `prompt` only after slash-command
         // expansion completes, and extension commands may block on user
         // dialogs indefinitely. Rejections arrive later as id-less response
