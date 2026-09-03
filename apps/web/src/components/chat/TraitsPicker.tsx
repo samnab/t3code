@@ -17,16 +17,7 @@ import {
 } from "@t3tools/shared/model";
 import { memo, useCallback, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
-import {
-  BrainIcon,
-  SignalHighIcon,
-  SignalIcon,
-  SignalLowIcon,
-  SignalMediumIcon,
-  SignalZeroIcon,
-  ZapIcon,
-  type LucideIcon,
-} from "lucide-react";
+import { ZapIcon, type LucideIcon } from "lucide-react";
 import { buttonVariants } from "../ui/button";
 import {
   Menu,
@@ -42,6 +33,7 @@ import { getProviderModelCapabilities } from "../../providerModels";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { BrainFoldIcons } from "../Icons";
 import { ComposerControl, ComposerControlChevron, ComposerControlIcon } from "./ComposerControl";
 
 type ProviderOptions = ReadonlyArray<ProviderOptionSelection>;
@@ -482,6 +474,29 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   );
 });
 
+const EFFORT_DESCRIPTOR_IDS = new Set(["effort", "reasoningEffort", "reasoning", "thinking"]);
+
+/** Fold density per effort value; unknown or default values read as medium. */
+const EFFORT_FOLD_LEVELS: Record<string, number> = {
+  none: 0,
+  minimal: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  xhigh: 4,
+  max: 4,
+  ultrathink: 4,
+};
+
+/** Icon-only trigger glyph: a brain whose folds scale with the selected effort. */
+function effortIcon(descriptorId: string | null, effort: string | null): LucideIcon {
+  const level =
+    descriptorId !== null && EFFORT_DESCRIPTOR_IDS.has(descriptorId) && effort !== null
+      ? (EFFORT_FOLD_LEVELS[effort] ?? 2)
+      : 2;
+  return BrainFoldIcons[level] ?? BrainFoldIcons[2]!;
+}
+
 /**
  * Build the traits trigger's text label plus whether the fast-mode bolt should
  * render. Claude and Cursor expose fast mode as a boolean, while Codex exposes
@@ -490,27 +505,6 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
  * fast mode is the only trait, where a bare bolt (or bare chevron) would leave
  * the trigger unreadable.
  */
-const EFFORT_DESCRIPTOR_IDS = new Set(["effort", "reasoningEffort", "reasoning", "thinking"]);
-
-const EFFORT_ICONS: Record<string, LucideIcon> = {
-  none: SignalZeroIcon,
-  minimal: SignalZeroIcon,
-  low: SignalLowIcon,
-  medium: SignalMediumIcon,
-  high: SignalHighIcon,
-  xhigh: SignalIcon,
-  max: SignalIcon,
-  ultrathink: SignalIcon,
-};
-
-/** Icon-only trigger glyph: signal bars for a known effort level, brain otherwise. */
-function effortIcon(descriptorId: string | null, effort: string | null): LucideIcon {
-  if (descriptorId === null || !EFFORT_DESCRIPTOR_IDS.has(descriptorId) || effort === null) {
-    return BrainIcon;
-  }
-  return EFFORT_ICONS[effort] ?? BrainIcon;
-}
-
 export function buildTraitsTriggerDisplay(input: {
   provider: ProviderDriverKind;
   descriptors: ReadonlyArray<ProviderOptionDescriptor>;
@@ -657,9 +651,7 @@ export const TraitsPicker = memo(function TraitsPicker({
             }
           >
             {fastModeIcon ?? (
-              <ComposerControlIcon
-                icon={effortIcon(primarySelectDescriptor?.id ?? null, effort)}
-              />
+              <ComposerControlIcon icon={effortIcon(primarySelectDescriptor?.id ?? null, effort)} />
             )}
             <ComposerControlChevron />
           </TooltipTrigger>

@@ -1,4 +1,4 @@
-import { createLucideIcon } from "lucide-react";
+import { createLucideIcon, type IconNode } from "lucide-react";
 import React, { type SVGProps, useId } from "react";
 import { cn } from "~/lib/utils";
 
@@ -726,3 +726,36 @@ export const TargetArrowIcon = createLucideIcon("TargetArrow", [
   ["path", { d: "m12 12 9-9", key: "shaft" }],
   ["path", { d: "M16.5 3H21v4.5", key: "head" }],
 ]);
+
+const brainFoldPaths = [
+  [],
+  ["M12 3v18"],
+  ["M12 3v18", "M7.5 7c2 1.5 2 3.5 0 5", "M16.5 7c-2 1.5-2 3.5 0 5"],
+  [
+    "M12 3v18",
+    "M7.5 6c2 1.5 2 3 0 4.5",
+    "M16.5 6c-2 1.5-2 3 0 4.5",
+    "M6 13.5c2.5 0 3.5 1.5 3 4",
+    "M18 13.5c-2.5 0-3.5 1.5-3 4",
+  ],
+  [
+    "M12 3v18",
+    "M8 4.5c1.5 1 1.5 2.5 0 3.5",
+    "M16 4.5c-1.5 1-1.5 2.5 0 3.5",
+    "M5 9.5c2.5 0 3.5 1 3.5 3",
+    "M19 9.5c-2.5 0-3.5 1-3.5 3",
+    "M6 15c2 0 3 1 3 3.5",
+    "M18 15c-2 0-3 1-3 3.5",
+  ],
+] as const;
+
+/**
+ * Round brain glyphs whose fold density scales with reasoning effort: index 0
+ * is an empty outline, index 4 is densely folded. Used by the composer's
+ * icon-only model-options trigger.
+ */
+export const BrainFoldIcons = brainFoldPaths.map((folds, level) => {
+  const node: IconNode = [["circle", { cx: "12", cy: "12", r: "9", key: "outline" }]];
+  folds.forEach((d, index) => node.push(["path", { d, key: `fold-${index}` }]));
+  return createLucideIcon(`BrainFold${level}`, node);
+});
