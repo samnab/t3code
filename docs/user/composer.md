@@ -230,6 +230,19 @@ A goal needs at least one visible character and fits within 1,024 characters. Th
 from a Codex execution goal, which Codex itself tracks in a live session — see
 [Codex](./providers-codex.md#codex-execution-goals).
 
+## Subscription usage limits
+
+Providers that bill against a subscription report how much of each usage window you have spent.
+Open the context meter next to the composer to see them under **Usage limits**: one row per
+window, with the share used and when it resets.
+
+- **Claude** reports its 5-hour window, its weekly window, and the per-model weekly windows.
+- **Codex** reports its two rolling windows.
+- **GLM (through Pi)** reports its 5-hour window when a z.ai key is configured.
+
+The rows come from the provider itself, so a window only appears once that provider has reported
+it in the open thread. Providers without subscription limits show nothing.
+
 ## Compact context
 
 When a thread's context grows, you can ask the provider to compact it: summarize the conversation

@@ -168,6 +168,23 @@ Provider output comes back as internal commands such as `thread.message.assistan
 `thread.session.set`, which clients observe through `orchestration.subscribeThread`. See
 [overview.md](./overview.md) for the command/event loop.
 
+## Subscription usage limits
+
+`account.rate-limits.updated` carries a normalised payload — `{ windows, replace }`, where each
+window is `{ id, label, usedPercent, resetsAt }` with `resetsAt` in unix milliseconds. Each adapter
+normalises at its own boundary (`apps/server/src/provider/usageLimits.ts`), so nothing downstream
+sees a provider-native rate-limit shape:
+
+- **Codex** maps its `primary`/`secondary` snapshot with `replace: true`.
+- **Claude** maps one SDK `rate_limit_event` at a time with `replace: false`, so clients merge by
+  window id. Unknown window keys pass through with a title-cased label rather than being dropped.
+- **Pi** has no native usage reporting, so GLM sessions read z.ai's quota endpoint once per session
+  start and once per completed turn, behind a five-minute cache
+  (`apps/server/src/provider/zaiUsageLimits.ts`). It never fails into the turn path.
+
+Ingestion turns the event into a `usage-limits.updated` thread activity carrying the provider,
+which clients fold with `mergeUsageLimitActivities` in `@t3tools/client-runtime/state/usage-limits`.
+
 ## Server-side workers
 
 Provider work flows through three queue-backed workers. All three are built with

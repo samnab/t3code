@@ -825,6 +825,28 @@ export function runtimeEventToActivities(
       ];
     }
 
+    case "account.rate-limits.updated": {
+      if (event.payload.windows.length === 0) {
+        return [];
+      }
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "usage-limits.updated",
+          summary: "Usage limits updated",
+          payload: {
+            provider: event.provider,
+            windows: event.payload.windows,
+            replace: event.payload.replace,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "item.updated": {
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];

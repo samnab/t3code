@@ -76,6 +76,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { normalizeClaudeRateLimit } from "../usageLimits.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
@@ -3597,7 +3598,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...base,
         type: "account.rate-limits.updated",
         payload: {
-          rateLimits: message,
+          // One SDK event carries one window, so clients merge by window id.
+          windows: normalizeClaudeRateLimit(message.rate_limit_info),
+          replace: false,
         },
       });
       return;

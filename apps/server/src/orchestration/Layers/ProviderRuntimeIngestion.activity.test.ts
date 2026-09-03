@@ -142,3 +142,36 @@ describe("runtimeEventToActivities tool streaming persistence", () => {
     expect(payload.data).toEqual(streamingData);
   });
 });
+
+describe("runtimeEventToActivities usage limits", () => {
+  it("carries the provider and merge mode onto a usage-limits activity", () => {
+    const activities = runtimeEventToActivities({
+      ...base,
+      type: "account.rate-limits.updated",
+      eventId: EventId.make("evt-limits"),
+      payload: {
+        windows: [{ id: "primary", label: "5-hour", usedPercent: 42, resetsAt: 1_700_000_000_000 }],
+        replace: true,
+      },
+    } satisfies ProviderRuntimeEvent);
+
+    expect(activities).toHaveLength(1);
+    expect(activities[0]?.kind).toBe("usage-limits.updated");
+    expect(activities[0]?.payload).toEqual({
+      provider: "codex",
+      windows: [{ id: "primary", label: "5-hour", usedPercent: 42, resetsAt: 1_700_000_000_000 }],
+      replace: true,
+    });
+  });
+
+  it("emits nothing when the provider reported no windows", () => {
+    expect(
+      runtimeEventToActivities({
+        ...base,
+        type: "account.rate-limits.updated",
+        eventId: EventId.make("evt-limits-empty"),
+        payload: { windows: [], replace: false },
+      } satisfies ProviderRuntimeEvent),
+    ).toEqual([]);
+  });
+});

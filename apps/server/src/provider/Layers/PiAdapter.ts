@@ -83,6 +83,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "../piLaunchArgs.ts";
+import { zaiUsageLimitWindows } from "../zaiUsageLimits.ts";
 import { expandPiSkillReference, parsePiDiscoveredCommands } from "../PiCommands.ts";
 import {
   makePiRpcConnection,
@@ -447,6 +448,23 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
       PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
 
+    /**
+     * Pi surfaces no usage limits of its own, so GLM sessions read z.ai's
+     * quota endpoint directly. Non-z.ai models and empty results emit nothing.
+     */
+    const emitZaiUsageLimits = (ctx: PiSessionContext) =>
+      Effect.gen(function* () {
+        if (ctx.session.model?.startsWith("zai/") !== true) return;
+        const windows = yield* zaiUsageLimitWindows;
+        if (windows.length === 0) return;
+        const base = yield* makeEventBase(ctx.session);
+        yield* offerRuntimeEvent({
+          ...base,
+          type: "account.rate-limits.updated",
+          payload: { windows, replace: true },
+        });
+      });
+
     const makeEventBase = (session: ProviderSession) =>
       Effect.gen(function* () {
         const [eventId, createdAt] = yield* Effect.all([nextUuid, nowIso]);
@@ -584,6 +602,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             payload: { state: "completed" },
           });
         }
+        yield* emitZaiUsageLimits(ctx);
       });
 
     /**
@@ -2131,6 +2150,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             type: "session.started",
             payload: resume !== undefined ? { resume: encodeResumeCursor(nativeSessionPath) } : {},
           });
+          yield* emitZaiUsageLimits(ctx);
           return session;
         }).pipe(
           Effect.onExit((exit) =>

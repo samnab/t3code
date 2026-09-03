@@ -745,8 +745,24 @@ const AccountUpdatedPayload = Schema.Struct({
 });
 export type AccountUpdatedPayload = typeof AccountUpdatedPayload.Type;
 
+/**
+ * One subscription usage window as reported by a provider, normalised at the
+ * adapter boundary so clients never see provider-native shapes.
+ */
+export const UsageLimitWindow = Schema.Struct({
+  /** Stable per-provider window key, e.g. `five_hour`, `seven_day_opus`. */
+  id: TrimmedNonEmptyStringSchema,
+  label: TrimmedNonEmptyStringSchema,
+  usedPercent: Schema.Number,
+  /** Unix epoch milliseconds, or null when the provider omits a reset time. */
+  resetsAt: Schema.NullOr(Schema.Number),
+});
+export type UsageLimitWindow = typeof UsageLimitWindow.Type;
+
 const AccountRateLimitsUpdatedPayload = Schema.Struct({
-  rateLimits: Schema.Unknown,
+  windows: Schema.Array(UsageLimitWindow),
+  /** `true` for full snapshots; `false` merges by window id into prior state. */
+  replace: Schema.Boolean,
 });
 export type AccountRateLimitsUpdatedPayload = typeof AccountRateLimitsUpdatedPayload.Type;
 

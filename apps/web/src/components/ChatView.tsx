@@ -341,6 +341,7 @@ import {
   resolveContextCompactionMode,
   shouldOfferResumeCompaction,
 } from "./chat/ContextWindowMeter.logic";
+import { mergeUsageLimitActivities } from "@t3tools/client-runtime/state/usage-limits";
 import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
 import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
@@ -2585,6 +2586,10 @@ function ChatViewContent(props: ChatViewProps) {
   }, [latestCheckpointCompletedAt, threadActivities]);
   const activeContextWindow = useMemo(
     () => deriveLatestContextWindowSnapshot(threadActivities),
+    [threadActivities],
+  );
+  const activeUsageLimits = useMemo(
+    () => mergeUsageLimitActivities(threadActivities),
     [threadActivities],
   );
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
@@ -7999,6 +8004,7 @@ function ChatViewContent(props: ChatViewProps) {
                             }
                             activeThreadModelSelection={activeThread?.modelSelection}
                             activeContextWindow={activeContextWindow}
+                            activeUsageLimits={activeUsageLimits}
                             compactDisabled={compactDisabled}
                             compactDisabledReason={compactDisabledReason}
                             contextCompactionMode={contextCompactionMode}

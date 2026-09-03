@@ -56,6 +56,7 @@ import {
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { normalizeCodexRateLimits } from "../usageLimits.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
@@ -1486,7 +1487,8 @@ function mapToRuntimeEvents(
         type: "account.rate-limits.updated",
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
-          rateLimits: event.payload ?? {},
+          windows: normalizeCodexRateLimits(event.payload),
+          replace: true,
         },
       },
     ];

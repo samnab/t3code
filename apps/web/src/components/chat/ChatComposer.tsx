@@ -339,6 +339,7 @@ import { type SessionPhase, type Thread, videoMimeType } from "../../types";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
 import type { PendingApproval, PendingUserInput } from "../../session-logic";
 import type { ContextWindowSnapshot } from "../../lib/contextWindow";
+import type { ProviderUsageLimits } from "@t3tools/client-runtime/state/usage-limits";
 import {
   formatProviderSkillDisplayName,
   getProviderSlashCommandsForSlashMenu,
@@ -583,6 +584,7 @@ const ComposerThreadGoalPassive = memo(function ComposerThreadGoalPassive(props:
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
   activeContextWindow: ContextWindowSnapshot | null;
+  activeUsageLimits: ReadonlyArray<ProviderUsageLimits>;
   activeThreadModelDisplayName: string | null;
   isPreparingWorktree: boolean;
   pendingAction: {
@@ -611,9 +613,10 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
-      {props.activeContextWindow ? (
+      {props.activeContextWindow || props.activeUsageLimits.length > 0 ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
+          usageLimits={props.activeUsageLimits}
           modelDisplayName={props.activeThreadModelDisplayName}
           onCompact={props.onCompactContext}
           compactDisabled={props.compactDisabled}
@@ -775,6 +778,7 @@ export interface ChatComposerProps {
 
   // Context window
   activeContextWindow: ContextWindowSnapshot | null;
+  activeUsageLimits: ReadonlyArray<ProviderUsageLimits>;
   compactDisabled: boolean;
   compactDisabledReason: string | null;
   /** Server-declared compaction mode for the active provider; null = hide. */
@@ -883,6 +887,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     activeContextWindow,
+    activeUsageLimits,
     compactDisabled,
     compactDisabledReason,
     contextCompactionMode,
@@ -4568,6 +4573,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   ) : null}
                   <ComposerFooterPrimaryActions
                     compact={isComposerPrimaryActionsCompact}
+                    activeUsageLimits={activeUsageLimits}
                     activeContextWindow={
                       settings.contextWindowMeterEnabled ? activeContextWindow : null
                     }

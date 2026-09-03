@@ -191,6 +191,10 @@
       "types": "./src/state/threadSearch.ts",
       "default": "./src/state/threadSearch.ts"
     },
+    "./state/usage-limits": {
+      "types": "./src/state/usageLimits.ts",
+      "default": "./src/state/usageLimits.ts"
+    },
     "./state/vcs": {
       "types": "./src/state/vcs.ts",
       "default": "./src/state/vcs.ts"

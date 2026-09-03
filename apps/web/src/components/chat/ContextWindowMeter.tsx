@@ -3,6 +3,87 @@ import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/con
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { formatContextWindowCompactionMessage } from "./ContextWindowMeter.logic";
 import { Minimize2Icon } from "lucide-react";
+import {
+  formatUsageLimitReset,
+  type ProviderUsageLimits,
+} from "@t3tools/client-runtime/state/usage-limits";
+import { useEffect, useState } from "react";
+
+const PROVIDER_LABELS: Record<string, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  cursor: "Cursor",
+  grok: "Grok",
+  opencode: "OpenCode",
+  pi: "GLM",
+};
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider.charAt(0).toUpperCase() + provider.slice(1);
+}
+
+/**
+ * Reset times are relative, so re-render them on a slow tick rather than
+ * animating: one update a minute is invisible to the GPU and keeps the popover
+ * honest while it stays open.
+ */
+function useMinuteTick(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  return now;
+}
+
+function UsageLimitsSection(props: { limits: ReadonlyArray<ProviderUsageLimits> }) {
+  const now = useMinuteTick(props.limits.length > 0);
+  if (props.limits.length === 0) {
+    return null;
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="font-medium text-muted-foreground text-xs">Usage Limits</div>
+      {props.limits.map((entry) =>
+        entry.windows.map((window) => {
+          const percent = Math.max(0, Math.min(100, window.usedPercent));
+          const resetsIn = formatUsageLimitReset(window.resetsAt, now);
+          return (
+            <div key={`${entry.provider}:${window.id}`} className="flex flex-col gap-1">
+              <div className="flex items-baseline justify-between gap-3 text-[11px] leading-4">
+                <span className="truncate text-secondary-label">
+                  {providerLabel(entry.provider)} · {window.label}
+                </span>
+                <span className="font-medium tabular-nums text-secondary-label">
+                  {Math.round(percent)}%
+                </span>
+              </div>
+              <div className="h-1 w-full overflow-hidden rounded-full bg-muted/60">
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${percent}%`,
+                    backgroundColor:
+                      percent > 90
+                        ? "var(--color-error)"
+                        : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)",
+                  }}
+                />
+              </div>
+              {resetsIn ? (
+                <div className="text-[11px] leading-4 text-secondary-label">
+                  resets in {resetsIn}
+                </div>
+              ) : null}
+            </div>
+          );
+        }),
+      )}
+    </div>
+  );
+}
 
 function formatPercentage(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) {
@@ -15,19 +96,21 @@ function formatPercentage(value: number | null): string | null {
 }
 
 export function ContextWindowMeter(props: {
-  usage: ContextWindowSnapshot;
+  usage: ContextWindowSnapshot | null;
+  usageLimits?: ReadonlyArray<ProviderUsageLimits> | undefined;
   modelDisplayName?: string | null;
   onCompact?: (() => void) | undefined;
   compactDisabled?: boolean | undefined;
   compactDisabledReason?: string | null | undefined;
 }) {
   const { usage, modelDisplayName, onCompact, compactDisabled, compactDisabledReason } = props;
-  const usedPercentage = formatPercentage(usage.usedPercentage);
-  const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
+  const usageLimits = props.usageLimits ?? [];
+  const usedPercentage = usage ? formatPercentage(usage.usedPercentage) : null;
+  const normalizedPercentage = Math.max(0, Math.min(100, usage?.usedPercentage ?? 0));
   const radius = 9.75;
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference * (1 - normalizedPercentage / 100);
-  const totalProcessedTokens = usage.totalProcessedTokens ?? null;
+  const totalProcessedTokens = usage?.totalProcessedTokens ?? null;
   const showTotalProcessed = totalProcessedTokens !== null && totalProcessedTokens > 0;
   const isOverloaded = normalizedPercentage > 90;
   const usageColor = isOverloaded
@@ -46,9 +129,11 @@ export function ContextWindowMeter(props: {
             variant="ghost-muted"
             className="size-7 rounded-full hover:text-muted-foreground data-pressed:text-muted-foreground"
             aria-label={
-              usage.maxTokens !== null && usedPercentage
-                ? `Context window ${usedPercentage} used`
-                : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
+              usage === null
+                ? "Usage limits"
+                : usage.maxTokens !== null && usedPercentage
+                  ? `Context window ${usedPercentage} used`
+                  : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
             }
           >
             <span className="relative flex size-5 items-center justify-center">
@@ -90,51 +175,59 @@ export function ContextWindowMeter(props: {
         className="w-64 max-w-none text-left whitespace-normal"
       >
         <div className="flex flex-col gap-2 p-[var(--floating-content-inset)]">
-          <div className="flex items-center justify-between gap-3">
-            <div className="font-medium text-muted-foreground text-xs">Context Window</div>
-            {usage.maxTokens !== null && usedPercentage ? (
-              <div className="text-secondary-label text-[11px] tabular-nums">
-                <span>{usedPercentage}</span>
-                <span className="mx-1">·</span>
-                <span>
-                  {formatContextWindowTokens(usage.usedTokens)}/
-                  {formatContextWindowTokens(usage.maxTokens ?? null)}
-                </span>
+          {usage ? (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-medium text-muted-foreground text-xs">Context Window</div>
+                {usage.maxTokens !== null && usedPercentage ? (
+                  <div className="text-secondary-label text-[11px] tabular-nums">
+                    <span>{usedPercentage}</span>
+                    <span className="mx-1">·</span>
+                    <span>
+                      {formatContextWindowTokens(usage.usedTokens)}/
+                      {formatContextWindowTokens(usage.maxTokens ?? null)}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="text-secondary-label text-[11px] tabular-nums">
+                    {formatContextWindowTokens(usage.usedTokens)}
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="text-secondary-label text-[11px] tabular-nums">
-                {formatContextWindowTokens(usage.usedTokens)}
-              </div>
-            )}
-          </div>
-          {usage.maxTokens !== null ? (
-            <div
-              className="h-1.5 w-full overflow-hidden rounded-full bg-muted/60"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(normalizedPercentage)}
-              aria-label="Context window usage"
-            >
-              <div
-                className="h-full rounded-full transition-[width,background-color] duration-500 ease-out motion-reduce:transition-none"
-                style={{ width: `${normalizedPercentage}%`, backgroundColor: usageColor }}
-              />
-            </div>
+              {usage.maxTokens !== null ? (
+                <div
+                  className="h-1.5 w-full overflow-hidden rounded-full bg-muted/60"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(normalizedPercentage)}
+                  aria-label="Context window usage"
+                >
+                  <div
+                    className="h-full rounded-full transition-[width,background-color] duration-500 ease-out motion-reduce:transition-none"
+                    style={{ width: `${normalizedPercentage}%`, backgroundColor: usageColor }}
+                  />
+                </div>
+              ) : null}
+              {showTotalProcessed ? (
+                <div className="flex items-center justify-between gap-3 text-[11px] leading-4">
+                  <span className="text-secondary-label">Total processed</span>
+                  <span className="font-medium tabular-nums text-secondary-label">
+                    {formatContextWindowTokens(totalProcessedTokens)}
+                  </span>
+                </div>
+              ) : null}
+              {usage.compactsAutomatically ? (
+                <div className="mt-1 text-pretty text-secondary-label text-[11px] font-medium">
+                  {formatContextWindowCompactionMessage(
+                    modelDisplayName,
+                    usage.autoCompactThreshold,
+                  )}
+                </div>
+              ) : null}
+            </>
           ) : null}
-          {showTotalProcessed ? (
-            <div className="flex items-center justify-between gap-3 text-[11px] leading-4">
-              <span className="text-secondary-label">Total processed</span>
-              <span className="font-medium tabular-nums text-secondary-label">
-                {formatContextWindowTokens(totalProcessedTokens)}
-              </span>
-            </div>
-          ) : null}
-          {usage.compactsAutomatically ? (
-            <div className="mt-1 text-pretty text-secondary-label text-[11px] font-medium">
-              {formatContextWindowCompactionMessage(modelDisplayName, usage.autoCompactThreshold)}
-            </div>
-          ) : null}
+          <UsageLimitsSection limits={usageLimits} />
           {onCompact ? (
             <>
               <Button
