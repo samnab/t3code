@@ -544,6 +544,7 @@ const make = Effect.gen(function* () {
     }
 
     const desiredRuntimeMode = thread.runtimeMode;
+    const desiredVoiceNotifications = thread.voiceNotifications;
     const requestedModelSelection = options?.modelSelection;
     const resolveActiveSession = (threadId: ThreadId) =>
       providerService
@@ -688,6 +689,7 @@ const make = Effect.gen(function* () {
           modelSelection: desiredModelSelection,
           ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
           runtimeMode: desiredRuntimeMode,
+          voiceNotifications: desiredVoiceNotifications,
         })
         .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
 

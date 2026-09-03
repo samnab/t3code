@@ -42,7 +42,7 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
-record({ type: "launch", args });
+record({ type: "launch", args, t3VoiceNotifications: process.env.T3_VOICE_NOTIFICATIONS });
 
 let buffer = "";
 let nextEntryId = 1;

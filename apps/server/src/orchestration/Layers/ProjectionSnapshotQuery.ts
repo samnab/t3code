@@ -102,6 +102,8 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    // sqlite stores booleans as 0/1 integers.
+    voiceNotifications: Schema.Number,
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -471,6 +473,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
+          voice_notifications AS "voiceNotifications",
           branch,
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
@@ -510,6 +513,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
+          voice_notifications AS "voiceNotifications",
           branch,
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
@@ -551,6 +555,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
+          voice_notifications AS "voiceNotifications",
           branch,
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
@@ -1012,6 +1017,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
+          voice_notifications AS "voiceNotifications",
           branch,
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
@@ -1909,6 +1915,7 @@ pending_approval_requests AS (
                 modelSelection: row.modelSelection,
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
+                voiceNotifications: row.voiceNotifications === 1,
                 branch: row.branch,
                 worktreePath: row.worktreePath,
                 ...(row.linkedPullRequest === null
@@ -2122,6 +2129,7 @@ pending_approval_requests AS (
                   modelSelection: row.modelSelection,
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
+                  voiceNotifications: row.voiceNotifications === 1,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
                   ...(row.linkedPullRequest === null
@@ -2263,6 +2271,7 @@ pending_approval_requests AS (
                       modelSelection: row.modelSelection,
                       runtimeMode: row.runtimeMode,
                       interactionMode: row.interactionMode,
+                      voiceNotifications: row.voiceNotifications === 1,
                       branch: row.branch,
                       worktreePath: row.worktreePath,
                       ...(row.linkedPullRequest === null
@@ -2413,6 +2422,7 @@ pending_approval_requests AS (
                   modelSelection: row.modelSelection,
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
+                  voiceNotifications: row.voiceNotifications === 1,
                   branch: row.branch,
                   worktreePath: row.worktreePath,
                   ...(row.linkedPullRequest === null
@@ -2714,6 +2724,7 @@ pending_approval_requests AS (
         modelSelection: threadRow.value.modelSelection,
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
+        voiceNotifications: threadRow.value.voiceNotifications === 1,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
         ...(threadRow.value.linkedPullRequest === null
@@ -2955,6 +2966,7 @@ pending_approval_requests AS (
         modelSelection: threadRow.value.modelSelection,
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
+        voiceNotifications: threadRow.value.voiceNotifications === 1,
         branch: threadRow.value.branch,
         worktreePath: threadRow.value.worktreePath,
         ...(threadRow.value.linkedPullRequest === null

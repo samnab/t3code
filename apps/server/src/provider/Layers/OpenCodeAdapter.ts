@@ -42,6 +42,7 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
+import { withVoiceNotificationsEnv } from "../ProviderInstanceEnvironment.ts";
 import {
   buildOpenCodePermissionRules,
   OpenCodeRuntime,
@@ -2402,7 +2403,10 @@ export function makeOpenCodeAdapter(
                 directory,
                 serverUrl,
                 ...(serverPassword ? { serverPassword } : {}),
-                ...(options?.environment ? { environment: options.environment } : {}),
+                environment: withVoiceNotificationsEnv(
+                  options?.environment ?? process.env,
+                  input.voiceNotifications,
+                ),
               });
               const client = openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,

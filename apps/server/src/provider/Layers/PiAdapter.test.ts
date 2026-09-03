@@ -191,6 +191,37 @@ describe("PiAdapter", () => {
     }).pipe(provideTestEnv),
   );
 
+  it.live("passes the thread voice-notification preference to the spawned process", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+        voiceNotifications: false,
+      });
+      yield* waitForFile(fixture.logPath);
+      expect(
+        readLogLines(fixture).find((line) => line.type === "launch")?.t3VoiceNotifications,
+      ).toBe("0");
+      yield* adapter.stopSession(THREAD_ID);
+
+      // Omitted (legacy callers) decodes to on.
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+      });
+      yield* waitForFile(fixture.logPath);
+      const launches = readLogLines(fixture).filter((line) => line.type === "launch");
+      expect(launches.at(-1)?.t3VoiceNotifications).toBe("1");
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
   it.live(
     "stops sessions created after adapter construction through stopAll and finalization",
     () =>

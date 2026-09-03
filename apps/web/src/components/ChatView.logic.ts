@@ -283,6 +283,7 @@ export function buildLocalDraftThread(
     modelSelection: fallbackModelSelection,
     runtimeMode: draftThread.runtimeMode,
     interactionMode: draftThread.interactionMode,
+    voiceNotifications: true,
     session: null,
     messages: [],
     createdAt: draftThread.createdAt,

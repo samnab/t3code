@@ -83,6 +83,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "../piLaunchArgs.ts";
+import { withVoiceNotificationsEnv } from "../ProviderInstanceEnvironment.ts";
 import { zaiUsageLimitWindows } from "../zaiUsageLimits.ts";
 import { expandPiSkillReference, parsePiDiscoveredCommands } from "../PiCommands.ts";
 import {
@@ -2002,7 +2003,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             command: piSettings.binaryPath || "pi",
             args: launch.args,
             cwd: input.cwd ?? serverConfig.cwd,
-            env: launch.env,
+            env: withVoiceNotificationsEnv(launch.env, input.voiceNotifications),
           }).pipe(
             Effect.mapError((cause) => adapterError(input.threadId, "spawn", cause)),
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),

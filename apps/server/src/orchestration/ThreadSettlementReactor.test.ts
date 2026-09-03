@@ -76,6 +76,7 @@ function makeThread(
     },
     runtimeMode: "full-access",
     interactionMode: "default",
+    voiceNotifications: true,
     branch: null,
     worktreePath: null,
     latestTurn: null,

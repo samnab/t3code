@@ -150,6 +150,7 @@ describe("OrchestrationEngine", () => {
             model: "gpt-5-codex",
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          voiceNotifications: true,
           runtimeMode: "full-access" as const,
           branch: null,
           worktreePath: null,

@@ -193,6 +193,15 @@ leaving the screen, or an audio interruption discards the new recording and keep
 and attachments. T3 Code deletes the local audio file after transcription or cancellation. It sends
 only the normal message text when you submit the draft.
 
+## Agent voice notifications
+
+The composer footer has a **Voice on / Voice off** control next to the access mode. It sets whether
+the coding agent T3 Code starts for that thread announces itself out loud — T3 Code passes the
+choice to the agent as the `T3_VOICE_NOTIFICATIONS` environment variable (`1` or `0`), and the
+agent's own notification hooks decide what to say; T3 Code itself stays silent. New threads start
+with voice on. The setting is per thread and takes effect the next time the thread starts an agent
+session.
+
 On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from a new thread to
 start it in the background. T3 Code opens another new thread and shows an **Open** action for the
 thread that started. The new thread keeps the selected workspace mode and base branch. If **New

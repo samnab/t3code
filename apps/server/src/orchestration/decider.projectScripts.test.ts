@@ -291,6 +291,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
             model: "gpt-5-codex",
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          voiceNotifications: true,
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
@@ -388,6 +389,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
             model: "gpt-5-codex",
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          voiceNotifications: true,
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
@@ -466,6 +468,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
             model: "gpt-5-codex",
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          voiceNotifications: true,
           runtimeMode: "approval-required",
           branch: null,
           worktreePath: null,
@@ -494,6 +497,85 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
         payload: {
           threadId: ThreadId.make("thread-1"),
           interactionMode: "plan",
+        },
+      });
+    }),
+  );
+
+  it.effect("emits thread.voice-notifications-set from thread.voice-notifications.set", () =>
+    Effect.gen(function* () {
+      const now = "2026-01-01T00:00:00.000Z";
+      const initial = createEmptyReadModel(now);
+      const withProject = yield* projectEvent(initial, {
+        sequence: 1,
+        eventId: asEventId("evt-project-create"),
+        aggregateKind: "project",
+        aggregateId: asProjectId("project-1"),
+        type: "project.created",
+        occurredAt: now,
+        commandId: CommandId.make("cmd-project-create"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-project-create"),
+        metadata: {},
+        payload: {
+          projectId: asProjectId("project-1"),
+          title: "Project",
+          workspaceRoot: "/tmp/project",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      const readModel = yield* projectEvent(withProject, {
+        sequence: 2,
+        eventId: asEventId("evt-thread-create"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.created",
+        occurredAt: now,
+        commandId: CommandId.make("cmd-thread-create"),
+        causationEventId: null,
+        correlationId: CommandId.make("cmd-thread-create"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          projectId: asProjectId("project-1"),
+          title: "Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          voiceNotifications: true,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.voice-notifications.set",
+          commandId: CommandId.make("cmd-voice-notifications-set"),
+          threadId: ThreadId.make("thread-1"),
+          voiceNotifications: false,
+          createdAt: now,
+        },
+        readModel,
+      });
+
+      const singleResult = Array.isArray(result) ? null : result;
+      if (singleResult === null) {
+        throw new Error("Expected a single voice-notifications-set event.");
+      }
+      expect(singleResult).toMatchObject({
+        type: "thread.voice-notifications-set",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          voiceNotifications: false,
         },
       });
     }),

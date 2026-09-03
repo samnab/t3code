@@ -404,6 +404,62 @@ describe("orchestration projector", () => {
     expect(afterUpdate.threads[0]?.updatedAt).toBe(updatedAt);
   });
 
+  it.effect("updates thread voice notifications from thread.voice-notifications-set", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-02-23T08:00:00.000Z";
+      const updatedAt = "2026-02-23T08:00:05.000Z";
+      const model = createEmptyReadModel(createdAt);
+
+      const afterCreate = yield* projectEvent(
+        model,
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: createdAt,
+          commandId: "cmd-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5.3-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      );
+      // Pre-voice thread.created payloads decode with the default on.
+      expect(afterCreate.threads[0]?.voiceNotifications).toBe(true);
+
+      const afterUpdate = yield* projectEvent(
+        afterCreate,
+        makeEvent({
+          sequence: 2,
+          type: "thread.voice-notifications-set",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: updatedAt,
+          commandId: "cmd-voice-notifications-set",
+          payload: {
+            threadId: "thread-1",
+            voiceNotifications: false,
+            updatedAt,
+          },
+        }),
+      );
+
+      expect(afterUpdate.threads[0]?.voiceNotifications).toBe(false);
+      expect(afterUpdate.threads[0]?.updatedAt).toBe(updatedAt);
+    }),
+  );
+
   it("marks assistant messages completed with non-streaming updates", async () => {
     const createdAt = "2026-02-23T09:00:00.000Z";
     const deltaAt = "2026-02-23T09:00:01.000Z";

@@ -34,6 +34,7 @@ function makeReadModel(input?: {
         modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "zai/glm-5" },
         runtimeMode: "full-access",
         interactionMode: "default",
+        voiceNotifications: true,
         branch: null,
         worktreePath: null,
         latestTurn: null,

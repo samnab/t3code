@@ -22,6 +22,7 @@ import {
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadRuntimeModeSetPayload,
+  ThreadVoiceNotificationsSetPayload,
   ThreadSettledPayload,
   ThreadPinnedPayload,
   ThreadPinReorderedPayload,
@@ -297,6 +298,7 @@ export function projectEvent(
             modelSelection: payload.modelSelection,
             runtimeMode: payload.runtimeMode,
             interactionMode: payload.interactionMode,
+            voiceNotifications: payload.voiceNotifications,
             goal: payload.goal ?? null,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
@@ -502,6 +504,22 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             interactionMode: payload.interactionMode,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.voice-notifications-set":
+      return decodeForEvent(
+        ThreadVoiceNotificationsSetPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            voiceNotifications: payload.voiceNotifications,
             updatedAt: payload.updatedAt,
           }),
         })),

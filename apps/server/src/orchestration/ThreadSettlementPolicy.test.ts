@@ -18,6 +18,7 @@ const makeThread = (
   modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
   runtimeMode: "full-access",
   interactionMode: "default",
+  voiceNotifications: true,
   branch: "feature",
   worktreePath: "/repo",
   latestTurn: null,

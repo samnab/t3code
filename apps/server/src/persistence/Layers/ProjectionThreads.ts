@@ -2,6 +2,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
@@ -20,6 +21,8 @@ const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    // sqlite stores booleans as 0/1 integers.
+    voiceNotifications: Schema.Number,
   }),
 );
 type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
@@ -38,6 +41,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           model_selection_json,
           runtime_mode,
           interaction_mode,
+          voice_notifications,
           branch,
           worktree_path,
           linked_pull_request_json,
@@ -68,6 +72,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${JSON.stringify(row.modelSelection)},
           ${row.runtimeMode},
           ${row.interactionMode},
+          ${row.voiceNotifications ? 1 : 0},
           ${row.branch},
           ${row.worktreePath},
           ${row.linkedPullRequest === undefined || row.linkedPullRequest === null ? null : JSON.stringify(row.linkedPullRequest)},
@@ -98,6 +103,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           model_selection_json = excluded.model_selection_json,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
+          voice_notifications = excluded.voice_notifications,
           branch = excluded.branch,
           worktree_path = excluded.worktree_path,
           linked_pull_request_json = excluded.linked_pull_request_json,
@@ -135,6 +141,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
+          voice_notifications AS "voiceNotifications",
           branch,
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
@@ -174,6 +181,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
+          voice_notifications AS "voiceNotifications",
           branch,
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
@@ -216,13 +224,22 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.upsert:query")),
     );
 
+  // The DbRow decodes voice_notifications as a 0/1 number; the repository
+  // interface exposes the boolean contract shape.
+  const toProjectionThread = (row: ProjectionThreadDbRow) => ({
+    ...row,
+    voiceNotifications: row.voiceNotifications === 1,
+  });
+
   const getById: ProjectionThreadRepositoryShape["getById"] = (input) =>
     getProjectionThreadRow(input).pipe(
+      Effect.map(Option.map(toProjectionThread)),
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.getById:query")),
     );
 
   const listByProjectId: ProjectionThreadRepositoryShape["listByProjectId"] = (input) =>
     listProjectionThreadRows(input).pipe(
+      Effect.map((rows) => rows.map(toProjectionThread)),
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.listByProjectId:query")),
     );
 

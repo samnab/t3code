@@ -63,6 +63,7 @@ const BASE_THREAD: OrchestrationThread = {
   },
   runtimeMode: "full-access",
   interactionMode: "default",
+  voiceNotifications: true,
   branch: "main",
   worktreePath: null,
   latestTurn: null,

@@ -15,9 +15,12 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   showInteractionModeToggle: boolean;
+  showVoiceNotificationsToggle: boolean;
+  voiceNotifications: boolean;
   traitsMenuContent?: ReactNode;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onVoiceNotificationsChange: (enabled: boolean) => void;
 }) {
   return (
     <Menu>
@@ -69,6 +72,22 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
           <MenuRadioItem value="auto">Auto</MenuRadioItem>
           <MenuRadioItem value="full-access">Full access</MenuRadioItem>
         </MenuRadioGroup>
+        {props.showVoiceNotificationsToggle ? (
+          <>
+            <MenuDivider />
+            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Voice</div>
+            <MenuRadioGroup
+              value={props.voiceNotifications ? "on" : "off"}
+              onValueChange={(value) => {
+                if (!value) return;
+                props.onVoiceNotificationsChange(value === "on");
+              }}
+            >
+              <MenuRadioItem value="on">Voice on</MenuRadioItem>
+              <MenuRadioItem value="off">Voice off</MenuRadioItem>
+            </MenuRadioGroup>
+          </>
+        ) : null}
       </MenuPopup>
     </Menu>
   );

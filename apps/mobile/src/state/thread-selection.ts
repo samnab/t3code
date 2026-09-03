@@ -24,6 +24,7 @@ export function threadDetailToShell(
     modelSelection: thread.modelSelection,
     runtimeMode: thread.runtimeMode,
     interactionMode: thread.interactionMode,
+    voiceNotifications: thread.voiceNotifications,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
     linkedPullRequest: thread.linkedPullRequest ?? null,

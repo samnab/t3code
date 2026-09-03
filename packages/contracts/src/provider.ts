@@ -62,6 +62,10 @@ export const ProviderSessionStartInput = Schema.Struct({
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
   runtimeMode: RuntimeMode,
+  /** Thread voice-notification preference, surfaced to the provider process
+      as T3_VOICE_NOTIFICATIONS. Omitted by callers that don't know it
+      (legacy/recovery paths); adapters treat omitted as on. */
+  voiceNotifications: Schema.optional(Schema.Boolean),
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 

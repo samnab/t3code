@@ -51,6 +51,7 @@ export function mergeEnvironmentThread(
     modelSelection: shell.modelSelection,
     runtimeMode: shell.runtimeMode,
     interactionMode: shell.interactionMode,
+    voiceNotifications: shell.voiceNotifications,
     branch: shell.branch,
     worktreePath: shell.worktreePath,
     ...(shell.goal !== undefined ? { goal: shell.goal } : {}),

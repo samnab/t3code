@@ -316,6 +316,8 @@ import {
   RotateCcwIcon,
   SparklesIcon,
   TargetIcon,
+  Volume2Icon,
+  VolumeXIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -425,8 +427,11 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
+  showVoiceNotificationsToggle: boolean;
+  voiceNotifications: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onVoiceNotificationsChange: (enabled: boolean) => void;
 }) {
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
   const RuntimeModeIcon = runtimeModeOption.icon;
@@ -509,6 +514,46 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
       </Tooltip>
 
       {interactionModeToggle}
+
+      {props.showVoiceNotificationsToggle ? (
+        <>
+          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+          <Tooltip>
+            <Select
+              value={props.voiceNotifications ? "on" : "off"}
+              onValueChange={(value) => props.onVoiceNotificationsChange(value === "on")}
+            >
+              <TooltipTrigger
+                render={
+                  <ComposerSelectControl className="font-medium" aria-label="Voice notifications" />
+                }
+              >
+                <ComposerControlIcon icon={props.voiceNotifications ? Volume2Icon : VolumeXIcon} />
+                <SelectValue>{props.voiceNotifications ? "Voice on" : "Voice off"}</SelectValue>
+              </TooltipTrigger>
+              <SelectPopup alignItemWithTrigger={false}>
+                <SelectItem value="on" hideIndicator className="min-w-48 py-2">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <Volume2Icon className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="font-medium text-foreground">Voice on</span>
+                  </div>
+                </SelectItem>
+                <SelectItem value="off" hideIndicator className="min-w-48 py-2">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <VolumeXIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="font-medium text-foreground">Voice off</span>
+                  </div>
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+            <TooltipPopup side="top">
+              {props.voiceNotifications
+                ? "Agent voice notifications on — the agent's own hooks announce progress. Applies the next time its session starts."
+                : "Agent voice notifications off — providers this thread starts get T3_VOICE_NOTIFICATIONS=0. Applies the next time its session starts."}
+            </TooltipPopup>
+          </Tooltip>
+        </>
+      ) : null}
     </>
   );
 });
@@ -769,6 +814,8 @@ export interface ChatComposerProps {
   // Mode
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  voiceNotifications: boolean;
+  showVoiceNotificationsToggle: boolean;
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
@@ -825,6 +872,7 @@ export interface ChatComposerProps {
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
+  handleVoiceNotificationsChange: (enabled: boolean) => void;
 
   focusComposer: () => void;
   scheduleComposerFocus: () => void;
@@ -882,6 +930,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProposedPlan,
     runtimeMode,
     interactionMode,
+    voiceNotifications,
+    showVoiceNotificationsToggle,
     lockedProvider,
     providerStatuses,
     activeProjectDefaultModelSelection,
@@ -916,6 +966,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     toggleInteractionMode,
     handleRuntimeModeChange,
     handleInteractionModeChange,
+    handleVoiceNotificationsChange,
     focusComposer,
     scheduleComposerFocus,
     setThreadError,
@@ -4492,9 +4543,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       interactionMode={interactionMode}
                       runtimeMode={runtimeMode}
                       showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
+                      showVoiceNotificationsToggle={showVoiceNotificationsToggle}
+                      voiceNotifications={voiceNotifications}
                       traitsMenuContent={providerTraitsMenuContent}
                       onToggleInteractionMode={toggleInteractionMode}
                       onRuntimeModeChange={handleRuntimeModeChange}
+                      onVoiceNotificationsChange={handleVoiceNotificationsChange}
                     />
                   ) : (
                     <>
@@ -4513,8 +4567,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         }
                         interactionMode={interactionMode}
                         runtimeMode={runtimeMode}
+                        showVoiceNotificationsToggle={showVoiceNotificationsToggle}
+                        voiceNotifications={voiceNotifications}
                         onToggleInteractionMode={toggleInteractionMode}
                         onRuntimeModeChange={handleRuntimeModeChange}
+                        onVoiceNotificationsChange={handleVoiceNotificationsChange}
                       />
                     </>
                   )}

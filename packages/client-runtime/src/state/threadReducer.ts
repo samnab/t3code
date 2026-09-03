@@ -93,6 +93,7 @@ export function applyThreadDetailEvent(
           modelSelection: event.payload.modelSelection,
           runtimeMode: event.payload.runtimeMode,
           interactionMode: event.payload.interactionMode,
+          voiceNotifications: event.payload.voiceNotifications,
           branch: event.payload.branch,
           worktreePath: event.payload.worktreePath,
           latestTurn: null,
@@ -259,6 +260,16 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           interactionMode: event.payload.interactionMode,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.voice-notifications-set":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          voiceNotifications: event.payload.voiceNotifications,
           updatedAt: event.payload.updatedAt,
         },
       };

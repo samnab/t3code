@@ -531,6 +531,10 @@ export const OrchestrationThread = Schema.Struct({
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
+  // Whether provider processes T3 starts for this thread receive
+  // T3_VOICE_NOTIFICATIONS=1 or =0. The provider's own hooks read it;
+  // T3 never speaks anything itself. Default-on so pre-voice payloads decode.
+  voiceNotifications: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
@@ -612,6 +616,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
+  // See OrchestrationThread.voiceNotifications.
+  voiceNotifications: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
@@ -976,15 +982,23 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadVoiceNotificationsSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.voice-notifications.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  voiceNotifications: Schema.Boolean,
+  createdAt: IsoDateTime,
+});
+
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   projectId: ProjectId,
-  // See ThreadCreateCommand: composer choices made before the first send.
-  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
-  voiceNotifications: Schema.optional(Schema.Boolean),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  // See ThreadCreateCommand: composer choices made before the first send.
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+  voiceNotifications: Schema.optional(Schema.Boolean),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
@@ -1123,6 +1137,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
+  ThreadVoiceNotificationsSetCommand,
   ThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
@@ -1152,6 +1167,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
+  ThreadVoiceNotificationsSetCommand,
   ClientThreadTurnStartCommand,
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
@@ -1272,6 +1288,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
+  "thread.voice-notifications-set",
   "thread.message-sent",
   "thread.turn-start-requested",
   "thread.turn-interrupt-requested",
@@ -1325,8 +1342,6 @@ export const ProjectDeletedPayload = Schema.Struct({
 
 export const ThreadCreatedPayload = Schema.Struct({
   threadId: ThreadId,
-  // See ThreadGoal: set from the composer when the first send creates the thread.
-  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
@@ -1334,6 +1349,10 @@ export const ThreadCreatedPayload = Schema.Struct({
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
+  /** New threads start with voice notifications on; see OrchestrationThread. */
+  voiceNotifications: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // See ThreadGoal: set from the composer when the first send creates the thread.
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
@@ -1435,6 +1454,12 @@ export const ThreadInteractionModeSetPayload = Schema.Struct({
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadVoiceNotificationsSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  voiceNotifications: Schema.Boolean,
   updatedAt: IsoDateTime,
 });
 
@@ -1649,6 +1674,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.interaction-mode-set"),
     payload: ThreadInteractionModeSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.voice-notifications-set"),
+    payload: ThreadVoiceNotificationsSetPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,
