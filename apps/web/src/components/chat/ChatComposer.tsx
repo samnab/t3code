@@ -75,6 +75,7 @@ import {
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
 import { ThreadGoalEditor } from "./ThreadGoalEditor";
+import { TargetArrowIcon } from "../Icons";
 import {
   ComposerTasksBadge,
   ComposerTasksContent,
@@ -315,7 +316,6 @@ import {
   PenLineIcon,
   RotateCcwIcon,
   SparklesIcon,
-  TargetIcon,
   Volume2Icon,
   VolumeXIcon,
   XIcon,
@@ -588,7 +588,7 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
           />
         }
       >
-        <ComposerControlIcon icon={TargetIcon} className="text-current opacity-100" />
+        <ComposerControlIcon icon={TargetArrowIcon} className="text-current opacity-100" />
         {props.goal !== null ? (
           <span className="min-w-0 max-w-28 truncate sm:max-w-44">{props.goal}</span>
         ) : null}
@@ -612,7 +612,7 @@ const ComposerThreadGoalPassive = memo(function ComposerThreadGoalPassive(props:
             data-thread-goal-passive="true"
             className="flex min-w-0 items-center gap-1.5 px-3 pt-1 pb-3 text-xs text-secondary-label sm:px-4 sm:pb-4"
           >
-            <TargetIcon aria-hidden className="size-3 shrink-0" />
+            <TargetArrowIcon aria-hidden className="size-3 shrink-0" />
             {/* Truncated visually; the label keeps the full text for AT. */}
             <span aria-label={`Thread goal: ${props.goal}`} className="min-w-0 truncate">
               {props.goal}

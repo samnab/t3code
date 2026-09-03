@@ -1,3 +1,4 @@
+import { createLucideIcon } from "lucide-react";
 import React, { type SVGProps, useId } from "react";
 import { cn } from "~/lib/utils";
 
@@ -713,3 +714,15 @@ export const PiAgentIcon: Icon = ({ className, ...props }) => (
     <path fill="#fff" d="M517.36 400H634.72V634.72H517.36Z" />
   </svg>
 );
+
+/**
+ * Thread-goal icon: lucide's target with an arrow struck into the bullseye.
+ * The outer ring breaks where the shaft crosses so the arrow reads at 12-16px.
+ */
+export const TargetArrowIcon = createLucideIcon("TargetArrow", [
+  ["path", { d: "M21.1 7.8a10 10 0 1 1-4.9-4.9", key: "ring" }],
+  ["circle", { cx: "12", cy: "12", r: "6", key: "mid" }],
+  ["circle", { cx: "12", cy: "12", r: "2", key: "bull" }],
+  ["path", { d: "m12 12 9-9", key: "shaft" }],
+  ["path", { d: "M16.5 3H21v4.5", key: "head" }],
+]);

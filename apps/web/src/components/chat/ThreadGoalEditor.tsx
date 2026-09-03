@@ -1,4 +1,5 @@
-import { TargetIcon, XIcon } from "lucide-react";
+import { XIcon } from "lucide-react";
+import { TargetArrowIcon } from "../Icons";
 import { memo, useEffect, useRef } from "react";
 import { THREAD_GOAL_MAX_CHARS } from "@t3tools/contracts";
 import {
@@ -66,7 +67,7 @@ export const ThreadGoalEditor = memo(function ThreadGoalEditor(props: {
     >
       <div className="flex h-7 items-center justify-between gap-2 px-2 pt-1">
         <span className="inline-flex min-w-0 items-center gap-1.5 px-1 text-xs font-medium text-secondary-label">
-          <TargetIcon aria-hidden className="size-3 shrink-0" />
+          <TargetArrowIcon aria-hidden className="size-3 shrink-0" />
           Thread goal
         </span>
         <Button
