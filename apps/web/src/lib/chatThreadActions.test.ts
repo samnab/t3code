@@ -5,6 +5,7 @@ import {
   ProviderInstanceId,
   type ModelSelection,
 } from "@t3tools/contracts";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   resolveThreadActionProjectRef,
@@ -74,6 +75,31 @@ describe("chatThreadActions", () => {
         destinationDraftId: "draft-b",
       }),
     ).toEqual(CARRIED_SELECTION);
+  });
+
+  it("replaces the carried model with the instance's configured default, keeping the instance", () => {
+    expect(
+      resolveNewThreadModelSelectionOverride({
+        projectDefaultSelection: null,
+        carrySelection: CARRIED_SELECTION,
+        carrySourceDraftId: "draft-a",
+        destinationDraftId: "draft-b",
+        settings: {
+          ...DEFAULT_UNIFIED_SETTINGS,
+          providerModelPreferences: {
+            [CARRIED_SELECTION.instanceId]: {
+              hiddenModels: [],
+              modelOrder: [],
+              defaultModel: "configured-default-model",
+              defaultOptions: [],
+            },
+          },
+        },
+      }),
+    ).toEqual({
+      instanceId: CARRIED_SELECTION.instanceId,
+      model: "configured-default-model",
+    });
   });
 
   it("keeps the project default above any carried selection", () => {

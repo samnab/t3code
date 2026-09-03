@@ -5,7 +5,10 @@ import type {
   ProjectId,
   ScopedProjectRef,
 } from "@t3tools/contracts";
+import type { UnifiedSettings } from "@t3tools/contracts/settings";
+import { createModelSelection } from "@t3tools/shared/model";
 import type { ComposerThreadDraftState, DraftThreadEnvMode } from "../composerDraftStore";
+import { readInstanceModelPreferences } from "../modelSelection";
 
 type ComposerModelSelectionState = Pick<
   ComposerThreadDraftState,
@@ -49,10 +52,35 @@ export function resolveNewThreadModelSelectionOverride(input: {
   readonly carrySelection: ModelSelection | null;
   readonly carrySourceDraftId: string | null;
   readonly destinationDraftId: string;
+  /**
+   * Settings to consult for a configured per-instance default. When the
+   * carried selection's instance has one, it replaces the carried
+   * model+options — the carried *instance* (provider) is kept either way.
+   * Project default still wins over everything, carried or configured.
+   */
+  readonly settings?: UnifiedSettings;
 }): ModelSelection | null {
-  return (
-    input.projectDefaultSelection ??
-    (input.carrySourceDraftId === input.destinationDraftId ? null : input.carrySelection)
+  if (input.projectDefaultSelection) {
+    return input.projectDefaultSelection;
+  }
+  if (input.carrySourceDraftId === input.destinationDraftId) {
+    return null;
+  }
+  const carrySelection = input.carrySelection;
+  if (!carrySelection || !input.settings) {
+    return carrySelection;
+  }
+  const instancePreferences = readInstanceModelPreferences(
+    input.settings,
+    carrySelection.instanceId,
+  );
+  if (!instancePreferences.defaultModel) {
+    return carrySelection;
+  }
+  return createModelSelection(
+    carrySelection.instanceId,
+    instancePreferences.defaultModel,
+    instancePreferences.defaultOptions,
   );
 }
 
