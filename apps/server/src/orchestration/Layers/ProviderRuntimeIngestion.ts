@@ -10,6 +10,7 @@ import {
   classifyTaskAgentKind,
   EventId,
   isToolLifecycleItemType,
+  MONITOR_TASK_TYPES,
   RuntimeTaskId,
   ThreadId,
   type ThreadTokenUsageSnapshot,
@@ -590,9 +591,11 @@ export function runtimeEventToActivities(
           summary:
             event.payload.taskType === "plan"
               ? "Plan task started"
-              : event.payload.taskType
-                ? `${event.payload.taskType} task started`
-                : "Task started",
+              : event.payload.taskType && MONITOR_TASK_TYPES.has(event.payload.taskType)
+                ? "Background command started"
+                : event.payload.taskType
+                  ? `${event.payload.taskType} task started`
+                  : "Task started",
           payload: {
             taskId: event.payload.taskId,
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),

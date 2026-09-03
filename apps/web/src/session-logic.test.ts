@@ -2336,6 +2336,28 @@ describe("deriveWorkLogEntries quiet-timeline guarantee", () => {
     expect(entries).toHaveLength(0);
   });
 
+  it("a background command's task.started row renders and folds its task.completed row", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        kind: "task.started",
+        summary: "Background command started",
+        tone: "info",
+        payload: { taskId: "sh-1", taskType: "local_bash", title: "npm run build" },
+        sequence: 1,
+      }),
+      makeActivity({
+        kind: "task.completed",
+        summary: "Task completed",
+        tone: "info",
+        payload: { taskId: "sh-1", taskType: "local_bash", status: "completed" },
+        sequence: 2,
+      }),
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.label).toBe("Task completed");
+    expect(entries[0]!.toolTitle).toBe("npm run build");
+  });
+
   it("drops task.updated and tool.progress from the work log (fold input only)", () => {
     const entries = deriveWorkLogEntries([
       makeActivity({

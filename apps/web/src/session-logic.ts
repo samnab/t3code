@@ -10,6 +10,7 @@ import {
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
+  MONITOR_TASK_TYPES,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
@@ -773,6 +774,24 @@ function isAgentTaskStartedActivity(activity: OrchestrationThreadActivity): bool
   return !isBackgroundTaskActivity(payload);
 }
 
+/**
+ * Top-level (no owning agentId) background shell/monitor task.started rows.
+ * These are the only background task.started rows worth showing while they
+ * run — plan/dream bookkeeping tasks are also "background" by agentKind but
+ * stay hidden, and rows owned by a subagent (agentId set) are filtered by
+ * isAgentInternalActivity below.
+ */
+function isMonitorTaskStartedActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload =
+    activity.payload && typeof activity.payload === "object"
+      ? (activity.payload as Record<string, unknown>)
+      : null;
+  if (!payload || typeof payload.taskId !== "string") {
+    return false;
+  }
+  return typeof payload.taskType === "string" && MONITOR_TASK_TYPES.has(payload.taskType);
+}
+
 function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean {
   const payload =
     activity.payload && typeof activity.payload === "object"
@@ -824,7 +843,12 @@ export function deriveWorkLogEntries(
     // which is the batch key (completions of background subagents arrive
     // under later synthetic turns and must not start new batches). They
     // collapse into the batch's single CTA row, never render standalone.
-    if (activity.kind === "task.started" && !isAgentTaskStartedActivity(activity)) continue;
+    if (
+      activity.kind === "task.started" &&
+      !isAgentTaskStartedActivity(activity) &&
+      !isMonitorTaskStartedActivity(activity)
+    )
+      continue;
     if (activity.kind === "task.updated") continue;
     if (activity.kind === "tool.progress") continue;
     if (activity.kind === "context-window.updated") continue;
@@ -1026,6 +1050,12 @@ function agentSpawnGroupKey(entry: DerivedWorkLogEntry): string {
 }
 
 function toolLifecycleCollapseMapKey(entry: DerivedWorkLogEntry): string | undefined {
+  // Background task rows (e.g. a running shell command) reuse their
+  // deriveToolLifecycleCollapseKey stamp so a later task.completed row can
+  // find and fold into the still-running task.started row.
+  if (entry.isBackgroundTask && entry[workLogCollapseKey] !== undefined) {
+    return entry[workLogCollapseKey];
+  }
   if (
     entry.sourceActivityKind !== "tool.updated" &&
     entry.sourceActivityKind !== "tool.completed"
@@ -1134,6 +1164,17 @@ function shouldCollapseToolLifecycleEntries(
   previous: DerivedWorkLogEntry,
   next: DerivedWorkLogEntry,
 ): boolean {
+  if (previous.isBackgroundTask && next.isBackgroundTask) {
+    // A completed/failed row is terminal; nothing folds into it further, and
+    // it never re-collapses into an unrelated later background row.
+    if (previous.sourceActivityKind === "task.completed") {
+      return false;
+    }
+    return (
+      previous[workLogCollapseKey] !== undefined &&
+      previous[workLogCollapseKey] === next[workLogCollapseKey]
+    );
+  }
   if (
     previous.sourceActivityKind !== "tool.updated" &&
     previous.sourceActivityKind !== "tool.completed"
@@ -1214,7 +1255,9 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
   // progress ticks fold into it, the terminal row wins the label.
   if (
     entry.taskId &&
-    (entry.sourceActivityKind === "task.progress" || entry.sourceActivityKind === "task.completed")
+    (entry.sourceActivityKind === "task.started" ||
+      entry.sourceActivityKind === "task.progress" ||
+      entry.sourceActivityKind === "task.completed")
   ) {
     return `task${entry.taskId}`;
   }

@@ -1,6 +1,7 @@
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
+  MONITOR_TASK_TYPES,
   ProviderApprovalOption,
   ProviderRequestKind,
   SubagentRunHistoryAvailability,
@@ -343,6 +344,17 @@ function isDurableDisclosureAnchor(
   );
 }
 
+/** Top-level (no owning agentId) background shell/monitor task.started rows:
+ * the only background task.started rows worth showing while they run. */
+function isMonitorTaskStartedActivity(payload: Record<string, unknown> | null): boolean {
+  return (
+    !!payload &&
+    typeof payload.taskId === "string" &&
+    typeof payload.taskType === "string" &&
+    MONITOR_TASK_TYPES.has(payload.taskType)
+  );
+}
+
 /**
  * Keep Phase 1 parent-chat quieting intact. Mobile retains terminal agent rows
  * as its completion signal and one durable task-start row as the transcript
@@ -383,7 +395,12 @@ function deriveWorkLogEntries(
         ? (activity.payload as Record<string, unknown>)
         : null;
     const durableDisclosureAnchor = isDurableDisclosureAnchor(activity, payload);
-    if (activity.kind === "task.started" && !durableDisclosureAnchor) continue;
+    if (
+      activity.kind === "task.started" &&
+      !durableDisclosureAnchor &&
+      !isMonitorTaskStartedActivity(payload)
+    )
+      continue;
     if (activity.kind === "task.updated" && !isTerminalBypassUpdate(activity)) continue;
     if (activity.kind === "tool.progress") continue;
     if (activity.kind === "context-window.updated") continue;
