@@ -15,6 +15,7 @@ import { useAtomValue } from "@effect/atom-react";
 import type {
   AgentPanelModel,
   AgentPanelWorkflowGroup,
+  RuntimeBackgroundProcess,
   RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
@@ -414,6 +415,33 @@ function AgentRow({
       </span>
       <span className="sr-only">{visuals.label}</span>
     </button>
+  );
+}
+
+const BACKGROUND_STATUS_DOT: Record<RuntimeBackgroundProcess["status"], string> = {
+  running: "bg-info",
+  completed: "bg-success",
+  failed: "bg-destructive",
+  stopped: "bg-muted-foreground/60",
+};
+
+/** Background command/watch-loop row: same visual language as AgentRow, no click-through. */
+function BackgroundProcessRow({ process }: { process: RuntimeBackgroundProcess }) {
+  return (
+    <div className="grid h-8 w-full grid-cols-[0.375rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-1.5 py-1">
+      <span className="flex items-center">
+        <span
+          aria-hidden
+          className={cn("size-1.5 shrink-0 rounded-full", BACKGROUND_STATUS_DOT[process.status])}
+        />
+      </span>
+      <span className="min-w-0 truncate text-sm font-medium">{process.title}</span>
+      <span className="min-w-14 text-right font-mono text-[.7rem] tabular-nums text-muted-foreground/80">
+        {process.status === "running"
+          ? elapsedBetween(process.startedAt, null)
+          : (process.detail ?? elapsedBetween(process.startedAt, process.endedAt))}
+      </span>
+    </div>
   );
 }
 
@@ -967,8 +995,8 @@ export function AgentsPanel({
         <Bot aria-hidden className="size-6 text-muted-foreground/60" />
         <p className="text-sm font-medium">No agents yet</p>
         <p className="max-w-56 text-xs text-muted-foreground">
-          When this thread spawns subagents or runs a workflow, they show up here with live status,
-          activity, and token usage.
+          When this thread spawns subagents, runs a workflow, or launches a background command, they
+          show up here with live status, activity, and token usage.
         </p>
       </div>
     );
@@ -997,13 +1025,23 @@ export function AgentsPanel({
               ))}
             </section>
           ) : null}
+          {model.backgroundProcesses.length > 0 ? (
+            <section>
+              <div className="px-1.5 pt-1 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
+                Background processes
+              </div>
+              {model.backgroundProcesses.map((process) => (
+                <BackgroundProcessRow key={process.id} process={process} />
+              ))}
+            </section>
+          ) : null}
         </div>
       </ScrollArea>
       <footer className="flex items-center justify-between border-t border-border/60 px-3 py-1.5 font-mono text-[.7rem] text-muted-foreground">
         <span className="flex items-center gap-2">
-          {model.runningCount + model.waitingCount > 0 ? (
+          {model.runningCount + model.waitingCount + model.liveBackgroundCount > 0 ? (
             <span className="text-info-foreground">
-              ● {model.runningCount + model.waitingCount} working
+              ● {model.runningCount + model.waitingCount + model.liveBackgroundCount} working
             </span>
           ) : null}
           {model.idleCount > 0 ? <span>{model.idleCount} idle</span> : null}

@@ -3,6 +3,10 @@
 Open the Agents tab in the right panel to see every subagent and workflow a thread has spawned,
 with live status, activity, and token usage.
 
+Background commands and watch loops a thread launches show up here too, in their own
+"Background processes" section, so you can see one is still running the same way you see a
+subagent.
+
 Click an agent's row to open its own session in the same panel. The detail view shows that
 agent's transcript from start to finish, and a message box at the bottom lets you send it a
 new instruction while it's still running. Send with Enter; use Shift+Enter for a new line.

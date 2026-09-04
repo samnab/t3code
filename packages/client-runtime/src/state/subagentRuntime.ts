@@ -17,7 +17,11 @@
  * folding (completion can create an agent; a late start only fills
  * metadata).
  */
-import type { OrchestrationSubagentRun, OrchestrationThreadActivity } from "@t3tools/contracts";
+import {
+  MONITOR_TASK_TYPES,
+  type OrchestrationSubagentRun,
+  type OrchestrationThreadActivity,
+} from "@t3tools/contracts";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -715,6 +719,117 @@ export function foldSubagentActivities(
   return roster.map((agent) => ({ ...agent }));
 }
 
+export interface RuntimeBackgroundProcess {
+  readonly id: string;
+  readonly title: string;
+  readonly status: "running" | "completed" | "failed" | "stopped";
+  readonly startedAt: string;
+  readonly endedAt: string | null;
+  /** Completion detail, e.g. "exit code 0". Null while running. */
+  readonly detail: string | null;
+}
+
+const BACKGROUND_TERMINAL_STATUS: ReadonlyMap<string, RuntimeBackgroundProcess["status"]> = new Map(
+  [
+    ["completed", "completed"],
+    ["failed", "failed"],
+    ["stopped", "stopped"],
+    ["cancelled", "stopped"],
+  ],
+);
+
+interface MutableBackgroundProcess {
+  id: string;
+  title: string;
+  status: RuntimeBackgroundProcess["status"];
+  startedAt: string;
+  endedAt: string | null;
+  detail: string | null;
+}
+
+/**
+ * Top-level (no agentId) background processes — direct spawns of background
+ * shells and watch loops — folded for the Agents pane's own section. Agent-
+ * owned background tasks stay agent-internal and are excluded here, mirroring
+ * foldSubagentActivities' exclusion of background rows.
+ */
+export function foldBackgroundProcesses(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyArray<RuntimeBackgroundProcess> {
+  const processes = new Map<string, MutableBackgroundProcess>();
+
+  const isTopLevelMonitorTask = (payload: Record<string, unknown>): boolean => {
+    if (asString(payload.agentId)) return false;
+    const taskType = asString(payload.taskType);
+    return taskType !== undefined && MONITOR_TASK_TYPES.has(taskType);
+  };
+
+  for (const activity of activities) {
+    if (typeof activity.payload !== "object" || activity.payload === null) continue;
+    const payload = activity.payload as Record<string, unknown>;
+    const at = activity.createdAt;
+    const taskId = asString(payload.taskId);
+    if (!taskId) continue;
+
+    switch (activity.kind) {
+      case "task.started": {
+        if (!isTopLevelMonitorTask(payload)) break;
+        if (processes.has(taskId)) break;
+        processes.set(taskId, {
+          id: taskId,
+          title: asString(payload.title) ?? asString(payload.detail) ?? taskId,
+          status: "running",
+          startedAt: at,
+          endedAt: null,
+          detail: null,
+        });
+        break;
+      }
+      case "task.updated": {
+        const process = processes.get(taskId);
+        if (!process || process.endedAt !== null) break;
+        const status = BACKGROUND_TERMINAL_STATUS.get(asString(payload.status) ?? "");
+        if (!status) break;
+        process.status = status;
+        process.endedAt = asString(payload.endedAt) ?? at;
+        break;
+      }
+      case "task.completed": {
+        const process = processes.get(taskId);
+        if (!process) break;
+        // Enrich even if already settled by task.updated (fill-if-missing),
+        // but never reopen a settled process.
+        const status =
+          BACKGROUND_TERMINAL_STATUS.get(asString(payload.status) ?? "") ?? "completed";
+        if (process.endedAt === null) {
+          process.status = status;
+          process.endedAt = at;
+        }
+        const detail = asString(payload.summary) ?? asString(payload.detail);
+        if (detail) process.detail = process.detail ?? bounded(detail);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  let roster = Array.from(processes.values());
+  if (roster.length > ROSTER_LIMIT) {
+    roster = roster
+      .slice()
+      .sort(
+        (a, b) =>
+          (a.endedAt === null ? 0 : 1) - (b.endedAt === null ? 0 : 1) ||
+          b.startedAt.localeCompare(a.startedAt),
+      )
+      .slice(0, ROSTER_LIMIT);
+  }
+  return roster
+    .map((process) => ({ ...process }))
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id));
+}
+
 function inventoryStatus(status: OrchestrationSubagentRun["status"]): RuntimeSubagentStatus {
   switch (status) {
     case "queued":
@@ -829,6 +944,8 @@ export interface AgentPanelModel {
   readonly totalTokens: number;
   readonly hasAgents: boolean;
   readonly liveCount: number;
+  readonly backgroundProcesses: ReadonlyArray<RuntimeBackgroundProcess>;
+  readonly liveBackgroundCount: number;
 }
 
 const EMPTY_PANEL_MODEL: AgentPanelModel = {
@@ -841,6 +958,8 @@ const EMPTY_PANEL_MODEL: AgentPanelModel = {
   totalTokens: 0,
   hasAgents: false,
   liveCount: 0,
+  backgroundProcesses: [],
+  liveBackgroundCount: 0,
 };
 
 export function emptyAgentPanelModel(): AgentPanelModel {
@@ -856,13 +975,26 @@ export function emptyAgentPanelModel(): AgentPanelModel {
 export function deriveAgentPanelModel({
   agents,
   v2Projection,
+  backgroundProcesses = [],
 }: {
   readonly agents: ReadonlyArray<RuntimeSubagent>;
   readonly v2Projection?: ReadonlyArray<RuntimeSubagent> | null;
+  readonly backgroundProcesses?: ReadonlyArray<RuntimeBackgroundProcess>;
 }): AgentPanelModel {
   const source = v2Projection ?? agents;
+  const liveBackgroundCount = backgroundProcesses.filter(
+    (process) => process.endedAt === null,
+  ).length;
   if (source.length === 0) {
-    return EMPTY_PANEL_MODEL;
+    if (backgroundProcesses.length === 0) {
+      return EMPTY_PANEL_MODEL;
+    }
+    return {
+      ...EMPTY_PANEL_MODEL,
+      hasAgents: true,
+      backgroundProcesses,
+      liveBackgroundCount,
+    };
   }
 
   const workflows = source
@@ -982,6 +1114,8 @@ export function deriveAgentPanelModel({
     totalTokens,
     hasAgents: true,
     liveCount: runningCount + waitingCount,
+    backgroundProcesses,
+    liveBackgroundCount,
   };
 }
 

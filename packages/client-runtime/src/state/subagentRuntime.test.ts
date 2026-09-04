@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import {
   deriveAgentPanelModel,
+  foldBackgroundProcesses,
   foldSubagentActivities,
   formatSubagentModelLabel,
   formatSubagentTokenCount,
@@ -703,6 +704,36 @@ describe("background task exclusion", () => {
     expect(agents).toHaveLength(1);
     expect(agents[0]!.status).toBe("completed");
     expect(agents[0]!.result).toBe("done");
+  });
+});
+
+describe("foldBackgroundProcesses", () => {
+  it("renders a running local_bash as running, settles it on completion, and excludes agent-owned shells", () => {
+    const processes = foldBackgroundProcesses([
+      activity("task.started", {
+        taskId: "bg-1",
+        taskType: "local_bash",
+        title: "npm run build --watch",
+      }),
+      activity("task.completed", {
+        taskId: "bg-1",
+        taskType: "local_bash",
+        status: "completed",
+        summary: 'Background command "npm run build --watch" completed (exit code 0)',
+      }),
+      // Owned by a subagent: agent-internal, must not appear in this list.
+      activity("task.started", {
+        taskId: "bg-2",
+        taskType: "shell",
+        agentId: "agent-1",
+        title: "child shell",
+      }),
+    ]);
+    expect(processes.map((process) => process.id)).toEqual(["bg-1"]);
+    expect(processes[0]!.status).toBe("completed");
+    expect(processes[0]!.detail).toBe(
+      'Background command "npm run build --watch" completed (exit code 0)',
+    );
   });
 });
 

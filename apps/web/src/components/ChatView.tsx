@@ -182,6 +182,7 @@ import { RightPanelTabs, type PullRequestTabStatus } from "./RightPanelTabs";
 import { AgentsPanel } from "./AgentsPanel";
 import {
   deriveAgentPanelModel,
+  foldBackgroundProcesses,
   foldSubagentActivities,
   reconcileSubagentInventory,
 } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -2522,6 +2523,7 @@ function ChatViewContent(props: ChatViewProps) {
           subagentRuns,
           foldSubagentActivities(threadActivities, { sessionLive: agentSessionLive }),
         ),
+        backgroundProcesses: foldBackgroundProcesses(threadActivities),
       }),
     [agentSessionLive, subagentRuns, threadActivities],
   );
@@ -4737,6 +4739,11 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeThread?.id]);
 
   useEffect(() => {
+    console.log("[probe] focus-effect run", {
+      id: activeThread?.id,
+      term: terminalUiState.terminalOpen,
+      fc: focusComposer,
+    });
     if (!activeThread?.id || terminalUiState.terminalOpen) return;
     const frame = window.requestAnimationFrame(() => {
       focusComposer();
@@ -5244,7 +5251,7 @@ function ChatViewContent(props: ChatViewProps) {
       return null;
     }
     const working = activeBackgroundLiveness === "working";
-    const liveCount = agentPanelModel.liveCount;
+    const liveCount = agentPanelModel.liveCount + agentPanelModel.liveBackgroundCount;
     return {
       id: `background-liveness:${activeThread.id}`,
       variant: "default",
@@ -5275,6 +5282,7 @@ function ChatViewContent(props: ChatViewProps) {
     activeBackgroundLiveness,
     activeThread,
     agentPanelModel.liveCount,
+    agentPanelModel.liveBackgroundCount,
     handleStopBackgroundWork,
     isStoppingBackgroundWork,
   ]);
@@ -7532,7 +7540,9 @@ function ChatViewContent(props: ChatViewProps) {
       // Suppressed while the Agents surface is visible: the roster itself is
       // on screen, so the toggle badge would be pointing at nothing.
       liveAgentCount={
-        rightPanelOpen && activeRightPanelSurface?.kind === "agents" ? 0 : agentPanelModel.liveCount
+        rightPanelOpen && activeRightPanelSurface?.kind === "agents"
+          ? 0
+          : agentPanelModel.liveCount + agentPanelModel.liveBackgroundCount
       }
       onToggleTerminal={toggleTerminalVisibility}
       onToggleRightPanel={toggleRightPanel}
@@ -8176,7 +8186,7 @@ function ChatViewContent(props: ChatViewProps) {
           filesAvailable={activeProject !== null}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           agentsAvailable
-          liveAgentCount={agentPanelModel.liveCount}
+          liveAgentCount={agentPanelModel.liveCount + agentPanelModel.liveBackgroundCount}
         >
           {rightPanelContent}
         </RightPanelTabs>
@@ -8225,7 +8235,7 @@ function ChatViewContent(props: ChatViewProps) {
             filesAvailable={activeProject !== null}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             agentsAvailable
-            liveAgentCount={agentPanelModel.liveCount}
+            liveAgentCount={agentPanelModel.liveCount + agentPanelModel.liveBackgroundCount}
           >
             {rightPanelContent}
           </RightPanelTabs>

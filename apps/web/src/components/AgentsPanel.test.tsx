@@ -61,6 +61,8 @@ function panel(directAgent: RuntimeSubagent): AgentPanelModel {
     totalTokens: 0,
     hasAgents: true,
     liveCount: 0,
+    backgroundProcesses: [],
+    liveBackgroundCount: 0,
   };
 }
 
