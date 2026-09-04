@@ -63,6 +63,10 @@ shortcut is `mod+shift+s`, and it does not run while the terminal has focus.
 already pinned. Its default shortcut is `mod+shift+p`, and it does not run while the terminal has
 focus. See [Organizing threads](./thread-sidebar.md) for how pinned threads are ordered.
 
+`composer.goalMode` toggles the composer between goal mode and normal message mode when a thread
+goal control is available. Its default shortcut is `mod+shift+g`, and it does not run while the
+terminal has focus. See [Thread goals](./composer.md#thread-goals).
+
 The command palette searches settings, active thread titles, projects, branches, user messages, and
 final agent responses across connected environments. A setting result opens its exact control or
 section. Message matches show one labeled excerpt while keeping the thread's project, branch, and

@@ -235,9 +235,11 @@ any line.
 Set a goal for the current thread with `/goal` followed by a short description, for example
 `/goal ship the login fix`, or use the target button in the composer controls. Once a goal is set,
 the button becomes a compact pill showing the goal's first line in the composer. Select the pill
-to open the goal editor, where you can change or clear the goal. On mobile, the goal pill and
-editor live in the thread composer's toolbar and open the same editor as a bottom sheet. Sending
-`/goal` on its own opens the editor with the current goal, and `/goal clear` removes the goal.
+to switch the chat input into goal mode: the input changes colour, and sending writes the goal
+instead of a message. Select the pill again to go back. On mobile, the goal pill lives in the
+thread composer's toolbar and opens a goal editor as a bottom sheet. Sending `/goal` on its own
+fills in the current goal for editing, and `/goal clear` removes it. The `mod+shift+g` shortcut
+toggles goal mode without leaving the keyboard.
 Goals are T3 Code state: they are stored with the thread, stay in sync across your devices, and
 are never sent to the agent. The word `clear` is reserved, so a goal cannot literally be `clear`.
 A goal needs at least one visible character and fits within 1,024 characters. This is separate

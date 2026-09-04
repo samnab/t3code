@@ -74,7 +74,6 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
-import { ThreadGoalEditor } from "./ThreadGoalEditor";
 import { TargetArrowIcon } from "../Icons";
 import {
   ComposerTasksBadge,
@@ -300,7 +299,7 @@ function ComposerCommandMenuLayer(props: { anchor: HTMLElement | null; children:
   );
 }
 import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup } from "../ui/select";
+import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
@@ -320,10 +319,7 @@ import {
   VolumeXIcon,
   XIcon,
 } from "lucide-react";
-import {
-  resolveThreadGoalDisplay,
-  type ThreadGoalEditorState,
-} from "@t3tools/client-runtime/state/threadGoalEditor";
+import { resolveThreadGoalDisplay } from "@t3tools/client-runtime/state/threadGoalEditor";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle } from "../../providerModels";
 import {
@@ -486,6 +482,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             render={<ComposerSelectControl className="font-medium" aria-label="Runtime mode" />}
           >
             <ComposerControlIcon icon={RuntimeModeIcon} />
+            <SelectValue>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false}>
             {runtimeModeOptions.map((mode) => {
@@ -509,9 +506,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             })}
           </SelectPopup>
         </Select>
-        <TooltipPopup side="top">
-          {runtimeModeOption.label} — {runtimeModeOption.description}
-        </TooltipPopup>
+        <TooltipPopup side="top">{runtimeModeOption.description}</TooltipPopup>
       </Tooltip>
 
       {interactionModeToggle}
@@ -561,14 +556,18 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
 /**
  * Thread-goal shortcut in the composer controls: the entry point when no
  * goal is set, and an active pill (icon + truncated goal, full text in the
- * tooltip) once one exists. Both states open the inline goal editor.
+ * tooltip) once one exists. Both toggle goal mode: the chat input turns into
+ * the goal editor and send writes the goal instead of a message.
  */
 const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props: {
   goal: string | null;
-  editorOpen: boolean;
+  active: boolean;
   onToggle: () => void;
+  shortcutLabel: string | null;
 }) {
-  const goalTooltip = props.goal ?? "Set a goal for this thread";
+  const goalTooltip =
+    (props.goal ?? "Set a goal for this thread") +
+    (props.shortcutLabel ? ` · ${props.shortcutLabel}` : "");
   return (
     <Tooltip>
       <TooltipTrigger
@@ -578,12 +577,14 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
             data-thread-goal
             data-thread-goal-set={props.goal !== null ? "true" : "false"}
             aria-label={props.goal !== null ? `Thread goal: ${props.goal}` : "Set thread goal"}
-            aria-expanded={props.editorOpen}
+            aria-pressed={props.active}
             className={cn(
               "min-w-0 shrink",
-              props.goal !== null
-                ? "bg-accent text-accent-foreground hover:bg-accent/80"
-                : "text-secondary-label hover:text-foreground",
+              props.active
+                ? "bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary"
+                : props.goal !== null
+                  ? "bg-accent text-accent-foreground hover:bg-accent/80"
+                  : "text-secondary-label hover:text-foreground",
             )}
             onClick={props.onToggle}
           />
@@ -699,6 +700,8 @@ export interface ChatComposerHandle {
   focusAt: (cursor: number) => void;
   addDroppedFiles: (files: File[]) => void;
   insertTextAtEnd: (text: string, options?: { ensureLeadingBoundary?: boolean }) => boolean;
+  /** Goal mode turns the input into the thread-goal editor; send sets the goal. */
+  setGoalMode: (enabled: boolean) => void;
   citeAssistantText: (
     citation: AssistantCitation,
     sourceAnchor: AssistantCitationSourceAnchor,
@@ -724,6 +727,7 @@ export interface ChatComposerHandle {
   /** Get the current prompt/effort/model state for use in send. */
   getSendContext: () => {
     prompt: string;
+    goalMode: boolean;
     images: ComposerImageAttachment[];
     files: ComposerFileAttachment[];
     terminalContexts: TerminalContextDraft[];
@@ -754,13 +758,6 @@ export interface ChatComposerProps {
   supportsThreadGoals: boolean;
   /** Current thread goal, when set; shown as a pill in the composer footer. */
   activeThreadGoal: string | null;
-  /** Open editor state (owned by ChatView, keyed by thread), or null. */
-  threadGoalEditor: ThreadGoalEditorState | null;
-  onThreadGoalEditorOpen: () => void;
-  onThreadGoalEditorClose: () => void;
-  onThreadGoalDraftChange: (text: string) => void;
-  onThreadGoalEditorSave: () => void;
-  onThreadGoalEditorClear: () => void;
   maxFileAttachmentBytes: number | null;
   routeKind: "server" | "draft";
   routeThreadRef: ScopedThreadRef;
@@ -894,12 +891,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     supportsAttachmentUploads,
     supportsThreadGoals,
     activeThreadGoal,
-    threadGoalEditor,
-    onThreadGoalEditorOpen,
-    onThreadGoalEditorClose,
-    onThreadGoalDraftChange,
-    onThreadGoalEditorSave,
-    onThreadGoalEditorClear,
     maxFileAttachmentBytes,
     routeKind,
     routeThreadRef,
@@ -1434,6 +1425,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const [composerMenuAnchor, setComposerMenuAnchor] = useState<HTMLDivElement | null>(null);
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
+  const [goalMode, setGoalMode] = useState(false);
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
     key: 0,
@@ -1444,18 +1436,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     usePanelAnimationSettings();
   const isComposerCollapsedMobile =
     isMobileViewport && !forceExpandedOnMobile && !isComposerFocused;
-
-  // Returning focus after the goal editor closes keeps keyboard users on the
-  // trigger instead of dropping focus to the page (the editor lives in a
-  // fixed layer, so focus would otherwise fall back to <body>).
-  const wasThreadGoalEditorOpenRef = useRef(false);
-  useEffect(() => {
-    const wasOpen = wasThreadGoalEditorOpenRef.current;
-    wasThreadGoalEditorOpenRef.current = threadGoalEditor !== null;
-    if (wasOpen && threadGoalEditor === null) {
-      document.querySelector<HTMLElement>("[data-thread-goal]")?.focus();
-    }
-  }, [threadGoalEditor]);
 
   // ------------------------------------------------------------------
   // Refs
@@ -1790,6 +1770,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       !showMobilePendingAnswerActions,
     supportsThreadGoals,
   });
+  // Goal mode belongs to the thread it was toggled on and needs its control.
+  const goalModeActive = goalMode && threadGoalDisplay === "control";
+  useEffect(() => {
+    setGoalMode(false);
+  }, [composerDraftTarget]);
 
   // ------------------------------------------------------------------
   // Prompt helpers
@@ -3262,6 +3247,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           modelPickerOpen: isComposerModelPickerOpen,
         },
       });
+      if (command === "composer.goalMode") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (isCommandPaletteOpen()) {
+          return;
+        }
+        if (threadGoalDisplay !== "control") {
+          return;
+        }
+        setGoalMode((on) => !on);
+        composerEditorRef.current?.focusAtEnd();
+        return;
+      }
       if (command !== "composer.stash") return;
       // Always claim the shortcut so the browser save dialog never opens,
       // even when the composer is in a state that can't stash.
@@ -3290,6 +3288,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectSelectionRequired,
     stashCurrentPrompt,
     terminalOpen,
+    threadGoalDisplay,
   ]);
 
   // ------------------------------------------------------------------
@@ -3634,11 +3633,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         focusComposer();
       },
       insertTextAtEnd: insertComposerTextAtEnd,
-      citeAssistantText: (citation, sourceAnchor) =>
+      setGoalMode,
+      citeAssistantText: (citation) =>
         insertComposerText(
           formatAssistantCitationForComposer(citation, citation.comment),
           "cursor",
-          { ensureLeadingBoundary: true, citationCommentAnchor: sourceAnchor },
+          {
+            ensureLeadingBoundary: true,
+          },
         ),
       openModelPicker: () => {
         setIsComposerModelPickerOpen(true);
@@ -3706,6 +3708,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       },
       getSendContext: () => ({
         prompt: promptRef.current,
+        goalMode: goalModeActive,
         images: composerImagesRef.current,
         files: composerFilesRef.current,
         terminalContexts: composerTerminalContextsRef.current,
@@ -3962,6 +3965,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             className={cn(
               "rounded-[20px] transition-[background-color] duration-200",
               isDragOverComposer ? "bg-accent/45 ring-1 ring-primary/70" : null,
+              goalModeActive ? "bg-primary/10 ring-1 ring-primary/60" : null,
               projectSelectionRequired ? "opacity-75" : null,
               composerProviderState.composerSurfaceClassName,
             )}
@@ -4036,21 +4040,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   />
                 </ComposerCommandMenuLayer>
               )}
-
-              {threadGoalEditor !== null &&
-              supportsThreadGoals &&
-              !composerMenuOpen &&
-              !isComposerApprovalState ? (
-                <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
-                  <ThreadGoalEditor
-                    state={threadGoalEditor}
-                    onDraftChange={onThreadGoalDraftChange}
-                    onSave={onThreadGoalEditorSave}
-                    onClear={onThreadGoalEditorClear}
-                    onClose={onThreadGoalEditorClose}
-                  />
-                </ComposerCommandMenuLayer>
-              ) : null}
 
               {composerMenuOpen && !isComposerApprovalState && (
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
@@ -4433,13 +4422,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         ? "Type your own answer, or leave this blank to use the selected option"
                         : showPlanFollowUpPrompt && activeProposedPlan
                           ? "Add feedback to refine the plan, or leave this blank to implement it"
-                          : projectSelectionRequired
-                            ? "Choose a project above to start a thread"
-                            : noProviderAvailable
-                              ? "Enable a provider in Settings to send a message"
-                              : phase === "disconnected"
-                                ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                          : goalModeActive
+                            ? "What should this thread accomplish? Send to set the goal"
+                            : projectSelectionRequired
+                              ? "Choose a project above to start a thread"
+                              : noProviderAvailable
+                                ? "Enable a provider in Settings to send a message"
+                                : phase === "disconnected"
+                                  ? DISCONNECTED_COMPOSER_PLACEHOLDER
+                                  : "Ask anything, @tag files/folders, $use skills, or / for commands"
                   }
                   disabled={isConnecting || isComposerApprovalState || projectSelectionRequired}
                 />
@@ -4579,10 +4570,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   {threadGoalDisplay === "control" ? (
                     <ComposerThreadGoalControl
                       goal={activeThreadGoal}
-                      editorOpen={threadGoalEditor !== null}
-                      onToggle={
-                        threadGoalEditor !== null ? onThreadGoalEditorClose : onThreadGoalEditorOpen
-                      }
+                      active={goalModeActive}
+                      onToggle={() => {
+                        setGoalMode(!goalModeActive);
+                        composerEditorRef.current?.focusAtEnd();
+                      }}
+                      shortcutLabel={shortcutLabelForCommand(keybindings, "composer.goalMode", {
+                        context: {
+                          terminalFocus: false,
+                          terminalOpen,
+                          modelPickerOpen: false,
+                        },
+                      })}
                     />
                   ) : null}
                 </div>
