@@ -420,6 +420,34 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
     }),
   );
 
+  it.effect("only resume and reset mark the loop as resumed", () =>
+    Effect.gen(function* () {
+      // The goal loop reactor starts a continuation turn on `resumed` alone,
+      // so pausing or blocking must never carry it.
+      const cases = [
+        { action: "resume", resumed: true },
+        { action: "reset", resumed: true },
+        { action: "pause", resumed: undefined },
+        { action: "block", resumed: undefined },
+      ] as const;
+      for (const [index, entry] of cases.entries()) {
+        const result = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.goal.loop",
+            commandId: CommandId.make(`cmd-loop-resumed-${index}`),
+            threadId: ThreadId.make("thread-1"),
+            action: entry.action,
+          },
+          readModel: withLoop({ state: "paused", iterations: 2 }),
+        });
+        const event = Array.isArray(result) ? result[0] : result;
+        if (event?.type === "thread.goal-loop-updated") {
+          expect(event.payload.resumed).toBe(entry.resumed);
+        }
+      }
+    }),
+  );
+
   it.effect("block records the reason it was given", () =>
     Effect.gen(function* () {
       const result = yield* decideOrchestrationCommand({

@@ -19,6 +19,11 @@
  * collides after a replaced goal resets it, and the engine then silently
  * swallows the new goal's complete/block/continue.
  *
+ * The other wake is `thread.goal-loop-updated` with `resumed`, which the
+ * decider sets only for the `resume` and `reset` actions: a user who resumes a
+ * paused loop or pushes past the iteration cap gets the next turn immediately
+ * rather than having to send a message.
+ *
  * @module GoalLoopReactor
  */
 import {
@@ -131,6 +136,14 @@ export class GoalLoopReactor extends Context.Service<
 interface Signal {
   readonly threadId: ThreadId;
   readonly turnId: TurnId | null;
+  /**
+   * Set when a user resumed or reset a held loop, to the loop's `updatedAt`.
+   * Such a signal starts the next turn straight away and never scans the last
+   * assistant message: that message is the one whose `<goal_blocked>` or
+   * `<goal_complete>` tag stopped the loop, and re-reading it would just stop
+   * it again.
+   */
+  readonly resumedAt?: string;
 }
 
 export const make = Effect.gen(function* () {
@@ -196,6 +209,11 @@ export const make = Effect.gen(function* () {
   const evaluate = Effect.fn("GoalLoopReactor.evaluate")(function* (signal: Signal) {
     const thread = Option.getOrUndefined(yield* snapshots.getThreadShellById(signal.threadId));
     if (thread === undefined || !canDriveGoalLoop(thread)) return;
+    if (signal.resumedAt !== undefined) {
+      // Explicit user intent, so it outranks the error-session hold below.
+      emptyRuns.delete(signal.threadId);
+      return yield* startContinuationTurn(thread, `resume:${signal.resumedAt}`);
+    }
     // A failed turn leaves the loop exactly as it is: the user decides
     // whether to retry, and a retry storm on a broken session helps nobody.
     if (thread.session?.status === "error") return;
@@ -291,14 +309,28 @@ export const make = Effect.gen(function* () {
                   }),
             ),
           );
-          yield* Stream.runForEach(engine.streamDomainEvents, (event: OrchestrationEvent) =>
-            event.type === "thread.turn-diff-completed"
-              ? worker.enqueue({
-                  threadId: event.payload.threadId,
-                  turnId: event.payload.turnId,
-                })
-              : Effect.void,
-          );
+          yield* Stream.runForEach(engine.streamDomainEvents, (event: OrchestrationEvent) => {
+            if (event.type === "thread.turn-diff-completed") {
+              return worker.enqueue({
+                threadId: event.payload.threadId,
+                turnId: event.payload.turnId,
+              });
+            }
+            // Resume and "continue anyway" have no turn to end, so the loop
+            // update is their start signal. Only those two actions set
+            // `resumed`; a freshly set goal waits for the user's first message.
+            if (event.type === "thread.goal-loop-updated" && event.payload.resumed === true) {
+              const loop = event.payload.loop;
+              return loop !== null && loop.state === "idle"
+                ? worker.enqueue({
+                    threadId: event.payload.threadId,
+                    turnId: null,
+                    resumedAt: loop.updatedAt,
+                  })
+                : Effect.void;
+            }
+            return Effect.void;
+          });
         }),
       );
     },

@@ -172,6 +172,38 @@ function makeTurnDiffCompletedEvent(
   };
 }
 
+const RESUMED_AT = "2026-09-03T12:05:00.000Z";
+
+/**
+ * The event a `thread.goal.loop` resume/reset produces. `resumed` is what the
+ * reactor keys on; a freshly set goal emits the same event without it.
+ */
+function makeGoalLoopUpdatedEvent(input: {
+  readonly loop: ThreadGoalLoop | null;
+  readonly resumed?: boolean;
+  readonly threadId?: ThreadId;
+  readonly key?: string;
+}): OrchestrationEvent {
+  const threadId = input.threadId ?? THREAD_ID;
+  return {
+    sequence: 2,
+    eventId: EventId.make(`event-goal-loop:${input.key ?? threadId}`),
+    aggregateKind: "thread",
+    aggregateId: threadId,
+    occurredAt: RESUMED_AT,
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.goal-loop-updated",
+    payload: {
+      threadId,
+      loop: input.loop,
+      ...(input.resumed === true ? { resumed: true } : {}),
+    },
+  };
+}
+
 interface HarnessOptions {
   readonly shell: OrchestrationThreadShell;
   readonly messages?: ReadonlyArray<OrchestrationMessage>;
@@ -504,6 +536,122 @@ describe("GoalLoopReactor", () => {
             ],
           );
         }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  /** Runs the given signals against a fixture and returns the dispatches. */
+  const dispatchesForSignals = Effect.fn("goalLoopDispatchesForSignals")(function* (
+    options: HarnessOptions & { readonly signals: ReadonlyArray<OrchestrationEvent> },
+  ) {
+    const fixture = yield* makeHarness(options);
+    return yield* Effect.gen(function* () {
+      const reactor = yield* GoalLoopReactor.GoalLoopReactor;
+      yield* runSignals({
+        reactor,
+        activation: fixture.activation,
+        shellReads: fixture.shellReads,
+        events: fixture.events,
+        signals: options.signals,
+      });
+      return yield* Ref.get(fixture.commands);
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("resuming a paused loop starts the next turn without re-reading the last reply", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const commands = yield* dispatchesForSignals({
+          // Post-resume shell: the decider already moved paused -> idle.
+          shell: makeShell({ goalLoop: makeLoop({ state: "idle", updatedAt: RESUMED_AT }) }),
+          // The reply that blocked the loop is still the last one. Scanning it
+          // would immediately re-block the loop the user just resumed.
+          messages: [makeAssistantMessage("<goal_blocked>I need the API key.</goal_blocked>")],
+          signals: [
+            makeGoalLoopUpdatedEvent({
+              loop: makeLoop({ state: "idle", updatedAt: RESUMED_AT }),
+              resumed: true,
+            }),
+          ],
+        });
+        assert.strictEqual(commands.length, 1);
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.turn.start");
+        if (command.type !== "thread.turn.start") return;
+        assert.strictEqual(
+          command.commandId,
+          `server:goal-continue:goal-loop-thread:resume:${RESUMED_AT}`,
+        );
+        assert.strictEqual(command.continuation, true);
+      }),
+    ),
+  );
+
+  it.effect("continuing past the cap (reset) starts the next turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const resetLoop = makeLoop({ state: "idle", iterations: 0, updatedAt: RESUMED_AT });
+        const commands = yield* dispatchesForSignals({
+          shell: makeShell({ goalLoop: resetLoop }),
+          messages: [makeAssistantMessage("Ran out of iterations.")],
+          signals: [makeGoalLoopUpdatedEvent({ loop: resetLoop, resumed: true })],
+        });
+        assert.strictEqual(commands.length, 1);
+        assert.strictEqual(commands[0]!.type, "thread.turn.start");
+      }),
+    ),
+  );
+
+  it.effect("a freshly set goal waits for the user's first message", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          shell: makeShell({ goalLoop: makeLoop({ state: "idle", iterations: 0 }) }),
+          messages: [makeAssistantMessage("Anything else?")],
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* GoalLoopReactor.GoalLoopReactor;
+          // Queued ahead of the tracer below, and before the reactor starts —
+          // the harness uses a buffered queue, so nothing is lost. No
+          // `resumed`: the goal was set, not resumed.
+          yield* Queue.offer(
+            fixture.events,
+            makeGoalLoopUpdatedEvent({ loop: makeLoop({ state: "idle", iterations: 0 }) }),
+          );
+          yield* runSignals({
+            reactor,
+            activation: fixture.activation,
+            shellReads: fixture.shellReads,
+            events: fixture.events,
+            // A signal for an unknown thread: it reads the shell (so the wait
+            // in `runSignals` lands) and dispatches nothing, proving the loop
+            // update ahead of it in the queue produced nothing either.
+            signals: [makeTurnDiffCompletedEvent(ThreadId.make("other-thread"))],
+          });
+          assert.deepStrictEqual(yield* Ref.get(fixture.commands), []);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("a duplicated resume event collapses onto one command id", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const resumedLoop = makeLoop({ state: "idle", updatedAt: RESUMED_AT });
+        const commands = yield* dispatchesForSignals({
+          shell: makeShell({ goalLoop: resumedLoop }),
+          messages: [makeAssistantMessage("Paused mid-flight.")],
+          signals: [
+            makeGoalLoopUpdatedEvent({ loop: resumedLoop, resumed: true, key: "a" }),
+            makeGoalLoopUpdatedEvent({ loop: resumedLoop, resumed: true, key: "b" }),
+          ],
+        });
+        // The engine replays an accepted command id instead of starting a
+        // second turn, so one id across both signals is the collapse.
+        assert.deepStrictEqual(
+          [...new Set(commands.map((command) => command.commandId))],
+          [`server:goal-continue:goal-loop-thread:resume:${RESUMED_AT}`],
+        );
       }),
     ),
   );

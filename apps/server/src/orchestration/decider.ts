@@ -45,6 +45,8 @@ const goalLoopEvent = Effect.fn("goalLoopEvent")(function* (input: {
   readonly commandId: OrchestrationCommand["commandId"];
   readonly occurredAt: string;
   readonly loop: ThreadGoalLoop | null;
+  /** See ThreadGoalLoopUpdatedPayload.resumed — only resume/reset set it. */
+  readonly resumed?: boolean;
 }) {
   return {
     ...(yield* withEventBase({
@@ -54,7 +56,11 @@ const goalLoopEvent = Effect.fn("goalLoopEvent")(function* (input: {
       commandId: input.commandId,
     })),
     type: "thread.goal-loop-updated" as const,
-    payload: { threadId: input.threadId, loop: input.loop },
+    payload: {
+      threadId: input.threadId,
+      loop: input.loop,
+      ...(input.resumed === true ? { resumed: true } : {}),
+    },
   };
 });
 
@@ -921,19 +927,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       const occurredAt = yield* nowIso;
       const loop = thread.goalLoop ?? initialGoalLoop({ thread, updatedAt: occurredAt });
-      const emit = (patch: Partial<ThreadGoalLoop>) =>
+      // `resumed` marks the two actions that hand a held loop back to the
+      // reactor, which starts the next turn on that alone.
+      const emit = (patch: Partial<ThreadGoalLoop>, resumed = false) =>
         goalLoopEvent({
           threadId: command.threadId,
           commandId: command.commandId,
           occurredAt,
           loop: { ...loop, reason: null, ...patch, updatedAt: occurredAt },
+          resumed,
         });
       switch (command.action) {
         case "pause":
           return yield* emit({ state: "paused" });
         case "resume":
           yield* requireGoalLoopNotCompleted({ command, thread });
-          return yield* emit({ state: "idle" });
+          return yield* emit({ state: "idle" }, true);
         case "continue":
           yield* requireGoalLoopNotCompleted({ command, thread });
           return loop.iterations >= loop.maxIterations
@@ -947,7 +956,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ...(command.reason !== undefined ? { reason: command.reason } : {}),
           });
         case "reset":
-          return yield* emit({ state: "idle", iterations: 0 });
+          return yield* emit({ state: "idle", iterations: 0 }, true);
       }
     }
 

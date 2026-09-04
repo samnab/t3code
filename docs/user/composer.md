@@ -266,8 +266,9 @@ takes effect once the turn that is running ends. The goal pill shows the loop's 
   set the count back to zero.
 - **Complete** means the agent reported the goal done.
 
-After a resume or a **Continue anyway**, send a message to put the agent back to work on the goal.
-Clearing the goal with `/goal clear`, or the pill, stops the loop along with it.
+A resume or a **Continue anyway** starts the next turn on its own — you do not have to send a
+message — and the agent picks up from where the loop stopped rather than re-reading the reply that
+paused or blocked it. Clearing the goal with `/goal clear`, or the pill, stops the loop along with it.
 
 ## Subscription usage limits
 

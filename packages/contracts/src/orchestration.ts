@@ -1537,6 +1537,14 @@ export const ThreadGoalLoopUpdatedPayload = Schema.Struct({
   threadId: ThreadId,
   /** Null clears the loop (the goal itself was cleared). See ThreadGoalLoop. */
   loop: Schema.NullOr(ThreadGoalLoop),
+  /**
+   * True only when a user action put a held loop back in motion (the `resume`
+   * or `reset` loop actions). The goal loop reactor starts a continuation turn
+   * on this and nothing else: a freshly set goal is left for the user's first
+   * message, and the resumed turn skips the last-reply scan because that reply
+   * may still carry the stale tag that stopped the loop.
+   */
+  resumed: Schema.optional(Schema.Boolean),
 });
 
 export const ThreadRuntimeModeSetPayload = Schema.Struct({
