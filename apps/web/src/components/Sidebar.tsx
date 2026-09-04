@@ -1232,7 +1232,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       <span
         role="img"
         aria-label={backgroundProcessLabel(backgroundProcessCount)}
-        title={backgroundProcessLabel(backgroundProcessCount)}
         data-testid={`sidebar-background-process-count-${thread.id}`}
         className="inline-flex shrink-0 items-center gap-0.5 text-muted-foreground/65"
       >
@@ -1248,7 +1247,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       <span
         role="img"
         aria-label={`Goal loop running · iteration ${thread.goalLoop.iterations} of ${thread.goalLoop.maxIterations}`}
-        title={`Goal loop running · iteration ${thread.goalLoop.iterations} of ${thread.goalLoop.maxIterations}`}
         data-testid={`sidebar-goal-loop-${thread.id}`}
         className="inline-flex shrink-0 items-center gap-0.5 text-muted-foreground/65"
       >
@@ -1261,7 +1259,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       <span
         role="img"
         aria-label="Goal loop blocked"
-        title="Goal loop blocked"
         data-testid={`sidebar-goal-loop-${thread.id}`}
         className="inline-flex size-1.5 shrink-0 rounded-full bg-destructive"
       />
