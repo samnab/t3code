@@ -54,6 +54,21 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.t3tools.t3code";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
+const DESKTOP_APP_ID_PATTERN = /^[A-Za-z0-9.-]+$/u;
+
+// A side-by-side fork build (e.g. a nightly or dev channel) can override the
+// bundle id via T3CODE_DESKTOP_APP_ID so its TCC/Privacy rows, LaunchServices
+// identity, and Keychain items don't collide with an official install.
+function resolveDesktopAppId(override: string | undefined): string {
+  const trimmed = override?.trim();
+  if (!trimmed) return DESKTOP_APP_ID;
+  if (!DESKTOP_APP_ID_PATTERN.test(trimmed)) {
+    throw new Error(
+      `T3CODE_DESKTOP_APP_ID must match ${DESKTOP_APP_ID_PATTERN} (got ${JSON.stringify(trimmed)}).`,
+    );
+  }
+  return trimmed;
+}
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
@@ -1230,7 +1245,7 @@ export function resolveMacPasskeySigningConfiguration(
   }
 
   return {
-    appId: DESKTOP_APP_ID,
+    appId: resolveDesktopAppId(env.T3CODE_DESKTOP_APP_ID),
     teamId,
     rpDomains: uniqueRpDomains,
     provisioningProfilePath,
@@ -2443,8 +2458,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
 ) {
+  const appIdOverride = yield* Config.string("T3CODE_DESKTOP_APP_ID").pipe(Config.option);
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
+    appId: resolveDesktopAppId(Option.getOrUndefined(appIdOverride)),
     productName: resolveDesktopProductName(version),
     artifactName: "T3-Code-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
