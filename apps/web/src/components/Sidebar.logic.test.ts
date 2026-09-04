@@ -813,9 +813,10 @@ describe("sortThreadsForSidebar", () => {
   const sortable = (input: { id: string; createdAt: string }) => ({
     id: input.id,
     createdAt: input.createdAt,
+    updatedAt: input.createdAt,
   });
 
-  it("orders by creation time, newest first, ignoring activity", () => {
+  it("orders by creation time, newest first, when nothing was updated since", () => {
     const sorted = sortThreadsForSidebar([
       sortable({ id: "oldest", createdAt: "2026-03-09T08:00:00.000Z" }),
       sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
@@ -823,6 +824,20 @@ describe("sortThreadsForSidebar", () => {
     ]);
 
     expect(sorted.map((thread) => thread.id)).toEqual(["newest", "middle", "oldest"]);
+  });
+
+  it("with updated_at sort order, the last user message lifts a thread above newer ones", () => {
+    const sorted = sortThreadsForSidebar([
+      sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
+      {
+        id: "old-but-active",
+        createdAt: "2026-03-09T08:00:00.000Z",
+        updatedAt: "2026-03-09T08:30:00.000Z",
+        latestUserMessageAt: "2026-03-09T13:00:00.000Z",
+      },
+    ]);
+
+    expect(sorted.map((thread) => thread.id)).toEqual(["old-but-active", "newest"]);
   });
 
   it("breaks creation-time ties by id so the order is stable", () => {
@@ -839,6 +854,7 @@ describe("sortThreadsForSidebar", () => {
       {
         id: "old-unsettled",
         createdAt: "2026-03-09T08:00:00.000Z",
+        updatedAt: "2026-03-09T08:00:00.000Z",
         unsettledAt: "2026-03-09T13:00:00.000Z",
       },
       sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
@@ -853,6 +869,7 @@ describe("sortThreadsForSidebar", () => {
       {
         id: "stale-stamp",
         createdAt: "2026-03-09T10:00:00.000Z",
+        updatedAt: "2026-03-09T10:00:00.000Z",
         unsettledAt: "2026-03-09T09:00:00.000Z",
       },
       sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
@@ -867,6 +884,7 @@ describe("sortThreadsForSidebar", () => {
         {
           id: "old-unsettled",
           createdAt: "2026-03-09T08:00:00.000Z",
+          updatedAt: "2026-03-09T08:00:00.000Z",
           unsettledAt: "2026-03-09T13:00:00.000Z",
         },
         sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),

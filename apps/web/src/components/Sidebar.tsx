@@ -3827,7 +3827,7 @@ export default function Sidebar() {
                       }}
                     >
                       {SidebarThreadSortOrder.literals.map((value) => (
-                        <MenuRadioItem key={value} value={value}>
+                        <MenuRadioItem key={value} value={value} closeOnClick>
                           {SIDEBAR_THREAD_SORT_LABELS[value]}
                         </MenuRadioItem>
                       ))}
