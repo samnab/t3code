@@ -1427,12 +1427,12 @@ function ChatViewContent(props: ChatViewProps) {
   const isDraftGoalTarget = activeServerThread === null && draftThread !== null;
 
   // Dispatches a goal-loop control action for the active server thread.
-  // "continue" past the iteration cap resets the counter first, since the
-  // server rejects a bare continue once capped.
+  // "continue" past the iteration cap is a plain reset: reset alone returns
+  // the loop to idle with a fresh budget, while a bare continue would spend
+  // an iteration without starting anything.
   const handleThreadGoalLoopAction = useCallback(
     async (action: "pause" | "resume" | "continue" | "reset") => {
       if (!activeServerThread) return;
-      const goalLoop = activeServerThread.goalLoop ?? null;
       const dispatch = async (dispatchAction: "pause" | "resume" | "continue" | "reset") => {
         const result = await setThreadGoalLoop({
           environmentId: activeServerThread.environmentId,
@@ -1449,12 +1449,7 @@ function ChatViewContent(props: ChatViewProps) {
           );
         }
       };
-      if (action === "continue" && goalLoop?.state === "capped") {
-        await dispatch("reset");
-        await dispatch("continue");
-        return;
-      }
-      await dispatch(action);
+      await dispatch(action === "continue" ? "reset" : action);
     },
     [activeServerThread, setThreadGoalLoop],
   );

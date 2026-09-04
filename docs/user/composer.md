@@ -248,19 +248,25 @@ goal, which Codex itself tracks in a live session — see
 
 #### Goal loop
 
-On servers that support it, setting a goal also starts a goal loop: T3 Code sends the goal to the
-agent and keeps sending follow-up turns until the agent reports the goal done, says it is stuck, or
-you step in. The goal pill shows the loop's state:
+On servers that support it, setting a goal also starts a goal loop: T3 Code adds the goal to each
+turn it sends the agent and keeps starting follow-up turns until the agent reports the goal done,
+says it is stuck, or you step in. Codex threads are the exception — Codex tracks its own execution
+goal, so T3 Code leaves those threads alone.
+
+The loop only changes between turns, never in the middle of one. Every control below therefore
+takes effect once the turn that is running ends. The goal pill shows the loop's state:
 
 - A running loop shows an iteration count, such as `3/10`.
 - **Paused** holds the loop without losing progress; select the pause button on the pill, or pause
-  it from the thread's menu, to stop it between turns. Resume picks the loop back up.
+  it from the thread's menu. The running turn finishes, and no new turn starts after it. Resume
+  clears the hold.
 - **Blocked** means the agent reported it cannot continue; the pill's tooltip shows why. Resume
-  tries again.
+  clears the block.
 - **Capped** means the loop reached its 10-turn ceiling. Select **Continue anyway** on the pill to
-  raise the ceiling and keep going.
+  set the count back to zero.
 - **Complete** means the agent reported the goal done.
 
+After a resume or a **Continue anyway**, send a message to put the agent back to work on the goal.
 Clearing the goal with `/goal clear`, or the pill, stops the loop along with it.
 
 ## Subscription usage limits
