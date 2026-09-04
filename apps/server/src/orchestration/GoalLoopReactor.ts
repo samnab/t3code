@@ -13,6 +13,12 @@
  * race checkpointing. (`turn.processing.quiesced` marks the same point but
  * rides `RuntimeReceiptBus`, whose production layer is a deliberate no-op.)
  *
+ * Every command the reactor dispatches is keyed on the turn that just ended.
+ * The engine replays a command id it has already accepted, so the key has to
+ * be unique per goal generation: keying on the loop's iteration count instead
+ * collides after a replaced goal resets it, and the engine then silently
+ * swallows the new goal's complete/block/continue.
+ *
  * @module GoalLoopReactor
  */
 import {
@@ -140,12 +146,13 @@ export const make = Effect.gen(function* () {
 
   const dispatchLoopAction = Effect.fn("GoalLoopReactor.dispatchLoopAction")(function* (input: {
     readonly threadId: ThreadId;
+    readonly turnKey: string;
     readonly action: "complete" | "block";
     readonly reason?: string;
   }) {
     yield* engine.dispatch({
       type: "thread.goal.loop",
-      commandId: CommandId.make(`server:goal-${input.action}:${input.threadId}`),
+      commandId: CommandId.make(`server:goal-${input.action}:${input.threadId}:${input.turnKey}`),
       threadId: input.threadId,
       action: input.action,
       ...(input.reason !== undefined ? { reason: input.reason } : {}),
@@ -154,13 +161,15 @@ export const make = Effect.gen(function* () {
 
   const startContinuationTurn = Effect.fn("GoalLoopReactor.startContinuationTurn")(function* (
     thread: OrchestrationThreadShell,
+    turnKey: string,
   ) {
     const loop = thread.goalLoop;
     if (loop == null) return;
     const createdAt = DateTime.formatIso(yield* DateTime.now);
-    // Keyed on the iteration the loop is currently on, so a replayed or
-    // duplicated end-of-turn signal collapses onto the same command.
-    const key = `${thread.id}:${loop.iterations}`;
+    // Keyed on the turn that just ended, so a replayed or duplicated
+    // end-of-turn signal collapses onto the same command while a later turn
+    // — including the first turn of a replaced goal — gets a fresh one.
+    const key = `${thread.id}:${turnKey}`;
     yield* engine.dispatch({
       type: "thread.turn.start",
       commandId: CommandId.make(`server:goal-continue:${key}`),
@@ -191,6 +200,12 @@ export const make = Effect.gen(function* () {
     // whether to retry, and a retry storm on a broken session helps nobody.
     if (thread.session?.status === "error") return;
 
+    // Unique per goal generation. A boot sweep has no turn to name, so it
+    // falls back to the loop's own timestamp, which still dedupes a double
+    // start against the same stale loop.
+    const turnKey =
+      signal.turnId ?? thread.session?.activeTurnId ?? `boot:${thread.goalLoop?.updatedAt ?? ""}`;
+
     const detail = Option.getOrUndefined(
       yield* snapshots.getThreadDetailById(signal.threadId, { activityKinds: [] }),
     );
@@ -199,12 +214,17 @@ export const make = Effect.gen(function* () {
 
     if (signalTag?.kind === "complete") {
       emptyRuns.delete(signal.threadId);
-      return yield* dispatchLoopAction({ threadId: signal.threadId, action: "complete" });
+      return yield* dispatchLoopAction({
+        threadId: signal.threadId,
+        turnKey,
+        action: "complete",
+      });
     }
     if (signalTag?.kind === "blocked") {
       emptyRuns.delete(signal.threadId);
       return yield* dispatchLoopAction({
         threadId: signal.threadId,
+        turnKey,
         action: "block",
         reason: signalTag.reason,
       });
@@ -217,6 +237,7 @@ export const make = Effect.gen(function* () {
         emptyRuns.delete(signal.threadId);
         return yield* dispatchLoopAction({
           threadId: signal.threadId,
+          turnKey,
           action: "block",
           reason: EMPTY_OUTPUT_REASON,
         });
@@ -225,7 +246,7 @@ export const make = Effect.gen(function* () {
       emptyRuns.delete(signal.threadId);
     }
 
-    yield* startContinuationTurn(thread);
+    yield* startContinuationTurn(thread, turnKey);
   });
 
   const worker = yield* makeDrainableWorker((signal: Signal) =>

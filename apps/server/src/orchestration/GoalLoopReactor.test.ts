@@ -144,10 +144,13 @@ function makeDetail(
   };
 }
 
-function makeTurnDiffCompletedEvent(threadId: ThreadId = THREAD_ID): OrchestrationEvent {
+function makeTurnDiffCompletedEvent(
+  threadId: ThreadId = THREAD_ID,
+  turnId: TurnId = TURN_ID,
+): OrchestrationEvent {
   return {
     sequence: 1,
-    eventId: EventId.make("event-turn-diff"),
+    eventId: EventId.make(`event-turn-diff:${turnId}`),
     aggregateKind: "thread",
     aggregateId: threadId,
     occurredAt: NOW,
@@ -158,7 +161,7 @@ function makeTurnDiffCompletedEvent(threadId: ThreadId = THREAD_ID): Orchestrati
     type: "thread.turn-diff-completed",
     payload: {
       threadId,
-      turnId: TURN_ID,
+      turnId,
       checkpointTurnCount: 1,
       checkpointRef: CheckpointRef.make("refs/t3/checkpoints/goal-loop-thread/1"),
       status: "ready",
@@ -313,7 +316,10 @@ describe("GoalLoopReactor", () => {
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.turn.start");
         if (command.type !== "thread.turn.start") return;
-        assert.strictEqual(command.commandId, "server:goal-continue:goal-loop-thread:1");
+        assert.strictEqual(
+          command.commandId,
+          "server:goal-continue:goal-loop-thread:goal-loop-turn",
+        );
         assert.strictEqual(command.message.text, GoalLoopReactor.GOAL_CONTINUE_MESSAGE);
         assert.strictEqual(command.continuation, true);
         assert.strictEqual(command.runtimeMode, "full-access");
@@ -323,7 +329,7 @@ describe("GoalLoopReactor", () => {
   );
 
   it.effect(
-    "keys the continuation on the iteration, so a repeated signal cannot double-start",
+    "keys the continuation on the ended turn, so a repeated signal cannot double-start",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -343,7 +349,7 @@ describe("GoalLoopReactor", () => {
             const commands = yield* Ref.get(fixture.commands);
             assert.deepStrictEqual(
               [...new Set(commands.map((command) => command.commandId))],
-              ["server:goal-continue:goal-loop-thread:1"],
+              ["server:goal-continue:goal-loop-thread:goal-loop-turn"],
             );
           }).pipe(Effect.provide(fixture.layer));
         }),
@@ -455,6 +461,53 @@ describe("GoalLoopReactor", () => {
     );
   }
 
+  it.effect("completes again after the goal is replaced", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const secondTurn = TurnId.make("goal-loop-turn-2");
+        const fixture = yield* makeHarness({
+          shell: makeShell(),
+          messages: [makeAssistantMessage("First goal done. <goal_complete>")],
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* GoalLoopReactor.GoalLoopReactor;
+          yield* runSignals({
+            reactor,
+            activation: fixture.activation,
+            shellReads: fixture.shellReads,
+            events: fixture.events,
+            signals: [makeTurnDiffCompletedEvent()],
+          });
+
+          // The user replaces the goal (`thread.meta.update`) and sends a turn:
+          // the loop resets to a fresh generation on the same thread.
+          yield* Ref.set(
+            fixture.shell,
+            makeShell({ goal: "Ship the follow-up", goalLoop: makeLoop({ iterations: 0 }) }),
+          );
+          yield* Ref.set(fixture.messages, [
+            makeAssistantMessage("Second goal done. <goal_complete>", secondTurn),
+          ]);
+          yield* Queue.offer(fixture.events, makeTurnDiffCompletedEvent(THREAD_ID, secondTurn));
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          const commands = yield* Ref.get(fixture.commands);
+          // The engine replays an already-accepted command id instead of
+          // re-running the decider, so two ids means two `thread.goal-loop-updated`
+          // events; one id would leave the replaced goal's loop stuck running.
+          assert.deepStrictEqual(
+            commands.map((command) => [command.type, command.commandId]),
+            [
+              ["thread.goal.loop", "server:goal-complete:goal-loop-thread:goal-loop-turn"],
+              ["thread.goal.loop", "server:goal-complete:goal-loop-thread:goal-loop-turn-2"],
+            ],
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
   it.effect("boot sweep continues a loop left running by a restart", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -475,7 +528,10 @@ describe("GoalLoopReactor", () => {
           });
           const commands = yield* Ref.get(fixture.commands);
           assert.strictEqual(commands.length, 1);
-          assert.strictEqual(commands[0]!.commandId, "server:goal-continue:goal-loop-thread:3");
+          assert.strictEqual(
+            commands[0]!.commandId,
+            `server:goal-continue:goal-loop-thread:boot:${NOW}`,
+          );
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),
