@@ -178,8 +178,22 @@ const make = Effect.fn("desktop.environment.make")(function* (
     joinPath: path.join,
     t3Home: config.t3Home,
   });
-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
-  const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
+  // An explicit T3CODE_HOME (outside development) gets its own userData dir
+  // name so two installs sharing the default profile don't collide on the
+  // single-instance lock or renderer localStorage. Reusing that same name as
+  // the "legacy" name makes the legacy-migration check in
+  // DesktopAppIdentity.resolveUserDataPath a no-op (it just finds itself),
+  // rather than accidentally migrating from the shared legacy profile.
+  const explicitT3HomeDirName = Option.map(
+    Option.filter(config.t3Home, () => !isDevelopment),
+    (t3Home) => `t3code-${path.basename(t3Home).replace(/[^A-Za-z0-9._-]/g, "_")}`,
+  );
+  const userDataDirName = Option.getOrElse(explicitT3HomeDirName, () =>
+    isDevelopment ? "t3code-dev" : "t3code",
+  );
+  const legacyUserDataDirName = Option.getOrElse(explicitT3HomeDirName, () =>
+    isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)",
+  );
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
     "applications",
