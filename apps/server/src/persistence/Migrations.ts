@@ -61,6 +61,7 @@ import Migration0046 from "./Migrations/046_ProjectionSubagentRuns.ts";
 import Migration0047 from "./Migrations/047_ProjectionThreadGoal.ts";
 import Migration0048 from "./Migrations/048_ProjectionSubagentTranscripts.ts";
 import Migration0049 from "./Migrations/049_ProjectionThreadsVoiceNotifications.ts";
+import Migration0050 from "./Migrations/050_ProjectionThreadGoalLoop.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -122,6 +123,7 @@ export const migrationEntries = [
   [47, "ProjectionThreadGoal", Migration0047],
   [48, "ProjectionSubagentTranscripts", Migration0048],
   [49, "ProjectionThreadsVoiceNotifications", Migration0049],
+  [50, "ProjectionThreadGoalLoop", Migration0050],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

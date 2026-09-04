@@ -223,6 +223,7 @@ export const make = Effect.gen(function* () {
       threadTitleRegeneration: true,
       threadPullRequestLinking: true,
       threadGoals: true,
+      threadGoalLoop: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverSelfUpdate === "boot-service" || desktopAppUpdate
         ? {

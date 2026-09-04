@@ -681,6 +681,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             worktreePath: event.payload.worktreePath,
             linkedPullRequest: null,
             goal: event.payload.goal ?? null,
+            goalLoop: null,
             latestTurnId: null,
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
@@ -883,6 +884,20 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : {}),
             ...(event.payload.goal !== undefined ? { goal: event.payload.goal } : {}),
             updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.goal-loop-updated": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            goalLoop: event.payload.loop,
           });
           return;
         }

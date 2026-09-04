@@ -6,6 +6,7 @@ import {
   ThreadArchivedPayload as ContractsThreadArchivedPayloadSchema,
   ThreadSettledPayload as ContractsThreadSettledPayloadSchema,
   ThreadMetaUpdatedPayload as ContractsThreadMetaUpdatedPayloadSchema,
+  ThreadGoalLoopUpdatedPayload as ContractsThreadGoalLoopUpdatedPayloadSchema,
   ThreadRuntimeModeSetPayload as ContractsThreadRuntimeModeSetPayloadSchema,
   ThreadInteractionModeSetPayload as ContractsThreadInteractionModeSetPayloadSchema,
   ThreadVoiceNotificationsSetPayload as ContractsThreadVoiceNotificationsSetPayloadSchema,
@@ -39,6 +40,7 @@ export const ThreadCreatedPayload = ContractsThreadCreatedPayloadSchema;
 export const ThreadArchivedPayload = ContractsThreadArchivedPayloadSchema;
 export const ThreadSettledPayload = ContractsThreadSettledPayloadSchema;
 export const ThreadMetaUpdatedPayload = ContractsThreadMetaUpdatedPayloadSchema;
+export const ThreadGoalLoopUpdatedPayload = ContractsThreadGoalLoopUpdatedPayloadSchema;
 export const ThreadRuntimeModeSetPayload = ContractsThreadRuntimeModeSetPayloadSchema;
 export const ThreadInteractionModeSetPayload = ContractsThreadInteractionModeSetPayloadSchema;
 export const ThreadVoiceNotificationsSetPayload = ContractsThreadVoiceNotificationsSetPayloadSchema;

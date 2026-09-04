@@ -1,9 +1,12 @@
 import {
   EventId,
+  resolveThreadGoalLoopMode,
+  THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
   type OrchestrationThread,
+  type ThreadGoalLoop,
 } from "@t3tools/contracts";
 import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 import * as DateTime from "effect/DateTime";
@@ -21,8 +24,10 @@ import {
   requireActiveProjectWorkspaceRootAbsent,
   requireProject,
   requireProjectAbsent,
+  requireGoalLoopNotCompleted,
   requireThread,
   requireThreadArchived,
+  requireThreadGoal,
   requireThreadAbsent,
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
@@ -30,6 +35,43 @@ import { projectEvent } from "./projector.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+/**
+ * Builds the `thread.goal-loop-updated` event. A null loop clears the loop,
+ * which is what a cleared goal leaves behind.
+ */
+const goalLoopEvent = Effect.fn("goalLoopEvent")(function* (input: {
+  readonly threadId: OrchestrationThread["id"];
+  readonly commandId: OrchestrationCommand["commandId"];
+  readonly occurredAt: string;
+  readonly loop: ThreadGoalLoop | null;
+}) {
+  return {
+    ...(yield* withEventBase({
+      aggregateKind: "thread" as const,
+      aggregateId: input.threadId,
+      occurredAt: input.occurredAt,
+      commandId: input.commandId,
+    })),
+    type: "thread.goal-loop-updated" as const,
+    payload: { threadId: input.threadId, loop: input.loop },
+  };
+});
+
+/** The loop a freshly set goal starts with. */
+function initialGoalLoop(input: {
+  readonly thread: OrchestrationThread;
+  readonly updatedAt: string;
+}): ThreadGoalLoop {
+  return {
+    state: "idle",
+    mode: resolveThreadGoalLoopMode(input.thread.modelSelection.instanceId),
+    iterations: 0,
+    maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
+    reason: null,
+    updatedAt: input.updatedAt,
+  };
+}
 
 /**
  * Blocked-on-you work derived from the thread's retained activities: an
@@ -335,14 +377,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      return {
+      const created = {
         ...(yield* withEventBase({
-          aggregateKind: "thread",
+          aggregateKind: "thread" as const,
           aggregateId: command.threadId,
           occurredAt: command.createdAt,
           commandId: command.commandId,
         })),
-        type: "thread.created",
+        type: "thread.created" as const,
         payload: {
           threadId: command.threadId,
           projectId: command.projectId,
@@ -358,6 +400,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: command.createdAt,
         },
       };
+      // A draft that already carries a goal starts its loop with the thread,
+      // so the goal is never a goal without a loop.
+      if (command.goal == null) return created;
+      return [
+        created,
+        yield* goalLoopEvent({
+          threadId: command.threadId,
+          commandId: command.commandId,
+          occurredAt: command.createdAt,
+          loop: {
+            state: "idle",
+            mode: resolveThreadGoalLoopMode(command.modelSelection.instanceId),
+            iterations: 0,
+            maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
+            reason: null,
+            updatedAt: command.createdAt,
+          },
+        }),
+      ];
     }
 
     case "thread.delete": {
@@ -788,14 +849,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ? thread.branch
           : command.branch;
       const occurredAt = yield* nowIso;
-      return {
+      const metaUpdated = {
         ...(yield* withEventBase({
-          aggregateKind: "thread",
+          aggregateKind: "thread" as const,
           aggregateId: command.threadId,
           occurredAt,
           commandId: command.commandId,
         })),
-        type: "thread.meta-updated",
+        type: "thread.meta-updated" as const,
         payload: {
           threadId: command.threadId,
           ...(command.title !== undefined ? { title: command.title } : {}),
@@ -824,6 +885,70 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: occurredAt,
         },
       };
+      // The loop is a property of the goal: setting one starts it, clearing
+      // one removes it, and replacing the text restarts the iteration count
+      // (a paused loop stays paused, because that is a user hold).
+      if (command.goal === undefined || command.goal === thread.goal) return metaUpdated;
+      const nextLoop: ThreadGoalLoop | null =
+        command.goal === null
+          ? null
+          : thread.goalLoop == null
+            ? initialGoalLoop({ thread, updatedAt: occurredAt })
+            : {
+                ...thread.goalLoop,
+                state: thread.goalLoop.state === "paused" ? "paused" : "idle",
+                iterations: 0,
+                reason: null,
+                updatedAt: occurredAt,
+              };
+      if (nextLoop === null && thread.goalLoop == null) return metaUpdated;
+      return [
+        metaUpdated,
+        yield* goalLoopEvent({
+          threadId: command.threadId,
+          commandId: command.commandId,
+          occurredAt,
+          loop: nextLoop,
+        }),
+      ];
+    }
+
+    case "thread.goal.loop": {
+      const thread = yield* requireThreadGoal({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const occurredAt = yield* nowIso;
+      const loop = thread.goalLoop ?? initialGoalLoop({ thread, updatedAt: occurredAt });
+      const emit = (patch: Partial<ThreadGoalLoop>) =>
+        goalLoopEvent({
+          threadId: command.threadId,
+          commandId: command.commandId,
+          occurredAt,
+          loop: { ...loop, reason: null, ...patch, updatedAt: occurredAt },
+        });
+      switch (command.action) {
+        case "pause":
+          return yield* emit({ state: "paused" });
+        case "resume":
+          yield* requireGoalLoopNotCompleted({ command, thread });
+          return yield* emit({ state: "idle" });
+        case "continue":
+          yield* requireGoalLoopNotCompleted({ command, thread });
+          return loop.iterations >= loop.maxIterations
+            ? yield* emit({ state: "capped", reason: `Reached ${loop.maxIterations} iterations.` })
+            : yield* emit({ state: "running", iterations: loop.iterations + 1 });
+        case "complete":
+          return yield* emit({ state: "completed" });
+        case "block":
+          return yield* emit({
+            state: "blocked",
+            ...(command.reason !== undefined ? { reason: command.reason } : {}),
+          });
+        case "reset":
+          return yield* emit({ state: "idle", iterations: 0 });
+      }
     }
 
     case "thread.title.regeneration.complete": {
@@ -938,6 +1063,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // The goal loop only drives turns T3 runs itself: a user send always
+      // starts, never counts an iteration, and never trips the cap.
+      const goalLoop =
+        targetThread.goalLoop != null &&
+        targetThread.goalLoop.mode === "t3" &&
+        (targetThread.goalLoop.state === "idle" || targetThread.goalLoop.state === "running")
+          ? targetThread.goalLoop
+          : null;
+      if (
+        goalLoop !== null &&
+        command.continuation === true &&
+        goalLoop.iterations >= goalLoop.maxIterations
+      ) {
+        return yield* goalLoopEvent({
+          threadId: command.threadId,
+          commandId: command.commandId,
+          occurredAt: command.createdAt,
+          loop: {
+            ...goalLoop,
+            state: "capped",
+            reason: `Reached ${goalLoop.maxIterations} iterations.`,
+            updatedAt: command.createdAt,
+          },
+        });
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1001,6 +1151,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+          ...(command.continuation === true ? { continuation: true as const } : {}),
           createdAt: command.createdAt,
         },
       };
@@ -1042,7 +1193,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
-      return [...lifecycleResetEvents, userMessageEvent, turnStartRequestedEvent];
+      const goalLoopEvents =
+        goalLoop === null
+          ? []
+          : [
+              yield* goalLoopEvent({
+                threadId: command.threadId,
+                commandId: command.commandId,
+                occurredAt: command.createdAt,
+                loop: {
+                  ...goalLoop,
+                  state: "running",
+                  iterations:
+                    command.continuation === true ? goalLoop.iterations + 1 : goalLoop.iterations,
+                  reason: null,
+                  updatedAt: command.createdAt,
+                },
+              }),
+            ];
+      return [
+        ...lifecycleResetEvents,
+        userMessageEvent,
+        turnStartRequestedEvent,
+        ...goalLoopEvents,
+      ];
     }
 
     case "thread.turn.interrupt": {

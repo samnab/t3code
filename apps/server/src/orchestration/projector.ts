@@ -18,6 +18,7 @@ import {
   ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
+  ThreadGoalLoopUpdatedPayload,
   ThreadInteractionModeSetPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
@@ -300,6 +301,7 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             voiceNotifications: payload.voiceNotifications,
             goal: payload.goal ?? null,
+            goalLoop: null,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
             latestTurn: null,
@@ -335,6 +337,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             deletedAt: payload.deletedAt,
+            goalLoop: null,
             updatedAt: payload.deletedAt,
           }),
         })),
@@ -478,6 +481,21 @@ export function projectEvent(
               : {}),
             ...(payload.goal !== undefined ? { goal: payload.goal } : {}),
             updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.goal-loop-updated":
+      return decodeForEvent(
+        ThreadGoalLoopUpdatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            goalLoop: payload.loop,
           }),
         })),
       );

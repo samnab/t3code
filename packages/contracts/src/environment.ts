@@ -89,6 +89,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server persists thread goals on thread.meta.update. Absent on older
       servers, so clients hide and never send goal commands. */
   threadGoals: Schema.optionalKey(Schema.Boolean),
+  /** Server understands thread.goal.loop and projects thread goal loops.
+      Absent on older servers, so clients hide the loop controls. */
+  threadGoalLoop: Schema.optionalKey(Schema.Boolean),
   /** The update path clients should offer for this server. Absent on
       servers that must be relaunched manually (dev checkouts, Windows
       foreground runs, pre-update servers). */

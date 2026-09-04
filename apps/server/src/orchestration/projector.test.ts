@@ -87,6 +87,7 @@ describe("orchestration projector", () => {
         interactionMode: "default",
         voiceNotifications: false,
         goal: "Ship the login fix",
+        goalLoop: null,
         branch: null,
         worktreePath: null,
         latestTurn: null,
@@ -1091,6 +1092,49 @@ describe("thread goal projection", () => {
       // Goal updates forge no chat or activity events.
       expect(model.threads[0]?.messages).toEqual([]);
       expect(model.threads[0]?.activities).toEqual([]);
+    }),
+  );
+
+  it.effect("projects, updates, and clears the goal loop", () =>
+    Effect.gen(function* () {
+      const loop = {
+        state: "running",
+        mode: "t3",
+        iterations: 2,
+        maxIterations: 10,
+        reason: null,
+        updatedAt: now,
+      };
+      const goalLoopUpdated = (commandId: string, payload: Record<string, unknown>) => ({
+        type: "thread.goal-loop-updated" as const,
+        aggregateKind: "thread" as const,
+        aggregateId: "thread-1",
+        commandId,
+        payload: { threadId: "thread-1", ...payload },
+      });
+      let model = createEmptyReadModel(now);
+      const events = [
+        THREAD_CREATED_INPUT,
+        META_UPDATED_INPUT("cmd-goal-set", { goal: "Ship the login fix", updatedAt: now }),
+        goalLoopUpdated("cmd-loop-run", { loop }),
+      ];
+      for (const [index, event] of events.entries()) {
+        model = yield* projectEvent(
+          model,
+          makeEvent({ sequence: index + 1, occurredAt: now, ...event }),
+        );
+      }
+      expect(model.threads[0]?.goalLoop).toMatchObject({ state: "running", iterations: 2 });
+
+      model = yield* projectEvent(
+        model,
+        makeEvent({
+          sequence: 4,
+          occurredAt: now,
+          ...goalLoopUpdated("cmd-loop-clear", { loop: null }),
+        }),
+      );
+      expect(model.threads[0]?.goalLoop).toBeNull();
     }),
   );
 });

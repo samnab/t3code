@@ -85,6 +85,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           worktree_path,
           linked_pull_request_json,
           goal,
+          goal_loop_json,
           latest_turn_id,
           latest_user_message_at,
           pending_approval_count,
@@ -107,6 +108,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           '{"projectId":"project-1","repository":"pingdotgg/t3code","number":42,"url":"https://github.com/pingdotgg/t3code/pull/42"}',
           'Ship the projection fix',
+          '{"state":"running","mode":"t3","iterations":2,"maxIterations":10,"reason":null,"updatedAt":"2026-02-24T00:00:03.000Z"}',
           'turn-1',
           '2026-02-24T00:00:04.000Z',
           1,
@@ -318,6 +320,14 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             url: "https://github.com/pingdotgg/t3code/pull/42",
           },
           goal: "Ship the projection fix",
+          goalLoop: {
+            state: "running",
+            mode: "t3",
+            iterations: 2,
+            maxIterations: 10,
+            reason: null,
+            updatedAt: "2026-02-24T00:00:03.000Z",
+          },
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -447,6 +457,14 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             url: "https://github.com/pingdotgg/t3code/pull/42",
           },
           goal: "Ship the projection fix",
+          goalLoop: {
+            state: "running",
+            mode: "t3",
+            iterations: 2,
+            maxIterations: 10,
+            reason: null,
+            updatedAt: "2026-02-24T00:00:03.000Z",
+          },
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -490,17 +508,21 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
 
       assert.equal(snapshot.threads[0]?.goal, "Ship the projection fix");
       assert.equal(shellSnapshot.threads[0]?.goal, "Ship the projection fix");
+      assert.equal(snapshot.threads[0]?.goalLoop?.iterations, 2);
+      assert.equal(shellSnapshot.threads[0]?.goalLoop?.state, "running");
 
       const threadShell = yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-1"));
       assert.equal(threadShell._tag, "Some");
       if (threadShell._tag === "Some") {
         assert.equal(threadShell.value.goal, "Ship the projection fix");
+        assert.equal(threadShell.value.goalLoop?.mode, "t3");
       }
 
       const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
         assert.equal(threadDetail.value.goal, "Ship the projection fix");
+        assert.equal(threadDetail.value.goalLoop?.maxIterations, 10);
         assert.deepEqual(threadDetail.value, snapshot.threads[0]);
       }
 

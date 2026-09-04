@@ -522,6 +522,62 @@ export const THREAD_GOAL_MAX_CHARS = 1024;
 export const ThreadGoal = TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_GOAL_MAX_CHARS));
 export type ThreadGoal = typeof ThreadGoal.Type;
 
+/**
+ * Lifecycle of the goal loop layered on {@link ThreadGoal}. `idle` is a goal
+ * with no turn in flight, `running` a turn the loop drives, `paused` a user
+ * hold, `blocked` a loop that reported it cannot proceed, `completed` the
+ * agent's own done signal, and `capped` the iteration ceiling.
+ */
+export const ThreadGoalLoopState = Schema.Literals([
+  "idle",
+  "running",
+  "paused",
+  "blocked",
+  "completed",
+  "capped",
+]);
+export type ThreadGoalLoopState = typeof ThreadGoalLoopState.Type;
+
+/**
+ * How the goal is driven: `native` hands it to the provider's own execution
+ * goal (Codex), `t3` injects it and starts continuation turns from the
+ * server, `unsupported` marks a provider that can do neither.
+ */
+export const ThreadGoalLoopMode = Schema.Literals(["native", "t3", "unsupported"]);
+export type ThreadGoalLoopMode = typeof ThreadGoalLoopMode.Type;
+
+/** Default continuation-turn ceiling for a new goal loop. */
+export const THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS = 10;
+/** Hard ceiling a client may raise {@link ThreadGoalLoop.maxIterations} to. */
+export const THREAD_GOAL_LOOP_MAX_ITERATIONS_CEILING = 50;
+
+/**
+ * Mode is derived from the thread's provider, never chosen by the user:
+ * Codex maps the goal onto its own execution goal, every other provider is
+ * driven by T3.
+ *
+ * Accepts the provider driver kind, or the provider instance id when the
+ * driver is not resolved yet — default instance ids are the driver slug
+ * (see `defaultInstanceIdForDriver`), so a custom instance of the Codex
+ * driver reads as `t3` until the reactor re-derives it with the real driver.
+ */
+export const resolveThreadGoalLoopMode = (
+  provider: string | null | undefined,
+): ThreadGoalLoopMode => (provider === "codex" ? "native" : "t3");
+
+/** Thread-scoped drive state layered on {@link ThreadGoal}. */
+export const ThreadGoalLoop = Schema.Struct({
+  state: ThreadGoalLoopState,
+  mode: ThreadGoalLoopMode,
+  /** Continuation turns spent so far. A user-sent turn never counts. */
+  iterations: NonNegativeInt,
+  maxIterations: PositiveInt,
+  /** Why the loop is blocked or capped; null once it moves on. */
+  reason: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  updatedAt: IsoDateTime,
+});
+export type ThreadGoalLoop = typeof ThreadGoalLoop.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -568,6 +624,8 @@ export const OrchestrationThread = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // See ThreadGoal: user-facing only, optional so older servers still decode.
   goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+  // Drive state for the goal. Null/absent means no loop. See ThreadGoalLoop.
+  goalLoop: Schema.optional(Schema.NullOr(ThreadGoalLoop)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -637,6 +695,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // See ThreadGoal: user-facing only, optional so older servers still decode.
   goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+  // Drive state for the goal. Null/absent means no loop. See ThreadGoalLoop.
+  goalLoop: Schema.optional(Schema.NullOr(ThreadGoalLoop)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
@@ -972,6 +1032,19 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   ),
 );
 
+/**
+ * Drives the goal loop. Actions are user or agent intents, never a direct
+ * state write: the decider maps them onto ThreadGoalLoop transitions and
+ * rejects the ones the current state forbids.
+ */
+const ThreadGoalLoopCommand = Schema.Struct({
+  type: Schema.Literal("thread.goal.loop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  action: Schema.Literals(["pause", "resume", "continue", "complete", "block", "reset"]),
+  reason: Schema.optional(TrimmedNonEmptyString),
+});
+
 const ThreadRuntimeModeSetCommand = Schema.Struct({
   type: Schema.Literal("thread.runtime-mode.set"),
   commandId: CommandId,
@@ -1043,6 +1116,10 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  // Set by the goal-loop reactor when T3, not the user, started this turn.
+  // Continuation turns count against ThreadGoalLoop.maxIterations; a
+  // user-sent turn never does. See ThreadGoalLoop.
+  continuation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1062,6 +1139,10 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  // Set by the goal-loop reactor when T3, not the user, started this turn.
+  // Continuation turns count against ThreadGoalLoop.maxIterations; a
+  // user-sent turn never does. See ThreadGoalLoop.
+  continuation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1141,6 +1222,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
   ThreadMetaUpdateCommand,
+  ThreadGoalLoopCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadVoiceNotificationsSetCommand,
@@ -1171,6 +1253,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUnpinCommand,
   ThreadPinReorderCommand,
   ThreadMetaUpdateCommand,
+  ThreadGoalLoopCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadVoiceNotificationsSetCommand,
@@ -1292,6 +1375,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.unpinned",
   "thread.pin-reordered",
   "thread.meta-updated",
+  "thread.goal-loop-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
   "thread.voice-notifications-set",
@@ -1449,6 +1533,12 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 
+export const ThreadGoalLoopUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  /** Null clears the loop (the goal itself was cleared). See ThreadGoalLoop. */
+  loop: Schema.NullOr(ThreadGoalLoop),
+});
+
 export const ThreadRuntimeModeSetPayload = Schema.Struct({
   threadId: ThreadId,
   runtimeMode: RuntimeMode,
@@ -1491,6 +1581,10 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  // Set by the goal-loop reactor when T3, not the user, started this turn.
+  // Continuation turns count against ThreadGoalLoop.maxIterations; a
+  // user-sent turn never does. See ThreadGoalLoop.
+  continuation: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1670,6 +1764,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.meta-updated"),
     payload: ThreadMetaUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.goal-loop-updated"),
+    payload: ThreadGoalLoopUpdatedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

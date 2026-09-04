@@ -3,8 +3,10 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
   ThreadId,
   type OrchestrationReadModel,
+  type ThreadGoalLoop,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -47,6 +49,26 @@ const readModel: OrchestrationReadModel = {
   ],
   updatedAt: UPDATED_AT,
 };
+
+/** thread-1 with a goal and a goal loop patched onto the base read model. */
+function withLoop(
+  patch: Partial<ThreadGoalLoop>,
+  goal = "Ship the login fix",
+): OrchestrationReadModel {
+  const loop: ThreadGoalLoop = {
+    state: "idle",
+    mode: "native",
+    iterations: 0,
+    maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
+    reason: null,
+    updatedAt: UPDATED_AT,
+    ...patch,
+  };
+  return {
+    ...readModel,
+    threads: readModel.threads.map((thread) => ({ ...thread, goal, goalLoop: loop })),
+  };
+}
 
 it.layer(NodeServices.layer)("thread goal decider", (it) => {
   it.effect("creates a thread with the composer's goal and voice choice", () =>
@@ -270,6 +292,306 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
           createdAt: UPDATED_AT,
         },
         readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.message-sent",
+        "thread.turn-start-requested",
+      ]);
+    }),
+  );
+
+  it.effect("starting a goal also starts its loop", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-goal-loop-start"),
+          threadId: ThreadId.make("thread-1"),
+          goal: "Ship the login fix",
+        },
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.meta-updated",
+        "thread.goal-loop-updated",
+      ]);
+      const loopEvent = events[1];
+      if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.loop).toMatchObject({
+          state: "idle",
+          // The thread's provider instance is `codex`, so the loop is native.
+          mode: "native",
+          iterations: 0,
+          maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
+        });
+      }
+    }),
+  );
+
+  it.effect("clearing the goal clears the loop", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-goal-loop-clear"),
+          threadId: ThreadId.make("thread-1"),
+          goal: null,
+        },
+        readModel: withLoop({ state: "running", iterations: 3 }, "Ship the login fix"),
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.meta-updated",
+        "thread.goal-loop-updated",
+      ]);
+      const loopEvent = events[1];
+      if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.loop).toBeNull();
+      }
+    }),
+  );
+
+  it.effect("replacing the goal keeps the loop but restarts its iterations", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-goal-loop-replace"),
+          threadId: ThreadId.make("thread-1"),
+          goal: "Ship the logout fix",
+        },
+        readModel: withLoop({ state: "running", iterations: 4 }, "Ship the login fix"),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      const loopEvent = events[1];
+
+      expect(loopEvent?.type).toBe("thread.goal-loop-updated");
+      if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.loop).toMatchObject({ state: "idle", iterations: 0 });
+      }
+    }),
+  );
+
+  it.effect("rejects a loop action on a thread with no goal", () =>
+    Effect.gen(function* () {
+      const failure = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.goal.loop",
+          commandId: CommandId.make("cmd-loop-no-goal"),
+          threadId: ThreadId.make("thread-1"),
+          action: "continue",
+        },
+        readModel,
+      }).pipe(Effect.flip);
+
+      expect(failure).toBeInstanceOf(OrchestrationCommandInvariantError);
+      expect(failure.message).toContain("no goal");
+    }),
+  );
+
+  it.effect("pause, block, and reset move the loop through its states", () =>
+    Effect.gen(function* () {
+      const cases = [
+        { action: "pause", expected: { state: "paused", iterations: 2 } },
+        { action: "reset", expected: { state: "idle", iterations: 0 } },
+        { action: "complete", expected: { state: "completed", iterations: 2 } },
+      ] as const;
+      for (const [index, entry] of cases.entries()) {
+        const result = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.goal.loop",
+            commandId: CommandId.make(`cmd-loop-${index}`),
+            threadId: ThreadId.make("thread-1"),
+            action: entry.action,
+          },
+          readModel: withLoop({ state: "running", iterations: 2 }),
+        });
+        const event = Array.isArray(result) ? result[0] : result;
+        expect(event?.type).toBe("thread.goal-loop-updated");
+        if (event?.type === "thread.goal-loop-updated") {
+          expect(event.payload.loop).toMatchObject(entry.expected);
+        }
+      }
+    }),
+  );
+
+  it.effect("block records the reason it was given", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.goal.loop",
+          commandId: CommandId.make("cmd-loop-block"),
+          threadId: ThreadId.make("thread-1"),
+          action: "block",
+          reason: "Needs credentials",
+        },
+        readModel: withLoop({ state: "running", iterations: 2 }),
+      });
+      const event = Array.isArray(result) ? result[0] : result;
+
+      expect(event?.type).toBe("thread.goal-loop-updated");
+      if (event?.type === "thread.goal-loop-updated") {
+        expect(event.payload.loop).toMatchObject({
+          state: "blocked",
+          reason: "Needs credentials",
+        });
+      }
+    }),
+  );
+
+  it.effect("continue at the ceiling caps instead of running another iteration", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.goal.loop",
+          commandId: CommandId.make("cmd-loop-cap"),
+          threadId: ThreadId.make("thread-1"),
+          action: "continue",
+        },
+        readModel: withLoop({ state: "running", iterations: 10, maxIterations: 10 }),
+      });
+      const event = Array.isArray(result) ? result[0] : result;
+
+      expect(event?.type).toBe("thread.goal-loop-updated");
+      if (event?.type === "thread.goal-loop-updated") {
+        expect(event.payload.loop).toMatchObject({ state: "capped", iterations: 10 });
+      }
+    }),
+  );
+
+  it.effect("rejects resuming a completed goal", () =>
+    Effect.gen(function* () {
+      const failure = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.goal.loop",
+          commandId: CommandId.make("cmd-loop-resume-complete"),
+          threadId: ThreadId.make("thread-1"),
+          action: "resume",
+        },
+        readModel: withLoop({ state: "completed", iterations: 3 }),
+      }).pipe(Effect.flip);
+
+      expect(failure).toBeInstanceOf(OrchestrationCommandInvariantError);
+      expect(failure.message).toContain("already completed");
+    }),
+  );
+
+  it.effect("a user turn runs the loop without spending an iteration", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-loop-user-turn"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-user"),
+            role: "user",
+            text: "keep going",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: UPDATED_AT,
+        },
+        readModel: withLoop({ state: "idle", iterations: 2, mode: "t3" }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.message-sent",
+        "thread.turn-start-requested",
+        "thread.goal-loop-updated",
+      ]);
+      const loopEvent = events[2];
+      if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.loop).toMatchObject({ state: "running", iterations: 2 });
+      }
+    }),
+  );
+
+  it.effect("a continuation turn spends an iteration", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-loop-continuation"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-continuation"),
+            role: "user",
+            text: "Continue working toward the goal.",
+            attachments: [],
+          },
+          continuation: true,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: UPDATED_AT,
+        },
+        readModel: withLoop({ state: "running", iterations: 2, mode: "t3" }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      const loopEvent = events[2];
+
+      expect(loopEvent?.type).toBe("thread.goal-loop-updated");
+      if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.loop).toMatchObject({ state: "running", iterations: 3 });
+      }
+    }),
+  );
+
+  it.effect("a continuation turn at the ceiling caps instead of starting", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-loop-continuation-capped"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-continuation-capped"),
+            role: "user",
+            text: "Continue working toward the goal.",
+            attachments: [],
+          },
+          continuation: true,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: UPDATED_AT,
+        },
+        readModel: withLoop({ state: "running", iterations: 10, maxIterations: 10, mode: "t3" }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events.map((event) => event.type)).toEqual(["thread.goal-loop-updated"]);
+      const loopEvent = events[0];
+      if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.loop).toMatchObject({ state: "capped" });
+      }
+    }),
+  );
+
+  it.effect("a native-mode loop never drives turns from T3", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-loop-native-turn"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-native"),
+            role: "user",
+            text: "keep going",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: UPDATED_AT,
+        },
+        readModel: withLoop({ state: "idle", iterations: 0 }),
       });
       const events = Array.isArray(result) ? result : [result];
 

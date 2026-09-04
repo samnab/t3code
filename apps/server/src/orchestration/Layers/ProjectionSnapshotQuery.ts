@@ -24,6 +24,7 @@ import {
   type OrchestrationThreadShell,
   ModelSelection,
   ProjectId,
+  ThreadGoalLoop,
   ThreadLinkedPullRequest,
   ThreadId,
 } from "@t3tools/contracts";
@@ -102,6 +103,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    goalLoop: Schema.NullOr(Schema.fromJsonString(ThreadGoalLoop)),
     // sqlite stores booleans as 0/1 integers.
     voiceNotifications: Schema.Number,
   }),
@@ -478,6 +480,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           goal,
+          goal_loop_json AS "goalLoop",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -518,6 +521,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           goal,
+          goal_loop_json AS "goalLoop",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -560,6 +564,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           goal,
+          goal_loop_json AS "goalLoop",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -1022,6 +1027,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           goal,
+          goal_loop_json AS "goalLoop",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -1922,6 +1928,7 @@ pending_approval_requests AS (
                   ? {}
                   : { linkedPullRequest: row.linkedPullRequest }),
                 goal: row.goal ?? null,
+                goalLoop: row.goalLoop ?? null,
                 latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                 createdAt: row.createdAt,
                 updatedAt: row.updatedAt,
@@ -2136,6 +2143,7 @@ pending_approval_requests AS (
                     ? {}
                     : { linkedPullRequest: row.linkedPullRequest }),
                   goal: row.goal ?? null,
+                  goalLoop: row.goalLoop ?? null,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2278,6 +2286,7 @@ pending_approval_requests AS (
                         ? {}
                         : { linkedPullRequest: row.linkedPullRequest }),
                       goal: row.goal ?? null,
+                      goalLoop: row.goalLoop ?? null,
                       latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                       createdAt: row.createdAt,
                       updatedAt: row.updatedAt,
@@ -2431,6 +2440,7 @@ pending_approval_requests AS (
                     ? {}
                     : { linkedPullRequest: row.linkedPullRequest }),
                   goal: row.goal ?? null,
+                  goalLoop: row.goalLoop ?? null,
                   latestTurn: latestTurnByThread.get(row.threadId) ?? null,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -2736,6 +2746,7 @@ pending_approval_requests AS (
           ? {}
           : { linkedPullRequest: threadRow.value.linkedPullRequest }),
         goal: threadRow.value.goal ?? null,
+        goalLoop: threadRow.value.goalLoop ?? null,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,
@@ -2981,6 +2992,7 @@ pending_approval_requests AS (
           ? {}
           : { linkedPullRequest: threadRow.value.linkedPullRequest }),
         goal: threadRow.value.goal ?? null,
+        goalLoop: threadRow.value.goalLoop ?? null,
         latestTurn: Option.isSome(latestTurnRow) ? mapLatestTurn(latestTurnRow.value) : null,
         createdAt: threadRow.value.createdAt,
         updatedAt: threadRow.value.updatedAt,

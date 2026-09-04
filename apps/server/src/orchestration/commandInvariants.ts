@@ -170,3 +170,46 @@ export function requireThreadAbsent(input: {
     ),
   );
 }
+
+/**
+ * The goal loop only exists on a thread that has a goal: every
+ * `thread.goal.loop` action is a no-op without one, so reject before any
+ * event is written.
+ */
+export function requireThreadGoal(input: {
+  readonly readModel: OrchestrationReadModel;
+  readonly command: OrchestrationCommand;
+  readonly threadId: ThreadId;
+}): Effect.Effect<OrchestrationThread, OrchestrationCommandInvariantError> {
+  return requireThread(input).pipe(
+    Effect.flatMap((thread) =>
+      thread.goal != null
+        ? Effect.succeed(thread)
+        : Effect.fail(
+            invariantError(
+              input.command.type,
+              `Thread '${input.threadId}' has no goal, so it has no goal loop to drive.`,
+            ),
+          ),
+    ),
+  );
+}
+
+/**
+ * A completed goal is a one-way door: the user clears or replaces the goal
+ * (which resets the loop) rather than resuming a finished one.
+ */
+export function requireGoalLoopNotCompleted(input: {
+  readonly command: OrchestrationCommand;
+  readonly thread: OrchestrationThread;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  if (input.thread.goalLoop?.state !== "completed") {
+    return Effect.void;
+  }
+  return Effect.fail(
+    invariantError(
+      input.command.type,
+      `Thread '${input.thread.id}' has already completed its goal; reset it or set a new goal.`,
+    ),
+  );
+}
