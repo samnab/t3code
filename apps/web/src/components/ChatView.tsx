@@ -3212,6 +3212,13 @@ function ChatViewContent(props: ChatViewProps) {
   const focusComposer = useCallback(() => {
     composerRef.current?.focusAtEnd();
   }, [composerRef]);
+  // Automatic focus only. Focusing the composer moves the document selection into
+  // it, so running this while the user holds a selection wipes the text they just
+  // dragged out of the transcript. Explicit focus requests still always win.
+  const focusComposerUnlessSelecting = useCallback(() => {
+    if (window.getSelection()?.isCollapsed === false) return;
+    focusComposer();
+  }, [focusComposer]);
   const scheduleComposerFocus = useCallback(() => {
     window.requestAnimationFrame(() => {
       focusComposer();
@@ -4741,12 +4748,12 @@ function ChatViewContent(props: ChatViewProps) {
   useEffect(() => {
     if (!activeThread?.id || terminalUiState.terminalOpen) return;
     const frame = window.requestAnimationFrame(() => {
-      focusComposer();
+      focusComposerUnlessSelecting();
     });
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [activeThread?.id, focusComposer, terminalUiState.terminalOpen]);
+  }, [activeThread?.id, focusComposerUnlessSelecting, terminalUiState.terminalOpen]);
 
   useEffect(() => {
     if (!activeThread?.id) return;
@@ -5639,7 +5646,7 @@ function ChatViewContent(props: ChatViewProps) {
     } else if (previous && !current) {
       terminalUiOpenByThreadRef.current[activeThreadKey] = current;
       const frame = window.requestAnimationFrame(() => {
-        focusComposer();
+        focusComposerUnlessSelecting();
       });
       return () => {
         window.cancelAnimationFrame(frame);
@@ -5647,7 +5654,7 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     terminalUiOpenByThreadRef.current[activeThreadKey] = current;
-  }, [activeThreadKey, focusComposer, terminalUiState.terminalOpen]);
+  }, [activeThreadKey, focusComposerUnlessSelecting, terminalUiState.terminalOpen]);
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
