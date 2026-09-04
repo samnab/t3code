@@ -4739,11 +4739,6 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeThread?.id]);
 
   useEffect(() => {
-    console.log("[probe] focus-effect run", {
-      id: activeThread?.id,
-      term: terminalUiState.terminalOpen,
-      fc: focusComposer,
-    });
     if (!activeThread?.id || terminalUiState.terminalOpen) return;
     const frame = window.requestAnimationFrame(() => {
       focusComposer();
