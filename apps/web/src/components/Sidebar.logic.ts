@@ -600,11 +600,13 @@ export function sortThreadsForSidebar<
     readonly createdAt: string;
     readonly unsettledAt?: string | null | undefined;
   },
->(threads: readonly T[]): T[] {
+>(threads: readonly T[], sortOrder: SidebarThreadSortOrder = "updated_at"): T[] {
+  const anchorMs =
+    sortOrder === "created_at"
+      ? (thread: T) => firstValidTimestampMs(thread.createdAt)
+      : activeThreadAnchorTimestampMs;
   return [...threads].toSorted(
-    (left, right) =>
-      activeThreadAnchorTimestampMs(right) - activeThreadAnchorTimestampMs(left) ||
-      left.id.localeCompare(right.id),
+    (left, right) => anchorMs(right) - anchorMs(left) || left.id.localeCompare(right.id),
   );
 }
 
@@ -697,15 +699,19 @@ export function resolveSettledTimestamp(thread: SettledTimestampInput): string |
   return latest ?? firstValidTimestamp(thread.updatedAt);
 }
 
-// Settled rows are history, so they order by when the work ENDED, not when
-// the thread was created or last touched.
+// Settled rows are history, so by default they order by when the work
+// ENDED, not when the thread was created or last touched. sortOrder
+// "created_at" instead orders by thread creation, matching the active list.
 export function sortSettledThreadsForSidebar<
-  T extends SettledTimestampInput & { readonly id: string },
->(threads: readonly T[]): T[] {
-  const timestampMs = (thread: T) => {
-    const timestamp = resolveSettledTimestamp(thread);
-    return timestamp === null ? 0 : Date.parse(timestamp);
-  };
+  T extends SettledTimestampInput & { readonly id: string; readonly createdAt?: string },
+>(threads: readonly T[], sortOrder: SidebarThreadSortOrder = "updated_at"): T[] {
+  const timestampMs =
+    sortOrder === "created_at"
+      ? (thread: T) => firstValidTimestampMs(thread.createdAt)
+      : (thread: T) => {
+          const timestamp = resolveSettledTimestamp(thread);
+          return timestamp === null ? 0 : Date.parse(timestamp);
+        };
   return [...threads].toSorted(
     (left, right) => timestampMs(right) - timestampMs(left) || left.id.localeCompare(right.id),
   );

@@ -860,6 +860,22 @@ describe("sortThreadsForSidebar", () => {
 
     expect(sorted.map((thread) => thread.id)).toEqual(["newest", "stale-stamp"]);
   });
+
+  it("with created_at sort order, ignores the re-entry stamp and orders by creation time", () => {
+    const sorted = sortThreadsForSidebar(
+      [
+        {
+          id: "old-unsettled",
+          createdAt: "2026-03-09T08:00:00.000Z",
+          unsettledAt: "2026-03-09T13:00:00.000Z",
+        },
+        sortable({ id: "newest", createdAt: "2026-03-09T12:00:00.000Z" }),
+      ],
+      "created_at",
+    );
+
+    expect(sorted.map((thread) => thread.id)).toEqual(["newest", "old-unsettled"]);
+  });
 });
 
 describe("pinOrderKeyBetween", () => {
