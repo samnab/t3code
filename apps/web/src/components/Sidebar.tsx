@@ -121,6 +121,7 @@ import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat"
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
+import { TargetArrowIcon } from "./Icons";
 import { openExecutionGoalDialog } from "./chat/CodexExecutionGoalDialog";
 import {
   animatePinnedLayoutChanges,
@@ -1239,6 +1240,32 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         <span className="text-xs tabular-nums">{backgroundProcessCount}</span>
       </span>
     ) : null;
+  // A running or blocked goal loop gets its own indicator beside the
+  // background-process count; paused/capped/completed loops don't need one
+  // in the list — the pill in the composer covers those.
+  const goalLoopBadge =
+    thread.goalLoop?.state === "running" ? (
+      <span
+        role="img"
+        aria-label={`Goal loop running · iteration ${thread.goalLoop.iterations} of ${thread.goalLoop.maxIterations}`}
+        title={`Goal loop running · iteration ${thread.goalLoop.iterations} of ${thread.goalLoop.maxIterations}`}
+        data-testid={`sidebar-goal-loop-${thread.id}`}
+        className="inline-flex shrink-0 items-center gap-0.5 text-muted-foreground/65"
+      >
+        <TargetArrowIcon aria-hidden className="size-3.5" />
+        <span className="text-xs tabular-nums">
+          {thread.goalLoop.iterations}/{thread.goalLoop.maxIterations}
+        </span>
+      </span>
+    ) : thread.goalLoop?.state === "blocked" ? (
+      <span
+        role="img"
+        aria-label="Goal loop blocked"
+        title="Goal loop blocked"
+        data-testid={`sidebar-goal-loop-${thread.id}`}
+        className="inline-flex size-1.5 shrink-0 rounded-full bg-destructive"
+      />
+    ) : null;
   const pinIndicator = props.isPinned ? (
     props.pinningSupported ? (
       <Tooltip>
@@ -1309,6 +1336,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {pinIndicator}
             {terminalStatusIcon}
             {backgroundProcessIcon}
+            {goalLoopBadge}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
                 Regenerating title
@@ -1601,6 +1629,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               )}
               {terminalStatusIcon}
               {backgroundProcessIcon}
+              {goalLoopBadge}
               {prBadge}
               {diff ? (
                 <span className="shrink-0 font-mono">
@@ -1792,6 +1821,9 @@ export default function Sidebar() {
     deleteThread,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
+  const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
     reportFailure: false,
   });
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
@@ -3158,6 +3190,7 @@ export default function Sidebar() {
                 titleRegeneration: supportsTitleRegeneration,
               },
               executionGoal: readThreadSupportsExecutionGoal(threadRef),
+              goalLoop: thread.goalLoop ? { state: thread.goalLoop.state } : null,
               snoozePresets,
             }),
             position,
@@ -3248,6 +3281,40 @@ export default function Sidebar() {
           case "execution-goal":
             openExecutionGoalDialog(threadRef);
             return;
+          case "pause-goal-loop": {
+            const result = await setThreadGoalLoop({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, action: "pause" },
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to pause goal loop",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
+          case "resume-goal-loop": {
+            const result = await setThreadGoalLoop({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, action: "resume" },
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to resume goal loop",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
           case "copy-path":
             if (!threadWorkspacePath) {
               toastManager.add(
@@ -3350,6 +3417,7 @@ export default function Sidebar() {
       serverConfigs,
       startThreadRename,
       updateThreadMetadata,
+      setThreadGoalLoop,
       timestampFormat,
     ],
   );

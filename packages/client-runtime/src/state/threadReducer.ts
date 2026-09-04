@@ -244,6 +244,16 @@ export function applyThreadDetailEvent(
         },
       };
 
+    case "thread.goal-loop-updated":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          goalLoop: event.payload.loop,
+          updatedAt: event.occurredAt,
+        },
+      };
+
     case "thread.runtime-mode-set":
       return {
         kind: "updated",

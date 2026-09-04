@@ -520,7 +520,7 @@ export type SidebarThreadStatus =
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness"
+  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness" | "goalLoop"
 >;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
@@ -545,6 +545,11 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   }
   if (thread.backgroundLiveness === "monitoring") {
     return "monitoring";
+  }
+  // A running goal loop is driving continuation turns even in the brief gap
+  // between them, so it must not read as idle/Ready.
+  if (thread.goalLoop?.state === "running") {
+    return "working";
   }
   return "ready";
 }

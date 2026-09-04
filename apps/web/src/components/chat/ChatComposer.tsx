@@ -11,6 +11,7 @@ import type {
   RuntimeMode,
   ScopedThreadRef,
   ServerProvider,
+  ThreadGoalLoop,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -312,6 +313,7 @@ import {
   type LucideIcon,
   LockIcon,
   LockOpenIcon,
+  PauseIcon,
   PenLineIcon,
   RotateCcwIcon,
   SparklesIcon,
@@ -554,49 +556,150 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
 });
 
 /**
+ * Tone and tooltip for a goal loop's drive state, shared by the pill and its
+ * passive counterpart. Idle reads as the plain goal pill (no loop is driving
+ * yet), so it has no distinct tone here.
+ */
+function describeGoalLoop(loop: ThreadGoalLoop | null): {
+  tone: "idle" | "running" | "paused" | "blocked" | "capped" | "completed";
+  tooltip: string | null;
+  suffix: string | null;
+} {
+  if (loop === null) {
+    return { tone: "idle", tooltip: null, suffix: null };
+  }
+  switch (loop.state) {
+    case "running":
+      return {
+        tone: "running",
+        tooltip: `Working toward the goal · iteration ${loop.iterations} of ${loop.maxIterations}`,
+        suffix: `${loop.iterations}/${loop.maxIterations}`,
+      };
+    case "paused":
+      return { tone: "paused", tooltip: "Goal loop paused", suffix: null };
+    case "blocked":
+      return {
+        tone: "blocked",
+        tooltip: loop.reason ? `Goal loop blocked · ${loop.reason}` : "Goal loop blocked",
+        suffix: null,
+      };
+    case "capped":
+      return {
+        tone: "capped",
+        tooltip: `Reached ${loop.iterations} iterations`,
+        suffix: null,
+      };
+    case "completed":
+      return { tone: "completed", tooltip: "Goal complete", suffix: null };
+    case "idle":
+      return { tone: "idle", tooltip: null, suffix: null };
+  }
+}
+
+const GOAL_LOOP_TONE_CLASSNAME: Record<ReturnType<typeof describeGoalLoop>["tone"], string> = {
+  idle: "",
+  running: "",
+  paused: "bg-muted text-muted-foreground",
+  blocked: "bg-destructive/15 text-destructive hover:bg-destructive/25 hover:text-destructive",
+  capped: "bg-warning/15 text-warning hover:bg-warning/25 hover:text-warning",
+  completed: "bg-success/15 text-success hover:bg-success/25 hover:text-success",
+};
+
+/**
  * Thread-goal shortcut in the composer controls: the entry point when no
  * goal is set, and an active pill (icon + truncated goal, full text in the
  * tooltip) once one exists. Both toggle goal mode: the chat input turns into
- * the goal editor and send writes the goal instead of a message.
+ * the goal editor and send writes the goal instead of a message. When the
+ * server drives a goal loop, the pill also shows its state and iteration
+ * count, and offers pause/resume/continue-anyway next to it.
  */
 const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props: {
   goal: string | null;
+  goalLoop: ThreadGoalLoop | null;
   active: boolean;
   onToggle: () => void;
+  onGoalLoopAction: (action: "pause" | "resume" | "continue" | "reset") => void;
   shortcutLabel: string | null;
 }) {
+  const { tone, tooltip, suffix } = describeGoalLoop(props.goalLoop);
   const goalTooltip =
-    (props.goal ?? "Set a goal for this thread") +
+    (tooltip ?? props.goal ?? "Set a goal for this thread") +
     (props.shortcutLabel ? ` · ${props.shortcutLabel}` : "");
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <ComposerControl
-            type="button"
-            data-thread-goal
-            data-thread-goal-set={props.goal !== null ? "true" : "false"}
-            aria-label={props.goal !== null ? `Thread goal: ${props.goal}` : "Set thread goal"}
-            aria-pressed={props.active}
-            className={cn(
-              "min-w-0 shrink",
-              props.active
-                ? "bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary"
-                : props.goal !== null
-                  ? "bg-accent text-accent-foreground hover:bg-accent/80"
-                  : "text-secondary-label hover:text-foreground",
-            )}
-            onClick={props.onToggle}
-          />
-        }
-      >
-        <ComposerControlIcon icon={TargetArrowIcon} className="text-current opacity-100" />
-        {props.goal !== null ? (
-          <span className="min-w-0 max-w-28 truncate sm:max-w-44">{props.goal}</span>
-        ) : null}
-      </TooltipTrigger>
-      <TooltipPopup side="top">{goalTooltip}</TooltipPopup>
-    </Tooltip>
+    <div className="flex min-w-0 shrink items-center gap-0.5">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <ComposerControl
+              type="button"
+              data-thread-goal
+              data-thread-goal-set={props.goal !== null ? "true" : "false"}
+              data-thread-goal-loop-state={props.goalLoop?.state ?? undefined}
+              aria-label={props.goal !== null ? `Thread goal: ${props.goal}` : "Set thread goal"}
+              aria-pressed={props.active}
+              className={cn(
+                "min-w-0 shrink",
+                props.active
+                  ? "bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary"
+                  : GOAL_LOOP_TONE_CLASSNAME[tone] ||
+                      (props.goal !== null
+                        ? "bg-accent text-accent-foreground hover:bg-accent/80"
+                        : "text-secondary-label hover:text-foreground"),
+              )}
+              onClick={props.onToggle}
+            />
+          }
+        >
+          <ComposerControlIcon icon={TargetArrowIcon} className="text-current opacity-100" />
+          {props.goal !== null ? (
+            <span className="min-w-0 max-w-28 truncate sm:max-w-44">{props.goal}</span>
+          ) : null}
+          {suffix !== null ? (
+            <span className="shrink-0 tabular-nums text-current opacity-80">{suffix}</span>
+          ) : null}
+        </TooltipTrigger>
+        <TooltipPopup side="top">{goalTooltip}</TooltipPopup>
+      </Tooltip>
+      {props.goalLoop !== null && (tone === "running" || tone === "paused") ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <ComposerControl
+                type="button"
+                aria-label={tone === "running" ? "Pause goal loop" : "Resume goal loop"}
+                className="shrink-0 text-secondary-label hover:text-foreground"
+                onClick={() => props.onGoalLoopAction(tone === "running" ? "pause" : "resume")}
+              />
+            }
+          >
+            <ComposerControlIcon
+              icon={tone === "running" ? PauseIcon : PlayIcon}
+              className="text-current opacity-100"
+            />
+          </TooltipTrigger>
+          <TooltipPopup side="top">
+            {tone === "running" ? "Pause goal loop" : "Resume goal loop"}
+          </TooltipPopup>
+        </Tooltip>
+      ) : null}
+      {tone === "capped" ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <ComposerControl
+                type="button"
+                aria-label="Continue anyway"
+                className="shrink-0 text-secondary-label hover:text-foreground"
+                onClick={() => props.onGoalLoopAction("continue")}
+              />
+            }
+          >
+            <ComposerControlIcon icon={RotateCcwIcon} className="text-current opacity-100" />
+          </TooltipTrigger>
+          <TooltipPopup side="top">Continue anyway</TooltipPopup>
+        </Tooltip>
+      ) : null}
+    </div>
   );
 });
 
@@ -605,13 +708,18 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
  * render (footer collapsed/unmounted/hidden, pending input, or capability
  * not known): the durable goal stays visible without offering edits.
  */
-const ComposerThreadGoalPassive = memo(function ComposerThreadGoalPassive(props: { goal: string }) {
+const ComposerThreadGoalPassive = memo(function ComposerThreadGoalPassive(props: {
+  goal: string;
+  goalLoop: ThreadGoalLoop | null;
+}) {
+  const { tooltip, suffix } = describeGoalLoop(props.goalLoop);
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <div
             data-thread-goal-passive="true"
+            data-thread-goal-loop-state={props.goalLoop?.state ?? undefined}
             className="flex min-w-0 items-center gap-1.5 px-3 pt-1 pb-3 text-xs text-secondary-label sm:px-4 sm:pb-4"
           >
             <TargetArrowIcon aria-hidden className="size-3 shrink-0" />
@@ -619,10 +727,11 @@ const ComposerThreadGoalPassive = memo(function ComposerThreadGoalPassive(props:
             <span aria-label={`Thread goal: ${props.goal}`} className="min-w-0 truncate">
               {props.goal}
             </span>
+            {suffix !== null ? <span className="shrink-0 tabular-nums">{suffix}</span> : null}
           </div>
         }
       />
-      <TooltipPopup side="top">{props.goal}</TooltipPopup>
+      <TooltipPopup side="top">{tooltip ?? props.goal}</TooltipPopup>
     </Tooltip>
   );
 });
@@ -758,6 +867,11 @@ export interface ChatComposerProps {
   supportsThreadGoals: boolean;
   /** Current thread goal, when set; shown as a pill in the composer footer. */
   activeThreadGoal: string | null;
+  /** Server understands thread.goal.loop; absent servers never send a loop. */
+  supportsThreadGoalLoop: boolean;
+  /** Drive state for the active goal, when the server supports it. */
+  activeThreadGoalLoop: ThreadGoalLoop | null;
+  onThreadGoalLoopAction: (action: "pause" | "resume" | "continue" | "reset") => void;
   maxFileAttachmentBytes: number | null;
   routeKind: "server" | "draft";
   routeThreadRef: ScopedThreadRef;
@@ -891,6 +1005,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     supportsAttachmentUploads,
     supportsThreadGoals,
     activeThreadGoal,
+    supportsThreadGoalLoop,
+    activeThreadGoalLoop,
+    onThreadGoalLoopAction,
     maxFileAttachmentBytes,
     routeKind,
     routeThreadRef,
@@ -4470,7 +4587,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             />
 
             {threadGoalDisplay === "passive" && activeThreadGoal !== null ? (
-              <ComposerThreadGoalPassive goal={activeThreadGoal} />
+              <ComposerThreadGoalPassive
+                goal={activeThreadGoal}
+                goalLoop={supportsThreadGoalLoop ? activeThreadGoalLoop : null}
+              />
             ) : null}
 
             {/* Bottom toolbar */}
@@ -4570,11 +4690,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   {threadGoalDisplay === "control" ? (
                     <ComposerThreadGoalControl
                       goal={activeThreadGoal}
+                      goalLoop={supportsThreadGoalLoop ? activeThreadGoalLoop : null}
                       active={goalModeActive}
                       onToggle={() => {
                         setGoalMode(!goalModeActive);
                         composerEditorRef.current?.focusAtEnd();
                       }}
+                      onGoalLoopAction={onThreadGoalLoopAction}
                       shortcutLabel={shortcutLabelForCommand(keybindings, "composer.goalMode", {
                         context: {
                           terminalFocus: false,

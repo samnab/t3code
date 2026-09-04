@@ -95,6 +95,9 @@ export function useThreadActionMenu(input: {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
+    reportFailure: false,
+  });
   const handleNewThread = useNewThreadHandler();
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
@@ -149,6 +152,7 @@ export function useThreadActionMenu(input: {
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
           supports,
           executionGoal: readThreadSupportsExecutionGoal(threadRef),
+          goalLoop: thread.goalLoop ? { state: thread.goalLoop.state } : null,
           snoozePresets,
         });
         const clicked = await settlePromise(() => api.contextMenu.show(items, position));
@@ -259,6 +263,22 @@ export function useThreadActionMenu(input: {
           case "execution-goal":
             openExecutionGoalDialog(threadRef);
             return;
+          case "pause-goal-loop":
+            await reportFailure("Failed to pause goal loop", () =>
+              setThreadGoalLoop({
+                environmentId: threadRef.environmentId,
+                input: { threadId: threadRef.threadId, action: "pause" },
+              }),
+            );
+            return;
+          case "resume-goal-loop":
+            await reportFailure("Failed to resume goal loop", () =>
+              setThreadGoalLoop({
+                environmentId: threadRef.environmentId,
+                input: { threadId: threadRef.threadId, action: "resume" },
+              }),
+            );
+            return;
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;
             if (!workspacePath) {
@@ -359,6 +379,7 @@ export function useThreadActionMenu(input: {
       unsettleThread,
       unsnoozeThread,
       updateThreadMetadata,
+      setThreadGoalLoop,
     ],
   );
 

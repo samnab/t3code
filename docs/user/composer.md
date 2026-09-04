@@ -240,11 +240,28 @@ instead of a message. Select the pill again to go back. On mobile, the goal pill
 thread composer's toolbar and opens a goal editor as a bottom sheet. Sending `/goal` on its own
 fills in the current goal for editing, and `/goal clear` removes it. The `mod+shift+g` shortcut
 toggles goal mode without leaving the keyboard.
-Goals are T3 Code state: they are stored with the thread, stay in sync across your devices, and
-are never sent to the agent. The word `clear` is reserved, so a goal cannot literally be `clear`.
-A goal needs at least one visible character and fits within 1,024 characters. This is separate
-from a Codex execution goal, which Codex itself tracks in a live session — see
+Goals are T3 Code state: they are stored with the thread and stay in sync across your devices.
+The word `clear` is reserved, so a goal cannot literally be `clear`. A goal needs at least one
+visible character and fits within 1,024 characters. This is separate from a Codex execution
+goal, which Codex itself tracks in a live session — see
 [Codex](./providers-codex.md#codex-execution-goals).
+
+#### Goal loop
+
+On servers that support it, setting a goal also starts a goal loop: T3 Code sends the goal to the
+agent and keeps sending follow-up turns until the agent reports the goal done, says it is stuck, or
+you step in. The goal pill shows the loop's state:
+
+- A running loop shows an iteration count, such as `3/10`.
+- **Paused** holds the loop without losing progress; select the pause button on the pill, or pause
+  it from the thread's menu, to stop it between turns. Resume picks the loop back up.
+- **Blocked** means the agent reported it cannot continue; the pill's tooltip shows why. Resume
+  tries again.
+- **Capped** means the loop reached its 10-turn ceiling. Select **Continue anyway** on the pill to
+  raise the ceiling and keep going.
+- **Complete** means the agent reported the goal done.
+
+Clearing the goal with `/goal clear`, or the pill, stops the loop along with it.
 
 ## Subscription usage limits
 

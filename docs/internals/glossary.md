@@ -45,7 +45,11 @@ A user-visible log item attached to a thread. In [the contracts][1], activities 
 
 #### Goal
 
-A short, durable, T3-owned statement of intent for a thread, set with `/goal` or the composer's goal pill and editor. It rides thread metadata (see the `goal` field in [the contracts][1]), never enters provider prompts or chat history, and is purely user-facing state.
+A short, durable, T3-owned statement of intent for a thread, set with `/goal` or the composer's goal pill and editor. It rides thread metadata (see the `goal` field in [the contracts][1]). On a server and thread with a [goal loop](#goal-loop), T3 sends it to the agent as continuation turns run; otherwise it never enters provider prompts or chat history and is purely user-facing state.
+
+#### Goal loop
+
+The drive state layered on a [Goal](#goal) that turns it from inert text into continuation turns: `ThreadGoalLoop` (state, mode, iterations, maxIterations, reason) in [the contracts][1]. State moves through `idle` → `running` (T3 or the provider is working the goal) → `paused` (user hold) / `blocked` (agent reported it cannot proceed) / `capped` (iteration ceiling, default 10) / `completed` (agent's own done signal). Mode is derived from the thread's provider, never chosen by the user: `native` hands the goal to Codex's own [execution goal](#execution-goal-codex-native), `t3` injects it and starts continuation turns from the server, `unsupported` marks a provider that can do neither. The `thread.goal.loop` command (pause/resume/continue/complete/block/reset) drives transitions; see [decider.ts][8].
 
 #### Execution goal (Codex-native)
 

@@ -1348,6 +1348,9 @@ function ChatViewContent(props: ChatViewProps) {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
+    reportFailure: false,
+  });
   const switchGitRef = useAtomCommand(vcsEnvironment.switchRef, { reportFailure: false });
   const setThreadRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
     reportFailure: false,
@@ -1422,6 +1425,39 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setComposerThreadSettings,
   );
   const isDraftGoalTarget = activeServerThread === null && draftThread !== null;
+
+  // Dispatches a goal-loop control action for the active server thread.
+  // "continue" past the iteration cap resets the counter first, since the
+  // server rejects a bare continue once capped.
+  const handleThreadGoalLoopAction = useCallback(
+    async (action: "pause" | "resume" | "continue" | "reset") => {
+      if (!activeServerThread) return;
+      const goalLoop = activeServerThread.goalLoop ?? null;
+      const dispatch = async (dispatchAction: "pause" | "resume" | "continue" | "reset") => {
+        const result = await setThreadGoalLoop({
+          environmentId: activeServerThread.environmentId,
+          input: { threadId: activeServerThread.id, action: dispatchAction },
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not update the goal loop",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      };
+      if (action === "continue" && goalLoop?.state === "capped") {
+        await dispatch("reset");
+        await dispatch("continue");
+        return;
+      }
+      await dispatch(action);
+    },
+    [activeServerThread, setThreadGoalLoop],
+  );
 
   // Pagination window state for the routed server thread: drives the
   // "load earlier turns" header when the loaded window has older history.
@@ -2249,6 +2285,7 @@ function ChatViewContent(props: ChatViewProps) {
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
   const threadGoalsCapabilityKnown = serverConfig !== null;
   const supportsThreadGoals = serverConfig?.environment.capabilities.threadGoals === true;
+  const supportsThreadGoalLoop = serverConfig?.environment.capabilities.threadGoalLoop === true;
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
   const attachmentUploadsCapabilityKnown = attachmentEnvironmentConfig !== null;
   const supportsAttachmentUploads =
@@ -7879,6 +7916,11 @@ function ChatViewContent(props: ChatViewProps) {
                                 ? (activeServerThread?.goal ?? null)
                                 : composerDraftGoal
                             }
+                            supportsThreadGoalLoop={supportsThreadGoalLoop}
+                            activeThreadGoalLoop={
+                              isServerThread ? (activeServerThread?.goalLoop ?? null) : null
+                            }
+                            onThreadGoalLoopAction={handleThreadGoalLoopAction}
                             maxFileAttachmentBytes={maxFileAttachmentBytes}
                             routeKind={routeKind}
                             routeThreadRef={routeThreadRef}

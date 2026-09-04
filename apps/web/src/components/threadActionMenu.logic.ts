@@ -1,4 +1,4 @@
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem, ThreadGoalLoopState } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 
 /**
@@ -19,6 +19,8 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "execution-goal"
+  | "pause-goal-loop"
+  | "resume-goal-loop"
   | "mark-unread"
   | "copy"
   | "copy-path"
@@ -44,6 +46,8 @@ export interface ThreadActionMenuState {
   };
   /** The thread's live session provider exposes native execution goals. */
   readonly executionGoal: boolean;
+  /** Server-driven goal loop state, when the server and thread have one. */
+  readonly goalLoop: { readonly state: ThreadGoalLoopState } | null;
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
 
@@ -109,6 +113,11 @@ export function buildThreadActionMenuItems(
           },
         ]
       : []),
+    ...(state.goalLoop?.state === "running" || state.goalLoop?.state === "idle"
+      ? [{ id: "pause-goal-loop" as const, label: "Pause goal loop", icon: "pause" }]
+      : state.goalLoop?.state === "paused" || state.goalLoop?.state === "blocked"
+        ? [{ id: "resume-goal-loop" as const, label: "Resume goal loop", icon: "play" }]
+        : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
     // Codex-owned live session state; always named in full so it can never
     // read as the T3 thread goal above the composer.

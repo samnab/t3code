@@ -46,6 +46,7 @@ export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
 export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
 export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
 export type SetThreadVoiceNotificationsInput = CommandInput<"thread.voice-notifications.set">;
+export type SetThreadGoalLoopInput = CommandInput<"thread.goal.loop">;
 export type StartThreadTurnInput = CommandInput<"thread.turn.start">;
 export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
 export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond">;
@@ -278,6 +279,16 @@ export const setThreadVoiceNotifications: (
     });
   },
 );
+
+export const setThreadGoalLoop: (input: SetThreadGoalLoopInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.setThreadGoalLoop",
+)(function* (input) {
+  return yield* dispatch({
+    ...input,
+    type: "thread.goal.loop",
+    commandId: yield* commandId(input),
+  });
+});
 
 export const startThreadTurn: (input: StartThreadTurnInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.startThreadTurn",
