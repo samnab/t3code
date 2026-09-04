@@ -53,6 +53,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import {
+  formatThreadGoalInjection,
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
   ProviderCommandReactorLive,
@@ -785,6 +786,65 @@ describe("ProviderCommandReactor", () => {
       expect(thread?.session).toBeNull();
     }),
   );
+
+  // A T3-driven goal rides on the provider input only; the stored user
+  // message stays exactly what the user typed. Codex drives its goal
+  // natively, so it must never receive the injected copy.
+  it.each([
+    {
+      label: "prefixes the provider input for a T3-driven goal",
+      instanceId: "claude_openrouter",
+      injected: true,
+    },
+    { label: "leaves a natively driven goal alone", instanceId: "codex", injected: false },
+  ])("$label", async ({ instanceId, injected }) => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make(instanceId),
+        model: "test-model",
+      },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-goal-set"),
+        threadId: ThreadId.make("thread-1"),
+        goal: "Ship the goal loop",
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-goal-injection"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-goal-injection"),
+          role: "user",
+          text: "hello reactor",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    const expectedInput = injected
+      ? `${formatThreadGoalInjection({
+          goal: "Ship the goal loop",
+          iteration: 0,
+          maxIterations: 10,
+        })}\n\nhello reactor`
+      : "hello reactor";
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: expectedInput });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.messages.at(-1)?.text).toBe("hello reactor");
+  });
 
   it("retries thread title generation after a transient failure", async () => {
     const harness = await createHarness();

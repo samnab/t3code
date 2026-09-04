@@ -49,10 +49,24 @@ export const TurnProcessingQuiescedReceipt = Schema.Struct({
 });
 export type TurnProcessingQuiescedReceipt = typeof TurnProcessingQuiescedReceipt.Type;
 
+/**
+ * Emitted by `GoalLoopReactor` once a continuation turn has been dispatched
+ * for a thread's goal loop, carrying the iteration count the loop stood at
+ * when the dispatch went out. Tests await this instead of sleeping.
+ */
+export const GoalLoopContinuedReceipt = Schema.Struct({
+  type: Schema.Literal("goal.loop.continued"),
+  threadId: ThreadId,
+  iterations: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+export type GoalLoopContinuedReceipt = typeof GoalLoopContinuedReceipt.Type;
+
 export const OrchestrationRuntimeReceipt = Schema.Union([
   CheckpointBaselineCapturedReceipt,
   CheckpointDiffFinalizedReceipt,
   TurnProcessingQuiescedReceipt,
+  GoalLoopContinuedReceipt,
 ]);
 export type OrchestrationRuntimeReceipt = typeof OrchestrationRuntimeReceipt.Type;
 

@@ -74,6 +74,25 @@ function toNonEmptyProviderInput(value: string | undefined): string | undefined 
   return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
+/**
+ * The block a T3-driven goal loop prepends to the provider input (never to
+ * the stored user message). It restates the goal, the iteration budget, and
+ * the two tags the root agent uses to end the loop — `GoalLoopReactor` reads
+ * those tags back off the turn's last assistant message.
+ */
+export function formatThreadGoalInjection(input: {
+  readonly goal: string;
+  readonly iteration: number;
+  readonly maxIterations: number;
+}): string {
+  return [
+    `<thread_goal iteration="${input.iteration}" max="${input.maxIterations}">`,
+    input.goal,
+    "</thread_goal>",
+    "You are working toward the thread goal above. Only you, the root agent of this thread, may signal its status: delegates and subagents report to you and never emit these tags. When the goal is fully met and verified, end your reply with <goal_complete>. If you cannot proceed without the user, end your reply with <goal_blocked>one-line reason</goal_blocked>. Otherwise keep working; the harness will ask you to continue.",
+  ].join("\n");
+}
+
 function mapProviderSessionStatusToOrchestrationStatus(
   status: "connecting" | "ready" | "running" | "error" | "closed",
 ): OrchestrationSession["status"] {
@@ -816,7 +835,22 @@ const make = Effect.gen(function* () {
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
-    const normalizedInput = toNonEmptyProviderInput(input.messageText);
+    // A T3-driven goal rides on every turn's provider input, user-sent or
+    // continuation, so resuming a paused loop still shows the agent its goal.
+    // Native (Codex) loops carry the goal in the provider's own execution
+    // goal, so they must not get a second copy here.
+    const goalLoop = thread.goalLoop;
+    const goalInjection =
+      thread.goal != null && goalLoop != null && goalLoop.mode === "t3"
+        ? formatThreadGoalInjection({
+            goal: thread.goal,
+            iteration: goalLoop.iterations,
+            maxIterations: goalLoop.maxIterations,
+          })
+        : null;
+    const normalizedInput = toNonEmptyProviderInput(
+      goalInjection === null ? input.messageText : `${goalInjection}\n\n${input.messageText}`,
+    );
     const normalizedAttachments = input.attachments ?? [];
     const activeSession = yield* providerService
       .listSessions()
