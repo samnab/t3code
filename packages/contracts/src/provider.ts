@@ -179,6 +179,18 @@ export const ProviderExecutionGoalInput = Schema.Struct({
 });
 export type ProviderExecutionGoalInput = typeof ProviderExecutionGoalInput.Type;
 
+/**
+ * Set input for the provider-native execution goal. Omitted fields leave the
+ * provider's existing value alone, so `{status}` alone pauses or resumes and
+ * `{objective}` alone replaces the text. Codex's `thread/goal/set` shape.
+ */
+export const ProviderExecutionGoalSetInput = Schema.Struct({
+  threadId: ThreadId,
+  objective: Schema.optional(TrimmedNonEmptyString),
+  status: Schema.optional(ProviderExecutionGoalStatus),
+});
+export type ProviderExecutionGoalSetInput = typeof ProviderExecutionGoalSetInput.Type;
+
 /** Current goal as the live provider session reports it; null = none set. */
 export const ProviderExecutionGoalGetResult = Schema.Struct({
   goal: Schema.NullOr(ProviderExecutionGoalSnapshot),

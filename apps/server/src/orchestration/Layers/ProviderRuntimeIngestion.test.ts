@@ -121,6 +121,7 @@ function createProviderServiceHarness() {
     stopSession: () => unsupported(),
     compactContext: () => unsupported(),
     getExecutionGoal: () => unsupported(),
+    setExecutionGoal: () => unsupported(),
     pauseExecutionGoal: () => unsupported(),
     clearExecutionGoal: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),

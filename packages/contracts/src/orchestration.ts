@@ -1036,13 +1036,23 @@ const ThreadMetaUpdateCommand = Schema.Struct({
  * Drives the goal loop. Actions are user or agent intents, never a direct
  * state write: the decider maps them onto ThreadGoalLoop transitions and
  * rejects the ones the current state forbids.
+ *
+ * `sync` is the one exception, and it is server-only: it writes the `state`
+ * and `mode` the server observed rather than an intent it wants applied.
+ * `NativeGoalReactor` uses it to mirror a Codex-driven execution goal, whose
+ * lifecycle T3 follows instead of deciding, and to correct a mode the decider
+ * could only guess from the thread's instance id.
  */
 const ThreadGoalLoopCommand = Schema.Struct({
   type: Schema.Literal("thread.goal.loop"),
   commandId: CommandId,
   threadId: ThreadId,
-  action: Schema.Literals(["pause", "resume", "continue", "complete", "block", "reset"]),
+  action: Schema.Literals(["pause", "resume", "continue", "complete", "block", "reset", "sync"]),
   reason: Schema.optional(TrimmedNonEmptyString),
+  /** `sync` only: the observed loop state. */
+  state: Schema.optional(ThreadGoalLoopState),
+  /** `sync` only: the mode re-derived from the thread's real provider driver. */
+  mode: Schema.optional(ThreadGoalLoopMode),
 });
 
 const ThreadRuntimeModeSetCommand = Schema.Struct({

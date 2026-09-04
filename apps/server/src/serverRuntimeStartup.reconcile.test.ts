@@ -62,6 +62,7 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
     rollbackConversation: () => Effect.die("unused"),
     uploadFeedback: () => Effect.die("unused"),
     getExecutionGoal: () => Effect.die("unused"),
+    setExecutionGoal: () => Effect.die("unused"),
     pauseExecutionGoal: () => Effect.die("unused"),
     clearExecutionGoal: () => Effect.die("unused"),
     streamEvents: Stream.empty,

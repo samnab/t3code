@@ -209,11 +209,19 @@ export interface CodexSessionRuntimeShape {
    * (`thread/goal/get|set|clear`). Read returns the provider's snapshot with
    * `goal ?? null` normalized; pause sends only `{threadId, status: "paused"}`;
    * clear sends only the thread id. No T3 goal state is touched.
+   *
+   * `setExecutionGoal` sends only the fields it is given, so `{objective}`
+   * replaces the text and `{status: "active"}` resumes a paused goal — Codex
+   * has no separate resume RPC.
    */
   readonly getExecutionGoal: Effect.Effect<
     EffectCodexSchema.V2ThreadGoalGetResponse,
     CodexSessionRuntimeError
   >;
+  readonly setExecutionGoal: (input: {
+    readonly objective?: string;
+    readonly status?: EffectCodexSchema.V2ThreadGoalSetParams["status"];
+  }) => Effect.Effect<EffectCodexSchema.V2ThreadGoalSetResponse, CodexSessionRuntimeError>;
   readonly pauseExecutionGoal: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly clearExecutionGoal: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
@@ -2415,6 +2423,15 @@ export const makeCodexSessionRuntime = (
         });
         return { goal: response.goal ?? null };
       }),
+      setExecutionGoal: (input) =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          return yield* client.request("thread/goal/set", {
+            threadId: providerThreadId,
+            ...(input.objective !== undefined ? { objective: input.objective } : {}),
+            ...(input.status !== undefined ? { status: input.status } : {}),
+          });
+        }),
       pauseExecutionGoal: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
         yield* client.request("thread/goal/set", {

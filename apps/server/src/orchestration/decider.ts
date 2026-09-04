@@ -957,6 +957,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           });
         case "reset":
           return yield* emit({ state: "idle", iterations: 0 }, true);
+        // Server-only mirror. No guard: the server is reporting what the
+        // provider already did, so refusing it would only desync the UI. Never
+        // `resumed` — a sync must not start a T3 turn.
+        case "sync":
+          return yield* emit({
+            ...(command.state !== undefined ? { state: command.state } : {}),
+            ...(command.mode !== undefined ? { mode: command.mode } : {}),
+            ...(command.reason !== undefined ? { reason: command.reason } : {}),
+          });
       }
     }
 

@@ -10,6 +10,7 @@ import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import * as GoalLoopReactor from "../GoalLoopReactor.ts";
+import * as NativeGoalReactor from "../NativeGoalReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
@@ -85,6 +86,15 @@ describe("OrchestrationReactor", () => {
           }),
         ),
         Layer.provideMerge(
+          Layer.succeed(NativeGoalReactor.NativeGoalReactor, {
+            start: () => {
+              started.push("native-goal-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
           Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
             publishThread: () => Effect.void,
             start: () => {
@@ -107,6 +117,7 @@ describe("OrchestrationReactor", () => {
       "thread-deletion-reactor",
       "thread-settlement-reactor",
       "goal-loop-reactor",
+      "native-goal-reactor",
       "agent-awareness-relay",
     ]);
 

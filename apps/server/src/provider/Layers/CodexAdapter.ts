@@ -1697,12 +1697,38 @@ function mapToRuntimeEvents(
     ];
   }
 
-  // Unmapped Codex notifications intentionally produce no runtime events.
-  // This includes `thread/goal/updated` and `thread/goal/cleared`: the
-  // Codex-native execution goal is provider-owned live session state, read
-  // on demand via the execution-goal RPCs. Projecting it here would create
-  // canonical goal history T3 deliberately does not keep, and would risk
-  // blurring it into the pinned T3 thread goal (asserted in tests).
+  // Codex owns the execution goal's lifecycle, so its status changes are the
+  // only truthful source for a native-mode T3 goal loop. Mapped to a status
+  // signal only — no objective history, no items, nothing projected as
+  // canonical goal history. `NativeGoalReactor` mirrors it onto the loop.
+  if (event.method === "thread/goal/updated") {
+    const payload = readPayload(EffectCodexSchema.V2ThreadGoalUpdatedNotification, event.payload);
+    if (!payload) return [];
+    const objective = trimText(payload.goal.objective);
+    return [
+      {
+        type: "thread.goal.updated",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          status: payload.goal.status,
+          ...(objective !== undefined ? { objective } : {}),
+        },
+      },
+    ];
+  }
+
+  if (event.method === "thread/goal/cleared") {
+    return [
+      {
+        type: "thread.goal.updated",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: { status: null },
+      },
+    ];
+  }
+
+  // Every other unmapped Codex notification intentionally produces no
+  // runtime events.
   return [];
 }
 
@@ -2046,6 +2072,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.flatMap((response) => toExecutionGoalResult(response, threadId)),
     );
 
+  const setExecutionGoal: CodexAdapterShape["setExecutionGoal"] = (threadId, goal) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) =>
+        session.runtime.setExecutionGoal({
+          ...(goal.objective !== undefined ? { objective: goal.objective } : {}),
+          ...(goal.status !== undefined ? { status: goal.status } : {}),
+        }),
+      ),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/goal/set", cause),
+      ),
+      // The set response carries the same ThreadGoal shape as get, so the
+      // caller sees exactly what Codex now holds.
+      Effect.flatMap((response) => toExecutionGoalResult(response, threadId)),
+    );
+
   const pauseExecutionGoal: CodexAdapterShape["pauseExecutionGoal"] = (threadId) =>
     requireSession(threadId).pipe(
       Effect.andThen((session) => session.runtime.pauseExecutionGoal),
@@ -2204,6 +2248,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     compactContext,
     getExecutionGoal,
+    setExecutionGoal,
     pauseExecutionGoal,
     clearExecutionGoal,
     readThread,

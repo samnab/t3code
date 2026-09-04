@@ -95,6 +95,25 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     (): Promise<EffectCodexSchema.V2ThreadGoalGetResponse> => Promise.resolve({ goal: null }),
   );
 
+  public readonly setExecutionGoalImpl = vi.fn(
+    (_input: {
+      readonly objective?: string;
+      readonly status?: EffectCodexSchema.V2ThreadGoalSetParams["status"];
+    }): Promise<EffectCodexSchema.V2ThreadGoalSetResponse> =>
+      Promise.resolve({
+        goal: {
+          threadId: "provider-thread-1",
+          objective: "ship the login fix",
+          status: "active",
+          tokenBudget: 100000,
+          tokensUsed: 12345,
+          timeUsedSeconds: 200,
+          createdAt: 1776272400,
+          updatedAt: 1776272460,
+        },
+      }),
+  );
+
   public readonly pauseExecutionGoalImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
 
   public readonly clearExecutionGoalImpl = vi.fn((): Promise<void> => Promise.resolve(undefined));
@@ -154,6 +173,13 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   compactThread = Effect.promise(() => this.compactThreadImpl());
 
   getExecutionGoal = Effect.promise(() => this.getExecutionGoalImpl());
+
+  setExecutionGoal(input: {
+    readonly objective?: string;
+    readonly status?: EffectCodexSchema.V2ThreadGoalSetParams["status"];
+  }) {
+    return Effect.promise(() => this.setExecutionGoalImpl(input));
+  }
 
   pauseExecutionGoal = Effect.promise(() => this.pauseExecutionGoalImpl());
 
@@ -2064,7 +2090,7 @@ executionGoalLayer("CodexAdapter execution goal", (it) => {
     }),
   );
 
-  it.effect("drops thread/goal notifications instead of mapping runtime events", () =>
+  it.effect("routes a set to the session runtime and returns the resulting goal", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
       yield* adapter.startSession({
@@ -2075,9 +2101,70 @@ executionGoalLayer("CodexAdapter execution goal", (it) => {
       const runtime = executionGoalRuntimeFactory.lastRuntime;
       NodeAssert.ok(runtime);
 
-      // First collected event proves the goal notifications produced none:
-      // had they mapped, they would precede the turn event in the queue.
-      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const setExecutionGoal = adapter.setExecutionGoal;
+      NodeAssert.ok(setExecutionGoal);
+      const result = yield* setExecutionGoal(asThreadId("thread-1"), {
+        objective: "ship the login fix",
+        status: "active",
+      });
+
+      NodeAssert.deepEqual(runtime?.setExecutionGoalImpl.mock.calls[0]?.[0], {
+        objective: "ship the login fix",
+        status: "active",
+      });
+      NodeAssert.equal(result.goal?.objective, "ship the login fix");
+      NodeAssert.equal(result.goal?.status, "active");
+    }),
+  );
+
+  it.effect("sends only the fields it was given, so a status-only set resumes", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = executionGoalRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      const setExecutionGoal = adapter.setExecutionGoal;
+      NodeAssert.ok(setExecutionGoal);
+      yield* setExecutionGoal(asThreadId("thread-1"), { status: "active" });
+
+      NodeAssert.deepEqual(runtime?.setExecutionGoalImpl.mock.calls[0]?.[0], {
+        status: "active",
+      });
+    }),
+  );
+
+  it.effect("fails a set truthfully when no live session owns the thread", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const setExecutionGoal = adapter.setExecutionGoal;
+      NodeAssert.ok(setExecutionGoal);
+      const error = yield* setExecutionGoal(asThreadId("thread-no-session"), {
+        objective: "ship it",
+      }).pipe(Effect.flip);
+      NodeAssert.equal(error._tag, "ProviderAdapterSessionNotFoundError");
+    }),
+  );
+
+  it.effect("maps thread/goal notifications onto a status-only runtime event", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        runtimeMode: "full-access",
+      });
+      const runtime = executionGoalRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      const collected = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
       yield* runtime?.emit({
         id: asEventId("evt-goal-updated"),
         kind: "notification",
@@ -2085,7 +2172,10 @@ executionGoalLayer("CodexAdapter execution goal", (it) => {
         createdAt: "2026-01-01T00:00:00.000Z",
         method: "thread/goal/updated",
         threadId: asThreadId("thread-1"),
-        payload: { goal: GOAL_THREAD_FIXTURE, threadId: "provider-thread-1" },
+        payload: {
+          goal: { ...GOAL_THREAD_FIXTURE, status: "paused" },
+          threadId: "provider-thread-1",
+        },
       });
       yield* runtime?.emit({
         id: asEventId("evt-goal-cleared"),
@@ -2096,21 +2186,15 @@ executionGoalLayer("CodexAdapter execution goal", (it) => {
         threadId: asThreadId("thread-1"),
         payload: { threadId: "provider-thread-1" },
       });
-      yield* runtime?.emit({
-        id: asEventId("evt-thread-closed"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        method: "thread/closed",
-        threadId: asThreadId("thread-1"),
-        payload: { threadId: "provider-thread-1" },
-      });
 
-      const first = yield* Fiber.join(firstEventFiber);
-      NodeAssert.ok(first._tag === "Some");
-      if (first._tag === "Some") {
-        NodeAssert.equal(first.value.type, "thread.state.changed");
-      }
+      const events = Array.from(yield* Fiber.join(collected));
+      NodeAssert.deepEqual(
+        events.map((event) => [event.type, event.payload]),
+        [
+          ["thread.goal.updated", { status: "paused", objective: "ship the login fix" }],
+          ["thread.goal.updated", { status: null }],
+        ],
+      );
     }),
   );
 });

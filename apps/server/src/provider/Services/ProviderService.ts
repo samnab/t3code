@@ -24,6 +24,7 @@ import type {
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
   ProviderExecutionGoalGetResult,
+  ProviderExecutionGoalSetInput,
   ThreadId,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
@@ -131,6 +132,15 @@ export interface ProviderServiceShape {
   readonly getExecutionGoal: (input: {
     readonly threadId: ThreadId;
   }) => Effect.Effect<ProviderExecutionGoalGetResult, ProviderServiceError>;
+
+  /**
+   * Set the thread's provider-native execution goal. Omitted fields keep the
+   * provider's existing value, so `{status: "active"}` alone resumes a paused
+   * goal — Codex has no separate resume RPC.
+   */
+  readonly setExecutionGoal: (
+    input: ProviderExecutionGoalSetInput,
+  ) => Effect.Effect<ProviderExecutionGoalGetResult, ProviderServiceError>;
 
   /** Pause an active provider-native execution goal on the live session. */
   readonly pauseExecutionGoal: (input: {

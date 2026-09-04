@@ -347,6 +347,7 @@ describe("ProviderCommandReactor", () => {
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       compactContext: compactContext as ProviderServiceShape["compactContext"],
       getExecutionGoal: () => Effect.die("unused"),
+      setExecutionGoal: () => Effect.die("unused"),
       pauseExecutionGoal: () => Effect.die("unused"),
       clearExecutionGoal: () => Effect.die("unused"),
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],

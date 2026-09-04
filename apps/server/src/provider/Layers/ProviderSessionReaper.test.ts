@@ -171,6 +171,7 @@ describe("ProviderSessionReaper", () => {
       stopSession,
       compactContext: () => unsupported(),
       getExecutionGoal: () => unsupported(),
+      setExecutionGoal: () => unsupported(),
       pauseExecutionGoal: () => unsupported(),
       clearExecutionGoal: () => unsupported(),
       listSessions: () => Effect.succeed([]),

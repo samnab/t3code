@@ -250,8 +250,9 @@ goal, which Codex itself tracks in a live session — see
 
 On servers that support it, setting a goal also starts a goal loop: T3 Code adds the goal to each
 turn it sends the agent and keeps starting follow-up turns until the agent reports the goal done,
-says it is stuck, or you step in. Codex threads are the exception — Codex tracks its own execution
-goal, so T3 Code leaves those threads alone.
+says it is stuck, or you step in. On a Codex thread the goal instead becomes Codex's own execution
+goal, and Codex drives the follow-up work — see
+[Codex](./providers-codex.md#thread-goals-map-onto-the-execution-goal).
 
 The loop only changes between turns, never in the middle of one. Every control below therefore
 takes effect once the turn that is running ends. The goal pill shows the loop's state:
@@ -269,6 +270,9 @@ takes effect once the turn that is running ends. The goal pill shows the loop's 
 A resume or a **Continue anyway** starts the next turn on its own — you do not have to send a
 message — and the agent picks up from where the loop stopped rather than re-reading the reply that
 paused or blocked it. Clearing the goal with `/goal clear`, or the pill, stops the loop along with it.
+
+You can send a `/goal` command while a turn is running — setting, editing, and clearing a goal are
+thread state, not messages to the agent, so the composer sends them instead of queueing them.
 
 ## Subscription usage limits
 

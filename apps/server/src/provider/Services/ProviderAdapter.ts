@@ -22,6 +22,7 @@ import type {
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
   ProviderExecutionGoalGetResult,
+  ProviderExecutionGoalSetInput,
   RuntimeTaskId,
   SubagentControlError,
   SubagentControlPlaneStatus,
@@ -189,6 +190,10 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly getExecutionGoal?: (
     threadId: ThreadId,
+  ) => Effect.Effect<ProviderExecutionGoalGetResult, TError>;
+  readonly setExecutionGoal?: (
+    threadId: ThreadId,
+    goal: Omit<ProviderExecutionGoalSetInput, "threadId">,
   ) => Effect.Effect<ProviderExecutionGoalGetResult, TError>;
   readonly pauseExecutionGoal?: (threadId: ThreadId) => Effect.Effect<void, TError>;
   readonly clearExecutionGoal?: (threadId: ThreadId) => Effect.Effect<void, TError>;

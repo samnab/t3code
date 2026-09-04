@@ -37,9 +37,21 @@ You can also act on it:
 Reading and changing the execution goal needs a live Codex session for the thread. If Codex is too
 old to know execution goals, the panel says so — update the Codex CLI and try again.
 
-An execution goal is not the same as a [thread goal](./composer.md#thread-goals). A thread goal is
-a short note you keep in T3 Code that is never sent to the agent; an execution goal is Codex's own
-state, tracked only in the live Codex session.
+### Thread goals map onto the execution goal
+
+On a Codex thread, the [thread goal](./composer.md#thread-goals) you set in T3 Code becomes Codex's
+execution goal with the same text, and clearing the thread goal clears Codex's. Codex then drives
+its own follow-up work; T3 Code never starts continuation turns on a Codex thread.
+
+Pausing the thread goal pauses the Codex goal, and resuming it sets the goal back to active. T3
+Code follows Codex's status rather than overriding it: while Codex is working, the goal reads as
+running; if Codex pauses the goal itself, T3 Code shows it paused and leaves it there for you to
+resume. If Codex clears the goal on its own, the thread goal is marked blocked so you can see what
+happened.
+
+Clearing a thread goal always works, even when Codex refuses the request or the session is gone.
+The T3 Code side is cleared either way, and the failure shows up in the thread's activity so the
+two are never quietly out of step.
 
 ## I Only Use One Codex Account
 

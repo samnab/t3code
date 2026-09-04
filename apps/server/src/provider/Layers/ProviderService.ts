@@ -13,6 +13,7 @@ import {
   ModelSelection,
   NonNegativeInt,
   ThreadId,
+  ProviderExecutionGoalSetInput,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -1266,6 +1267,29 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const setExecutionGoal: ProviderServiceMethod<"setExecutionGoal"> = Effect.fn("setExecutionGoal")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.setExecutionGoal",
+        schema: ProviderExecutionGoalSetInput,
+        payload: rawInput,
+      });
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.setExecutionGoal",
+        allowRecovery: false,
+      });
+      const set = routed.adapter.setExecutionGoal;
+      if (set === undefined) {
+        return yield* unsupportedExecutionGoal(routed.adapter.provider);
+      }
+      return yield* set(routed.threadId, {
+        ...(input.objective !== undefined ? { objective: input.objective } : {}),
+        ...(input.status !== undefined ? { status: input.status } : {}),
+      });
+    },
+  );
+
   const pauseExecutionGoal: ProviderServiceMethod<"pauseExecutionGoal"> = Effect.fn(
     "pauseExecutionGoal",
   )(function* (rawInput) {
@@ -1372,6 +1396,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     rollbackConversation,
     uploadFeedback,
     getExecutionGoal,
+    setExecutionGoal,
     pauseExecutionGoal,
     clearExecutionGoal,
     // Each access creates a fresh PubSub subscription so that multiple

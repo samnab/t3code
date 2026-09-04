@@ -116,6 +116,7 @@ const startupDependencies = Layer.mergeAll(
     stopSession: () => Effect.die("unused"),
     compactContext: () => Effect.die("unused"),
     getExecutionGoal: () => Effect.die("unused"),
+    setExecutionGoal: () => Effect.die("unused"),
     pauseExecutionGoal: () => Effect.die("unused"),
     clearExecutionGoal: () => Effect.die("unused"),
     listSessions: () => Effect.succeed([]),
