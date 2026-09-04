@@ -1823,6 +1823,7 @@ export default function Sidebar() {
   const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
     reportFailure: false,
   });
+  const reloadAgent = useAtomCommand(threadEnvironment.stopSession, "reload agent");
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -3179,7 +3180,9 @@ export default function Sidebar() {
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
               isRunning:
-                thread.session?.status === "running" && thread.session.activeTurnId != null,
+                thread.session?.status === "starting" ||
+                (thread.session?.status === "running" && thread.session.activeTurnId != null),
+              hasReloadableSession: thread.session !== null && thread.session.status !== "stopped",
               supports: {
                 settlement: supportsSettlement,
                 snooze: supportsSnooze,
@@ -3312,6 +3315,31 @@ export default function Sidebar() {
             }
             return;
           }
+          case "reload-agent": {
+            const result = await reloadAgent({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Failed to reload agent",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+              return;
+            }
+            if (result._tag === "Success") {
+              toastManager.add({
+                type: "success",
+                title: "Agent reloaded",
+                description: "The next message will resume in a fresh agent process.",
+              });
+            }
+            return;
+          }
           case "copy-path":
             if (!threadWorkspacePath) {
               toastManager.add(
@@ -3411,6 +3439,7 @@ export default function Sidebar() {
       markThreadUnread,
       openProjectSettings,
       projectCwdByKey,
+      reloadAgent,
       serverConfigs,
       startThreadRename,
       updateThreadMetadata,

@@ -92,6 +92,7 @@ export function useThreadActionMenu(input: {
     archiveThread,
     deleteThread,
   } = useThreadActions();
+  const reloadAgent = useAtomCommand(threadEnvironment.stopSession, "reload agent");
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -149,7 +150,10 @@ export function useThreadActionMenu(input: {
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
-          isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
+          isRunning:
+            thread.session?.status === "starting" ||
+            (thread.session?.status === "running" && thread.session.activeTurnId != null),
+          hasReloadableSession: thread.session !== null && thread.session.status !== "stopped",
           supports,
           executionGoal: readThreadSupportsExecutionGoal(threadRef),
           goalLoop: thread.goalLoop ? { state: thread.goalLoop.state } : null,
@@ -279,6 +283,24 @@ export function useThreadActionMenu(input: {
               }),
             );
             return;
+          case "reload-agent": {
+            const result = await reloadAgent({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (result._tag === "Failure") {
+              if (!isAtomCommandInterrupted(result)) {
+                failureToast("Failed to reload agent", squashAtomCommandFailure(result));
+              }
+              return;
+            }
+            toastManager.add({
+              type: "success",
+              title: "Agent reloaded",
+              description: "The next message will resume in a fresh agent process.",
+            });
+            return;
+          }
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;
             if (!workspacePath) {
@@ -371,6 +393,7 @@ export function useThreadActionMenu(input: {
       projectCwd,
       projectGroupingSettings,
       projects,
+      reloadAgent,
       router,
       settleThread,
       snoozeThread,

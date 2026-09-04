@@ -308,6 +308,8 @@ type ThreadSettingsSessionProps = {
   readonly onUpdateOptionSelections: (selections: ReadonlyArray<ProviderOptionSelection>) => void;
   readonly runtimeMode: RuntimeMode;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
+  readonly canReloadAgent?: boolean;
+  readonly onReloadAgent?: () => void;
 };
 
 export type ExistingThreadSettingsRouteSession = ThreadSettingsSessionProps & {
@@ -356,6 +358,9 @@ type ThreadSettingsSessionValue = {
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
   readonly runtimeMode: RuntimeMode;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
+  readonly canReloadAgent: boolean;
+  readonly showReloadAgent: boolean;
+  readonly onReloadAgent: () => void;
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
   readonly providerExpansionOverrides: ReadonlySet<string>;
   readonly hasLegacyModels: boolean;
@@ -475,6 +480,9 @@ function ThreadSettingsSessionProvider(
       providerGroups: props.providerGroups,
       runtimeMode: props.runtimeMode,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
+      canReloadAgent: props.canReloadAgent ?? false,
+      showReloadAgent: props.onReloadAgent !== undefined,
+      onReloadAgent: props.onReloadAgent ?? (() => undefined),
       displayedDescriptors,
       providerExpansionOverrides,
       hasLegacyModels,
@@ -505,6 +513,8 @@ function ThreadSettingsSessionProvider(
       pressModel,
       providerFilter,
       props.onUpdateRuntimeMode,
+      props.canReloadAgent,
+      props.onReloadAgent,
       props.providerGroups,
       props.runtimeMode,
       searchQuery,
@@ -728,7 +738,6 @@ function ThreadSettingsOptionsItem(props: {
         })}
         <Animated.View layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}>
           <DisclosureRow
-            isLast
             label="Runtime"
             value={
               RUNTIME_MODE_CHOICES.find((choice) => choice.mode === session.runtimeMode)?.label
@@ -736,6 +745,23 @@ function ThreadSettingsOptionsItem(props: {
             onPress={() => props.onOpenSubmenu({ kind: "runtime" })}
           />
         </Animated.View>
+        {session.showReloadAgent ? (
+          <Pressable
+            accessibilityRole="button"
+            disabled={!session.canReloadAgent}
+            onPress={session.onReloadAgent}
+            className="min-h-11 flex-row items-center gap-2 bg-card px-4 py-2 active:bg-subtle disabled:opacity-50"
+          >
+            <Text className="text-sm font-t3-medium text-foreground">Reload agent</Text>
+            <View className="flex-1" />
+            <SymbolView
+              name="arrow.clockwise"
+              size={15}
+              tintColorClassName="accent-icon-subtle"
+              type="monochrome"
+            />
+          </Pressable>
+        ) : null}
       </Animated.View>
 
       {Platform.OS !== "ios" && session.hasLegacyModels ? (

@@ -45,6 +45,8 @@ import Animated, {
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import { threadEnvironment } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
@@ -437,6 +439,33 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   });
   const canSend = hasContent && !voiceInput.blocksSubmission && attachmentBlockReason === null;
   const [compactionInFlight, setCompactionInFlight] = useState(false);
+  const reloadAgent = useAtomCommand(threadEnvironment.stopSession, "reload agent");
+  const sessionStatus = props.selectedThread.session?.status;
+  const canReloadAgent =
+    props.connectionState === "connected" &&
+    sessionStatus !== undefined &&
+    sessionStatus !== "stopped" &&
+    sessionStatus !== "starting" &&
+    !(sessionStatus === "running" && props.selectedThread.session?.activeTurnId !== null);
+  const handleReloadAgent = useCallback(() => {
+    if (!canReloadAgent) return;
+    Alert.alert(
+      "Reload agent?",
+      "The next message will resume this thread in a fresh agent process.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reload",
+          onPress: () => {
+            void reloadAgent({
+              environmentId: props.environmentId,
+              input: { threadId: props.selectedThread.id },
+            });
+          },
+        },
+      ],
+    );
+  }, [canReloadAgent, props.environmentId, props.selectedThread.id, reloadAgent]);
   const executionGoalControl = resolveExecutionGoalControl({
     provider: selectedProviderStatus,
     sessionPresent: props.selectedThread.session !== null,
@@ -593,12 +622,16 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         props.onUpdateModelSelection({ ...currentModelSelection, options }),
       runtimeMode: currentRuntimeMode,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
+      canReloadAgent,
+      onReloadAgent: handleReloadAgent,
     }),
     [
       currentModelSelection,
       currentRuntimeMode,
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
+      canReloadAgent,
+      handleReloadAgent,
       providerOptionDescriptors,
       settingsOwnerId,
       threadProviderGroups,

@@ -21,6 +21,7 @@ export type ThreadActionMenuId =
   | "execution-goal"
   | "pause-goal-loop"
   | "resume-goal-loop"
+  | "reload-agent"
   | "mark-unread"
   | "copy"
   | "copy-path"
@@ -38,6 +39,8 @@ export interface ThreadActionMenuState {
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
+  /** A provider process exists and can be stopped without losing its native resume cursor. */
+  readonly hasReloadableSession: boolean;
   readonly supports: {
     readonly settlement: boolean;
     readonly snooze: boolean;
@@ -127,6 +130,17 @@ export function buildThreadActionMenuItems(
             id: "execution-goal" as const,
             label: "Codex execution goal…",
             icon: "flag",
+          },
+        ]
+      : []),
+    ...(state.hasReloadableSession
+      ? [
+          {
+            id: "reload-agent" as const,
+            label: "Reload agent",
+            icon: "refresh-cw",
+            disabled: state.isRunning,
+            separatorBefore: true,
           },
         ]
       : []),

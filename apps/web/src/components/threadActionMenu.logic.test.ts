@@ -10,6 +10,7 @@ const baseState: ThreadActionMenuState = {
   canSnoozeNow: true,
   isRegeneratingTitle: false,
   isRunning: false,
+  hasReloadableSession: true,
   supports: { settlement: true, snooze: true, pinning: true, titleRegeneration: true },
   executionGoal: false,
   goalLoop: null,
@@ -35,7 +36,15 @@ describe("buildThreadActionMenuItems", () => {
         ...baseState,
         supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
       }),
-    ).toEqual(["rename", "mark-unread", "copy", "project-settings", "archive", "delete"]);
+    ).toEqual([
+      "rename",
+      "mark-unread",
+      "reload-agent",
+      "copy",
+      "project-settings",
+      "archive",
+      "delete",
+    ]);
   });
 
   it("groups project settings with utility actions before archive", () => {
@@ -119,5 +128,17 @@ describe("buildThreadActionMenuItems", () => {
       (item) => item.id === "archive",
     );
     expect(archiveItem?.disabled).toBe(true);
+  });
+
+  it("offers reload only for an idle live agent session", () => {
+    const reload = buildThreadActionMenuItems(baseState).find((item) => item.id === "reload-agent");
+    expect(reload).toMatchObject({ label: "Reload agent", icon: "refresh-cw", disabled: false });
+
+    expect(
+      buildThreadActionMenuItems({ ...baseState, isRunning: true }).find(
+        (item) => item.id === "reload-agent",
+      )?.disabled,
+    ).toBe(true);
+    expect(ids({ ...baseState, hasReloadableSession: false })).not.toContain("reload-agent");
   });
 });
