@@ -29,7 +29,7 @@ import {
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
-import type { SidebarThreadSortOrder, TimestampFormat } from "@t3tools/contracts/settings";
+import { SidebarThreadSortOrder, type TimestampFormat } from "@t3tools/contracts/settings";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
@@ -213,6 +213,7 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Keep the v2 key so existing preferences survive the v2-to-default rename.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar-v2:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar-v2:snoozed-expanded";
+const isSidebarThreadSortOrder = Schema.is(SidebarThreadSortOrder);
 const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
   updated_at: "Last updated",
   created_at: "Created",
@@ -3822,16 +3823,12 @@ export default function Sidebar() {
                     <MenuRadioGroup
                       value={sidebarThreadSortOrder}
                       onValueChange={(value) => {
-                        handleThreadSortOrderChange(value as SidebarThreadSortOrder);
+                        if (isSidebarThreadSortOrder(value)) handleThreadSortOrderChange(value);
                       }}
                     >
-                      {(
-                        Object.entries(SIDEBAR_THREAD_SORT_LABELS) as Array<
-                          [SidebarThreadSortOrder, string]
-                        >
-                      ).map(([value, label]) => (
+                      {SidebarThreadSortOrder.literals.map((value) => (
                         <MenuRadioItem key={value} value={value}>
-                          {label}
+                          {SIDEBAR_THREAD_SORT_LABELS[value]}
                         </MenuRadioItem>
                       ))}
                     </MenuRadioGroup>
