@@ -21,7 +21,7 @@ import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
-import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
+import { parseThreadGoalCommand, serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import {
   memo,
@@ -1879,6 +1879,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Editing control only while its control row is on screen with known
   // support; a durable goal otherwise stays readable (passive) so loading,
   // reconnecting, approval, and collapsed states never hide it.
+  // A `/goal …` draft (typed, or written through goal mode) is thread
+  // metadata, not provider input, so it stays sendable while a turn runs —
+  // otherwise a goal loop's own continuation turn hides the way to stop it.
+  const promptWritesThreadGoal = goalMode || parseThreadGoalCommand(prompt) !== null;
   const threadGoalDisplay = resolveThreadGoalDisplay({
     goal: activeThreadGoal,
     controlsVisible:
@@ -4774,7 +4778,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
                     preserveComposerFocusOnPointerDown={isMobileViewport}
-                    showSendWhileRunning={isMobileViewport}
+                    showSendWhileRunning={isMobileViewport || promptWritesThreadGoal}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
