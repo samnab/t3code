@@ -7,6 +7,7 @@ import type {
   RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
+  AgentDetailView,
   AgentsPanel,
   canShowTranscriptDetail,
   transcriptDisplayState,
@@ -88,6 +89,36 @@ describe("AgentsPanel child transcript disclosure", () => {
     // there's no separate inline-disclosure affordance to assert on here.
     expect(markup).toContain("<button");
     expect(markup).toContain("History available");
+  });
+
+  // Regression: most subagents (only PiAdapter stamps durable evidence
+  // today) carry historyAvailability === undefined, not "summary-only". The
+  // detail view must never attempt to load a transcript for those runs —
+  // it previously fell through to the transcript body (and the ws RPC error
+  // "Could not load the child transcript.") for anything that wasn't
+  // explicitly flagged summary-only/unavailable.
+  it("never renders a transcript load attempt when history isn't flagged durable", () => {
+    const undocumented = agent({
+      status: "completed",
+      result: "Boston is 61°F and cloudy.",
+    });
+    // Simulate a Claude/Codex run: only PiAdapter stamps historyAvailability
+    // at all, so this is undefined in practice, not the explicit
+    // "summary-only" the `agent()` helper defaults to.
+    delete (undocumented as { historyAvailability?: unknown }).historyAvailability;
+    const markup = renderToStaticMarkup(
+      <AgentDetailView
+        agent={undocumented}
+        environmentId={EnvironmentId.make("environment-1")}
+        threadId={ThreadId.make("thread-1")}
+        onBack={() => {}}
+      />,
+    );
+
+    expect(canShowTranscriptDetail(undocumented)).toBe(false);
+    expect(markup).not.toContain("Could not load");
+    expect(markup).toContain("Child transcript detail unavailable");
+    expect(markup).toContain("Boston is 61°F and cloudy.");
   });
 });
 

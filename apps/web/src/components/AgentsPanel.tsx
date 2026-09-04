@@ -768,7 +768,7 @@ function WorkflowSection({
  * replacing the roster in the same right-pane surface (mirrors how the Codex
  * app opens a child's own conversation).
  */
-function AgentDetailView({
+export function AgentDetailView({
   agent,
   environmentId,
   threadId,
@@ -833,8 +833,12 @@ function AgentDetailView({
     }
   };
 
-  const historyUnavailable =
-    agent.historyAvailability === "summary-only" || agent.historyAvailability === "unavailable";
+  // Same truthful gate as the roster row's disclosure: only a run stamped
+  // "durable" ever has transcript rows to fetch. Most subagents (only
+  // PiAdapter stamps this evidence today) are undefined here, not
+  // "summary-only" — that reads the same as summary-only: no body to show.
+  const canShowTranscript = canShowTranscriptDetail(agent);
+  const fallbackSummary = agent.error ?? agent.result;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -855,14 +859,8 @@ function AgentDetailView({
           </div>
         </div>
       </header>
-      <div className="min-h-0 flex-1">
-        {historyUnavailable ? (
-          <p className="p-3 text-xs text-muted-foreground">
-            {agent.historyAvailability === "summary-only"
-              ? "Child transcript detail unavailable for this agent."
-              : "History unavailable for this agent."}
-          </p>
-        ) : (
+      <div className="min-h-0 flex-1 overflow-auto">
+        {canShowTranscript ? (
           <AgentTranscript
             agent={agent}
             environmentId={environmentId}
@@ -870,6 +868,19 @@ function AgentDetailView({
             transcriptId={transcriptId}
             fill
           />
+        ) : (
+          <div className="flex flex-col gap-2 p-3">
+            <p className="text-xs text-muted-foreground">
+              {agent.historyAvailability === "unavailable"
+                ? "History unavailable for this agent."
+                : "Child transcript detail unavailable for this agent."}
+            </p>
+            {terminal && fallbackSummary ? (
+              <p className="whitespace-pre-wrap break-words text-xs text-foreground/90">
+                {fallbackSummary}
+              </p>
+            ) : null}
+          </div>
         )}
       </div>
       <footer className="border-t border-border/60 p-2">
