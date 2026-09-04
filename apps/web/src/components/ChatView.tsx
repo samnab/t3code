@@ -1358,9 +1358,10 @@ function ChatViewContent(props: ChatViewProps) {
   const setThreadInteractionMode = useAtomCommand(threadEnvironment.setInteractionMode, {
     reportFailure: false,
   });
-  const setThreadVoiceNotifications = useAtomCommand(threadEnvironment.setVoiceNotifications, {
-    reportFailure: false,
-  });
+  const setThreadVoiceNotifications = useAtomCommand(
+    threadEnvironment.setVoiceNotifications,
+    "voice notifications",
+  );
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const createAttachmentAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
@@ -3711,11 +3712,12 @@ function ChatViewContent(props: ChatViewProps) {
         scheduleComposerFocus();
         return;
       }
-      if (!serverThread || (serverThread.voiceNotifications ?? true) === enabled) return;
+      if (!activeServerThread || (activeServerThread.voiceNotifications ?? true) === enabled)
+        return;
       void setThreadVoiceNotifications({
         environmentId,
         input: {
-          threadId: serverThread.id,
+          threadId: activeServerThread.id,
           voiceNotifications: enabled,
           createdAt: new Date().toISOString(),
         },
@@ -3723,11 +3725,11 @@ function ChatViewContent(props: ChatViewProps) {
       scheduleComposerFocus();
     },
     [
+      activeServerThread,
       composerDraftTarget,
       environmentId,
       isLocalDraftThread,
       scheduleComposerFocus,
-      serverThread,
       setComposerThreadSettings,
       setThreadVoiceNotifications,
     ],
@@ -7959,10 +7961,10 @@ function ChatViewContent(props: ChatViewProps) {
                             voiceNotifications={
                               isLocalDraftThread
                                 ? (composerDraftVoiceNotifications ?? true)
-                                : (serverThread?.voiceNotifications ?? true)
+                                : (activeServerThread?.voiceNotifications ?? true)
                             }
                             showVoiceNotificationsToggle={
-                              Boolean(serverThread) || isLocalDraftThread
+                              Boolean(activeServerThread) || isLocalDraftThread
                             }
                             lockedProvider={lockedProvider}
                             providerStatuses={providerStatuses as ServerProvider[]}

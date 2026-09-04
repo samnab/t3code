@@ -701,7 +701,41 @@ describe("buildLoadingThreadFromShell", () => {
       proposedPlans: [],
       activities: [],
       checkpoints: [],
+      voiceNotifications: true,
     });
+  });
+
+  it("carries a voice-off shell choice while the detail is still loading", () => {
+    const shell = {
+      environmentId,
+      id: threadId,
+      projectId,
+      title: "Loading thread",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.4",
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      voiceNotifications: false,
+      branch: "main",
+      worktreePath: null,
+      latestTurn: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      snoozedUntil: null,
+      snoozedAt: null,
+      session: null,
+      latestUserMessageAt: now,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    } satisfies ThreadShell;
+
+    expect(buildLoadingThreadFromShell(shell).voiceNotifications).toBe(false);
   });
 });
 
