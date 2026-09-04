@@ -1507,6 +1507,14 @@ const NodeHttpServerTestWithWsDeflate = HttpServer.layerTestClient.pipe(
   ),
 );
 
+it("isThreadDetailEvent forwards goal-loop updates to the thread detail subscription", () => {
+  const event = {
+    type: "thread.goal-loop-updated",
+    threadId: "thread_test",
+  } as unknown as OrchestrationEvent;
+  assert.isTrue(isThreadDetailEvent(event));
+});
+
 it.layer(NodeServices.layer)("server router seam", (it) => {
   it.effect("parks HTTP ingress until command readiness", () =>
     Effect.gen(function* () {
