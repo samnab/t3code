@@ -55,6 +55,21 @@ const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.t3tools.t3code";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 const DESKTOP_APP_ID_PATTERN = /^[A-Za-z0-9.-]+$/u;
+const DESKTOP_STAGE_LABEL_VALUES = ["Fork"] as const;
+
+// A side-by-side fork build can also stamp its packaged package.json with a
+// visible "Fork" stage label (see DesktopEnvironment.resolveDesktopAppStageLabel),
+// so the desktop UI and window/app title read "T3 Code (Fork)" instead of Alpha.
+function resolveDesktopStageLabel(override: string | undefined): string | undefined {
+  const trimmed = override?.trim();
+  if (!trimmed) return undefined;
+  if (!(DESKTOP_STAGE_LABEL_VALUES as readonly string[]).includes(trimmed)) {
+    throw new Error(
+      `T3CODE_DESKTOP_STAGE_LABEL must be one of ${DESKTOP_STAGE_LABEL_VALUES.join(", ")} (got ${JSON.stringify(trimmed)}).`,
+    );
+  }
+  return trimmed;
+}
 
 // A side-by-side fork build (e.g. a nightly or dev channel) can override the
 // bundle id via T3CODE_DESKTOP_APP_ID so its TCC/Privacy rows, LaunchServices
@@ -924,6 +939,7 @@ interface StagePackageJson {
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
+  readonly t3codeStageLabel?: string;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
@@ -3293,6 +3309,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const appVersion = options.version ?? serverPackageJson.version;
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
+  const stageLabelOverride = yield* Config.string("T3CODE_DESKTOP_STAGE_LABEL").pipe(Config.option);
+  const stageLabel = resolveDesktopStageLabel(Option.getOrUndefined(stageLabelOverride));
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
     prefix: `t3code-desktop-${options.platform}-stage-`,
@@ -3516,6 +3534,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
+    ...(stageLabel ? { t3codeStageLabel: stageLabel } : {}),
     private: true,
     packageManager: rootPackageJson.packageManager,
     description: "T3 Code desktop build",

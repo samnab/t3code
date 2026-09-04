@@ -44,10 +44,15 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
     stageLabel,
     environmentIdentificationMode === "artwork",
   );
+  // Fork builds have no dedicated backdrop artwork, so their pill shows in
+  // "artwork" mode too; it only disappears when identification is off.
+  const environmentIdentificationPillLabel = resolveEnvironmentIdentificationPillLabel(stageLabel);
   const pillLabel =
-    environmentIdentificationMode === "pill"
-      ? resolveEnvironmentIdentificationPillLabel(stageLabel)
-      : null;
+    environmentIdentificationMode === "none"
+      ? null
+      : environmentIdentificationMode === "pill" || environmentIdentificationPillLabel === "Fork"
+        ? environmentIdentificationPillLabel
+        : null;
 
   return (
     <SidebarHeader

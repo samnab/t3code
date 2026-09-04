@@ -7,6 +7,7 @@ import type {
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -90,9 +91,14 @@ const APP_BASE_NAME = "T3 Code";
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly isFork: boolean;
 }): DesktopAppStageLabel {
   if (input.isDevelopment) {
     return "Dev";
+  }
+
+  if (input.isFork) {
+    return "Fork";
   }
 
   return isNightlyDesktopVersion(input.appVersion) ? "Nightly" : "Alpha";
@@ -101,6 +107,7 @@ function resolveDesktopAppStageLabel(input: {
 function resolveDesktopAppBranding(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly isFork: boolean;
 }): DesktopAppBranding {
   const stageLabel = resolveDesktopAppStageLabel(input);
   return {
@@ -142,7 +149,11 @@ function resolveDesktopRuntimeInfo(input: {
 
 const make = Effect.fn("desktop.environment.make")(function* (
   input: MakeDesktopEnvironmentInput,
-): Effect.fn.Return<DesktopEnvironment["Service"], Config.ConfigError, Path.Path> {
+): Effect.fn.Return<
+  DesktopEnvironment["Service"],
+  Config.ConfigError,
+  Path.Path | FileSystem.FileSystem
+> {
   const path = yield* Path.Path;
   const config = yield* DesktopConfig.DesktopConfig;
   const homeDirectory = input.homeDirectory;
@@ -167,9 +178,34 @@ const make = Effect.fn("desktop.environment.make")(function* (
     input.isPackaged && input.platform === "win32"
       ? path.join(input.resourcesPath, "server.asar")
       : appRoot;
+  // The packaged package.json is stamped with t3codeStageLabel by
+  // scripts/build-desktop-artifact.ts (T3CODE_DESKTOP_STAGE_LABEL) for fork
+  // builds that want their own visible branding, distinct from an official
+  // Alpha/Nightly install.
+  const isFork = input.isPackaged
+    ? yield* Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const raw = yield* fileSystem
+          .readFileString(path.join(appRoot, "package.json"))
+          .pipe(Effect.option);
+        return Option.match(raw, {
+          onNone: () => false,
+          onSome: (value) => {
+            try {
+              return (
+                (JSON.parse(value) as { t3codeStageLabel?: unknown }).t3codeStageLabel === "Fork"
+              );
+            } catch {
+              return false;
+            }
+          },
+        });
+      })
+    : false;
   const branding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
+    isFork,
   });
   const displayName = branding.displayName;
   const stateDir = resolveDesktopStateDir({
