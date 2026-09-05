@@ -132,10 +132,12 @@ export function useComposerCommandMenu({
       // message; elsewhere it arrives as literal text. Built-ins apply
       // locally and skills insert a `$` mention the server dispatches from
       // any position, so only provider commands are position-gated.
+      const builtInCommandNames = new Set(allBuiltIn.map((item) => item.command));
       const providerCommands: ComposerCommandItem[] = [];
       const expandableCommands =
         trigger.rangeStart === 0 ? (selectedProviderStatus?.slashCommands ?? []) : [];
       for (const command of expandableCommands) {
+        if (builtInCommandNames.has(command.name.trim().toLowerCase())) continue;
         if (!command.name.toLowerCase().includes(q)) continue;
         // Codex feedback uploads an existing thread's session and logs.
         if (
