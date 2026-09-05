@@ -2429,8 +2429,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             return;
           }
           case "goal": {
-            // Selecting /goal stages the command for typing the goal text,
-            // mirroring provider slash commands; it never changes mode.
+            // Selecting /goal enters goal mode directly, mirroring the goal
+            // button in the composer controls, when goal mode is available.
+            // Otherwise fall back to staging the command text for typing.
+            if (threadGoalDisplay === "control") {
+              // The replacement focuses the editor itself once it renders; a
+              // focusAtEnd here would re-emit the stale "/goal" snapshot.
+              const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+                expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+              });
+              if (applied) {
+                setComposerHighlightedItemId(null);
+                setGoalMode(true);
+              }
+              return;
+            }
             const replacement = "/goal ";
             const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
               snapshot.value,
@@ -2504,7 +2517,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
     },
-    [applyPromptReplacement, handleInteractionModeChange, resolveActiveComposerTrigger],
+    [
+      applyPromptReplacement,
+      handleInteractionModeChange,
+      resolveActiveComposerTrigger,
+      threadGoalDisplay,
+      setGoalMode,
+    ],
   );
 
   const onComposerMenuItemHighlighted = useCallback(

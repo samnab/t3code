@@ -233,7 +233,9 @@ any line.
 ### Thread goals
 
 Set a goal for the current thread with `/goal` followed by a short description, for example
-`/goal ship the login fix`, or use the target button in the composer controls. Once a goal is set,
+`/goal ship the login fix`, or use the target button in the composer controls. Picking `/goal`
+from the slash menu switches the input into goal mode directly, the same as selecting the target
+button. Once a goal is set,
 the button becomes a compact pill showing the goal's first line in the composer. Select the pill
 to switch the chat input into goal mode: the input changes colour, and sending writes the goal
 instead of a message. Select the pill again to go back. On mobile, the goal pill lives in the
