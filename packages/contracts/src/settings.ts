@@ -392,6 +392,21 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
   );
 }
 
+const CODEX_MAX_CONCURRENT_SUBAGENTS_PATTERN = /^(?:|[1-9]\d*)$/;
+const CODEX_MAX_CONCURRENT_SUBAGENTS_SAFE_INTEGER = Schema.makeFilter((value: string) => {
+  if (value === "") return undefined;
+
+  const count = Number(value);
+  return Number.isSafeInteger(count) && count > 0
+    ? undefined
+    : "Expected a positive safe integer or an empty value.";
+});
+
+const CodexMaxConcurrentSubagents = TrimmedString.check(
+  Schema.isPattern(CODEX_MAX_CONCURRENT_SUBAGENTS_PATTERN),
+  CODEX_MAX_CONCURRENT_SUBAGENTS_SAFE_INTEGER,
+);
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -428,6 +443,18 @@ export const CodexSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    maxConcurrentSubagents: CodexMaxConcurrentSubagents.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Maximum concurrent subagents",
+        description:
+          "Maximum number of child subagents. The primary session is not included. Applies to new sessions. Leave blank to use Codex's default.",
+        providerSettingsForm: {
+          placeholder: "e.g. 4",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     launchArgs: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
@@ -441,7 +468,7 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "shadowHomePath", "maxConcurrentSubagents", "launchArgs"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -929,6 +956,7 @@ const CodexSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
+  maxConcurrentSubagents: Schema.optionalKey(CodexMaxConcurrentSubagents),
   launchArgs: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });

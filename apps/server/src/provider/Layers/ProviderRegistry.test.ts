@@ -397,15 +397,21 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
       it.effect("passes configured launch args to the Codex provider probe", () =>
         Effect.gen(function* () {
           let observedLaunchArgs: string | undefined;
-          const settings = decodeCodexSettings({ launchArgs: "--strict-config --enable foo" });
+          let observedMaxConcurrentSubagents: string | undefined;
+          const settings = decodeCodexSettings({
+            launchArgs: "--strict-config --enable foo",
+            maxConcurrentSubagents: "20",
+          });
 
           const status = yield* checkCodexProviderStatus(settings, (input) => {
             observedLaunchArgs = input.launchArgs;
+            observedMaxConcurrentSubagents = input.maxConcurrentSubagents;
             return Effect.succeed(makeCodexProbeSnapshot());
           });
 
           assert.strictEqual(status.status, "ready");
           assert.strictEqual(observedLaunchArgs, "--strict-config --enable foo");
+          assert.strictEqual(observedMaxConcurrentSubagents, "20");
         }),
       );
 

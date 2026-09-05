@@ -65,6 +65,10 @@ CODEX_HOME path: ~/.codex
 Shadow home path: empty
 ```
 
+To limit native multi-agent fan-out, set **Maximum concurrent subagents** in the provider settings.
+The value counts child subagents and excludes the primary session. It applies to new sessions; leave
+it blank to use Codex's default.
+
 Log in with Codex normally:
 
 ```bash

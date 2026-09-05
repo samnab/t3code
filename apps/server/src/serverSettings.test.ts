@@ -188,6 +188,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           codex: {
             binaryPath: "/usr/local/bin/codex",
             homePath: "/Users/julius/.codex",
+            maxConcurrentSubagents: "20",
           },
           claudeAgent: {
             binaryPath: "/usr/local/bin/claude",
@@ -212,6 +213,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         providers: {
           codex: {
             binaryPath: "/opt/homebrew/bin/codex",
+            maxConcurrentSubagents: "",
           },
         },
         textGenerationModelSelection: {
@@ -224,6 +226,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/opt/homebrew/bin/codex",
         homePath: "/Users/julius/.codex",
         shadowHomePath: "",
+        maxConcurrentSubagents: "",
         launchArgs: "",
         customModels: [],
       });
@@ -910,6 +913,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         binaryPath: "/opt/homebrew/bin/codex",
         homePath: "",
         shadowHomePath: "",
+        maxConcurrentSubagents: "",
         launchArgs: "",
         customModels: [],
       });

@@ -324,6 +324,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly launchArgs?: string;
+  readonly maxConcurrentSubagents?: string;
   readonly cwd: string;
   readonly customModels?: ReadonlyArray<string>;
   readonly environment?: NodeJS.ProcessEnv;
@@ -340,7 +341,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   };
   const spawnCommand = yield* resolveSpawnCommand(
     input.binaryPath,
-    codexAppServerArgs(input.launchArgs),
+    codexAppServerArgs(input.launchArgs, input.maxConcurrentSubagents),
     {
       env: environment,
       extendEnv: true,
@@ -420,6 +421,7 @@ export const probeCodexSkillsForCwd = Effect.fn("probeCodexSkillsForCwd")(functi
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly launchArgs?: string;
+  readonly maxConcurrentSubagents?: string;
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv;
 }) {
@@ -431,7 +433,7 @@ export const probeCodexSkillsForCwd = Effect.fn("probeCodexSkillsForCwd")(functi
   };
   const spawnCommand = yield* resolveSpawnCommand(
     input.binaryPath,
-    codexAppServerArgs(input.launchArgs),
+    codexAppServerArgs(input.launchArgs, input.maxConcurrentSubagents),
     { env: environment, extendEnv: true },
   );
   const child = yield* spawner
@@ -554,6 +556,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly binaryPath: string;
     readonly homePath?: string;
     readonly launchArgs?: string;
+    readonly maxConcurrentSubagents?: string;
     readonly cwd: string;
     readonly customModels: ReadonlyArray<string>;
     readonly environment?: NodeJS.ProcessEnv;
@@ -596,6 +599,9 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     cwd: process.cwd(),
     customModels: codexSettings.customModels,
     environment: resolvedEnvironment,
+    ...(codexSettings.maxConcurrentSubagents
+      ? { maxConcurrentSubagents: codexSettings.maxConcurrentSubagents }
+      : {}),
   }).pipe(
     Effect.scoped,
     Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),

@@ -1796,6 +1796,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           binaryPath: codexConfig.binaryPath,
           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
           environment: sessionEnvironment,
+          ...(codexConfig.maxConcurrentSubagents
+            ? { maxConcurrentSubagents: codexConfig.maxConcurrentSubagents }
+            : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }

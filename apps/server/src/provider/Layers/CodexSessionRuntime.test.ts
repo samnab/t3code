@@ -702,6 +702,7 @@ describe("codexSessionAppServerArgs", () => {
       codexSessionAppServerArgs(
         ["-c", "mcp_servers.t3-code.url=http://127.0.0.1/mcp"],
         "--strict-config --enable foo",
+        "20",
       ),
       [
         "app-server",
@@ -710,6 +711,10 @@ describe("codexSessionAppServerArgs", () => {
         "foo",
         "-c",
         "mcp_servers.t3-code.url=http://127.0.0.1/mcp",
+        "-c",
+        "agents.max_concurrent_threads_per_session=20",
+        "-c",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=21",
       ],
     );
   });

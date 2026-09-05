@@ -41,6 +41,33 @@ describe("codexAppServerArgs", () => {
       "foo",
     ]);
   });
+
+  it("appends structured concurrency overrides after conflicting launch args", () => {
+    NodeAssert.deepStrictEqual(
+      codexAppServerArgs(
+        "-c agents.max_concurrent_threads_per_session=2 -c features.multi_agent_v2.max_concurrent_threads_per_session=3",
+        "20",
+      ),
+      [
+        "app-server",
+        "-c",
+        "agents.max_concurrent_threads_per_session=2",
+        "-c",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=3",
+        "-c",
+        "agents.max_concurrent_threads_per_session=20",
+        "-c",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=21",
+      ],
+    );
+  });
+
+  it("does not add concurrency overrides when the setting is cleared", () => {
+    NodeAssert.deepStrictEqual(
+      codexAppServerArgs("-c agents.max_concurrent_threads_per_session=2", ""),
+      ["app-server", "-c", "agents.max_concurrent_threads_per_session=2"],
+    );
+  });
 });
 
 describe("codexExecLaunchArgs", () => {

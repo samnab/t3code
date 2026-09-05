@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  CodexSettings,
   DEFAULT_SERVER_SETTINGS,
   defaultEnabledForDriver,
   resolveProviderInstanceEnabled,
@@ -20,6 +21,41 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
+
+describe("CodexSettings maximum concurrent subagents", () => {
+  it("uses Codex's default when no override is configured", () => {
+    expect(decodeCodexSettings({}).maxConcurrentSubagents).toBe("");
+  });
+
+  it.each(["1", "20", "9007199254740991"])("accepts a positive safe integer: %s", (value) => {
+    expect(decodeCodexSettings({ maxConcurrentSubagents: value }).maxConcurrentSubagents).toBe(
+      value,
+    );
+    expect(
+      decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: value } } }),
+    ).toBeDefined();
+  });
+
+  it.each(["0", "-1", "1.5", "1e3", "9007199254740992", "9999999999999999"])(
+    "rejects an invalid concurrency count: %s",
+    (value) => {
+      expect(() => decodeCodexSettings({ maxConcurrentSubagents: value })).toThrow();
+      expect(() =>
+        decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: value } } }),
+      ).toThrow();
+    },
+  );
+
+  it("trims and accepts an empty patch value to clear the override", () => {
+    expect(
+      decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: " 20 " } } }),
+    ).toMatchObject({ providers: { codex: { maxConcurrentSubagents: "20" } } });
+    expect(
+      decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: "  " } } }),
+    ).toMatchObject({ providers: { codex: { maxConcurrentSubagents: "" } } });
+  });
+});
 
 describe("ClaudeSettings auto-compaction", () => {
   it("uses Claude's default threshold when no override is configured", () => {

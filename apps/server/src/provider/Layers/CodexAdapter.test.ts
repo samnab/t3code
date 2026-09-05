@@ -455,7 +455,10 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     const layer = Layer.effect(
       CodexAdapter,
       Effect.gen(function* () {
-        const codexConfig = decodeCodexSettings({ launchArgs: "--strict-config --enable foo" });
+        const codexConfig = decodeCodexSettings({
+          launchArgs: "--strict-config --enable foo",
+          maxConcurrentSubagents: "20",
+        });
         return yield* makeCodexAdapter(codexConfig, {
           makeRuntime: runtimeFactory.factory,
         });
@@ -478,6 +481,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       const runtime = runtimeFactory.lastRuntime;
       NodeAssert.ok(runtime);
       NodeAssert.equal(runtime.options.launchArgs, "--strict-config --enable foo");
+      NodeAssert.equal(runtime.options.maxConcurrentSubagents, "20");
     }).pipe(Effect.provide(layer));
   });
 

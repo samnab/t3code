@@ -209,6 +209,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
                 binaryPath: effectiveConfig.binaryPath,
                 homePath: effectiveConfig.homePath,
                 launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
+                ...(effectiveConfig.maxConcurrentSubagents
+                  ? { maxConcurrentSubagents: effectiveConfig.maxConcurrentSubagents }
+                  : {}),
                 cwd,
                 environment: processEnv,
               }).pipe(
