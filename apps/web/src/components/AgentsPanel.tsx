@@ -1029,6 +1029,20 @@ export function AgentsPanel({
     }
   }, [selectedAgentId, selectedAgent]);
 
+  // Hooks stay above the early returns below (hook order must not change).
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { width: backgroundHeight, handlers: backgroundHeightHandlers } = useResizableWidth({
+    storageKey: BACKGROUND_HEIGHT_STORAGE_KEY,
+    defaultWidth: DEFAULT_BACKGROUND_HEIGHT,
+    minWidth: MIN_BACKGROUND_HEIGHT,
+    maxWidth: Math.max(
+      MIN_BACKGROUND_HEIGHT,
+      (containerRef.current?.clientHeight ?? DEFAULT_BACKGROUND_HEIGHT * 3) * 0.7,
+    ),
+    edge: "top",
+    axis: "y",
+  });
+
   if (selectedAgent !== null && environmentId !== null && threadId !== null) {
     return (
       <AgentDetailView
@@ -1056,19 +1070,6 @@ export function AgentsPanel({
   const hasAgentList = model.workflows.length > 0 || model.directAgents.length > 0;
   const hasBackgroundProcesses = model.backgroundProcesses.length > 0;
   const showDivider = hasAgentList && hasBackgroundProcesses;
-
-  const containerRef = useRef<HTMLDivElement>(null);
-  const { width: backgroundHeight, handlers: backgroundHeightHandlers } = useResizableWidth({
-    storageKey: BACKGROUND_HEIGHT_STORAGE_KEY,
-    defaultWidth: DEFAULT_BACKGROUND_HEIGHT,
-    minWidth: MIN_BACKGROUND_HEIGHT,
-    maxWidth: Math.max(
-      MIN_BACKGROUND_HEIGHT,
-      (containerRef.current?.clientHeight ?? DEFAULT_BACKGROUND_HEIGHT * 3) * 0.7,
-    ),
-    edge: "top",
-    axis: "y",
-  });
 
   const agentList = (
     <div className="flex flex-col gap-2 p-2">
