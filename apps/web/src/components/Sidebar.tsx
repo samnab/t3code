@@ -215,8 +215,8 @@ const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar-v2:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar-v2:snoozed-expanded";
 const isSidebarThreadSortOrder = Schema.is(SidebarThreadSortOrder);
 const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
+  created_at: "Default",
   updated_at: "Last updated",
-  created_at: "Created",
 };
 
 function compactSidebarTimeLabel(label: string): string {

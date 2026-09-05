@@ -587,13 +587,13 @@ export function firstValidTimestamp(
   return null;
 }
 
-// Sidebar sort, newest on top. "updated_at" follows the user's last message
-// (getThreadSortTimestamp, shared with the command palette and mobile), so
-// agent activity alone never reorders the list; a thread moves only when the
-// user talks to it, or when an un-settle re-anchors it (see
-// activeThreadAnchorTimestampMs). "created_at" is a static creation order.
-// Status (including pending approval) is carried by each card's edge strip,
-// not by position.
+// Sidebar sort, newest on top. "created_at" (shown as "Default") is the
+// static order: creation time, re-anchored only when an un-settle brings a
+// thread back (see activeThreadAnchorTimestampMs). "updated_at" also follows
+// the user's last message (getThreadSortTimestamp, shared with the command
+// palette and mobile). Agent activity alone never reorders either. Status
+// (including pending approval) is carried by each card's edge strip, not by
+// position.
 export function sortThreadsForSidebar<
   T extends ThreadSortInput & {
     readonly id: string;
@@ -602,7 +602,7 @@ export function sortThreadsForSidebar<
 >(threads: readonly T[], sortOrder: SidebarThreadSortOrder = "updated_at"): T[] {
   const anchorMs =
     sortOrder === "created_at"
-      ? (thread: T) => firstValidTimestampMs(thread.createdAt)
+      ? activeThreadAnchorTimestampMs
       : (thread: T) =>
           Math.max(
             getThreadSortTimestamp(thread, "updated_at"),
