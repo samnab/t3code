@@ -241,7 +241,8 @@ to switch the chat input into goal mode: the input changes colour, and sending w
 instead of a message. Select the pill again to go back. On mobile, the goal pill lives in the
 thread composer's toolbar and opens a goal editor as a bottom sheet. Sending `/goal` on its own
 fills in the current goal for editing, and `/goal clear` removes it. The `mod+shift+g` shortcut
-toggles goal mode without leaving the keyboard.
+toggles goal mode without leaving the keyboard. Pressing Esc while typing in goal mode leaves goal
+mode and keeps whatever you typed.
 Goals are T3 Code state: they are stored with the thread and stay in sync across your devices.
 The word `clear` is reserved, so a goal cannot literally be `clear`. A goal needs at least one
 visible character and fits within 1,024 characters. This is separate from a Codex execution

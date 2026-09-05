@@ -3406,6 +3406,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         composerEditorRef.current?.focusAtEnd();
         return;
       }
+      if (
+        event.key === "Escape" &&
+        goalModeActive &&
+        !composerMenuOpen &&
+        !isComposerModelPickerOpen &&
+        !isStashMenuOpen &&
+        !isCommandPaletteOpen() &&
+        (event.target as HTMLElement | null)?.closest('[data-testid="composer-editor"]')
+      ) {
+        setGoalMode(false);
+        return;
+      }
       if (command !== "composer.stash") return;
       // Always claim the shortcut so the browser save dialog never opens,
       // even when the composer is in a state that can't stash.
@@ -3427,8 +3439,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return () => window.removeEventListener("keydown", handler, true);
   }, [
     activePendingProgress,
+    composerMenuOpen,
+    goalModeActive,
     isComposerApprovalState,
     isComposerModelPickerOpen,
+    isStashMenuOpen,
     keybindings,
     pendingUserInputs.length,
     projectSelectionRequired,
