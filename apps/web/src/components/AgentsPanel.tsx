@@ -31,9 +31,35 @@ import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useResizableWidth } from "~/hooks/useResizableWidth";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
+
+const BACKGROUND_HEIGHT_STORAGE_KEY = "agents-panel:background-height";
+const DEFAULT_BACKGROUND_HEIGHT = 200;
+const MIN_BACKGROUND_HEIGHT = 96;
+
+/** In-flow horizontal drag handle between the agent list and background processes. */
+function HorizontalResizeHandle({
+  handlers,
+}: {
+  handlers: ReturnType<typeof useResizableWidth>["handlers"];
+}) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="horizontal"
+      className="group relative -my-1 h-2 shrink-0 cursor-row-resize select-none"
+      {...handlers}
+    >
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-transparent transition-colors duration-150 group-hover:bg-border group-active:bg-primary/60"
+      />
+    </div>
+  );
+}
 
 /**
  * In-flight states all present as Working (one steady state, per the
@@ -1027,31 +1053,65 @@ export function AgentsPanel({
     );
   }
 
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col gap-2 p-2">
-          {model.workflows.map((group) => (
-            <WorkflowSection
-              key={group.workflow.id}
-              group={group}
-              environmentId={environmentId}
-              threadId={threadId}
-              onSelect={setSelectedAgentId}
-            />
+  const hasAgentList = model.workflows.length > 0 || model.directAgents.length > 0;
+  const hasBackgroundProcesses = model.backgroundProcesses.length > 0;
+  const showDivider = hasAgentList && hasBackgroundProcesses;
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { width: backgroundHeight, handlers: backgroundHeightHandlers } = useResizableWidth({
+    storageKey: BACKGROUND_HEIGHT_STORAGE_KEY,
+    defaultWidth: DEFAULT_BACKGROUND_HEIGHT,
+    minWidth: MIN_BACKGROUND_HEIGHT,
+    maxWidth: Math.max(
+      MIN_BACKGROUND_HEIGHT,
+      (containerRef.current?.clientHeight ?? DEFAULT_BACKGROUND_HEIGHT * 3) * 0.7,
+    ),
+    edge: "top",
+    axis: "y",
+  });
+
+  const agentList = (
+    <div className="flex flex-col gap-2 p-2">
+      {model.workflows.map((group) => (
+        <WorkflowSection
+          key={group.workflow.id}
+          group={group}
+          environmentId={environmentId}
+          threadId={threadId}
+          onSelect={setSelectedAgentId}
+        />
+      ))}
+      {model.directAgents.length > 0 ? (
+        <section>
+          <div className="px-1.5 pt-1 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
+            Direct spawns
+          </div>
+          {model.directAgents.map((agent) => (
+            <AgentRow key={agent.id} agent={agent} onSelect={setSelectedAgentId} />
           ))}
-          {model.directAgents.length > 0 ? (
-            <section>
-              <div className="px-1.5 pt-1 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
-                Direct spawns
-              </div>
-              {model.directAgents.map((agent) => (
-                <AgentRow key={agent.id} agent={agent} onSelect={setSelectedAgentId} />
-              ))}
-            </section>
-          ) : null}
-          {model.backgroundProcesses.length > 0 ? (
-            <section>
+        </section>
+      ) : null}
+      {!showDivider && hasBackgroundProcesses ? (
+        <section>
+          <div className="px-1.5 pt-1 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
+            Background processes
+          </div>
+          {model.backgroundProcesses.map((process) => (
+            <BackgroundProcessRow key={process.id} process={process} />
+          ))}
+        </section>
+      ) : null}
+    </div>
+  );
+
+  return (
+    <div ref={containerRef} className="flex h-full min-h-0 flex-col">
+      {showDivider ? (
+        <>
+          <ScrollArea className="min-h-0 flex-1">{agentList}</ScrollArea>
+          <HorizontalResizeHandle handlers={backgroundHeightHandlers} />
+          <ScrollArea className="shrink-0" style={{ height: backgroundHeight }}>
+            <section className="p-2">
               <div className="px-1.5 pt-1 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
                 Background processes
               </div>
@@ -1059,9 +1119,11 @@ export function AgentsPanel({
                 <BackgroundProcessRow key={process.id} process={process} />
               ))}
             </section>
-          ) : null}
-        </div>
-      </ScrollArea>
+          </ScrollArea>
+        </>
+      ) : (
+        <ScrollArea className="min-h-0 flex-1">{agentList}</ScrollArea>
+      )}
       <footer className="flex items-center justify-between border-t border-border/60 px-3 py-1.5 font-mono text-[.7rem] text-muted-foreground">
         <span className="flex items-center gap-2">
           {model.runningCount + model.waitingCount + model.liveBackgroundCount > 0 ? (

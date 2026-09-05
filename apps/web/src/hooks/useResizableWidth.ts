@@ -15,8 +15,11 @@ export interface UseResizableWidthOptions {
    * Which edge of the host element carries the drag handle:
    *   - "left"  → panel grows leftward (right-anchored panels)
    *   - "right" → panel grows rightward (left-anchored panels)
+   *   - "top"   → panel grows upward (bottom-anchored panels), only valid with axis "y"
    */
-  readonly edge: "left" | "right";
+  readonly edge: "left" | "right" | "top";
+  /** Drag direction: "x" resizes width (default), "y" resizes height. */
+  readonly axis?: "x" | "y";
 }
 
 export interface ResizableWidthHandlers {
@@ -39,7 +42,7 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
   readonly width: number;
   readonly handlers: ResizableWidthHandlers;
 } {
-  const { storageKey, defaultWidth, minWidth, maxWidth, edge } = options;
+  const { storageKey, defaultWidth, minWidth, maxWidth, edge, axis = "x" } = options;
 
   const clamp = useCallback(
     (value: number): number => {
@@ -65,7 +68,7 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
 
   const dragStateRef = useRef<{
     pointerId: number;
-    startX: number;
+    startPos: number;
     startWidth: number;
     pending: number;
     rafId: number | null;
@@ -101,18 +104,18 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
       } catch {
         return;
       }
-      document.body.style.cursor = "col-resize";
+      document.body.style.cursor = axis === "y" ? "row-resize" : "col-resize";
       document.body.style.userSelect = "none";
       dragStateRef.current = {
         pointerId: event.pointerId,
-        startX: event.clientX,
+        startPos: axis === "y" ? event.clientY : event.clientX,
         startWidth: clampedWidth,
         pending: clampedWidth,
         rafId: null,
         target,
       };
     },
-    [clampedWidth],
+    [axis, clampedWidth],
   );
 
   const onPointerMove = useCallback(
@@ -120,7 +123,10 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
       const state = dragStateRef.current;
       if (!state || state.pointerId !== event.pointerId) return;
       event.preventDefault();
-      const delta = edge === "left" ? state.startX - event.clientX : event.clientX - state.startX;
+      const pos = axis === "y" ? event.clientY : event.clientX;
+      // "left"/"top" edges grow the panel as the pointer moves toward the
+      // panel's anchor (up or left); "right" grows away from it.
+      const delta = edge === "right" ? pos - state.startPos : state.startPos - pos;
       state.pending = clamp(state.startWidth + delta);
       if (state.rafId !== null) return;
       state.rafId = requestAnimationFrame(() => {
@@ -130,7 +136,7 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
         setWidth(active.pending);
       });
     },
-    [clamp, edge],
+    [axis, clamp, edge],
   );
 
   const onPointerUp = useCallback(
