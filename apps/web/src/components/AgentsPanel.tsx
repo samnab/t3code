@@ -425,21 +425,46 @@ const BACKGROUND_STATUS_DOT: Record<RuntimeBackgroundProcess["status"], string> 
   stopped: "bg-muted-foreground/60",
 };
 
+/** Short status label for a settled background process: "exit N" from detail, else a status fallback. */
+export function backgroundStatusLabel(
+  status: RuntimeBackgroundProcess["status"],
+  detail: string | null | undefined,
+): string {
+  const exitMatch = detail?.match(/exit code (-?\d+)/i);
+  if (exitMatch) {
+    return `exit ${exitMatch[1]}`;
+  }
+  return status === "failed" ? "failed" : status === "stopped" ? "stopped" : "done";
+}
+
 /** Background command/watch-loop row: same visual language as AgentRow, no click-through. */
 function BackgroundProcessRow({ process }: { process: RuntimeBackgroundProcess }) {
+  const elapsed = elapsedBetween(
+    process.startedAt,
+    process.status === "running" ? null : process.endedAt,
+  );
+  const statusText =
+    process.status === "running"
+      ? elapsed
+      : [backgroundStatusLabel(process.status, process.detail), elapsed]
+          .filter(Boolean)
+          .join(" · ");
   return (
-    <div className="grid h-8 w-full grid-cols-[0.375rem_minmax(0,1fr)_auto] items-center gap-x-2 rounded-md px-1.5 py-1">
-      <span className="flex items-center">
+    <div
+      className="grid w-full grid-cols-[0.375rem_minmax(0,1fr)_auto] items-start gap-x-2 rounded-md px-1.5 py-1"
+      title={process.detail ?? undefined}
+    >
+      <span className="flex items-center pt-0.5">
         <span
           aria-hidden
           className={cn("size-1.5 shrink-0 rounded-full", BACKGROUND_STATUS_DOT[process.status])}
         />
       </span>
-      <span className="min-w-0 truncate text-sm font-medium">{process.title}</span>
-      <span className="min-w-14 text-right font-mono text-[.7rem] tabular-nums text-muted-foreground/80">
-        {process.status === "running"
-          ? elapsedBetween(process.startedAt, null)
-          : (process.detail ?? elapsedBetween(process.startedAt, process.endedAt))}
+      <span className="min-w-0 whitespace-pre-wrap break-words font-mono text-xs font-medium">
+        {process.title}
+      </span>
+      <span className="min-w-14 whitespace-nowrap pt-0.5 text-right font-mono text-[.7rem] tabular-nums text-muted-foreground/80">
+        {statusText}
       </span>
     </div>
   );

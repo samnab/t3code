@@ -9,6 +9,7 @@ import type {
 import {
   AgentDetailView,
   AgentsPanel,
+  backgroundStatusLabel,
   canShowTranscriptDetail,
   transcriptDisplayState,
   transcriptFlagLabels,
@@ -186,5 +187,19 @@ describe("AgentsPanel transcript rendering semantics", () => {
         terminalCatchUpComplete: false,
       }),
     ).toBe("error");
+  });
+});
+
+describe("backgroundStatusLabel", () => {
+  it("extracts the exit code from detail when present", () => {
+    expect(
+      backgroundStatusLabel("completed", 'Background command "x" completed (exit code 0)'),
+    ).toBe("exit 0");
+  });
+
+  it("falls back to a status word when detail has no exit code", () => {
+    expect(backgroundStatusLabel("failed", undefined)).toBe("failed");
+    expect(backgroundStatusLabel("stopped", undefined)).toBe("stopped");
+    expect(backgroundStatusLabel("completed", undefined)).toBe("done");
   });
 });
