@@ -6140,8 +6140,13 @@ function ChatViewContent(props: ChatViewProps) {
               description: "Type the goal after /goal and send.",
             }),
           );
-        } else {
-          composerRef.current?.insertTextAtEnd(currentGoal, { ensureLeadingBoundary: true });
+        } else if (
+          composerRef.current?.insertTextAtEnd(currentGoal, { ensureLeadingBoundary: true })
+        ) {
+          // The insert already focuses at the new end once it renders. A
+          // focusAtEnd here would re-emit the editor's stale snapshot
+          // through onChange and overwrite the staged goal.
+          return;
         }
         composerRef.current?.focusAtEnd();
         return;
