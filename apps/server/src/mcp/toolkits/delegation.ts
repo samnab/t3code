@@ -4,6 +4,7 @@ import {
   ChildRunCapabilities,
   ChildRunError,
   ChildRunResult,
+  ChildRunSendInput,
   ChildRunService,
   ChildRunSpawnInput,
 } from "../ChildRunService.ts";
@@ -17,7 +18,7 @@ const target = Schema.Struct({
 export const DelegationToolkit = Toolkit.make(
   Tool.make("subagent_capabilities", {
     description:
-      "List configured native child providers and delegation limits. Codex, Claude and Pi children use their own provider adapters. Restricted parents are currently unsupported. Results last for this server lifetime, with at most 256 retained runs. Completion requires subagent_result; no automatic parent wake-up.",
+      "List configured native child providers and delegation limits. Codex, Claude and Pi children use their own provider adapters. Each target truthfully reports whether it can enforce the parent's runtime mode. Results and native resume identities survive server restarts, and terminal results are delivered automatically when the parent is idle.",
     parameters: Schema.Struct({}),
     success: ChildRunCapabilities,
     failure: ChildRunError,
@@ -25,15 +26,23 @@ export const DelegationToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("subagent_spawn", {
     description:
-      "Start one child turn using a configured provider instance and its native model identifier. The child inherits the parent's working directory and full-access runtime mode, receives only your prompt, and has no T3 delegation tools. Returns immediately; collect with subagent_result. Interactive requests fail explicitly. No Pi dependency for Codex or Claude children.",
+      "Start one child turn using a configured provider instance and native model identifier. The child inherits the parent's working directory and runtime mode, receives only your prompt, and has no T3 delegation tools. Returns immediately. Interactive requests fail explicitly. Codex, Claude and Pi each run through their own native adapter.",
     parameters: ChildRunSpawnInput,
+    success: ChildRunResult,
+    failure: ChildRunError,
+    dependencies,
+  }),
+  Tool.make("subagent_send", {
+    description:
+      "Send another instruction to a child. An active child is steered through its native adapter. A terminal child starts a follow-up from its durable native resume identity and returns a new run id linked to the prior run.",
+    parameters: ChildRunSendInput,
     success: ChildRunResult,
     failure: ChildRunError,
     dependencies,
   }),
   Tool.make("subagent_result", {
     description:
-      "Read a child run's status and bounded assistant output. Set waitMs up to 30000 to wait for completion. A starting/running response requires another call; terminal results are repeatable until eviction or server restart. Only the parent session can access this run.",
+      "Read a child run's durable status and bounded assistant output. Set waitMs up to 30000 to wait for completion. Terminal results are repeatable across parent credential renewal and server restart. Reading a terminal result acknowledges automatic delivery.",
     parameters: Schema.Struct({
       ...target.fields,
       waitMs: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 30_000 }))),
@@ -60,6 +69,10 @@ export const DelegationHandlersLive = DelegationToolkit.toLayer({
   subagent_spawn: (input) =>
     Effect.gen(function* () {
       return yield* (yield* ChildRunService).spawn(yield* McpInvocationContext, input);
+    }),
+  subagent_send: (input) =>
+    Effect.gen(function* () {
+      return yield* (yield* ChildRunService).send(yield* McpInvocationContext, input);
     }),
   subagent_result: (input) =>
     Effect.gen(function* () {

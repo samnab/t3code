@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   classifyTaskAgentKind,
   ProviderDriverKind,
+  ProviderInstanceId,
   RuntimeTaskId,
   ThreadId,
   type OrchestrationSubagentRun,
@@ -955,6 +956,45 @@ describe("nested agents vs subagent shells", () => {
 });
 
 describe("reconcileSubagentInventory", () => {
+  it("keeps T3-native provider runs visible in the shared web and mobile inventory model", () => {
+    const runId = RuntimeTaskId.make("native-client-run");
+    const reconciled = reconcileSubagentInventory(
+      [
+        {
+          runId,
+          runNumber: 51,
+          threadId: ThreadId.make("thread-native-run"),
+          parentRunId: null,
+          runtimeFamily: "t3-native",
+          harness: "claudeAgent",
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: ProviderInstanceId.make("claude-native"),
+          model: "claude-sonnet",
+          effort: null,
+          title: "Cross-provider research",
+          summary: null,
+          status: "active",
+          terminalReason: null,
+          controlAvailability: "unsupported",
+          historyAvailability: "summary-only",
+          capabilities: { steer: false, cancel: false, resume: false },
+          createdAt: "2026-09-06T10:00:00.000Z",
+          updatedAt: "2026-09-06T10:00:00.000Z",
+          terminalAt: null,
+        },
+      ],
+      [],
+    );
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      id: runId,
+      role: "claudeAgent",
+      status: "running",
+      controlAvailability: "unsupported",
+      historyAvailability: "summary-only",
+    });
+  });
+
   it("keeps durable history while applying newer live activity by opaque id", () => {
     const runId = RuntimeTaskId.make("opaque-client-run");
     const inventory: ReadonlyArray<OrchestrationSubagentRun> = [

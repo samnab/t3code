@@ -444,7 +444,7 @@ export const SubagentRunHistoryAvailability = Schema.Literals([
 ]);
 export type SubagentRunHistoryAvailability = typeof SubagentRunHistoryAvailability.Type;
 
-export const SubagentRunRuntimeFamily = Schema.Literals(["pi-stock", "pi-manager"]);
+export const SubagentRunRuntimeFamily = Schema.Literals(["pi-stock", "pi-manager", "t3-native"]);
 export type SubagentRunRuntimeFamily = typeof SubagentRunRuntimeFamily.Type;
 
 export const SubagentRunCapabilities = Schema.Struct({
@@ -1130,6 +1130,10 @@ export const ThreadTurnStartCommand = Schema.Struct({
   // Continuation turns count against ThreadGoalLoop.maxIterations; a
   // user-sent turn never does. See ThreadGoalLoop.
   continuation: Schema.optional(Schema.Literal(true)),
+  // Internal automation can enqueue a result only if no turn, request, or
+  // queued start appeared first. This field is intentionally absent from the
+  // client command schema.
+  onlyIfIdle: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 

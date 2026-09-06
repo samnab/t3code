@@ -82,6 +82,40 @@ function makeSession(status: OrchestrationSession["status"]): OrchestrationSessi
 }
 
 it.layer(NodeServices.layer)("settled thread decider", (it) => {
+  it.effect("admits automatic result delivery only while the parent is idle", () =>
+    Effect.gen(function* () {
+      const command = {
+        type: "thread.turn.start" as const,
+        commandId: CommandId.make("automatic-result"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("automatic-result-message"),
+          role: "user" as const,
+          text: "Subagent result",
+          attachments: [],
+        },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        onlyIfIdle: true as const,
+        createdAt: NOW,
+      };
+      const busy = yield* decideOrchestrationCommand({
+        command,
+        readModel: makeReadModel(null, null, makeSession("running")),
+      }).pipe(Effect.result);
+      expect(busy._tag).toBe("Failure");
+
+      const idle = yield* decideOrchestrationCommand({
+        command: { ...command, commandId: CommandId.make("automatic-result-idle") },
+        readModel: makeReadModel(null, null, makeSession("ready")),
+      });
+      const events = Array.isArray(idle) ? idle : [idle];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.message-sent",
+        "thread.turn-start-requested",
+      ]);
+    }),
+  );
   it.effect("rejects an automatic settle when the thread is pinned active", () =>
     Effect.gen(function* () {
       const command = {

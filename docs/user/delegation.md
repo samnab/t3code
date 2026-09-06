@@ -1,22 +1,23 @@
 # Delegate across providers
 
-An agent can delegate a task to a different configured provider. For example,
-a Codex conversation can ask a Claude child to investigate a question, and a
-Claude conversation can ask a Codex child to review code. Each child uses its
-own provider directly. Pi is needed only when choosing a Pi child.
+Codex, Claude and Pi conversations can delegate work to any configured Codex,
+Claude or Pi provider. Each child uses that provider directly. Pi is never used
+as an engine for Codex or Claude work.
 
-Ask your agent to check its delegation capabilities, then specify the provider
-and model you want. The parent must currently have full access. Children share
-its working directory and receive the task prompt without the conversation
-history. Give each child a clear task and avoid overlapping file edits.
+Ask the parent agent to check its delegation capabilities, then name the
+provider and model you want. Children share the parent's working directory and
+receive the task prompt without the conversation history. Codex and Claude
+children can inherit restricted modes. Pi children currently require full
+access. Give each child a clear task and avoid overlapping file edits.
 
-The parent can check results, wait for completion or cancel a child. Up to four
-children can run at once for a conversation. Results appear through the
-parent's tool activity; these runs do not yet appear in the Agents view.
-Tasks that need interactive input fail with an explanation.
+The parent can inspect a result, wait, cancel, steer a running child, or start a
+follow-up from a finished child. Up to four children can run at once for a
+conversation. Their status appears in the Agents view on web, desktop and
+mobile. Tasks that need interactive input fail with an explanation.
 
-Keep the parent session and server running until results are collected.
-Children do not automatically wake the parent, and results are lost when the
-server restarts. The server retains up to 256 child results, with older finished
-results removed as new children start. Long output is truncated explicitly.
-Delegation works independently of agent browser access.
+When a child finishes, T3 delivers its result after the parent becomes idle.
+Finished results survive server and parent-session restarts. Work interrupted
+by a server restart is reported as failed rather than left running. Explicitly
+stopping the parent cancels its active children without restarting the
+conversation. Long output is truncated explicitly. Delegation is independent
+of agent browser access.

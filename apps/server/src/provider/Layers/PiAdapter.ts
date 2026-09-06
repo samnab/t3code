@@ -2029,13 +2029,19 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             issue: resolvedLaunchArgs.message,
           });
         }
+        const candidateMcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const mcpSession =
+          candidateMcpSession !== undefined &&
+          (boundInstanceId === undefined ||
+            candidateMcpSession.providerInstanceId === boundInstanceId)
+            ? candidateMcpSession
+            : undefined;
         const extensionPath = yield* materializePiT3McpExtension(
           serverConfig.providerStatusCacheDir,
         ).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.mapError((cause) => adapterError(input.threadId, "materialize_t3_mcp", cause)),
         );
-        const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const launch = buildPiRpcLaunch({
           launchArgs: resolvedLaunchArgs.args,
           environment,

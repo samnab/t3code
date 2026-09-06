@@ -76,7 +76,22 @@ function makeClient(url: string, bearer: string) {
     if (parsed.error !== undefined) throw new Error(parsed.error.message ?? "T3 MCP request failed.");
     return parsed.result;
   };
-  return { request };
+  const notify = async (method: string, params?: unknown, signal?: AbortSignal) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        authorization: bearer.startsWith("Bearer ") ? bearer : \`Bearer \${bearer}\`,
+        "content-type": "application/json",
+        "mcp-protocol-version": PROTOCOL,
+        ...(sessionId === undefined ? {} : { "mcp-session-id": sessionId }),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", method, params }),
+      signal,
+    });
+    if (!response.ok) throw new Error(\`T3 MCP \${method} failed (\${response.status}).\`);
+  };
+  return { request, notify };
 }
 
 export default async function t3McpExtension(pi: ExtensionAPI) {
@@ -87,6 +102,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     capabilities: {},
     clientInfo: { name: "t3-pi-mcp", version: "1.0.0" },
   });
+  await client.notify("notifications/initialized", {});
   const listed = await client.request("tools/list", {}) as { readonly tools?: McpTool[] } | undefined;
   for (const tool of listed?.tools ?? []) {
     const registeredName = \`mcp__t3-code__\${tool.name}\`;
@@ -101,12 +117,12 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       parameters: unsafe === undefined ? Type.Object({}, { additionalProperties: true }) : unsafe(tool.inputSchema ?? {}),
       async execute(_toolCallId, params, signal) {
         const result = await client.request("tools/call", { name: tool.name, arguments: params ?? {} }, signal);
+        if (typeof result === "object" && result !== null && "isError" in result && result.isError === true) {
+          throw new Error(resultText(result).slice(0, 4_000) || "T3 MCP tool failed.");
+        }
         return {
           content: [{ type: "text", text: resultText(result) }],
           details: { server: "t3-code", tool: tool.name },
-          ...(typeof result === "object" && result !== null && "isError" in result && result.isError === true
-            ? { isError: true }
-            : {}),
         };
       },
     });
