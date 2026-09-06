@@ -54,12 +54,17 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   failFirstActivity = false,
   repositoryLayer?: Layer.Layer<NativeChildRunRepository>,
   pauseTerminalActivity = false,
+  blockSteers = false,
 ) {
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const domainEvents = yield* PubSub.unbounded<OrchestrationEvent>();
   const sent = yield* Deferred.make<ThreadId>();
   const terminalActivityReached = yield* Deferred.make<void>();
   const releaseTerminalActivity = yield* Deferred.make<void>();
+  const firstSteerStarted = yield* Deferred.make<void>();
+  const releaseFirstSteer = yield* Deferred.make<void>();
+  const secondSteerStarted = yield* Deferred.make<void>();
+  const releaseSecondSteer = yield* Deferred.make<void>();
   const starts: Array<ProviderSessionStartInput> = [];
   const stopped: Array<ThreadId> = [];
   const sentPrompts: string[] = [];
@@ -102,10 +107,19 @@ const makeHarness = Effect.fn("makeHarness")(function* (
       }),
     sendTurn: (input) =>
       Effect.gen(function* () {
-        const turnId = TurnId.make(`child-turn-${sentTurns.length + 1}`);
+        const turnNumber = sentTurns.length + 1;
+        const turnId = TurnId.make(`child-turn-${turnNumber}`);
         sentTurns.push(turnId);
         sentPrompts.push(input.input ?? "");
         yield* Deferred.succeed(sent, input.threadId);
+        if (blockSteers && turnNumber === 2) {
+          yield* Deferred.succeed(firstSteerStarted, undefined);
+          yield* Deferred.await(releaseFirstSteer);
+        }
+        if (blockSteers && turnNumber === 3) {
+          yield* Deferred.succeed(secondSteerStarted, undefined);
+          yield* Deferred.await(releaseSecondSteer);
+        }
         if (complete) {
           yield* PubSub.publish(events, {
             type: "content.delta",
@@ -207,6 +221,10 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     domainEvents,
     terminalActivityReached,
     releaseTerminalActivity,
+    firstSteerStarted,
+    releaseFirstSteer,
+    secondSteerStarted,
+    releaseSecondSteer,
     input: {
       providerInstanceId: childInstance,
       model: "native-model",
@@ -503,6 +521,65 @@ it.effect("waits for a Codex queued steer turn instead of stopping after the pri
       });
       expect((yield* service.result(h.scope, run.runId, 30_000)).status).toBe("completed");
       expect(h.stopped).toEqual([threadId]);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("serializes concurrent steers before accepting their terminal events", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "claudeAgent",
+      "codex",
+      "full-access",
+      false,
+      false,
+      undefined,
+      false,
+      true,
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const run = yield* service.spawn(h.scope, h.input);
+      const childThreadId = yield* Deferred.await(h.sent);
+      const firstSteer = yield* service
+        .send(h.scope, { runId: run.runId, prompt: "First steer" })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(h.firstSteerStarted);
+      const [status] = yield* service.controlPlane.status();
+      const secondSteer = yield* service.controlPlane
+        .steer({
+          managerId: status!.managerId!,
+          runId: run.runId,
+          text: "Second steer",
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(h.releaseFirstSteer, undefined);
+      yield* Fiber.join(firstSteer);
+      yield* Deferred.await(h.secondSteerStarted);
+      yield* PubSub.publish(h.events, {
+        type: "turn.completed",
+        eventId: EventId.make("first-steer-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: childThreadId,
+        turnId: h.sentTurns[1],
+        createdAt: now,
+        payload: { state: "completed" },
+      });
+      yield* Deferred.succeed(h.releaseSecondSteer, undefined);
+      yield* Fiber.join(secondSteer);
+      yield* Effect.yieldNow;
+      expect(h.stopped).toHaveLength(0);
+      yield* PubSub.publish(h.events, {
+        type: "turn.completed",
+        eventId: EventId.make("second-steer-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: childThreadId,
+        turnId: h.sentTurns[2],
+        createdAt: now,
+        payload: { state: "completed" },
+      });
+      expect((yield* service.result(h.scope, run.runId, 30_000)).status).toBe("completed");
     }).pipe(Effect.provide(h.services));
   }),
 );

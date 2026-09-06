@@ -138,7 +138,11 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
       UPDATE native_child_runs SET status = ${input.status}, output = ${input.output},
         output_truncated = ${input.outputTruncated ? 1 : 0}, error = ${input.error},
         resume_cursor_json = COALESCE(${input.resumeCursor}, resume_cursor_json),
-        delivery_state = 'pending', updated_at = ${input.updatedAt}
+        delivery_state = CASE
+          WHEN delivery_state IN ('suppressed', 'delivered') THEN delivery_state
+          ELSE 'pending'
+        END,
+        updated_at = ${input.updatedAt}
       WHERE run_id = ${input.runId} AND status IN ('starting', 'running')
     `,
   });
@@ -151,9 +155,11 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
   const parentDeliveredRows = SqlSchema.void({
     Request: Schema.Struct({ parentThreadId: ThreadId }),
     execute: ({ parentThreadId }) => sql`
-      UPDATE native_child_runs SET delivery_state = 'delivered'
+      UPDATE native_child_runs SET delivery_state = CASE
+        WHEN delivery_state = 'delivered' THEN 'delivered'
+        ELSE 'suppressed'
+      END
       WHERE parent_thread_id = ${parentThreadId}
-        AND status IN ('completed', 'failed', 'cancelled')
     `,
   });
   const retryRow = SqlSchema.void({
@@ -169,7 +175,11 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
     execute: ({ interruptedAt }) => sql`
       UPDATE native_child_runs SET status = 'failed',
         error = ${NATIVE_CHILD_RESTART_ERROR},
-        delivery_state = 'pending', updated_at = ${interruptedAt}
+        delivery_state = CASE
+          WHEN delivery_state IN ('suppressed', 'delivered') THEN delivery_state
+          ELSE 'pending'
+        END,
+        updated_at = ${interruptedAt}
       WHERE status IN ('starting', 'running')
       RETURNING ${selectColumns}
     `,
@@ -268,20 +278,21 @@ const makeMemoryRepository = Effect.sync(() => {
         outputTruncated: input.outputTruncated,
         error: input.error,
         resumeCursor: input.resumeCursor ?? run.resumeCursor,
-        deliveryState: "pending",
+        deliveryState:
+          run.deliveryState === "suppressed" || run.deliveryState === "delivered"
+            ? run.deliveryState
+            : "pending",
         updatedAt: input.updatedAt,
       })),
     markDelivered: (runId) => update(runId, (run) => ({ ...run, deliveryState: "delivered" })),
     markParentDelivered: (parentThreadId) =>
       Effect.sync(() => {
         for (const [runId, run] of rows) {
-          if (
-            run.parentThreadId !== parentThreadId ||
-            (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled")
-          ) {
-            continue;
-          }
-          rows.set(runId, { ...run, deliveryState: "delivered" });
+          if (run.parentThreadId !== parentThreadId) continue;
+          rows.set(runId, {
+            ...run,
+            deliveryState: run.deliveryState === "delivered" ? "delivered" : "suppressed",
+          });
         }
       }),
     markDeliveryRetry: (runId) =>
@@ -299,7 +310,10 @@ const makeMemoryRepository = Effect.sync(() => {
             ...run,
             status: "failed",
             error: NATIVE_CHILD_RESTART_ERROR,
-            deliveryState: "pending",
+            deliveryState:
+              run.deliveryState === "suppressed" || run.deliveryState === "delivered"
+                ? run.deliveryState
+                : "pending",
             updatedAt: interruptedAt,
           });
           rows.set(runId, next);

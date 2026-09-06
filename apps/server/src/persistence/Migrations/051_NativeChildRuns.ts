@@ -121,7 +121,7 @@ export default Effect.gen(function* () {
       output TEXT NOT NULL,
       output_truncated INTEGER NOT NULL CHECK (output_truncated IN (0, 1)),
       error TEXT,
-      delivery_state TEXT NOT NULL CHECK (delivery_state IN ('pending', 'delivered')),
+      delivery_state TEXT NOT NULL CHECK (delivery_state IN ('pending', 'suppressed', 'delivered')),
       delivery_attempt INTEGER NOT NULL CHECK (delivery_attempt >= 0),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,

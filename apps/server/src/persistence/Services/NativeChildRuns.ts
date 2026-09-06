@@ -44,7 +44,7 @@ export const NativeChildRun = Schema.Struct({
   output: Schema.String,
   outputTruncated: Schema.Boolean,
   error: Schema.NullOr(Schema.String),
-  deliveryState: Schema.Literals(["pending", "delivered"]),
+  deliveryState: Schema.Literals(["pending", "suppressed", "delivered"]),
   deliveryAttempt: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

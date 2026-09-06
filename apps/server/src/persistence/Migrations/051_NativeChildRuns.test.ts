@@ -115,4 +115,54 @@ it.layer(testLayer)("native child persistence", (it) => {
       expect(inventory).toEqual([{ runtimeFamily: "t3-native" }]);
     }),
   );
+
+  it.effect("preserves explicit parent-stop delivery suppression across restart", () =>
+    Effect.gen(function* () {
+      const repository = yield* NativeChildRunRepository;
+      yield* runMigrations({ toMigrationInclusive: 51 });
+      const runId = RuntimeTaskId.make("native-suppressed-active");
+      const parentThreadId = ThreadId.make("parent-suppressed-active");
+      const childThreadId = ThreadId.make("child-suppressed-active");
+      const createdAt = "2026-09-06T00:00:00.000Z";
+      const runNumber = yield* repository.reserveRunNumber({
+        runId,
+        allocatedAt: createdAt,
+        childThreadId,
+      });
+      yield* repository.insert(
+        NativeChildRun.make({
+          runId,
+          runNumber,
+          parentRunId: null,
+          parentThreadId,
+          childThreadId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          provider: ProviderDriverKind.make("codex"),
+          model: "gpt-5.6-codex",
+          title: "Suppressed child",
+          runtimeMode: "full-access",
+          cwd: "/workspace",
+          resumeCursor: null,
+          generation: 1,
+          status: "running",
+          output: "",
+          outputTruncated: false,
+          error: null,
+          deliveryState: "pending",
+          deliveryAttempt: 0,
+          createdAt,
+          updatedAt: createdAt,
+        }),
+      );
+
+      yield* repository.markParentDelivered(parentThreadId);
+      yield* repository.reconcileRestart("2026-09-06T00:01:00.000Z");
+
+      expect(yield* repository.get(runId)).toMatchObject({
+        status: "failed",
+        deliveryState: "suppressed",
+      });
+      expect(yield* repository.listPendingDelivery(parentThreadId)).toHaveLength(1);
+    }),
+  );
 });

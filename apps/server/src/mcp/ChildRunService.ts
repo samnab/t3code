@@ -107,7 +107,8 @@ interface ActiveRun {
   sessionStarted: boolean;
   sessionStopped: boolean;
   expectedTurnId: TurnId | null;
-  steering: boolean;
+  readonly steerMutex: Semaphore.Semaphore;
+  pendingSteers: number;
   pendingCompletions: Array<{
     readonly turnId: TurnId | null;
     readonly outcome: {
@@ -329,7 +330,7 @@ const make = Effect.gen(function* () {
 
   const deliver = Effect.fn("ChildRunService.deliver")(function* (run: NativeChildRun) {
     if (run.deliveryState === "delivered") return;
-    if (stoppedParents.has(run.parentThreadId)) {
+    if (run.deliveryState === "suppressed" || stoppedParents.has(run.parentThreadId)) {
       yield* repository
         .markDelivered(run.runId)
         .pipe(Effect.mapError(persistenceError("Suppressing delivery after parent stop")));
@@ -455,7 +456,8 @@ const make = Effect.gen(function* () {
       sessionStarted: false,
       sessionStopped: false,
       expectedTurnId: null,
-      steering: false,
+      steerMutex: yield* Semaphore.make(1),
+      pendingSteers: 0,
       pendingCompletions: [],
     };
     activeByRun.set(run.runId, active);
@@ -528,7 +530,8 @@ const make = Effect.gen(function* () {
     const releaseSteering = (expectedTurnId?: TurnId) =>
       Effect.gen(function* () {
         if (expectedTurnId !== undefined) active.expectedTurnId = expectedTurnId;
-        active.steering = false;
+        active.pendingSteers = Math.max(0, active.pendingSteers - 1);
+        if (active.pendingSteers > 0) return;
         const completion =
           expectedTurnId === undefined
             ? active.pendingCompletions.at(-1)
@@ -540,7 +543,7 @@ const make = Effect.gen(function* () {
           yield* Deferred.succeed(active.terminal, completion.outcome);
         }
       });
-    active.steering = true;
+    active.pendingSteers += 1;
     let released = false;
     yield* Effect.gen(function* () {
       const turn = yield* active.adapter
@@ -563,7 +566,10 @@ const make = Effect.gen(function* () {
           updatedAt: yield* nowIso,
         })
         .pipe(Effect.mapError(persistenceError("Persisting child session identity")));
-    }).pipe(Effect.ensuring(Effect.suspend(() => (released ? Effect.void : releaseSteering()))));
+    }).pipe(
+      active.steerMutex.withPermits(1),
+      Effect.ensuring(Effect.suspend(() => (released ? Effect.void : releaseSteering()))),
+    );
   });
 
   const start = Effect.fn("ChildRunService.start")(
@@ -711,7 +717,7 @@ const make = Effect.gen(function* () {
       readonly error?: string;
     },
   ) => {
-    if (child.steering) {
+    if (child.pendingSteers > 0) {
       return Effect.sync(() => {
         child.pendingCompletions.push({ turnId: turnId ?? null, outcome });
         if (child.pendingCompletions.length > 4) child.pendingCompletions.shift();
