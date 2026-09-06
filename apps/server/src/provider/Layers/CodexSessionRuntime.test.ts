@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
 
