@@ -127,3 +127,19 @@ it.effect("does not keep credentials of other threads alive", () =>
     expect(yield* registry.resolve(token)).toBeUndefined();
   }),
 );
+
+it.effect("binds only explicitly granted MCP capabilities to the credential", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("delegation-only"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: ["delegation"],
+    });
+    const scope = yield* registry.resolve(
+      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    );
+    expect(scope?.capabilities.has("delegation")).toBe(true);
+    expect(scope?.capabilities.has("preview")).toBe(false);
+  }),
+);
