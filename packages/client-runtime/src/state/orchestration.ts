@@ -372,5 +372,9 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:subagent-control-steer",
       tag: ORCHESTRATION_WS_METHODS.subagentControlSteer,
     }),
+    subagentControlCancel: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:subagent-control-cancel",
+      tag: ORCHESTRATION_WS_METHODS.subagentControlCancel,
+    }),
   };
 }

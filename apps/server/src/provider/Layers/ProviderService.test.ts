@@ -2500,7 +2500,8 @@ describe("agent browser access", () => {
 
   const startSessionWith = (enableAgentBrowserAccess: boolean, threadId: ThreadId) =>
     Effect.gen(function* () {
-      const issued: Array<ThreadId> = [];
+      const issued: Array<{ threadId: ThreadId; capabilities: ReadonlyArray<string> | undefined }> =
+        [];
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -2515,7 +2516,7 @@ describe("agent browser access", () => {
       const providerLayer = makeProviderServiceLive({
         issueMcpCredential: (request) =>
           Effect.sync(() => {
-            issued.push(request.threadId);
+            issued.push({ threadId: request.threadId, capabilities: request.capabilities });
             return undefined;
           }),
         revokeMcpCredential: (revoked) => Effect.sync(() => void revokedThreads.push(revoked)),
@@ -2546,14 +2547,13 @@ describe("agent browser access", () => {
       return issued;
     });
 
-  // Credential issuance is the observable that matters: it is the only place a
-  // credential is minted, and `/mcp` accepts nothing else, so withholding it is
-  // what actually denies every provider and external MCP client.
-  it.effect("requests no MCP credential when agent browser access is off", () =>
+  it.effect("grants delegation without preview when agent browser access is off", () =>
     Effect.gen(function* () {
       const issued = yield* startSessionWith(false, asThreadId("thread-browser-off"));
 
-      assert.deepEqual(issued, []);
+      assert.deepEqual(issued, [
+        { threadId: asThreadId("thread-browser-off"), capabilities: ["delegation"] },
+      ]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -2577,7 +2577,7 @@ describe("agent browser access", () => {
 
       const issued = yield* startSessionWith(true, threadId);
 
-      assert.deepEqual(issued, [threadId]);
+      assert.deepEqual(issued, [{ threadId, capabilities: ["preview", "delegation"] }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

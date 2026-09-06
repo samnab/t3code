@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   classifyTaskAgentKind,
   ProviderDriverKind,
+  ProviderInstanceId,
   RuntimeTaskId,
   ThreadId,
   type OrchestrationSubagentRun,
@@ -103,6 +104,30 @@ describe("foldSubagentActivities", () => {
     expect(agent.usage?.totalTokens).toBe(5000);
     expect(agent.activationCount).toBe(1);
     expect(agent.completedAt).not.toBeNull();
+  });
+
+  it("a t3-native task.completed with status cancelled maps to cancelled, not completed", () => {
+    const agents = fold([
+      activity("task.started", { taskId: "task-cancel", taskType: "local_agent" }),
+      activity("task.completed", {
+        taskId: "task-cancel",
+        status: "cancelled",
+        summary: "Cancelled by user",
+      }),
+    ]);
+    expect(agents[0]!.status).toBe("cancelled");
+  });
+
+  it("a t3-native task.completed with status interrupted maps to interrupted, not completed", () => {
+    const agents = fold([
+      activity("task.started", { taskId: "task-interrupt", taskType: "local_agent" }),
+      activity("task.completed", {
+        taskId: "task-interrupt",
+        status: "interrupted",
+        summary: "Restart interrupted",
+      }),
+    ]);
+    expect(agents[0]!.status).toBe("interrupted");
   });
 
   it("progress can create an agent when its start row aged out of retention", () => {
@@ -955,6 +980,45 @@ describe("nested agents vs subagent shells", () => {
 });
 
 describe("reconcileSubagentInventory", () => {
+  it("keeps T3-native provider runs visible in the shared web and mobile inventory model", () => {
+    const runId = RuntimeTaskId.make("native-client-run");
+    const reconciled = reconcileSubagentInventory(
+      [
+        {
+          runId,
+          runNumber: 51,
+          threadId: ThreadId.make("thread-native-run"),
+          parentRunId: null,
+          runtimeFamily: "t3-native",
+          harness: "claudeAgent",
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: ProviderInstanceId.make("claude-native"),
+          model: "claude-sonnet",
+          effort: null,
+          title: "Cross-provider research",
+          summary: null,
+          status: "active",
+          terminalReason: null,
+          controlAvailability: "owner-routed",
+          historyAvailability: "summary-only",
+          capabilities: { steer: true, cancel: true, resume: false },
+          createdAt: "2026-09-06T10:00:00.000Z",
+          updatedAt: "2026-09-06T10:00:00.000Z",
+          terminalAt: null,
+        },
+      ],
+      [],
+    );
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      id: runId,
+      role: "claudeAgent",
+      status: "running",
+      controlAvailability: "owner-routed",
+      historyAvailability: "summary-only",
+    });
+  });
+
   it("keeps durable history while applying newer live activity by opaque id", () => {
     const runId = RuntimeTaskId.make("opaque-client-run");
     const inventory: ReadonlyArray<OrchestrationSubagentRun> = [

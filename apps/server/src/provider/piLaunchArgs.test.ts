@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./piLaunchArgs.ts";
+import { PI_T3_MCP_EXTENSION_SOURCE } from "./piT3McpExtensionSource.ts";
 
 describe("resolvePiLaunchArgs", () => {
   it("accepts empty arguments", () => {
@@ -82,10 +84,44 @@ describe("buildPiRpcLaunch", () => {
   it("strips T3-owned session credentials from the child environment", () => {
     const launch = buildPiRpcLaunch({
       launchArgs: [],
-      environment: { PATH: "/usr/bin", T3_MCP_URL: "http://loopback", T3_MCP_BEARER: "secret" },
+      environment: {
+        PATH: "/usr/bin",
+        T3_MCP_URL: "http://loopback",
+        T3_MCP_BEARER_TOKEN: "secret",
+      },
     });
     expect(launch.env.PATH).toBe("/usr/bin");
     expect(launch.env.T3_MCP_URL).toBeUndefined();
-    expect(launch.env.T3_MCP_BEARER).toBeUndefined();
+    expect(launch.env.T3_MCP_BEARER_TOKEN).toBeUndefined();
+  });
+
+  it("injects the session-bound T3 MCP bridge into a parent Pi process", () => {
+    const launch = buildPiRpcLaunch({
+      launchArgs: [],
+      environment: {},
+      extensionPath: "/cache/pi-t3-mcp-extension.ts",
+      runtimeMode: "full-access",
+      mcpSession: {
+        environmentId: EnvironmentId.make("environment"),
+        threadId: ThreadId.make("thread"),
+        providerSessionId: "session",
+        providerInstanceId: ProviderInstanceId.make("pi"),
+        endpoint: "http://127.0.0.1/mcp",
+        authorizationHeader: "Bearer secret",
+      },
+    });
+    expect(launch.args).toEqual(["--mode", "rpc", "--extension", "/cache/pi-t3-mcp-extension.ts"]);
+    expect(launch.env.T3_MCP_URL).toBe("http://127.0.0.1/mcp");
+    expect(launch.env.T3_MCP_BEARER_TOKEN).toBe("secret");
+    expect(launch.env.T3_PI_RUNTIME_MODE).toBe("full-access");
+  });
+});
+
+describe("Pi T3 MCP extension", () => {
+  it("completes the MCP handshake and throws failed tool results", () => {
+    expect(PI_T3_MCP_EXTENSION_SOURCE).toContain('client.notify("notifications/initialized"');
+    expect(PI_T3_MCP_EXTENSION_SOURCE).toContain('"isError" in result');
+    expect(PI_T3_MCP_EXTENSION_SOURCE).toContain("throw new Error(resultText(result)");
+    expect(PI_T3_MCP_EXTENSION_SOURCE).not.toContain("? { isError: true }");
   });
 });

@@ -1081,6 +1081,20 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.onlyIfIdle === true) {
+        if (
+          targetThread.session?.status === "starting" ||
+          targetThread.session?.status === "running" ||
+          targetThread.session?.status === "stopped" ||
+          hasOpenBlockingRequest(targetThread) ||
+          hasQueuedTurnStartForThread(targetThread, command.createdAt)
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `thread ${command.threadId} is not idle; skipping automatic turn start`,
+          });
+        }
+      }
       // The goal loop only drives turns T3 runs itself: a user send always
       // starts, never counts an iteration, and never trips the cap.
       const goalLoop =

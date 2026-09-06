@@ -50,6 +50,9 @@ export interface SubagentControlAdapterLookup {
   ) => Effect.Effect<ProviderInstanceRoutingInfo, ProviderUnsupportedError>;
 }
 
+export type AdditionalSubagentControlPlane =
+  ProviderSubagentControlPlaneShape<ProviderAdapterError>;
+
 const MAX_STATUSES = 64;
 
 const unsupportedStatus = (reason: string): SubagentControlPlaneStatus => ({
@@ -79,6 +82,7 @@ const normalizeControlFailure = (cause: unknown): SubagentControlError =>
  */
 export const routeSubagentControlStatus = (
   registry: SubagentControlAdapterLookup,
+  additionalPlanes: ReadonlyArray<AdditionalSubagentControlPlane> = [],
 ): Effect.Effect<{ readonly statuses: ReadonlyArray<SubagentControlPlaneStatus> }, never> =>
   Effect.gen(function* () {
     const instanceIds = yield* registry.listInstances().pipe(Effect.orElseSucceed(() => []));
@@ -119,6 +123,12 @@ export const routeSubagentControlStatus = (
         statuses.push({ ...entry, providerInstanceId: instanceId });
       }
     }
+    for (const plane of additionalPlanes) {
+      if (statuses.length >= MAX_STATUSES) break;
+      const entries = yield* plane.status().pipe(Effect.option);
+      if (Option.isNone(entries)) continue;
+      statuses.push(...entries.value.slice(0, MAX_STATUSES - statuses.length));
+    }
     return { statuses };
   });
 
@@ -126,6 +136,7 @@ export const routeSubagentControlStatus = (
 const findOwnerPlanes = (
   registry: SubagentControlAdapterLookup,
   managerId: string,
+  additionalPlanes: ReadonlyArray<AdditionalSubagentControlPlane>,
 ): Effect.Effect<ReadonlyArray<ProviderSubagentControlPlaneShape<ProviderAdapterError>>, never> =>
   Effect.gen(function* () {
     const instanceIds = yield* registry.listInstances().pipe(Effect.orElseSucceed(() => []));
@@ -134,6 +145,15 @@ const findOwnerPlanes = (
       const adapter = yield* registry.getByInstance(instanceId).pipe(Effect.option);
       const plane = Option.isNone(adapter) ? undefined : adapter.value.subagentControlPlane;
       if (plane === undefined) continue;
+      const statuses = yield* plane.status().pipe(Effect.option);
+      if (
+        Option.isSome(statuses) &&
+        statuses.value.some((status) => status.supported && status.managerId === managerId)
+      ) {
+        planes.push(plane);
+      }
+    }
+    for (const plane of additionalPlanes) {
       const statuses = yield* plane.status().pipe(Effect.option);
       if (
         Option.isSome(statuses) &&
@@ -154,9 +174,10 @@ const routeToOwner = (
     OrchestrationSubagentControlActionResult,
     ProviderAdapterError | SubagentControlError
   >,
+  additionalPlanes: ReadonlyArray<AdditionalSubagentControlPlane> = [],
 ): Effect.Effect<OrchestrationSubagentControlActionResult, SubagentControlError> =>
   Effect.gen(function* () {
-    const planes = yield* findOwnerPlanes(registry, managerId);
+    const planes = yield* findOwnerPlanes(registry, managerId, additionalPlanes);
     if (planes.length === 0) {
       return yield* new SubagentControlError({
         reason: "unknown-manager",
@@ -186,14 +207,16 @@ const routeToOwner = (
 export const routeSubagentControlSteer = (
   registry: SubagentControlAdapterLookup,
   input: OrchestrationSubagentControlSteerInput,
+  additionalPlanes: ReadonlyArray<AdditionalSubagentControlPlane> = [],
 ): Effect.Effect<OrchestrationSubagentControlActionResult, SubagentControlError> =>
-  routeToOwner(registry, input.managerId, (plane) => plane.steer(input));
+  routeToOwner(registry, input.managerId, (plane) => plane.steer(input), additionalPlanes);
 
 export const routeSubagentControlCancel = (
   registry: SubagentControlAdapterLookup,
   input: OrchestrationSubagentControlCancelInput,
+  additionalPlanes: ReadonlyArray<AdditionalSubagentControlPlane> = [],
 ): Effect.Effect<OrchestrationSubagentControlActionResult, SubagentControlError> =>
-  routeToOwner(registry, input.managerId, (plane) => plane.cancel(input));
+  routeToOwner(registry, input.managerId, (plane) => plane.cancel(input), additionalPlanes);
 
 /**
  * Route one exact Phase 1.5 `run-upsert-result` to the live manager that

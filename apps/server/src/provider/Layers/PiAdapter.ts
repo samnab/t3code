@@ -75,6 +75,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -82,7 +83,11 @@ import {
   ProviderAdapterValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import { buildPiRpcLaunch, resolvePiLaunchArgs } from "../piLaunchArgs.ts";
+import {
+  buildPiRpcLaunch,
+  materializePiT3McpExtension,
+  resolvePiLaunchArgs,
+} from "../piLaunchArgs.ts";
 import { withVoiceNotificationsEnv } from "../ProviderInstanceEnvironment.ts";
 import { zaiUsageLimitWindows } from "../zaiUsageLimits.ts";
 import { expandPiSkillReference, parsePiDiscoveredCommands } from "../PiCommands.ts";
@@ -2024,9 +2029,25 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             issue: resolvedLaunchArgs.message,
           });
         }
+        const candidateMcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const mcpSession =
+          candidateMcpSession !== undefined &&
+          (boundInstanceId === undefined ||
+            candidateMcpSession.providerInstanceId === boundInstanceId)
+            ? candidateMcpSession
+            : undefined;
+        const extensionPath = yield* materializePiT3McpExtension(
+          serverConfig.providerStatusCacheDir,
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.mapError((cause) => adapterError(input.threadId, "materialize_t3_mcp", cause)),
+        );
         const launch = buildPiRpcLaunch({
           launchArgs: resolvedLaunchArgs.args,
           environment,
+          extensionPath,
+          runtimeMode: input.runtimeMode,
+          ...(mcpSession === undefined ? {} : { mcpSession }),
         });
         const scope = yield* Scope.make("sequential");
         return yield* Effect.gen(function* () {

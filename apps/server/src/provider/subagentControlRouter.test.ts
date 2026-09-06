@@ -164,6 +164,33 @@ describe("subagentControlRouter", () => {
     }),
   );
 
+  it.effect("routes status, steer, and cancel through a T3-owned additional plane", () =>
+    Effect.gen(function* () {
+      const plane = makePlane("t3-native:parent");
+      const registry = makeLookup([]);
+      const status = yield* routeSubagentControlStatus(registry, [plane]);
+      expect(status.statuses).toHaveLength(1);
+      expect(status.statuses[0]).toMatchObject({
+        supported: true,
+        managerId: "t3-native:parent",
+      });
+      yield* routeSubagentControlSteer(
+        registry,
+        { managerId: "t3-native:parent", runId: RUN_ID, text: "focus" },
+        [plane],
+      );
+      yield* routeSubagentControlCancel(
+        registry,
+        { managerId: "t3-native:parent", runId: RUN_ID },
+        [plane],
+      );
+      expect(plane.events).toEqual([
+        `steer:t3-native:parent:${RUN_ID}`,
+        `cancel:t3-native:parent:${RUN_ID}`,
+      ]);
+    }),
+  );
+
   it.effect("routes cancel by declared manager ownership", () =>
     Effect.gen(function* () {
       const ownerPlane = makePlane("mgr-1");

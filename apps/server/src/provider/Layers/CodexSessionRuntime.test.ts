@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off
 import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
 
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -22,6 +24,7 @@ import {
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
+  reapDescendantProcessTree,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
@@ -40,6 +43,69 @@ describe("CodexSessionRuntimeIdentifierGenerationError", () => {
       error.message,
       "Failed to generate Codex App Server identifier for provider-event.",
     );
+  });
+});
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("reapDescendantProcessTree", () => {
+  it("kills a grandchild that escaped into its own process group, without touching the root or unrelated processes", async () => {
+    // Simulates the live defect: Codex's native app-server (the "root" here)
+    // spawns a shell tool call detached into its own process group, so a
+    // group-kill of the root's own pgid never reaches it.
+    const root = NodeChildProcess.spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+        const { spawn } = require("node:child_process");
+        const grandchild = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+        grandchild.unref();
+        process.stdout.write(String(grandchild.pid) + "\\n");
+        setInterval(() => {}, 1000);
+        `,
+      ],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    const control = NodeChildProcess.spawn("sleep", ["30"], { stdio: "ignore" });
+
+    try {
+      const grandchildPid = await new Promise<number>((resolve, reject) => {
+        let buffered = "";
+        root.stdout?.on("data", (chunk: Buffer) => {
+          buffered += chunk.toString("utf8");
+          const line = buffered.split("\n")[0]?.trim();
+          if (line) resolve(Number(line));
+        });
+        root.once("error", reject);
+        setTimeout(() => reject(new Error("timed out waiting for grandchild pid")), 5_000);
+      });
+
+      NodeAssert.ok(isPidAlive(grandchildPid), "grandchild should be running before reap");
+      NodeAssert.ok(root.pid !== undefined);
+
+      reapDescendantProcessTree(root.pid!);
+      // The kill signal and the ps-table snapshot race the OS scheduler by a
+      // hair; give the grandchild's SIGKILL a moment to land.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      NodeAssert.equal(isPidAlive(grandchildPid), false, "grandchild should be reaped");
+      NodeAssert.ok(isPidAlive(root.pid!), "reap must not kill the root process itself");
+      NodeAssert.ok(
+        control.pid !== undefined && isPidAlive(control.pid),
+        "unrelated process must survive",
+      );
+    } finally {
+      root.kill("SIGKILL");
+      control.kill("SIGKILL");
+    }
   });
 });
 
