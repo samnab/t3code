@@ -2,8 +2,11 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import type * as Scope from "effect/Scope";
 import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -16,6 +19,44 @@ export const TAILSCALE_PROBE_TIMEOUT = Duration.millis(2_500);
 // it is always spawned directly rather than through cmd.exe shell mode.
 const tailscaleCommandForPlatform = (platform: NodeJS.Platform): "tailscale" | "tailscale.exe" =>
   platform === "win32" ? "tailscale.exe" : "tailscale";
+
+const MACOS_TAILSCALE_BUNDLE_EXECUTABLE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+
+const isPlatformError = (cause: unknown): cause is PlatformError.PlatformError =>
+  Predicate.isTagged(cause, "PlatformError");
+
+const isNotFoundPlatformError = (cause: unknown): boolean =>
+  isPlatformError(cause) && cause.reason._tag === "NotFound";
+
+const isNotFoundSpawnDefect = (cause: unknown): boolean =>
+  typeof cause === "object" &&
+  cause !== null &&
+  "code" in cause &&
+  ((cause.code === "ENOENT" && "message" in cause && typeof cause.message === "string") ||
+    (cause.code === "ERR_INVALID_ARG_TYPE" &&
+      "message" in cause &&
+      cause.message === 'Executable not found in $PATH: "tailscale"'));
+
+const spawnTailscale = (
+  platform: NodeJS.Platform,
+  args: ReadonlyArray<string>,
+  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+): Effect.Effect<
+  ChildProcessSpawner.ChildProcessHandle,
+  PlatformError.PlatformError,
+  Scope.Scope
+> => {
+  // Finder-launched macOS apps do not inherit Tailscale's app-bundle CLI path.
+  // Keep the normal PATH command first and fall back only when it is absent.
+  const command = tailscaleCommandForPlatform(platform);
+  const fallback = () => spawner.spawn(ChildProcess.make(MACOS_TAILSCALE_BUNDLE_EXECUTABLE, args));
+  return spawner.spawn(ChildProcess.make(command, args)).pipe(
+    Effect.catchIf((cause) => platform === "darwin" && isNotFoundPlatformError(cause), fallback),
+    Effect.catchDefect((cause) =>
+      platform === "darwin" && isNotFoundSpawnDefect(cause) ? fallback() : Effect.die(cause),
+    ),
+  );
+};
 
 const TailscaleCommandContext = {
   executable: Schema.Literals(["tailscale", "tailscale.exe"]),
@@ -228,7 +269,7 @@ export const readTailscaleStatus = Effect.gen(function* () {
     argumentCount: args.length,
   };
   return yield* Effect.gen(function* () {
-    const child = yield* spawner.spawn(ChildProcess.make(executable, args)).pipe(
+    const child = yield* spawnTailscale(hostPlatform, args, spawner).pipe(
       Effect.mapError((cause) => new TailscaleCommandSpawnError({ ...commandContext, cause })),
       // Spawning can also fail as a defect rather than a typed error - a
       // non-directory entry on PATH makes node throw ENOTDIR synchronously.
@@ -303,7 +344,7 @@ const runTailscaleCommand = (
     };
     const timeout = Duration.fromInputUnsafe(timeoutInput);
     return yield* Effect.gen(function* () {
-      const child = yield* spawner.spawn(ChildProcess.make(executable, args)).pipe(
+      const child = yield* spawnTailscale(hostPlatform, args, spawner).pipe(
         Effect.mapError((cause) => new TailscaleCommandSpawnError({ ...commandContext, cause })),
         Effect.catchDefect((cause) =>
           Effect.fail(new TailscaleCommandSpawnError({ ...commandContext, cause })),

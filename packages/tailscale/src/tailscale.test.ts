@@ -7,7 +7,8 @@ import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
   buildTailscaleHttpsBaseUrl,
@@ -183,6 +184,43 @@ describe("tailscale", () => {
         magicDnsName: "desktop.tail.ts.net",
         tailnetIpv4Addresses: ["100.90.1.2"],
       });
+    });
+  });
+
+  it.effect("falls back to the macOS app bundle when tailscale is not on PATH", () => {
+    const commands: Array<string> = [];
+    const notFound = PlatformError.systemError({
+      _tag: "NotFound",
+      module: "ChildProcess",
+      method: "spawn",
+      cause: new Error("tailscale not found"),
+    });
+    const layer = Layer.succeed(
+      ChildProcessSpawner.ChildProcessSpawner,
+      ChildProcessSpawner.make((command) => {
+        if (!ChildProcess.isStandardCommand(command)) {
+          return Effect.die("expected a standard command");
+        }
+        commands.push(command.command);
+        return commands.length === 1
+          ? Effect.fail(notFound)
+          : Effect.succeed(mockHandle({ stdout: tailscaleStatusWithSingleIpJson }));
+      }),
+    );
+
+    return Effect.gen(function* () {
+      const status = yield* readTailscaleStatus.pipe(
+        Effect.provide(layer),
+        Effect.provideService(HostProcessPlatform, "darwin"),
+      );
+      assert.deepEqual(status, {
+        magicDnsName: "desktop.tail.ts.net",
+        tailnetIpv4Addresses: ["100.90.1.2"],
+      });
+      assert.deepEqual(commands, [
+        "tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+      ]);
     });
   });
 
