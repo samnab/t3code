@@ -156,6 +156,7 @@ it.layer(testLayer)("native child persistence", (it) => {
       );
 
       yield* repository.markParentDelivered(parentThreadId);
+      yield* repository.markDeliveryRetry(runId);
       yield* repository.reconcileRestart("2026-09-06T00:01:00.000Z");
 
       expect(yield* repository.get(runId)).toMatchObject({

@@ -165,7 +165,10 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
   const retryRow = SqlSchema.void({
     Request: RunIdInput,
     execute: ({ runId }) => sql`
-      UPDATE native_child_runs SET delivery_state = 'pending',
+      UPDATE native_child_runs SET delivery_state = CASE
+          WHEN delivery_state IN ('suppressed', 'delivered') THEN delivery_state
+          ELSE 'pending'
+        END,
         delivery_attempt = delivery_attempt + 1 WHERE run_id = ${runId}
     `,
   });
@@ -298,7 +301,10 @@ const makeMemoryRepository = Effect.sync(() => {
     markDeliveryRetry: (runId) =>
       update(runId, (run) => ({
         ...run,
-        deliveryState: "pending",
+        deliveryState:
+          run.deliveryState === "suppressed" || run.deliveryState === "delivered"
+            ? run.deliveryState
+            : "pending",
         deliveryAttempt: run.deliveryAttempt + 1,
       })),
     reconcileRestart: (interruptedAt) =>
