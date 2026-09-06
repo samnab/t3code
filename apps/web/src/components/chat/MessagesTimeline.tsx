@@ -119,6 +119,7 @@ import {
   resolveTimelineMinimapIndexFromPointer,
   resolveTimelineMinimapInteractiveWidth,
   resolveTimelineMinimapTopPercent,
+  resolveTimelineSelectionRowIds,
   resolveWorkGroupScrollIndex,
   shouldFollowWorkGroupAppend,
   shouldPreserveAssistantLineBreaks,
@@ -524,6 +525,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     onExpandTurn: expandCitedTurn,
     onManualNavigation,
   });
+  const selectionRowIds = useTimelineSelectionRowIds(timelineViewportElement);
+  const alwaysRender = useMemo(() => {
+    const keys = [...(citationAlwaysRender?.keys ?? []), ...selectionRowIds];
+    return keys.length > 0 ? { keys } : undefined;
+  }, [citationAlwaysRender, selectionRowIds]);
   useLayoutEffect(() => {
     keepTimelineEndVisibleAfterOverlayGrowth({
       timeline: listRef.current,
@@ -719,7 +725,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             initialScrollAtEnd={citationRequest === null}
             // Legend needs a data refresh to mount new pins without a scroll event.
             {...(readyCitationRequest ? { dataVersion: readyCitationRequest.key } : {})}
-            {...(citationAlwaysRender ? { alwaysRender: citationAlwaysRender } : {})}
+            {...(alwaysRender ? { alwaysRender } : {})}
             onLoad={onCitationListLoad}
             {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
             contentInsetEndAdjustment={contentInsetEndAdjustment}
@@ -1475,6 +1481,24 @@ function ThinkingTimelineRow() {
 // Self-ticking labels — update their own text nodes so elapsed-time display
 // does not create a React commit every second while a response is streaming.
 // ---------------------------------------------------------------------------
+
+const NO_ROW_IDS: ReadonlyArray<string> = [];
+
+/** Tracks which timeline rows a live text selection touches, updating only when that set changes. */
+function useTimelineSelectionRowIds(viewport: HTMLElement | null): ReadonlyArray<string> {
+  const [rowIds, setRowIds] = useState(NO_ROW_IDS);
+  useEffect(() => {
+    if (!viewport) return;
+    const document = viewport.ownerDocument;
+    const onSelectionChange = () => {
+      const next = resolveTimelineSelectionRowIds(document.getSelection(), viewport);
+      setRowIds((current) => (current.join("\n") === next.join("\n") ? current : next));
+    };
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => document.removeEventListener("selectionchange", onSelectionChange);
+  }, [viewport]);
+  return rowIds;
+}
 
 /** Live "Working for Xs" label. */
 function WorkingTimer({ createdAt }: { createdAt: string }) {

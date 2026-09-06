@@ -1031,3 +1031,28 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
     }
   }
 }
+
+/**
+ * Row ids holding the ends of a live text selection inside the timeline
+ * viewport, deduplicated. Virtualization unmounts rows that scroll past the
+ * draw distance, and the browser re-anchors a selection whose end node leaves
+ * the DOM, so the timeline pins these rows while the selection exists.
+ */
+export function resolveTimelineSelectionRowIds(
+  selection: Selection | null,
+  viewport: HTMLElement,
+): ReadonlyArray<string> {
+  if (!selection || selection.isCollapsed) return [];
+  const rowId = (node: Node | null): string | null => {
+    const element = node instanceof Element ? node : node?.parentElement;
+    const row = element?.closest<HTMLElement>("[data-timeline-row-id]");
+    return row && viewport.contains(row) ? (row.dataset.timelineRowId ?? null) : null;
+  };
+  return [
+    ...new Set(
+      [rowId(selection.anchorNode), rowId(selection.focusNode)].filter(
+        (id): id is string => id !== null,
+      ),
+    ),
+  ];
+}
