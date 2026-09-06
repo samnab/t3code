@@ -224,6 +224,40 @@ describe("tailscale", () => {
     });
   });
 
+  it.effect("falls back when Node reports a missing executable defect", () => {
+    const commands: Array<string> = [];
+    const defect = Object.assign(new Error('Executable not found in $PATH: "tailscale"'), {
+      code: "ERR_INVALID_ARG_TYPE",
+    });
+    const layer = Layer.succeed(
+      ChildProcessSpawner.ChildProcessSpawner,
+      ChildProcessSpawner.make((command) => {
+        if (!ChildProcess.isStandardCommand(command)) {
+          return Effect.die("expected a standard command");
+        }
+        commands.push(command.command);
+        if (commands.length === 1) {
+          return Effect.callback<never, never>(() => {
+            throw defect;
+          });
+        }
+        return Effect.succeed(mockHandle({ stdout: tailscaleStatusWithSingleIpJson }));
+      }),
+    );
+
+    return Effect.gen(function* () {
+      const status = yield* readTailscaleStatus.pipe(
+        Effect.provide(layer),
+        Effect.provideService(HostProcessPlatform, "darwin"),
+      );
+      assert.equal(status.magicDnsName, "desktop.tail.ts.net");
+      assert.deepEqual(commands, [
+        "tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+      ]);
+    });
+  });
+
   it.effect("preserves tailscale spawn failures as causes", () => {
     const systemCause = new Error("private executable lookup detail");
     const cause = PlatformError.systemError({
