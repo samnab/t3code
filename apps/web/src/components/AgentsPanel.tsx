@@ -65,15 +65,14 @@ function HorizontalResizeHandle({
  * In-flight states all present as Working (one steady state, per the
  * monitoring-pill design: detail belongs in the activity sub-line, and a
  * stalled/waiting/queued subagent is still the fleet doing its job, not a
- * user problem). Only settled states differentiate.
+ * user problem). Settled states differentiate.
  */
 const STATUS_VISUALS: Record<RuntimeSubagent["status"], { dotClass: string; label: string }> = {
   pending: { dotClass: "bg-info", label: "Working" },
   running: { dotClass: "bg-info", label: "Working" },
   waiting: { dotClass: "bg-info", label: "Working" },
-  // Idle reads as settled (muted, not sky): a resting Codex child looks done
-  // unless resumed — live-test: sky idle dots read as stuck in-progress.
-  idle: { dotClass: "bg-muted-foreground/50", label: "Idle · resumable" },
+  // Idle reads as settled while remaining visually distinct from completed.
+  idle: { dotClass: "bg-success", label: "Idle · resumable" },
   completed: { dotClass: "bg-success", label: "Completed" },
   failed: { dotClass: "bg-destructive", label: "Failed" },
   cancelled: { dotClass: "bg-muted-foreground/60", label: "Stopped" },
