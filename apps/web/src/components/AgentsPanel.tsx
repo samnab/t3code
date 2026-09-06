@@ -879,9 +879,14 @@ export function AgentDetailView({
   const steer = useAtomCommand(orchestrationEnvironment.subagentControlSteer, {
     reportFailure: false,
   });
+  const cancel = useAtomCommand(orchestrationEnvironment.subagentControlCancel, {
+    reportFailure: false,
+  });
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   const disabledReason =
     agent.controlAvailability === "read-only"
@@ -908,6 +913,20 @@ export function AgentDetailView({
       setText("");
     } else {
       setSendError("Could not send the message. Try again.");
+    }
+  };
+
+  const handleCancel = async () => {
+    if (managerId === null || cancelling) return;
+    setCancelling(true);
+    setCancelError(null);
+    const result = await cancel({
+      environmentId,
+      input: { managerId, runId: RuntimeTaskId.make(agent.id) },
+    });
+    setCancelling(false);
+    if (result._tag !== "Success") {
+      setCancelError("Could not cancel the run. Try again.");
     }
   };
 
@@ -970,6 +989,11 @@ export function AgentDetailView({
             {sendError}
           </p>
         ) : null}
+        {cancelError ? (
+          <p role="alert" className="mb-1.5 text-[.7rem] text-destructive-foreground">
+            {cancelError}
+          </p>
+        ) : null}
         <div className="flex items-end gap-1.5">
           <Textarea
             size="sm"
@@ -984,6 +1008,15 @@ export function AgentDetailView({
               }
             }}
           />
+          <Button
+            size="icon-micro"
+            variant="ghost-muted"
+            aria-label="Cancel run"
+            disabled={disabledReason !== null || cancelling}
+            onClick={() => void handleCancel()}
+          >
+            <X aria-hidden className="size-3.5" />
+          </Button>
           <Button
             size="icon-micro"
             variant="ghost-muted"
