@@ -50,12 +50,16 @@ function HorizontalResizeHandle({
     <div
       role="separator"
       aria-orientation="horizontal"
-      className="group relative -my-1 h-2 shrink-0 cursor-row-resize select-none"
+      className="group relative h-3 shrink-0 cursor-row-resize select-none"
       {...handlers}
     >
       <span
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-transparent transition-colors duration-150 group-hover:bg-border group-active:bg-primary/60"
+        className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border transition-colors duration-150 group-hover:bg-primary/60 group-active:bg-primary"
+      />
+      <span
+        aria-hidden
+        className="pointer-events-none absolute left-1/2 top-1/2 h-1 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted-foreground/40 transition-colors duration-150 group-hover:bg-primary/70 group-active:bg-primary"
       />
     </div>
   );
