@@ -57,17 +57,21 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
 
 /**
- * Best-effort reap of anything still descending from `rootPid` after the
- * Codex app-server itself has been signalled to exit. Codex's native
- * app-server runs shell tool calls in their own process group so a running
- * tool's signal handling can't propagate back up to app-server; that means
- * the group-kill T3's spawner sends to the app-server's own pgid on teardown
- * never reaches those tool subprocesses (see live-validation defect: a
- * `sleep` spawned by a tool call survived app-server exiting and was
- * reparented to PID 1). Walk the OS pid/ppid table for live descendants of
- * `rootPid` and kill each by its exact captured pid — never by name or
- * pattern. Windows already tree-kills via `taskkill /T` in the spawner, so
- * this only runs on POSIX.
+ * Best-effort reap of anything still descending from `rootPid`. Codex's
+ * native app-server runs shell tool calls in their own process group so a
+ * running tool's signal handling can't propagate back up to app-server;
+ * that means the group-kill T3's spawner sends to the app-server's own pgid
+ * on teardown never reaches those tool subprocesses.
+ *
+ * MUST be called (and must find the tree) while `rootPid` is still alive:
+ * once app-server exits, POSIX reparents its orphaned descendants to PID 1
+ * and this walk, starting from the now-dead `rootPid`, finds nothing — that
+ * is the live-validation defect (a `sleep` spawned by a tool call survived
+ * app-server exiting and was reparented to PID 1). Callers must snapshot
+ * and kill before letting anything terminate the root. Kills each live
+ * descendant by its exact captured pid — never by name or pattern. Windows
+ * already tree-kills via `taskkill /T` in the spawner, so this only runs on
+ * POSIX.
  */
 export function reapDescendantProcessTree(rootPid: number): void {
   if (process.platform === "win32") return;
@@ -1267,18 +1271,6 @@ export const makeCodexSessionRuntime = (
       env,
       extendEnv,
     });
-    // Registered before the spawn's own `Effect.acquireRelease`, so on scope
-    // release this runs *after* the spawner's group-kill has already had its
-    // chance (LIFO finalizer order): the spawner tries first, this reaps any
-    // descendants that its process-group signal didn't reach.
-    const appServerPidRef = yield* Ref.make<number | undefined>(undefined);
-    yield* Effect.addFinalizer(() =>
-      Ref.get(appServerPidRef).pipe(
-        Effect.map((pid) => {
-          if (pid !== undefined) reapDescendantProcessTree(pid);
-        }),
-      ),
-    );
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -1299,7 +1291,13 @@ export const makeCodexSessionRuntime = (
             }),
         ),
       );
-    yield* Ref.set(appServerPidRef, child.pid);
+    // Registered *after* the spawn's own `Effect.acquireRelease`, so on scope
+    // release this runs FIRST (LIFO finalizer order) — while `child.pid` is
+    // still alive — and only then does the spawner's own group-kill signal
+    // the app-server itself. Reaping after the root dies is too late: its
+    // orphaned descendants have already been reparented to PID 1 and this
+    // walk would find nothing.
+    yield* Effect.addFinalizer(() => Effect.sync(() => reapDescendantProcessTree(child.pid)));
 
     const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
       Layer.build,

@@ -55,46 +55,56 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Spawns a wrapper process (the "root", standing in for Codex's app-server)
+ * whose grandchild escapes into its own process group (standing in for a
+ * shell tool call) — the exact shape of the live defect. Resolves once the
+ * grandchild's pid has been observed on the root's stdout, with both
+ * processes confirmed alive.
+ */
+async function spawnRootWithEscapedGrandchild(): Promise<{
+  readonly root: NodeChildProcess.ChildProcess;
+  readonly grandchildPid: number;
+}> {
+  const root = NodeChildProcess.spawn(
+    process.execPath,
+    [
+      "-e",
+      `
+      const { spawn } = require("node:child_process");
+      const grandchild = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+      grandchild.unref();
+      process.stdout.write(String(grandchild.pid) + "\\n");
+      setInterval(() => {}, 1000);
+      `,
+    ],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  const grandchildPid = await new Promise<number>((resolve, reject) => {
+    let buffered = "";
+    root.stdout?.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString("utf8");
+      const line = buffered.split("\n")[0]?.trim();
+      if (line) resolve(Number(line));
+    });
+    root.once("error", reject);
+    setTimeout(() => reject(new Error("timed out waiting for grandchild pid")), 5_000);
+  });
+  NodeAssert.ok(root.pid !== undefined);
+  NodeAssert.ok(isPidAlive(grandchildPid), "grandchild should be running before reap");
+  return { root, grandchildPid };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 200));
+
 describe("reapDescendantProcessTree", () => {
   it("kills a grandchild that escaped into its own process group, without touching the root or unrelated processes", async () => {
-    // Simulates the live defect: Codex's native app-server (the "root" here)
-    // spawns a shell tool call detached into its own process group, so a
-    // group-kill of the root's own pgid never reaches it.
-    const root = NodeChildProcess.spawn(
-      process.execPath,
-      [
-        "-e",
-        `
-        const { spawn } = require("node:child_process");
-        const grandchild = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
-        grandchild.unref();
-        process.stdout.write(String(grandchild.pid) + "\\n");
-        setInterval(() => {}, 1000);
-        `,
-      ],
-      { stdio: ["ignore", "pipe", "ignore"] },
-    );
+    const { root, grandchildPid } = await spawnRootWithEscapedGrandchild();
     const control = NodeChildProcess.spawn("sleep", ["30"], { stdio: "ignore" });
 
     try {
-      const grandchildPid = await new Promise<number>((resolve, reject) => {
-        let buffered = "";
-        root.stdout?.on("data", (chunk: Buffer) => {
-          buffered += chunk.toString("utf8");
-          const line = buffered.split("\n")[0]?.trim();
-          if (line) resolve(Number(line));
-        });
-        root.once("error", reject);
-        setTimeout(() => reject(new Error("timed out waiting for grandchild pid")), 5_000);
-      });
-
-      NodeAssert.ok(isPidAlive(grandchildPid), "grandchild should be running before reap");
-      NodeAssert.ok(root.pid !== undefined);
-
       reapDescendantProcessTree(root.pid!);
-      // The kill signal and the ps-table snapshot race the OS scheduler by a
-      // hair; give the grandchild's SIGKILL a moment to land.
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await settle();
 
       NodeAssert.equal(isPidAlive(grandchildPid), false, "grandchild should be reaped");
       NodeAssert.ok(isPidAlive(root.pid!), "reap must not kill the root process itself");
@@ -105,6 +115,52 @@ describe("reapDescendantProcessTree", () => {
     } finally {
       root.kill("SIGKILL");
       control.kill("SIGKILL");
+    }
+  });
+
+  it("reaps the escaped grandchild when run in production order (reap while root alive, then kill root)", async () => {
+    // Mirrors makeCodexSessionRuntime's finalizer order: reap runs first,
+    // while the app-server root is still alive, and only afterwards does the
+    // spawner's own group-kill terminate the root.
+    const { root, grandchildPid } = await spawnRootWithEscapedGrandchild();
+
+    reapDescendantProcessTree(root.pid!);
+    root.kill("SIGKILL");
+    await settle();
+
+    NodeAssert.equal(
+      isPidAlive(grandchildPid),
+      false,
+      "grandchild should be reaped when snapshotted before the root dies",
+    );
+  });
+
+  it("finds nothing if reap runs after the root has already died (documents why order matters)", async () => {
+    // This is the ordering bug the live-validation run caught: once the root
+    // exits, POSIX reparents the escaped grandchild to PID 1, so a reap that
+    // starts its pid/ppid walk from the now-dead root pid finds no
+    // descendants and the grandchild leaks.
+    const { root, grandchildPid } = await spawnRootWithEscapedGrandchild();
+    const rootPid = root.pid!;
+
+    root.kill("SIGKILL");
+    await settle();
+    NodeAssert.equal(
+      isPidAlive(rootPid),
+      false,
+      "root must actually be dead for this to prove anything",
+    );
+
+    reapDescendantProcessTree(rootPid);
+    await settle();
+
+    try {
+      NodeAssert.ok(
+        isPidAlive(grandchildPid),
+        "grandchild is reparented to PID 1 before reap runs, so reap-after-death cannot find it",
+      );
+    } finally {
+      process.kill(grandchildPid, "SIGKILL");
     }
   });
 });
