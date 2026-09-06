@@ -16,6 +16,17 @@
  * @module provider/piLaunchArgs
  */
 import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+
+import type { McpProviderSessionConfig } from "../mcp/McpProviderSession.ts";
+import {
+  PI_T3_MCP_EXTENSION_FILENAME,
+  PI_T3_MCP_EXTENSION_SOURCE,
+  T3_MCP_BEARER_ENV,
+  T3_MCP_URL_ENV,
+  T3_PI_RUNTIME_MODE_ENV,
+} from "./piT3McpExtensionSource.ts";
 
 const RESERVED_PI_LAUNCH_ARGUMENTS = new Set([
   "--continue",
@@ -165,8 +176,32 @@ export function resolvePiLaunchArgs(launchArgs: string): PiLaunchArgsResolution 
   return { ok: true, args };
 }
 
-/** Environment keys T3 owns for its own sessions; never inherited by a Pi child. */
-const T3_SESSION_ENV_KEYS = ["T3_MCP_URL", "T3_MCP_BEARER", "T3_PI_RUNTIME_MODE"] as const;
+function normalizedPiPath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function hasExplicitExtension(args: ReadonlyArray<string>, extensionPath: string): boolean {
+  const wanted = normalizedPiPath(extensionPath);
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== "--extension" && args[index] !== "-e") continue;
+    if (normalizedPiPath(args[index + 1] ?? "") === wanted) return true;
+    index += 1;
+  }
+  return false;
+}
+
+export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtension")(function* (
+  cacheDir: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  yield* fs.makeDirectory(cacheDir, { recursive: true });
+  const destination = `${normalizedPiPath(cacheDir)}/${PI_T3_MCP_EXTENSION_FILENAME}`;
+  const existing = yield* fs.readFileString(destination).pipe(Effect.orElseSucceed(() => ""));
+  if (existing !== PI_T3_MCP_EXTENSION_SOURCE) {
+    yield* fs.writeFileString(destination, PI_T3_MCP_EXTENSION_SOURCE);
+  }
+  return destination;
+});
 
 export interface BuildPiRpcLaunchInput {
   readonly launchArgs: ReadonlyArray<string>;
@@ -175,12 +210,19 @@ export interface BuildPiRpcLaunchInput {
   readonly ephemeral?: boolean;
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
+  readonly mcpSession?: McpProviderSessionConfig;
+  readonly extensionPath?: string;
+  readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
 }
 
 export function buildPiRpcLaunch(input: BuildPiRpcLaunchInput): {
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
 } {
+  const hasT3Mcp =
+    input.disableExtensions !== true &&
+    input.extensionPath !== undefined &&
+    input.mcpSession !== undefined;
   const args = [
     "--mode",
     "rpc",
@@ -191,11 +233,30 @@ export function buildPiRpcLaunch(input: BuildPiRpcLaunchInput): {
     ...(input.disableExtensions === true ? ["--no-extensions"] : []),
     ...(input.disableTools === true ? ["--no-tools"] : []),
   ];
+  if (
+    input.disableExtensions !== true &&
+    input.extensionPath !== undefined &&
+    !hasExplicitExtension(args, input.extensionPath)
+  ) {
+    args.push("--extension", input.extensionPath);
+  }
   const environment = { ...input.environment };
   // These values belong to the current T3 session. Never let a Pi child reuse
   // credentials inherited from the server or a parent provider process.
-  for (const key of T3_SESSION_ENV_KEYS) {
-    delete environment[key];
-  }
-  return { args, env: environment };
+  delete environment[T3_MCP_URL_ENV];
+  delete environment[T3_MCP_BEARER_ENV];
+  delete environment[T3_PI_RUNTIME_MODE_ENV];
+  return {
+    args,
+    env: {
+      ...environment,
+      ...(input.runtimeMode === undefined ? {} : { [T3_PI_RUNTIME_MODE_ENV]: input.runtimeMode }),
+      ...(hasT3Mcp && input.mcpSession !== undefined
+        ? {
+            [T3_MCP_URL_ENV]: input.mcpSession.endpoint,
+            [T3_MCP_BEARER_ENV]: input.mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+          }
+        : {}),
+    },
+  };
 }
