@@ -19,7 +19,14 @@ export const DelegationToolkit = Toolkit.make(
   Tool.make("subagent_capabilities", {
     description:
       "List configured native child providers and delegation limits. Codex, Claude and Pi children use their own provider adapters. Each target truthfully reports whether it can enforce the parent's runtime mode. Results and native resume identities survive server restarts, and terminal results are delivered automatically when the parent is idle.",
-    parameters: Schema.Struct({}),
+    // `Schema.Struct({})` encodes to `{"anyOf":[{"type":"object"},{"type":"array"}]}`,
+    // not `{"type":"object"}`. Claude's MCP client rejects a tool whose
+    // top-level inputSchema isn't a plain object schema and silently drops
+    // the *entire* server's tool list (all delegation and preview tools),
+    // not just this one. `Schema.Record(String, Never)` encodes to the
+    // correct `{"type":"object","additionalProperties":false}` for the same
+    // "accepts no properties" contract.
+    parameters: Schema.Record(Schema.String, Schema.Never),
     success: ChildRunCapabilities,
     failure: ChildRunError,
     dependencies,
