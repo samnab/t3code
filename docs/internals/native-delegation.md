@@ -23,8 +23,10 @@ Children use private `child-<uuid>` adapter session IDs and never enter
 `ProviderService` event broadcast, so it cannot compete with an adapter queue
 consumer. It emits `t3-native` task activities into the normal orchestration
 pipeline. The existing snapshot and activity folds display those runs in the
-web, desktop and mobile Agents inventory without allowing child events to alter
-the parent's session or checkpoint state.
+web and desktop Agents inventory and the mobile work log without allowing child
+events to alter the parent's session or checkpoint state. The existing Agents
+control router sends steer and cancel actions back to the same T3-owned child
+service; terminal follow-ups remain available to the parent agent.
 
 Native resume identity, bounded output and delivery state live in SQLite.
 Assistant output is capped at 100,000 characters with an explicit truncation
@@ -36,7 +38,7 @@ After native session cleanup, completion is delivered through a normal
 `thread.turn.start` command. The decider atomically accepts this internal
 command only when the parent has no live session, blocking request or queued
 start. Deterministic run-and-attempt command IDs make retries idempotent.
-Reading a terminal result acknowledges it and suppresses later delivery.
+Reading a result is side-effect free and does not suppress automatic delivery.
 Stopping the parent cancels its active children and marks their result handled,
 so an explicit stop cannot restart the conversation.
 

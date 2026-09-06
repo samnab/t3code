@@ -6,21 +6,37 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeTaskId,
+  SubagentControlError,
   ThreadId,
   TrimmedNonEmptyString,
+  TurnId,
   type ProviderRuntimeEvent,
   type ProviderSession,
 } from "@t3tools/contracts";
-import { Context, DateTime, Deferred, Effect, Layer, Schema, Scope, Stream } from "effect";
+import {
+  Context,
+  DateTime,
+  Deferred,
+  Effect,
+  Layer,
+  Schema,
+  Scope,
+  Semaphore,
+  Stream,
+} from "effect";
 
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
 import {
   NativeChildRunRepository,
   NativeChildRun,
+  NATIVE_CHILD_RESTART_ERROR,
 } from "../persistence/Services/NativeChildRuns.ts";
 import type { ProviderAdapterError } from "../provider/Errors.ts";
-import type { ProviderAdapterShape } from "../provider/Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterShape,
+  ProviderSubagentControlPlaneShape,
+} from "../provider/Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
@@ -90,6 +106,15 @@ interface ActiveRun {
   suppressDelivery: boolean;
   sessionStarted: boolean;
   sessionStopped: boolean;
+  expectedTurnId: TurnId | null;
+  steering: boolean;
+  pendingCompletions: Array<{
+    readonly turnId: TurnId | null;
+    readonly outcome: {
+      readonly status: "completed" | "failed" | "cancelled";
+      readonly error?: string;
+    };
+  }>;
 }
 
 const supported = new Set<string>(["codex", "claudeAgent", "pi"]);
@@ -97,9 +122,25 @@ const MAX_OUTPUT = 100_000;
 const MAX_PER_PARENT = 4;
 const MAX_RUNNING = 16;
 const decodeRuntimeTaskId = Schema.decodeUnknownEffect(RuntimeTaskId);
+const NATIVE_CONTROL_CAPABILITIES = {
+  normalizedEvents: true,
+  stableActivations: true,
+  ownerRouting: true,
+  steering: true,
+  cancellation: true,
+  reloadRestore: false,
+  scheduling: false,
+  nativeChildProjection: true,
+  deliveryAcknowledgements: true,
+  childTranscripts: false,
+} as const;
 const isTerminal = (run: NativeChildRun) =>
   run.status === "completed" || run.status === "failed" || run.status === "cancelled";
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+function nativeManagerId(threadId: ThreadId): string {
+  return `t3-native:${NodeCrypto.createHash("sha256").update(threadId).digest("hex").slice(0, 32)}`;
+}
 
 function toResult(run: NativeChildRun): ChildRunResult {
   return {
@@ -152,6 +193,7 @@ export class ChildRunService extends Context.Service<
       scope: McpInvocationScope,
       runId: string,
     ) => Effect.Effect<ChildRunResult, ChildRunError>;
+    readonly controlPlane: ProviderSubagentControlPlaneShape<never>;
   }
 >()("t3/mcp/ChildRunService") {}
 
@@ -163,8 +205,11 @@ const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const startup = yield* ServerRuntimeStartup;
   const serviceScope = yield* Scope.Scope;
+  const spawnMutex = yield* Semaphore.make(1);
   const activeByRun = new Map<RuntimeTaskId, ActiveRun>();
   const activeByThread = new Map<ThreadId, ActiveRun>();
+  const stoppedParents = new Set<ThreadId>();
+  const parentProviderByThread = new Map<ThreadId, ProviderInstanceId>();
 
   const persistenceError = (operation: string) => (_cause: unknown) =>
     new ChildRunError({ message: `${operation} failed.` });
@@ -258,9 +303,13 @@ const make = Effect.gen(function* () {
                       : status === "interrupted"
                         ? { terminalReason: "server-restart" as const }
                         : {}),
-                controlAvailability: "unsupported",
+                controlAvailability: status === "active" ? "owner-routed" : "read-only",
                 historyAvailability: "summary-only",
-                capabilities: { steer: false, cancel: false, resume: false },
+                capabilities: {
+                  steer: status === "active",
+                  cancel: status === "active",
+                  resume: false,
+                },
                 startedAt: run.createdAt,
               },
             },
@@ -280,6 +329,12 @@ const make = Effect.gen(function* () {
 
   const deliver = Effect.fn("ChildRunService.deliver")(function* (run: NativeChildRun) {
     if (run.deliveryState === "delivered") return;
+    if (stoppedParents.has(run.parentThreadId)) {
+      yield* repository
+        .markDelivered(run.runId)
+        .pipe(Effect.mapError(persistenceError("Suppressing delivery after parent stop")));
+      return;
+    }
     const createdAt = yield* nowIso;
     const outcome = yield* startup
       .enqueueCommand(
@@ -318,26 +373,34 @@ const make = Effect.gen(function* () {
     yield* Effect.forEach(pending, deliver, { concurrency: 1, discard: true });
   });
 
+  const stopActiveSession = Effect.fn("ChildRunService.stopActiveSession")(function* (
+    active: ActiveRun,
+  ) {
+    if (!active.sessionStarted || active.sessionStopped) return true;
+    const stopped = yield* active.adapter.stopSession(active.run.childThreadId).pipe(
+      Effect.as(true),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Child session cleanup failed", {
+          childThreadId: active.run.childThreadId,
+          cause,
+        }).pipe(Effect.as(false)),
+      ),
+      Effect.ensuring(Effect.sync(() => (active.sessionStopped = true))),
+      Effect.uninterruptible,
+    );
+    return stopped;
+  });
+
   const finish = Effect.fn("ChildRunService.finish")(function* (
     active: ActiveRun,
     outcome: { readonly status: "completed" | "failed" | "cancelled"; readonly error?: string },
   ) {
-    let cleanupError: string | undefined;
-    if (active.sessionStarted && !active.sessionStopped) {
-      active.sessionStopped = true;
-      yield* active.adapter.stopSession(active.run.childThreadId).pipe(
-        Effect.catch((cause) => {
-          cleanupError = "Child session cleanup failed; inspect the provider session.";
-          return Effect.logWarning("Child session cleanup failed", {
-            childThreadId: active.run.childThreadId,
-            cause,
-          });
-        }),
-      );
-    }
+    const stopped = yield* stopActiveSession(active);
     const updatedAt = yield* nowIso;
-    const status = cleanupError === undefined ? outcome.status : "failed";
-    const error = cleanupError ?? outcome.error ?? null;
+    const status = stopped ? outcome.status : "failed";
+    const error = stopped
+      ? (outcome.error ?? null)
+      : "Child session cleanup failed; inspect the provider session.";
     yield* repository
       .markTerminal({
         runId: active.run.runId,
@@ -370,9 +433,8 @@ const make = Effect.gen(function* () {
     }
   });
 
-  const execute = Effect.fn("ChildRunService.execute")(function* (
+  const makeActive = Effect.fn("ChildRunService.makeActive")(function* (
     run: NativeChildRun,
-    prompt: string,
     adapter: ProviderAdapterShape<ProviderAdapterError>,
     parentProviderInstanceId: ProviderInstanceId,
   ) {
@@ -392,10 +454,20 @@ const make = Effect.gen(function* () {
       suppressDelivery: false,
       sessionStarted: false,
       sessionStopped: false,
+      expectedTurnId: null,
+      steering: false,
+      pendingCompletions: [],
     };
     activeByRun.set(run.runId, active);
     activeByThread.set(run.childThreadId, active);
+    return active;
+  });
 
+  const execute = Effect.fn("ChildRunService.execute")(function* (
+    active: ActiveRun,
+    prompt: string,
+  ) {
+    const { run, adapter } = active;
     const work = Effect.gen(function* () {
       const session = yield* adapter.startSession({
         threadId: run.childThreadId,
@@ -414,6 +486,7 @@ const make = Effect.gen(function* () {
         input: prompt,
         modelSelection: { instanceId: run.providerInstanceId, model: run.model },
       });
+      active.expectedTurnId = turn.turnId;
       active.resumeCursor = turn.resumeCursor ?? active.resumeCursor;
       yield* repository
         .markRunning({
@@ -439,17 +512,7 @@ const make = Effect.gen(function* () {
     }).pipe(
       Effect.ensuring(
         Effect.gen(function* () {
-          if (active.sessionStarted && !active.sessionStopped) {
-            active.sessionStopped = true;
-            yield* active.adapter.stopSession(active.run.childThreadId).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("Interrupted child session cleanup failed", {
-                  childThreadId: active.run.childThreadId,
-                  cause,
-                }),
-              ),
-            );
-          }
+          yield* stopActiveSession(active);
           activeByRun.delete(run.runId);
           activeByThread.delete(run.childThreadId);
           yield* Deferred.succeed(active.done, undefined);
@@ -458,106 +521,244 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const start = Effect.fn("ChildRunService.start")(function* (
-    scope: McpInvocationScope,
-    session: ProviderSession,
-    input: ChildRunSpawnInput,
-    parentRunId: RuntimeTaskId | null,
-    resumeCursor: unknown | null,
-    generation: number,
+  const steerActive = Effect.fn("ChildRunService.steerActive")(function* (
+    active: ActiveRun,
+    prompt: string,
   ) {
-    if (session.cwd === undefined) {
-      return yield* new ChildRunError({ message: "Parent session has no working directory." });
-    }
-    const info = yield* registry
-      .getInstanceInfo(input.providerInstanceId)
-      .pipe(Effect.mapError(() => new ChildRunError({ message: "Unknown provider instance." })));
-    const availability = providerAvailability(info.driverKind, session.runtimeMode);
-    if (!info.enabled || !availability.available) {
-      return yield* new ChildRunError({
-        message: availability.reason ?? "Provider instance is disabled.",
+    const releaseSteering = (expectedTurnId?: TurnId) =>
+      Effect.gen(function* () {
+        if (expectedTurnId !== undefined) active.expectedTurnId = expectedTurnId;
+        active.steering = false;
+        const completion =
+          expectedTurnId === undefined
+            ? active.pendingCompletions.at(-1)
+            : active.pendingCompletions.find(
+                (candidate) => candidate.turnId === null || candidate.turnId === expectedTurnId,
+              );
+        active.pendingCompletions.length = 0;
+        if (completion !== undefined) {
+          yield* Deferred.succeed(active.terminal, completion.outcome);
+        }
       });
-    }
-    const existing = yield* repository
-      .listActive()
-      .pipe(Effect.mapError(persistenceError("Checking child concurrency")));
-    if (
-      existing.length >= MAX_RUNNING ||
-      existing.filter((candidate) => candidate.parentThreadId === scope.threadId).length >=
-        MAX_PER_PARENT
+    active.steering = true;
+    let released = false;
+    yield* Effect.gen(function* () {
+      const turn = yield* active.adapter
+        .sendTurn({
+          threadId: active.run.childThreadId,
+          input: prompt,
+          modelSelection: {
+            instanceId: active.run.providerInstanceId,
+            model: active.run.model,
+          },
+        })
+        .pipe(Effect.mapError(() => new ChildRunError({ message: "Child steering failed." })));
+      yield* releaseSteering(turn.turnId);
+      released = true;
+      active.resumeCursor = turn.resumeCursor ?? active.resumeCursor;
+      yield* repository
+        .markRunning({
+          runId: active.run.runId,
+          resumeCursor: active.resumeCursor,
+          updatedAt: yield* nowIso,
+        })
+        .pipe(Effect.mapError(persistenceError("Persisting child session identity")));
+    }).pipe(Effect.ensuring(Effect.suspend(() => (released ? Effect.void : releaseSteering()))));
+  });
+
+  const start = Effect.fn("ChildRunService.start")(
+    function* (
+      scope: McpInvocationScope,
+      session: ProviderSession,
+      input: ChildRunSpawnInput,
+      parentRunId: RuntimeTaskId | null,
+      resumeCursor: unknown | null,
+      generation: number,
     ) {
-      return yield* new ChildRunError({ message: "Child run concurrency limit reached." });
-    }
-    const adapter = yield* registry
-      .getByInstance(input.providerInstanceId)
-      .pipe(
-        Effect.mapError(() => new ChildRunError({ message: "Child provider is unavailable." })),
-      );
-    const createdAt = yield* nowIso;
-    const id = NodeCrypto.randomUUID();
-    const runId = RuntimeTaskId.make(`native-${id}`);
-    const childThreadId = ThreadId.make(`child-${id}`);
-    const runNumber = yield* repository
-      .reserveRunNumber({ runId, allocatedAt: createdAt, childThreadId })
-      .pipe(Effect.mapError(persistenceError("Reserving the child inventory row")));
-    const run = NativeChildRun.make({
-      runId,
-      runNumber,
-      parentRunId,
-      parentThreadId: scope.threadId,
-      childThreadId,
-      providerInstanceId: input.providerInstanceId,
-      provider: info.driverKind,
-      model: input.model,
-      title: input.title,
-      runtimeMode: session.runtimeMode,
-      cwd: session.cwd,
-      resumeCursor,
-      generation,
-      status: "starting",
-      output: "",
-      outputTruncated: false,
-      error: null,
-      deliveryState: "pending",
-      deliveryAttempt: 0,
-      createdAt,
-      updatedAt: createdAt,
-    });
-    yield* repository.insert(run).pipe(Effect.mapError(persistenceError("Persisting child run")));
-    yield* activity(run, "active", input.title).pipe(
-      Effect.catch((cause) =>
-        repository
+      if (session.cwd === undefined) {
+        return yield* new ChildRunError({ message: "Parent session has no working directory." });
+      }
+      parentProviderByThread.set(scope.threadId, scope.providerInstanceId);
+      stoppedParents.delete(scope.threadId);
+      const info = yield* registry
+        .getInstanceInfo(input.providerInstanceId)
+        .pipe(Effect.mapError(() => new ChildRunError({ message: "Unknown provider instance." })));
+      const availability = providerAvailability(info.driverKind, session.runtimeMode);
+      if (!info.enabled || !availability.available) {
+        return yield* new ChildRunError({
+          message: availability.reason ?? "Provider instance is disabled.",
+        });
+      }
+      const existing = yield* repository
+        .listActive()
+        .pipe(Effect.mapError(persistenceError("Checking child concurrency")));
+      if (
+        existing.length >= MAX_RUNNING ||
+        existing.filter((candidate) => candidate.parentThreadId === scope.threadId).length >=
+          MAX_PER_PARENT
+      ) {
+        return yield* new ChildRunError({ message: "Child run concurrency limit reached." });
+      }
+      const adapter = yield* registry
+        .getByInstance(input.providerInstanceId)
+        .pipe(
+          Effect.mapError(() => new ChildRunError({ message: "Child provider is unavailable." })),
+        );
+      const createdAt = yield* nowIso;
+      const id = NodeCrypto.randomUUID();
+      const runId = RuntimeTaskId.make(`native-${id}`);
+      const childThreadId = ThreadId.make(`child-${id}`);
+      const runNumber = yield* repository
+        .reserveRunNumber({ runId, allocatedAt: createdAt, childThreadId })
+        .pipe(Effect.mapError(persistenceError("Reserving the child inventory row")));
+      const run = NativeChildRun.make({
+        runId,
+        runNumber,
+        parentRunId,
+        parentThreadId: scope.threadId,
+        childThreadId,
+        providerInstanceId: input.providerInstanceId,
+        provider: info.driverKind,
+        model: input.model,
+        title: input.title,
+        runtimeMode: session.runtimeMode,
+        cwd: session.cwd,
+        resumeCursor,
+        generation,
+        status: "starting",
+        output: "",
+        outputTruncated: false,
+        error: null,
+        deliveryState: "pending",
+        deliveryAttempt: 0,
+        createdAt,
+        updatedAt: createdAt,
+      });
+      yield* repository.insert(run).pipe(Effect.mapError(persistenceError("Persisting child run")));
+      const active = yield* makeActive(run, adapter, scope.providerInstanceId);
+      if (stoppedParents.has(scope.threadId)) {
+        yield* repository
           .markTerminal({
             runId: run.runId,
-            status: "failed",
+            status: "cancelled",
             output: "",
             outputTruncated: false,
-            error: "T3 Code could not publish the child run to Agents.",
+            error: "Parent session stopped while the child was starting.",
             resumeCursor: null,
             updatedAt: createdAt,
           })
           .pipe(
             Effect.andThen(repository.markDelivered(run.runId)),
-            Effect.mapError(persistenceError("Rolling back child startup")),
-            Effect.andThen(Effect.fail(cause)),
-          ),
-      ),
+            Effect.mapError(persistenceError("Cancelling child startup after parent stop")),
+            Effect.ensuring(
+              Effect.sync(() => {
+                activeByRun.delete(run.runId);
+                activeByThread.delete(run.childThreadId);
+              }).pipe(Effect.andThen(Deferred.succeed(active.done, undefined))),
+            ),
+          );
+        return yield* new ChildRunError({ message: "Parent session is no longer active." });
+      }
+      yield* activity(run, "active", input.title).pipe(
+        Effect.catch((cause) =>
+          repository
+            .markTerminal({
+              runId: run.runId,
+              status: "failed",
+              output: "",
+              outputTruncated: false,
+              error: "T3 Code could not publish the child run to Agents.",
+              resumeCursor: null,
+              updatedAt: createdAt,
+            })
+            .pipe(
+              Effect.andThen(repository.markDelivered(run.runId)),
+              Effect.mapError(persistenceError("Rolling back child startup")),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  activeByRun.delete(run.runId);
+                  activeByThread.delete(run.childThreadId);
+                }).pipe(Effect.andThen(Deferred.succeed(active.done, undefined))),
+              ),
+              Effect.andThen(Effect.fail(cause)),
+            ),
+        ),
+      );
+      yield* execute(active, input.prompt).pipe(
+        Effect.onError((cause) =>
+          Effect.logError("Native child execution failed", { runId: run.runId, cause }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            activeByRun.delete(run.runId);
+            activeByThread.delete(run.childThreadId);
+          }),
+        ),
+        Effect.interruptible,
+        Effect.forkIn(serviceScope, { startImmediately: true }),
+      );
+      return toResult(run);
+    },
+    spawnMutex.withPermits(1),
+    Effect.uninterruptible,
+  );
+
+  const completeChildTurn = (
+    child: ActiveRun,
+    turnId: TurnId | undefined,
+    outcome: {
+      readonly status: "completed" | "failed" | "cancelled";
+      readonly error?: string;
+    },
+  ) => {
+    if (child.steering) {
+      return Effect.sync(() => {
+        child.pendingCompletions.push({ turnId: turnId ?? null, outcome });
+        if (child.pendingCompletions.length > 4) child.pendingCompletions.shift();
+      });
+    }
+    if (child.expectedTurnId !== null && turnId !== undefined && turnId !== child.expectedTurnId) {
+      return Effect.void;
+    }
+    return Deferred.succeed(child.terminal, outcome).pipe(Effect.asVoid);
+  };
+
+  const suppressParent = (
+    threadId: ThreadId,
+    providerInstanceId?: ProviderInstanceId,
+  ): Effect.Effect<void> => {
+    const candidates = [...activeByRun.values()].filter(
+      (candidate) =>
+        candidate.run.parentThreadId === threadId &&
+        (providerInstanceId === undefined ||
+          candidate.parentProviderInstanceId === providerInstanceId),
     );
-    yield* execute(run, input.prompt, adapter, scope.providerInstanceId).pipe(
-      Effect.onError((cause) =>
-        Effect.logError("Native child execution failed", { runId: run.runId, cause }),
-      ),
-      Effect.ensuring(
-        Effect.sync(() => {
-          activeByRun.delete(run.runId);
-          activeByThread.delete(run.childThreadId);
-        }),
-      ),
-      Effect.interruptible,
-      Effect.forkIn(serviceScope, { startImmediately: true }),
-    );
-    return toResult(run);
-  }, Effect.uninterruptible);
+    if (
+      providerInstanceId !== undefined &&
+      parentProviderByThread.get(threadId) !== providerInstanceId
+    ) {
+      return Effect.void;
+    }
+    return Effect.gen(function* () {
+      stoppedParents.add(threadId);
+      yield* repository.markParentDelivered(threadId).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Failed to suppress pending child delivery after parent stop", {
+            threadId,
+            cause,
+          }),
+        ),
+      );
+      yield* Effect.forEach(
+        candidates,
+        (candidate) =>
+          Effect.sync(() => {
+            candidate.suppressDelivery = true;
+          }).pipe(Effect.andThen(Deferred.succeed(candidate.cancel, undefined))),
+        { discard: true },
+      );
+    });
+  };
 
   const onProviderEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
     const child = activeByThread.get(event.threadId);
@@ -584,13 +785,15 @@ const make = Effect.gen(function* () {
             ? {}
             : { error: event.payload.errorMessage.slice(0, 2_000) }),
         };
-        return Deferred.succeed(child.terminal, outcome).pipe(Effect.asVoid);
+        return completeChildTurn(child, event.turnId, outcome);
       }
-      if (
-        event.type === "turn.aborted" ||
-        event.type === "session.exited" ||
-        event.type === "runtime.error"
-      ) {
+      if (event.type === "turn.aborted") {
+        return completeChildTurn(child, event.turnId, {
+          status: "failed",
+          error: "Child provider ended before completing its turn.",
+        });
+      }
+      if (event.type === "session.exited" || event.type === "runtime.error") {
         return Deferred.succeed(child.terminal, {
           status: "failed",
           error: "Child provider ended before completing its turn.",
@@ -604,19 +807,9 @@ const make = Effect.gen(function* () {
       }
       return Effect.void;
     }
-    if (event.type !== "session.exited") return Effect.void;
-    return Effect.forEach(
-      [...activeByRun.values()].filter(
-        (candidate) =>
-          candidate.run.parentThreadId === event.threadId &&
-          candidate.parentProviderInstanceId === event.providerInstanceId,
-      ),
-      (candidate) =>
-        Effect.sync(() => {
-          candidate.suppressDelivery = true;
-        }).pipe(Effect.andThen(Deferred.succeed(candidate.cancel, undefined))),
-      { discard: true },
-    );
+    return event.type === "session.exited"
+      ? suppressParent(event.threadId, event.providerInstanceId)
+      : Effect.void;
   };
 
   // ProviderService is the sole adapter event consumer and fans out here.
@@ -629,21 +822,46 @@ const make = Effect.gen(function* () {
     Effect.provideService(Scope.Scope, serviceScope),
   );
   yield* domainEvents.pipe(
-    Stream.runForEach((event) =>
-      event.type === "thread.turn-diff-completed"
+    Stream.runForEach((event) => {
+      if (event.type === "thread.session-stop-requested") {
+        return suppressParent(event.payload.threadId);
+      }
+      return event.type === "thread.turn-diff-completed"
         ? deliverPending(event.payload.threadId).pipe(Effect.catchCause(Effect.logWarning))
-        : Effect.void,
-    ),
+        : Effect.void;
+    }),
     Effect.forkIn(serviceScope, { startImmediately: true }),
   );
 
-  const interrupted = yield* repository
+  yield* repository
     .reconcileRestart(yield* nowIso)
     .pipe(Effect.mapError(persistenceError("Reconciling child runs after restart")));
   yield* Effect.gen(function* () {
+    const pending = yield* repository
+      .listPendingDelivery()
+      .pipe(Effect.mapError(persistenceError("Listing pending child results")));
     yield* Effect.forEach(
-      interrupted,
-      (run) => activity(run, "interrupted", run.error ?? "Interrupted by T3 Code restart"),
+      pending,
+      (run) =>
+        Effect.gen(function* () {
+          yield* activity(run, "active", run.title);
+          const terminalStatus =
+            run.status === "completed"
+              ? ("done" as const)
+              : run.status === "cancelled"
+                ? ("cancelled" as const)
+                : run.error === NATIVE_CHILD_RESTART_ERROR
+                  ? ("interrupted" as const)
+                  : ("error" as const);
+          yield* activity(run, terminalStatus, run.output || run.error || run.status);
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Native child projection repair failed", {
+              runId: run.runId,
+              cause,
+            }),
+          ),
+        ),
       { concurrency: 1, discard: true },
     );
     yield* deliverPending();
@@ -654,7 +872,58 @@ const make = Effect.gen(function* () {
     Effect.forkIn(serviceScope, { startImmediately: true }),
   );
 
+  const controlPlane = {
+    status: () =>
+      Effect.sync(() => {
+        const parents = new Set<ThreadId>();
+        const statuses = [];
+        for (const active of activeByRun.values()) {
+          if (active.sessionStopped || parents.has(active.run.parentThreadId)) continue;
+          parents.add(active.run.parentThreadId);
+          statuses.push({
+            supported: true as const,
+            threadId: active.run.parentThreadId,
+            managerId: nativeManagerId(active.run.parentThreadId),
+            protocolVersion: 1,
+            capabilities: NATIVE_CONTROL_CAPABILITIES,
+            controls: { steer: { enabled: true }, cancel: { enabled: true } },
+          });
+        }
+        return statuses;
+      }),
+    steer: (input) =>
+      Effect.gen(function* () {
+        const active = activeByRun.get(input.runId);
+        if (active === undefined || active.sessionStopped) {
+          return yield* new SubagentControlError({ reason: "unknown-run" });
+        }
+        if (nativeManagerId(active.run.parentThreadId) !== input.managerId) {
+          return yield* new SubagentControlError({ reason: "manager-mismatch" });
+        }
+        yield* steerActive(active, input.text).pipe(
+          Effect.mapError(
+            (error) =>
+              new SubagentControlError({ reason: "manager-rejected", detail: error.message }),
+          ),
+        );
+        return { accepted: true as const };
+      }),
+    cancel: (input) =>
+      Effect.gen(function* () {
+        const active = activeByRun.get(input.runId);
+        if (active === undefined || active.sessionStopped) {
+          return yield* new SubagentControlError({ reason: "unknown-run" });
+        }
+        if (nativeManagerId(active.run.parentThreadId) !== input.managerId) {
+          return yield* new SubagentControlError({ reason: "manager-mismatch" });
+        }
+        yield* Deferred.succeed(active.cancel, undefined);
+        return { accepted: true as const };
+      }),
+  } satisfies ProviderSubagentControlPlaneShape<never>;
+
   return ChildRunService.of({
+    controlPlane,
     capabilities: Effect.fn("ChildRunService.capabilities")(function* (scope) {
       const session = yield* parent(scope);
       const instances = yield* registry.listInstances();
@@ -697,21 +966,7 @@ const make = Effect.gen(function* () {
       const run = yield* readOwned(scope, input.runId);
       const active = activeByRun.get(run.runId);
       if (active !== undefined && !isTerminal(run)) {
-        const turn = yield* active.adapter
-          .sendTurn({
-            threadId: run.childThreadId,
-            input: input.prompt,
-            modelSelection: { instanceId: run.providerInstanceId, model: run.model },
-          })
-          .pipe(Effect.mapError(() => new ChildRunError({ message: "Child steering failed." })));
-        active.resumeCursor = turn.resumeCursor ?? active.resumeCursor;
-        yield* repository
-          .markRunning({
-            runId: run.runId,
-            resumeCursor: active.resumeCursor,
-            updatedAt: yield* nowIso,
-          })
-          .pipe(Effect.mapError(persistenceError("Persisting child session identity")));
+        yield* steerActive(active, input.prompt);
         return toResult({ ...run, status: "running" });
       }
       if (!isTerminal(run)) {
@@ -738,11 +993,6 @@ const make = Effect.gen(function* () {
         yield* Deferred.await(active.done).pipe(Effect.timeoutOption(Math.min(waitMs, 30_000)));
         run = yield* readOwned(scope, runId);
       }
-      if (isTerminal(run) && run.deliveryState !== "delivered") {
-        yield* repository
-          .markDelivered(run.runId)
-          .pipe(Effect.mapError(persistenceError("Recording child result collection")));
-      }
       return toResult(run);
     }),
     cancel: Effect.fn("ChildRunService.cancel")(function* (scope, runId) {
@@ -754,6 +1004,6 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(ChildRunService, make).pipe(
-  Layer.provide(NativeChildRunRepositoryAuto),
-);
+export const layerWithRepository = Layer.effect(ChildRunService, make);
+
+export const layer = layerWithRepository.pipe(Layer.provide(NativeChildRunRepositoryAuto));

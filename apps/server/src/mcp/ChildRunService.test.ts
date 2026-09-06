@@ -4,8 +4,10 @@ import {
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
+  RuntimeTaskId,
   ThreadId,
   TurnId,
+  type OrchestrationEvent,
   type OrchestrationCommand,
   type ProviderRuntimeEvent,
   type ProviderSession,
@@ -27,18 +29,22 @@ import {
 import { McpSchema, McpServer } from "effect/unstable/ai";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
+import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
+import {
+  NativeChildRun,
+  NativeChildRunRepository,
+} from "../persistence/Services/NativeChildRuns.ts";
 import type { ProviderAdapterShape } from "../provider/Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
-import { ChildRunResult, ChildRunService, layer } from "./ChildRunService.ts";
+import { ChildRunResult, ChildRunService, layer, layerWithRepository } from "./ChildRunService.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
 import { DelegationToolkitRegistrationLive } from "./McpHttpServer.ts";
 import { readMcpProviderSession } from "./McpProviderSession.ts";
 
 const now = "2026-09-06T00:00:00.000Z";
 const parentId = ThreadId.make("parent");
-const turnId = TurnId.make("child-turn");
 const decodeChildRunResult = Schema.decodeUnknownEffect(ChildRunResult);
 const makeHarness = Effect.fn("makeHarness")(function* (
   parentDriver = "codex",
@@ -46,12 +52,18 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   mode: RuntimeMode = "full-access",
   complete = true,
   failFirstActivity = false,
+  repositoryLayer?: Layer.Layer<NativeChildRunRepository>,
+  pauseTerminalActivity = false,
 ) {
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+  const domainEvents = yield* PubSub.unbounded<OrchestrationEvent>();
   const sent = yield* Deferred.make<ThreadId>();
+  const terminalActivityReached = yield* Deferred.make<void>();
+  const releaseTerminalActivity = yield* Deferred.make<void>();
   const starts: Array<ProviderSessionStartInput> = [];
   const stopped: Array<ThreadId> = [];
   const sentPrompts: string[] = [];
+  const sentTurns: TurnId[] = [];
   const commands: OrchestrationCommand[] = [];
   let shouldFailActivity = failFirstActivity;
   const parentInstance = ProviderInstanceId.make("parent-provider");
@@ -90,6 +102,8 @@ const makeHarness = Effect.fn("makeHarness")(function* (
       }),
     sendTurn: (input) =>
       Effect.gen(function* () {
+        const turnId = TurnId.make(`child-turn-${sentTurns.length + 1}`);
+        sentTurns.push(turnId);
         sentPrompts.push(input.input ?? "");
         yield* Deferred.succeed(sent, input.threadId);
         if (complete) {
@@ -98,6 +112,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
             eventId: EventId.make("text"),
             provider: ProviderDriverKind.make(childDriver),
             threadId: input.threadId,
+            turnId,
             createdAt: now,
             payload: { streamKind: "assistant_text", delta: "Native child result" },
           });
@@ -106,6 +121,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
             eventId: EventId.make("complete"),
             provider: ProviderDriverKind.make(childDriver),
             threadId: input.threadId,
+            turnId,
             createdAt: now,
             payload: { state: "completed" },
           });
@@ -159,12 +175,20 @@ const makeHarness = Effect.fn("makeHarness")(function* (
               }),
             );
           }
-          return Effect.sync(() => {
+          return Effect.gen(function* () {
+            if (
+              pauseTerminalActivity &&
+              command.type === "thread.activity.append" &&
+              command.activity.kind === "task.completed"
+            ) {
+              yield* Deferred.succeed(terminalActivityReached, undefined);
+              yield* Deferred.await(releaseTerminalActivity);
+            }
             commands.push(command);
             return { sequence: commands.length };
           });
         }),
-      subscribeDomainEvents: Effect.succeed(Stream.empty),
+      subscribeDomainEvents: Effect.succeed(Stream.fromPubSub(domainEvents)),
     }),
     Layer.mock(ServerRuntimeStartup)({
       awaitCommandReady: Effect.void,
@@ -176,16 +200,23 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     starts,
     stopped,
     sentPrompts,
+    sentTurns,
     commands,
     sent,
     events,
+    domainEvents,
+    terminalActivityReached,
+    releaseTerminalActivity,
     input: {
       providerInstanceId: childInstance,
       model: "native-model",
       title: "Investigate",
       prompt: "Do the task",
     },
-    services: layer.pipe(
+    services: (repositoryLayer === undefined
+      ? layer
+      : layerWithRepository.pipe(Layer.provide(repositoryLayer))
+    ).pipe(
       Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
       Layer.provide(runtimeServices),
     ),
@@ -438,6 +469,72 @@ it.effect("steers active children and resumes terminal children as linked follow
   }),
 );
 
+it.effect("waits for a Codex queued steer turn instead of stopping after the prior turn", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness("claudeAgent", "codex", "full-access", false);
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const run = yield* service.spawn(h.scope, h.input);
+      const threadId = yield* Deferred.await(h.sent);
+      yield* service.send(h.scope, { runId: run.runId, prompt: "Run after this turn" });
+      const [firstTurn, queuedTurn] = h.sentTurns;
+      expect(firstTurn).toBeDefined();
+      expect(queuedTurn).toBeDefined();
+      yield* PubSub.publish(h.events, {
+        type: "turn.completed",
+        eventId: EventId.make("first-complete"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: firstTurn,
+        createdAt: now,
+        payload: { state: "completed" },
+      });
+      yield* Effect.yieldNow;
+      expect((yield* service.result(h.scope, run.runId)).status).toBe("running");
+      expect(h.stopped).toHaveLength(0);
+      yield* PubSub.publish(h.events, {
+        type: "turn.completed",
+        eventId: EventId.make("queued-complete"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: queuedTurn,
+        createdAt: now,
+        payload: { state: "completed" },
+      });
+      expect((yield* service.result(h.scope, run.runId, 30_000)).status).toBe("completed");
+      expect(h.stopped).toEqual([threadId]);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("exposes active native children through the shared Agents control plane", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness("codex", "claudeAgent", "full-access", false);
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const run = yield* service.spawn(h.scope, h.input);
+      const childThreadId = yield* Deferred.await(h.sent);
+      const [status] = yield* service.controlPlane.status();
+      expect(status).toMatchObject({
+        supported: true,
+        threadId: parentId,
+        controls: { steer: { enabled: true }, cancel: { enabled: true } },
+      });
+      expect(status?.managerId).toMatch(/^t3-native:/);
+      yield* service.controlPlane.steer({
+        managerId: status!.managerId!,
+        runId: run.runId,
+        text: "Steer from Agents",
+      });
+      expect(h.sentPrompts).toEqual(["Do the task", "Steer from Agents"]);
+      yield* service.controlPlane.cancel({ managerId: status!.managerId!, runId: run.runId });
+      expect((yield* service.result(h.scope, run.runId, 30_000)).status).toBe("cancelled");
+      expect(h.stopped).toEqual([childThreadId]);
+      expect(yield* service.controlPlane.status()).toEqual([]);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
 it.effect("cancels children on parent exit without automatically restarting the parent", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness("codex", "claudeAgent", "full-access", false);
@@ -460,6 +557,131 @@ it.effect("cancels children on parent exit without automatically restarting the 
   }),
 );
 
+it.effect("does not launch a child when its parent exits during durable reservation", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const baseRepository = Context.get(repositoryContext, NativeChildRunRepository);
+      const insertReached = yield* Deferred.make<void>();
+      const releaseInsert = yield* Deferred.make<void>();
+      const parentSuppressed = yield* Deferred.make<void>();
+      const repository = NativeChildRunRepository.of({
+        ...baseRepository,
+        insert: (run) =>
+          baseRepository
+            .insert(run)
+            .pipe(
+              Effect.andThen(Deferred.succeed(insertReached, undefined)),
+              Effect.andThen(Deferred.await(releaseInsert)),
+            ),
+        markParentDelivered: (threadId) =>
+          baseRepository
+            .markParentDelivered(threadId)
+            .pipe(Effect.andThen(Deferred.succeed(parentSuppressed, undefined))),
+      });
+      const h = yield* makeHarness(
+        "codex",
+        "claudeAgent",
+        "full-access",
+        false,
+        false,
+        Layer.succeed(NativeChildRunRepository, repository),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ChildRunService;
+        const spawn = yield* service
+          .spawn(h.scope, h.input)
+          .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(insertReached);
+        yield* PubSub.publish(h.events, {
+          type: "session.exited",
+          eventId: EventId.make("parent-exited-during-child-reservation"),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: h.scope.providerInstanceId,
+          threadId: parentId,
+          createdAt: now,
+          payload: { reason: "stopped" },
+        });
+        yield* Deferred.await(parentSuppressed);
+        yield* Deferred.succeed(releaseInsert, undefined);
+        expect((yield* Fiber.join(spawn))._tag).toBe("Failure");
+        expect(h.starts).toHaveLength(0);
+        expect(yield* baseRepository.listActive()).toEqual([]);
+      }).pipe(Effect.provide(h.services));
+    }),
+  ),
+);
+
+it.effect(
+  "suppresses completion delivery when an explicit parent stop races terminal activity",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const repositoryScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+        const repositoryContext = yield* Layer.buildWithScope(
+          NativeChildRunRepositoryAuto,
+          repositoryScope,
+        );
+        const baseRepository = Context.get(repositoryContext, NativeChildRunRepository);
+        const parentSuppressed = yield* Deferred.make<void>();
+        const repository = NativeChildRunRepository.of({
+          ...baseRepository,
+          markParentDelivered: (threadId) =>
+            baseRepository
+              .markParentDelivered(threadId)
+              .pipe(Effect.andThen(Deferred.succeed(parentSuppressed, undefined))),
+        });
+        const h = yield* makeHarness(
+          "codex",
+          "claudeAgent",
+          "full-access",
+          false,
+          false,
+          Layer.succeed(NativeChildRunRepository, repository),
+          true,
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* ChildRunService;
+          const run = yield* service.spawn(h.scope, h.input);
+          const childThreadId = yield* Deferred.await(h.sent);
+          yield* PubSub.publish(h.events, {
+            type: "turn.completed",
+            eventId: EventId.make("child-completed-before-parent-stop"),
+            provider: ProviderDriverKind.make("claudeAgent"),
+            threadId: childThreadId,
+            turnId: h.sentTurns[0],
+            createdAt: now,
+            payload: { state: "completed" },
+          });
+          yield* Deferred.await(h.terminalActivityReached);
+          yield* PubSub.publish(h.domainEvents, {
+            sequence: 1,
+            eventId: EventId.make("parent-stop-during-child-completion"),
+            aggregateKind: "thread",
+            aggregateId: parentId,
+            occurredAt: now,
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            type: "thread.session-stop-requested",
+            payload: { threadId: parentId, createdAt: now },
+          });
+          yield* Deferred.await(parentSuppressed);
+          yield* Deferred.succeed(h.releaseTerminalActivity, undefined);
+          expect((yield* service.result(h.scope, run.runId, 30_000)).status).toBe("completed");
+          expect(h.commands.some((command) => command.type === "thread.turn.start")).toBe(false);
+        }).pipe(Effect.provide(h.services));
+      }),
+    ),
+);
+
 it.effect("stops started child sessions and releases result waiters when the service closes", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness("codex", "claudeAgent", "full-access", false);
@@ -475,4 +697,72 @@ it.effect("stops started child sessions and releases result waiters when the ser
     expect(h.stopped).toEqual([childThreadId]);
     expect((yield* Fiber.join(waiter)).status).toBe("running");
   }),
+);
+
+it.effect("repairs missing start and terminal projection activities before restart delivery", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const repository = Context.get(repositoryContext, NativeChildRunRepository);
+      const runId = RuntimeTaskId.make("native-crash-window");
+      const childThreadId = ThreadId.make("child-crash-window");
+      const createdAt = "2026-09-06T00:00:00.000Z";
+      const runNumber = yield* repository.reserveRunNumber({
+        runId,
+        childThreadId,
+        allocatedAt: createdAt,
+      });
+      yield* repository.insert(
+        NativeChildRun.make({
+          runId,
+          runNumber,
+          parentRunId: null,
+          parentThreadId: parentId,
+          childThreadId,
+          providerInstanceId: ProviderInstanceId.make("child-provider"),
+          provider: ProviderDriverKind.make("claudeAgent"),
+          model: "native-model",
+          title: "Recovered child",
+          runtimeMode: "full-access",
+          cwd: "/workspace",
+          resumeCursor: { session: "recovered" },
+          generation: 1,
+          status: "completed",
+          output: "Recovered result",
+          outputTruncated: false,
+          error: null,
+          deliveryState: "pending",
+          deliveryAttempt: 0,
+          createdAt,
+          updatedAt: createdAt,
+        }),
+      );
+      const h = yield* makeHarness(
+        "codex",
+        "claudeAgent",
+        "full-access",
+        false,
+        false,
+        Layer.succeed(NativeChildRunRepository, repository),
+      );
+      yield* Effect.gen(function* () {
+        yield* ChildRunService;
+        const activities = h.commands.filter(
+          (command) => command.type === "thread.activity.append",
+        );
+        expect(activities.map((command) => command.activity.kind)).toEqual([
+          "task.started",
+          "task.completed",
+        ]);
+        expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
+          1,
+        );
+      }).pipe(Effect.provide(h.services));
+    }),
+  ),
 );

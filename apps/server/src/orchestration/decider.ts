@@ -1085,6 +1085,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         if (
           targetThread.session?.status === "starting" ||
           targetThread.session?.status === "running" ||
+          targetThread.session?.status === "stopped" ||
           hasOpenBlockingRequest(targetThread) ||
           hasQueuedTurnStartForThread(targetThread, command.createdAt)
         ) {

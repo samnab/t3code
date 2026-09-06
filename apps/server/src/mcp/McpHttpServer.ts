@@ -13,7 +13,6 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
-import * as ChildRunService from "./ChildRunService.ts";
 import { DelegationHandlersLive, DelegationToolkit } from "./toolkits/delegation.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
@@ -232,4 +231,4 @@ export const DelegationToolkitRegistrationLive = McpServer.toolkit(DelegationToo
 export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   DelegationToolkitRegistrationLive,
-).pipe(Layer.provide(ChildRunService.layer), Layer.provideMerge(McpTransportLive));
+).pipe(Layer.provideMerge(McpTransportLive));

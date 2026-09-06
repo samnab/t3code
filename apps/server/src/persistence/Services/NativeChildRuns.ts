@@ -24,6 +24,8 @@ export const NativeChildRunStatus = Schema.Literals([
 ]);
 export type NativeChildRunStatus = typeof NativeChildRunStatus.Type;
 
+export const NATIVE_CHILD_RESTART_ERROR = "T3 Code restarted before the child turn completed.";
+
 export const NativeChildRun = Schema.Struct({
   runId: RuntimeTaskId,
   runNumber: PositiveInt,
@@ -42,7 +44,7 @@ export const NativeChildRun = Schema.Struct({
   output: Schema.String,
   outputTruncated: Schema.Boolean,
   error: Schema.NullOr(Schema.String),
-  deliveryState: Schema.Literals(["pending", "delivering", "delivered"]),
+  deliveryState: Schema.Literals(["pending", "delivered"]),
   deliveryAttempt: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -78,6 +80,7 @@ export interface NativeChildRunRepositoryShape {
     readonly updatedAt: string;
   }) => Effect.Effect<void, RepositoryError>;
   readonly markDelivered: (runId: RuntimeTaskId) => Effect.Effect<void, RepositoryError>;
+  readonly markParentDelivered: (parentThreadId: ThreadId) => Effect.Effect<void, RepositoryError>;
   readonly markDeliveryRetry: (runId: RuntimeTaskId) => Effect.Effect<void, RepositoryError>;
   readonly reconcileRestart: (
     interruptedAt: string,

@@ -975,9 +975,9 @@ describe("reconcileSubagentInventory", () => {
           summary: null,
           status: "active",
           terminalReason: null,
-          controlAvailability: "unsupported",
+          controlAvailability: "owner-routed",
           historyAvailability: "summary-only",
-          capabilities: { steer: false, cancel: false, resume: false },
+          capabilities: { steer: true, cancel: true, resume: false },
           createdAt: "2026-09-06T10:00:00.000Z",
           updatedAt: "2026-09-06T10:00:00.000Z",
           terminalAt: null,
@@ -990,7 +990,7 @@ describe("reconcileSubagentInventory", () => {
       id: runId,
       role: "claudeAgent",
       status: "running",
-      controlAvailability: "unsupported",
+      controlAvailability: "owner-routed",
       historyAvailability: "summary-only",
     });
   });

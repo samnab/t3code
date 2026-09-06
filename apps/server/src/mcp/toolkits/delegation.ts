@@ -42,7 +42,7 @@ export const DelegationToolkit = Toolkit.make(
   }),
   Tool.make("subagent_result", {
     description:
-      "Read a child run's durable status and bounded assistant output. Set waitMs up to 30000 to wait for completion. Terminal results are repeatable across parent credential renewal and server restart. Reading a terminal result acknowledges automatic delivery.",
+      "Read a child run's durable status and bounded assistant output. Set waitMs up to 30000 to wait for completion. Terminal results are repeatable across parent credential renewal and server restart. Reading a result does not suppress automatic delivery.",
     parameters: Schema.Struct({
       ...target.fields,
       waitMs: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 30_000 }))),

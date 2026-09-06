@@ -13,7 +13,8 @@ access. Give each child a clear task and avoid overlapping file edits.
 The parent can inspect a result, wait, cancel, steer a running child, or start a
 follow-up from a finished child. Up to four children can run at once for a
 conversation. Their status appears in the Agents view on web, desktop and
-mobile. Tasks that need interactive input fail with an explanation.
+in the mobile work log. Active runs can be steered or cancelled from the Agents
+view. Tasks that need interactive input fail with an explanation.
 
 When a child finishes, T3 delivers its result after the parent becomes idle.
 Finished results survive server and parent-session restarts. Work interrupted

@@ -111,6 +111,7 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
+import { ChildRunService } from "./mcp/ChildRunService.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
@@ -504,6 +505,7 @@ const makeWsRpcLayer = (
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  childRuns: ChildRunService["Service"],
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -1721,19 +1723,19 @@ const makeWsRpcLayer = (
         [ORCHESTRATION_WS_METHODS.subagentControlStatus]: () =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.subagentControlStatus,
-            routeSubagentControlStatus(providerAdapterRegistry),
+            routeSubagentControlStatus(providerAdapterRegistry, [childRuns.controlPlane]),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.subagentControlSteer]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.subagentControlSteer,
-            routeSubagentControlSteer(providerAdapterRegistry, input),
+            routeSubagentControlSteer(providerAdapterRegistry, input, [childRuns.controlPlane]),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.subagentControlCancel]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.subagentControlCancel,
-            routeSubagentControlCancel(providerAdapterRegistry, input),
+            routeSubagentControlCancel(providerAdapterRegistry, input, [childRuns.controlPlane]),
             { "rpc.aggregate": "orchestration" },
           ),
         [ORCHESTRATION_WS_METHODS.getSubagentTranscript]: (input) =>
@@ -2702,6 +2704,7 @@ const makeWsRpcLayer = (
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const childRuns = yield* ChildRunService;
     const baseServerSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const config = yield* ServerConfig.ServerConfig;
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -2761,6 +2764,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               clientOrigin,
               clientAnalyticsProps,
               previewAutomationBroker,
+              childRuns,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderMaintenanceRunner.layer),

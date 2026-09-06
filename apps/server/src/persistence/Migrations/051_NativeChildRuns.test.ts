@@ -98,7 +98,7 @@ it.layer(testLayer)("native child persistence", (it) => {
           ${runId}, ${runNumber}, ${run.parentThreadId}, NULL, 't3-native', 'claudeAgent',
           'claudeAgent', ${run.providerInstanceId}, NULL, 't3-native', ${childThreadId},
           NULL, ${run.model}, NULL, ${run.title}, NULL, 'active', NULL,
-          'unsupported', 'summary-only', 0, 0, 0, ${run.createdAt}, ${run.updatedAt},
+          'owner-routed', 'summary-only', 1, 1, 0, ${run.createdAt}, ${run.updatedAt},
           NULL, 1, 1
         )
       `;

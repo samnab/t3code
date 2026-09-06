@@ -9,6 +9,7 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
   NativeChildRun,
+  NATIVE_CHILD_RESTART_ERROR,
   NativeChildRunRepository,
   type NativeChildRunRepositoryShape,
 } from "../Services/NativeChildRuns.ts";
@@ -147,6 +148,14 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
       UPDATE native_child_runs SET delivery_state = 'delivered' WHERE run_id = ${runId}
     `,
   });
+  const parentDeliveredRows = SqlSchema.void({
+    Request: Schema.Struct({ parentThreadId: ThreadId }),
+    execute: ({ parentThreadId }) => sql`
+      UPDATE native_child_runs SET delivery_state = 'delivered'
+      WHERE parent_thread_id = ${parentThreadId}
+        AND status IN ('completed', 'failed', 'cancelled')
+    `,
+  });
   const retryRow = SqlSchema.void({
     Request: RunIdInput,
     execute: ({ runId }) => sql`
@@ -159,7 +168,7 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
     Result: NativeChildRunDbRow,
     execute: ({ interruptedAt }) => sql`
       UPDATE native_child_runs SET status = 'failed',
-        error = 'T3 Code restarted before the child turn completed.',
+        error = ${NATIVE_CHILD_RESTART_ERROR},
         delivery_state = 'pending', updated_at = ${interruptedAt}
       WHERE status IN ('starting', 'running')
       RETURNING ${selectColumns}
@@ -192,6 +201,11 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
     markTerminal: (input) => mapped("NativeChildRunRepository.markTerminal", terminalRow(input)),
     markDelivered: (runId) =>
       mapped("NativeChildRunRepository.markDelivered", deliveredRow({ runId })),
+    markParentDelivered: (parentThreadId) =>
+      mapped(
+        "NativeChildRunRepository.markParentDelivered",
+        parentDeliveredRows({ parentThreadId }),
+      ),
     markDeliveryRetry: (runId) =>
       mapped("NativeChildRunRepository.markDeliveryRetry", retryRow({ runId })),
     reconcileRestart: (interruptedAt) =>
@@ -258,6 +272,18 @@ const makeMemoryRepository = Effect.sync(() => {
         updatedAt: input.updatedAt,
       })),
     markDelivered: (runId) => update(runId, (run) => ({ ...run, deliveryState: "delivered" })),
+    markParentDelivered: (parentThreadId) =>
+      Effect.sync(() => {
+        for (const [runId, run] of rows) {
+          if (
+            run.parentThreadId !== parentThreadId ||
+            (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled")
+          ) {
+            continue;
+          }
+          rows.set(runId, { ...run, deliveryState: "delivered" });
+        }
+      }),
     markDeliveryRetry: (runId) =>
       update(runId, (run) => ({
         ...run,
@@ -272,7 +298,7 @@ const makeMemoryRepository = Effect.sync(() => {
           const next = NativeChildRun.make({
             ...run,
             status: "failed",
-            error: "T3 Code restarted before the child turn completed.",
+            error: NATIVE_CHILD_RESTART_ERROR,
             deliveryState: "pending",
             updatedAt: interruptedAt,
           });

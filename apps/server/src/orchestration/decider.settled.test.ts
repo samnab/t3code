@@ -104,6 +104,11 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
         readModel: makeReadModel(null, null, makeSession("running")),
       }).pipe(Effect.result);
       expect(busy._tag).toBe("Failure");
+      const explicitlyStopped = yield* decideOrchestrationCommand({
+        command: { ...command, commandId: CommandId.make("automatic-result-stopped") },
+        readModel: makeReadModel(null, null, makeSession("stopped")),
+      }).pipe(Effect.result);
+      expect(explicitlyStopped._tag).toBe("Failure");
 
       const idle = yield* decideOrchestrationCommand({
         command: { ...command, commandId: CommandId.make("automatic-result-idle") },
