@@ -19,6 +19,8 @@ import {
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { normalizeModelSlug } from "@t3tools/shared/model";
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -53,6 +55,53 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+
+/**
+ * Best-effort reap of anything still descending from `rootPid` after the
+ * Codex app-server itself has been signalled to exit. Codex's native
+ * app-server runs shell tool calls in their own process group so a running
+ * tool's signal handling can't propagate back up to app-server; that means
+ * the group-kill T3's spawner sends to the app-server's own pgid on teardown
+ * never reaches those tool subprocesses (see live-validation defect: a
+ * `sleep` spawned by a tool call survived app-server exiting and was
+ * reparented to PID 1). Walk the OS pid/ppid table for live descendants of
+ * `rootPid` and kill each by its exact captured pid — never by name or
+ * pattern. Windows already tree-kills via `taskkill /T` in the spawner, so
+ * this only runs on POSIX.
+ */
+export function reapDescendantProcessTree(rootPid: number): void {
+  if (process.platform === "win32") return;
+  let table: string;
+  try {
+    table = NodeChildProcess.execFileSync("ps", ["-Ao", "pid=,ppid="], {
+      encoding: "utf8",
+      timeout: 2_000,
+    });
+  } catch {
+    return;
+  }
+  const childrenByParentPid = new Map<number, Array<number>>();
+  for (const line of table.split("\n")) {
+    const [pidText, ppidText] = line.trim().split(/\s+/);
+    const pid = Number(pidText);
+    const ppid = Number(ppidText);
+    if (!Number.isFinite(pid) || !Number.isFinite(ppid)) continue;
+    const siblings = childrenByParentPid.get(ppid) ?? [];
+    siblings.push(pid);
+    childrenByParentPid.set(ppid, siblings);
+  }
+  const queue = [rootPid];
+  for (let pid = queue.shift(); pid !== undefined; pid = queue.shift()) {
+    for (const descendantPid of childrenByParentPid.get(pid) ?? []) {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // Already exited between the snapshot and the kill; nothing to do.
+      }
+      queue.push(descendantPid);
+    }
+  }
+}
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
   "missing thread",
@@ -1218,6 +1267,18 @@ export const makeCodexSessionRuntime = (
       env,
       extendEnv,
     });
+    // Registered before the spawn's own `Effect.acquireRelease`, so on scope
+    // release this runs *after* the spawner's group-kill has already had its
+    // chance (LIFO finalizer order): the spawner tries first, this reaps any
+    // descendants that its process-group signal didn't reach.
+    const appServerPidRef = yield* Ref.make<number | undefined>(undefined);
+    yield* Effect.addFinalizer(() =>
+      Ref.get(appServerPidRef).pipe(
+        Effect.map((pid) => {
+          if (pid !== undefined) reapDescendantProcessTree(pid);
+        }),
+      ),
+    );
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -1238,6 +1299,7 @@ export const makeCodexSessionRuntime = (
             }),
         ),
       );
+    yield* Ref.set(appServerPidRef, child.pid);
 
     const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
       Layer.build,
