@@ -106,6 +106,30 @@ describe("foldSubagentActivities", () => {
     expect(agent.completedAt).not.toBeNull();
   });
 
+  it("a t3-native task.completed with status cancelled maps to cancelled, not completed", () => {
+    const agents = fold([
+      activity("task.started", { taskId: "task-cancel", taskType: "local_agent" }),
+      activity("task.completed", {
+        taskId: "task-cancel",
+        status: "cancelled",
+        summary: "Cancelled by user",
+      }),
+    ]);
+    expect(agents[0]!.status).toBe("cancelled");
+  });
+
+  it("a t3-native task.completed with status interrupted maps to interrupted, not completed", () => {
+    const agents = fold([
+      activity("task.started", { taskId: "task-interrupt", taskType: "local_agent" }),
+      activity("task.completed", {
+        taskId: "task-interrupt",
+        status: "interrupted",
+        summary: "Restart interrupted",
+      }),
+    ]);
+    expect(agents[0]!.status).toBe("interrupted");
+  });
+
   it("progress can create an agent when its start row aged out of retention", () => {
     const agents = fold([
       activity("task.progress", {
