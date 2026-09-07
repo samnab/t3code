@@ -84,6 +84,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
+import { buildClaudeExperimentQueryOptions } from "../ClaudeExperimentSession.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { withVoiceNotificationsEnv } from "../ProviderInstanceEnvironment.ts";
 import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
@@ -4142,7 +4143,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
 
       const startedAt = yield* nowIso;
-      const resumeState = readClaudeResumeState(input.resumeCursor);
+      const candidateMcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      const mcpSession =
+        candidateMcpSession?.providerInstanceId === boundInstanceId
+          ? candidateMcpSession
+          : undefined;
+      const isExperiment = mcpSession?.experiment !== undefined;
+      const resumeState = isExperiment ? undefined : readClaudeResumeState(input.resumeCursor);
       const threadId = input.threadId;
       const existingResumeSessionId = resumeState?.resume;
       const newSessionId = existingResumeSessionId === undefined ? yield* randomUUIDv4 : undefined;
@@ -4608,7 +4615,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? { autoCompactWindow: Number(claudeSettings.autoCompactWindow) }
           : {}),
       };
-      const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       // The attachments dir grant lets the agent Read/copy pasted images at
       // the paths ProviderService injects into the turn text, without an
       // approval prompt. It is a leaf directory holding only attachment
@@ -4617,7 +4623,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.cwd ? [input.cwd] : []),
         serverConfig.attachmentsDir,
       ];
-      const queryOptions: ClaudeQueryOptions = {
+      const standardQueryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
@@ -4663,6 +4669,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             }
           : {}),
       };
+      const queryOptions =
+        isExperiment && mcpSession !== undefined && newSessionId !== undefined
+          ? buildClaudeExperimentQueryOptions({
+              cwd: input.cwd,
+              model: apiModelId,
+              executablePath: claudeBinaryPath,
+              environment: withVoiceNotificationsEnv(claudeEnvironment, input.voiceNotifications),
+              sessionId: newSessionId,
+              systemPrompt: {
+                type: "preset",
+                preset: "claude_code",
+                append: buildRuntimeInstructions({ harness: "Claude Code" }),
+              },
+              mcpSession,
+            })
+          : standardQueryOptions;
 
       yield* Effect.annotateCurrentSpan({
         "provider.kind": PROVIDER,
