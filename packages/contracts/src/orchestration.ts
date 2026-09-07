@@ -311,6 +311,13 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
+// Marks a role: "user" message that T3 authored on the user's behalf rather
+// than the user typing it, so clients can render it distinctly (e.g. a
+// subagent result card) instead of as the user's own words. Absent means an
+// ordinary user- or provider-authored message.
+export const OrchestrationMessageOrigin = Schema.Literals(["subagent-delivery", "goal-continue"]);
+export type OrchestrationMessageOrigin = typeof OrchestrationMessageOrigin.Type;
+
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
   role: OrchestrationMessageRole,
@@ -318,6 +325,7 @@ export const OrchestrationMessage = Schema.Struct({
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,
+  origin: Schema.optional(OrchestrationMessageOrigin),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1117,6 +1125,10 @@ export const ThreadTurnStartCommand = Schema.Struct({
     role: Schema.Literal("user"),
     text: Schema.String,
     attachments: Schema.Array(ChatAttachment),
+    // Set only by server-internal producers (subagent delivery, goal-loop
+    // continuation). Intentionally absent from the client command schema so
+    // a client can never forge authorship of its own message.
+    origin: Schema.optional(OrchestrationMessageOrigin),
   }),
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
@@ -1589,6 +1601,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,
+  origin: Schema.optional(OrchestrationMessageOrigin),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
