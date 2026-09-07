@@ -67,6 +67,13 @@ export function buildComposerSlashCommandItems(input: {
             label: "/goal",
             description: "Set or view this thread's goal",
           },
+          {
+            id: "cmd:goal-experiment",
+            type: "slash-command",
+            command: "goal experiment",
+            label: "/goal experiment",
+            description: "Preview a bounded goal experiment",
+          },
         ] as const)
       : []),
     {
@@ -87,7 +94,7 @@ export function buildComposerSlashCommandItems(input: {
   const items: ComposerCommandItem[] = builtIn.filter(
     (item) =>
       item.command.includes(query) &&
-      (item.command === "model" || item.command === "goal" || allowInteractionMode),
+      (item.command === "model" || item.command.startsWith("goal") || allowInteractionMode),
   );
 
   // Providers expand commands only at the start of a message. T3 commands

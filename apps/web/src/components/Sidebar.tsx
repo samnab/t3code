@@ -3876,7 +3876,7 @@ export default function Sidebar() {
                 titleRegeneration: supportsTitleRegeneration,
               },
               executionGoal: readThreadSupportsExecutionGoal(threadRef),
-              goalLoop: thread.goalLoop ? { state: thread.goalLoop.state } : null,
+              goalLoop: thread.goalLoop ?? null,
               snoozePresets,
             }),
             position,

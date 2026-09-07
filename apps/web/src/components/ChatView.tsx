@@ -63,6 +63,7 @@ import {
   parseThreadGoalCommand,
   trimThreadGoalWhitespace,
 } from "@t3tools/shared/composerTrigger";
+import { threadExperimentObjectiveError } from "@t3tools/client-runtime/state/threadGoalEditor";
 import {
   projectScriptCwd,
   projectScriptRuntimeEnv,

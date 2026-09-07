@@ -103,6 +103,7 @@ import {
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
+import type { ThreadExperimentConfirmationState } from "./thread-experiment-confirmation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
 import { isServerAuthoredMessage } from "@t3tools/client-runtime/state/messageOrigin";
 
@@ -143,6 +144,10 @@ export interface ThreadDetailScreenProps {
   readonly onChangeGoalDraft: (text: string) => void;
   readonly onSaveGoalEditor: () => void;
   readonly onClearGoalEditor: () => void;
+  readonly onGoalLoopAction: (action: "pause" | "resume" | "continue") => void;
+  readonly experimentConfirmationState: ThreadExperimentConfirmationState | null;
+  readonly onCancelExperimentConfirmation: () => void;
+  readonly onConfirmExperiment: () => void;
   readonly executionGoalState: ExecutionGoalPanelState | null;
   readonly onOpenExecutionGoal: () => void;
   readonly onRefreshExecutionGoal: () => void;
@@ -944,7 +949,10 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       supportsThreadGoals:
                         props.serverConfig?.environment.capabilities.threadGoals === true,
                     }) === "passive" ? (
-                      <ThreadGoalPassiveLabel goal={props.selectedThread.goal ?? ""} />
+                      <ThreadGoalPassiveLabel
+                        goal={props.selectedThread.goal ?? ""}
+                        goalLoop={props.selectedThread.goalLoop}
+                      />
                     ) : null}
                   </Animated.View>
                 ) : null}
@@ -975,6 +983,10 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                   onChangeGoalDraft={props.onChangeGoalDraft}
                   onSaveGoalEditor={props.onSaveGoalEditor}
                   onClearGoalEditor={props.onClearGoalEditor}
+                  onGoalLoopAction={props.onGoalLoopAction}
+                  experimentConfirmationState={props.experimentConfirmationState}
+                  onCancelExperimentConfirmation={props.onCancelExperimentConfirmation}
+                  onConfirmExperiment={props.onConfirmExperiment}
                   executionGoalState={props.executionGoalState}
                   onOpenExecutionGoal={props.onOpenExecutionGoal}
                   onRefreshExecutionGoal={props.onRefreshExecutionGoal}

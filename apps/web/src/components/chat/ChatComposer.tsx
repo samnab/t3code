@@ -90,6 +90,7 @@ import {
 } from "../../promptStashStore";
 import { ComposerStashBadge } from "./ComposerStashBadge";
 import { ComposerStashMenu } from "./ComposerStashMenu";
+import { describeGoalLoop } from "./threadGoalLoopPresentation";
 import { TargetArrowIcon } from "../Icons";
 import { useComposerMenuState } from "./useComposerMenuState";
 import { useComposerFocusState } from "./useComposerFocusState";
@@ -1094,47 +1095,6 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   );
 });
 
-/**
- * Tone and tooltip for a goal loop's drive state, shared by the pill and its
- * passive counterpart. Idle reads as the plain goal pill (no loop is driving
- * yet), so it has no distinct tone here.
- */
-function describeGoalLoop(loop: ThreadGoalLoop | null): {
-  tone: "idle" | "running" | "paused" | "blocked" | "capped" | "completed";
-  tooltip: string | null;
-  suffix: string | null;
-} {
-  if (loop === null) {
-    return { tone: "idle", tooltip: null, suffix: null };
-  }
-  switch (loop.state) {
-    case "running":
-      return {
-        tone: "running",
-        tooltip: `Working toward the goal · iteration ${loop.iterations} of ${loop.maxIterations}`,
-        suffix: `${loop.iterations}/${loop.maxIterations}`,
-      };
-    case "paused":
-      return { tone: "paused", tooltip: "Goal loop paused", suffix: null };
-    case "blocked":
-      return {
-        tone: "blocked",
-        tooltip: loop.reason ? `Goal loop blocked · ${loop.reason}` : "Goal loop blocked",
-        suffix: null,
-      };
-    case "capped":
-      return {
-        tone: "capped",
-        tooltip: `Reached ${loop.iterations} iterations`,
-        suffix: null,
-      };
-    case "completed":
-      return { tone: "completed", tooltip: "Goal complete", suffix: null };
-    case "idle":
-      return { tone: "idle", tooltip: null, suffix: null };
-  }
-}
-
 const GOAL_LOOP_TONE_CLASSNAME: Record<ReturnType<typeof describeGoalLoop>["tone"], string> = {
   idle: "",
   running: "",
@@ -1160,7 +1120,7 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
   onGoalLoopAction: (action: "pause" | "resume" | "continue" | "reset") => void;
   shortcutLabel: string | null;
 }) {
-  const { tone, tooltip, suffix } = describeGoalLoop(props.goalLoop);
+  const { tone, tooltip, suffix, pauseAction, canContinue } = describeGoalLoop(props.goalLoop);
   const goalTooltip =
     (tooltip ?? props.goal ?? "Set a goal for this thread") +
     (props.shortcutLabel ? ` · ${props.shortcutLabel}` : "");
@@ -1174,7 +1134,11 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
               data-thread-goal
               data-thread-goal-set={props.goal !== null ? "true" : "false"}
               data-thread-goal-loop-state={props.goalLoop?.state ?? undefined}
-              aria-label={props.goal !== null ? `Thread goal: ${props.goal}` : "Set thread goal"}
+              aria-label={
+                props.goal !== null
+                  ? `Thread goal: ${props.goal}${tooltip ? `. ${tooltip}` : ""}`
+                  : "Set thread goal"
+              }
               aria-pressed={props.active}
               className={cn(
                 "min-w-0 shrink",
@@ -1199,29 +1163,31 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
         </TooltipTrigger>
         <TooltipPopup side="top">{goalTooltip}</TooltipPopup>
       </Tooltip>
-      {props.goalLoop !== null && (tone === "running" || tone === "paused") ? (
+      {props.goalLoop !== null &&
+      pauseAction !== null &&
+      (tone === "running" || tone === "paused") ? (
         <Tooltip>
           <TooltipTrigger
             render={
               <ComposerControl
                 type="button"
-                aria-label={tone === "running" ? "Pause goal loop" : "Resume goal loop"}
+                aria-label={pauseAction === "pause" ? "Pause goal loop" : "Resume goal loop"}
                 className="shrink-0 text-secondary-label hover:text-foreground"
-                onClick={() => props.onGoalLoopAction(tone === "running" ? "pause" : "resume")}
+                onClick={() => props.onGoalLoopAction(pauseAction)}
               />
             }
           >
             <ComposerControlIcon
-              icon={tone === "running" ? PauseIcon : PlayIcon}
+              icon={pauseAction === "pause" ? PauseIcon : PlayIcon}
               className="text-current opacity-100"
             />
           </TooltipTrigger>
           <TooltipPopup side="top">
-            {tone === "running" ? "Pause goal loop" : "Resume goal loop"}
+            {pauseAction === "pause" ? "Pause goal loop" : "Resume goal loop"}
           </TooltipPopup>
         </Tooltip>
       ) : null}
-      {tone === "capped" ? (
+      {tone === "capped" && canContinue ? (
         <Tooltip>
           <TooltipTrigger
             render={
@@ -1263,7 +1229,10 @@ const ComposerThreadGoalPassive = memo(function ComposerThreadGoalPassive(props:
           >
             <TargetArrowIcon aria-hidden className="size-3 shrink-0" />
             {/* Truncated visually; the label keeps the full text for AT. */}
-            <span aria-label={`Thread goal: ${props.goal}`} className="min-w-0 truncate">
+            <span
+              aria-label={`Thread goal: ${props.goal}${tooltip ? `. ${tooltip}` : ""}`}
+              className="min-w-0 truncate"
+            >
               {props.goal}
             </span>
             {suffix !== null ? <span className="shrink-0 tabular-nums">{suffix}</span> : null}

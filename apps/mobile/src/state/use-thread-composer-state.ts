@@ -25,6 +25,7 @@ import {
 import {
   nextThreadGoalEditorEpoch,
   resolveThreadGoalCommandBlockReason,
+  threadExperimentObjectiveError,
   threadGoalEditorCanSave,
   threadGoalEditorReducer,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
@@ -85,6 +86,12 @@ import {
   composerAttachmentUploadBlockReason,
   composerAttachmentUploadsAtom,
 } from "./composer-attachment-uploads";
+import {
+  canConfirmThreadExperiment,
+  threadExperimentConfirmationReducer,
+  threadExperimentStartInput,
+  type ThreadExperimentConfirmationState,
+} from "../features/threads/thread-experiment-confirmation";
 
 export function appendReviewCommentToDraft(input: {
   readonly environmentId: EnvironmentId;
@@ -143,6 +150,28 @@ export function useThreadComposerState() {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
+    reportFailure: false,
+  });
+  const previewThreadExperiment = useAtomCommand(threadEnvironment.experimentPreview, {
+    reportFailure: false,
+  });
+  const startThreadExperiment = useAtomCommand(threadEnvironment.experimentStart, {
+    reportFailure: false,
+  });
+
+  const [threadExperimentConfirmationState, dispatchThreadExperimentConfirmation] = useReducer(
+    threadExperimentConfirmationReducer,
+    null,
+  );
+  const threadExperimentConfirmationStateRef = useRef<ThreadExperimentConfirmationState | null>(
+    null,
+  );
+  threadExperimentConfirmationStateRef.current = threadExperimentConfirmationState;
+  const submittedExperimentDraftRef = useRef<{
+    readonly threadKey: string;
+    readonly draft: ReturnType<typeof getComposerDraftSnapshot>;
+  } | null>(null);
 
   // ── Codex execution goal ── Provider-owned live session state, pulled
   // via the three execution-goal RPCs only; never the thread metadata path
@@ -510,6 +539,39 @@ export function useThreadComposerState() {
         );
         return null;
       }
+      if (goalCommand.action === "experiment") {
+        const objectiveError = threadExperimentObjectiveError(goalCommand.objective);
+        if (objectiveError !== null) {
+          Alert.alert("Experiment needs an objective", objectiveError);
+          return null;
+        }
+        const result = await previewThreadExperiment({
+          environmentId: selectedThreadShell.environmentId,
+          input: { threadId: selectedThreadShell.id, objective: goalCommand.objective },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = Cause.squash(result.cause);
+            Alert.alert(
+              "Could not preview experiment",
+              error instanceof Error
+                ? error.message
+                : "Check the experiment configuration and try again.",
+            );
+          }
+          return null;
+        }
+        submittedExperimentDraftRef.current = { threadKey, draft };
+        dispatchThreadExperimentConfirmation({
+          type: "open",
+          threadKey,
+          environmentId: selectedThreadShell.environmentId,
+          threadId: selectedThreadShell.id,
+          objective: goalCommand.objective,
+          preview: result.value,
+        });
+        return null;
+      }
       if (goalCommand.action === "set" && goalCommand.goal.length > THREAD_GOAL_MAX_CHARS) {
         Alert.alert("Goal is too long", `Keep it under ${THREAD_GOAL_MAX_CHARS} characters.`);
         return null;
@@ -652,6 +714,7 @@ export function useThreadComposerState() {
     selectedEnvironmentRuntime?.serverConfig,
     selectedThreadDetail,
     selectedThreadShell,
+    previewThreadExperiment,
     updateThreadMetadata,
     uploadThreadFeedback,
   ]);
@@ -837,6 +900,69 @@ export function useThreadComposerState() {
     dispatchThreadGoalEditor({ type: "close" });
   }, []);
 
+  const onThreadGoalLoopAction = useCallback(
+    async (action: "pause" | "resume" | "continue") => {
+      if (!selectedThreadShell) return;
+      const result = await setThreadGoalLoop({
+        environmentId: selectedThreadShell.environmentId,
+        input: {
+          threadId: selectedThreadShell.id,
+          action: action === "continue" ? "reset" : action,
+        },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = Cause.squash(result.cause);
+        Alert.alert(
+          "Could not update the goal loop",
+          error instanceof Error ? error.message : "An error occurred.",
+        );
+      }
+    },
+    [selectedThreadShell, setThreadGoalLoop],
+  );
+
+  useEffect(() => {
+    const confirmation = threadExperimentConfirmationStateRef.current;
+    if (confirmation && confirmation.threadKey !== selectedThreadKey) {
+      submittedExperimentDraftRef.current = null;
+      dispatchThreadExperimentConfirmation({ type: "cancel" });
+    }
+  }, [selectedThreadKey]);
+
+  const cancelThreadExperimentConfirmation = useCallback(() => {
+    if (threadExperimentConfirmationStateRef.current?.confirming) return;
+    submittedExperimentDraftRef.current = null;
+    dispatchThreadExperimentConfirmation({ type: "cancel" });
+  }, []);
+
+  const confirmThreadExperiment = useCallback(async () => {
+    const confirmation = threadExperimentConfirmationStateRef.current;
+    if (!canConfirmThreadExperiment(confirmation)) return;
+    dispatchThreadExperimentConfirmation({ type: "beginConfirm" });
+    const result = await startThreadExperiment({
+      environmentId: confirmation.environmentId,
+      input: threadExperimentStartInput(confirmation),
+    });
+    if (result._tag === "Failure") {
+      const error = isAtomCommandInterrupted(result) ? null : Cause.squash(result.cause);
+      dispatchThreadExperimentConfirmation({
+        type: "confirmFailure",
+        error:
+          error instanceof Error
+            ? error.message
+            : isAtomCommandInterrupted(result)
+              ? "The experiment start was interrupted. Review the configuration and try again."
+              : "The experiment could not start. Review the configuration and try again.",
+      });
+      return;
+    }
+
+    const submitted = submittedExperimentDraftRef.current;
+    dispatchThreadExperimentConfirmation({ type: "cancel" });
+    submittedExperimentDraftRef.current = null;
+    if (submitted) clearComposerDraftContentIfUnchanged(submitted.threadKey, submitted.draft);
+  }, [startThreadExperiment]);
+
   // Switching threads closes the execution-goal sheet: it belongs to the
   // thread's live Codex session.
   useEffect(() => {
@@ -955,6 +1081,10 @@ export function useThreadComposerState() {
     saveThreadGoalFromEditor,
     clearThreadGoalFromEditor,
     closeThreadGoalEditor,
+    onThreadGoalLoopAction,
+    threadExperimentConfirmationState,
+    cancelThreadExperimentConfirmation,
+    confirmThreadExperiment,
     executionGoalPanelState,
     openExecutionGoalPanel,
     refreshExecutionGoalPanel,

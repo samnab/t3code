@@ -1,4 +1,5 @@
-import type { ContextMenuItem, ThreadGoalLoopState } from "@t3tools/contracts";
+import type { ContextMenuItem, ThreadGoalLoop } from "@t3tools/contracts";
+import { isThreadGoalLoopActionAvailable } from "@t3tools/client-runtime/state/threadGoalEditor";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 
 /**
@@ -50,7 +51,7 @@ export interface ThreadActionMenuState {
   /** The thread's live session provider exposes native execution goals. */
   readonly executionGoal: boolean;
   /** Server-driven goal loop state, when the server and thread have one. */
-  readonly goalLoop: { readonly state: ThreadGoalLoopState } | null;
+  readonly goalLoop: ThreadGoalLoop | null;
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
 
@@ -116,9 +117,9 @@ export function buildThreadActionMenuItems(
           },
         ]
       : []),
-    ...(state.goalLoop?.state === "running" || state.goalLoop?.state === "idle"
+    ...(isThreadGoalLoopActionAvailable(state.goalLoop, "pause")
       ? [{ id: "pause-goal-loop" as const, label: "Pause goal loop", icon: "pause" }]
-      : state.goalLoop?.state === "paused" || state.goalLoop?.state === "blocked"
+      : isThreadGoalLoopActionAvailable(state.goalLoop, "resume")
         ? [{ id: "resume-goal-loop" as const, label: "Resume goal loop", icon: "play" }]
         : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },

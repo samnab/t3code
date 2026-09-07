@@ -101,7 +101,10 @@ import {
   useExistingThreadSettingsRoutePresentation,
 } from "./ThreadSettingsSheet";
 import { CodexExecutionGoalSheet } from "./CodexExecutionGoalSheet";
+import { ThreadExperimentConfirmationSheet } from "./ThreadExperimentConfirmationSheet";
 import { ThreadGoalEditorSheet } from "./ThreadGoalEditorSheet";
+import type { ThreadExperimentConfirmationState } from "./thread-experiment-confirmation";
+import { mobileGoalLoopAction, mobileGoalLoopStatus } from "./thread-goal-loop";
 import { resolveThreadCompactionControl } from "./thread-compaction";
 import { resolveExecutionGoalControl } from "./thread-execution-goal";
 import {
@@ -143,6 +146,10 @@ export interface ThreadComposerProps {
   readonly onChangeGoalDraft: (text: string) => void;
   readonly onSaveGoalEditor: () => void;
   readonly onClearGoalEditor: () => void;
+  readonly onGoalLoopAction: (action: "pause" | "resume" | "continue") => void;
+  readonly experimentConfirmationState: ThreadExperimentConfirmationState | null;
+  readonly onCancelExperimentConfirmation: () => void;
+  readonly onConfirmExperiment: () => void;
   readonly executionGoalState: ExecutionGoalPanelState | null;
   readonly onOpenExecutionGoal: () => void;
   readonly onRefreshExecutionGoal: () => void;
@@ -332,16 +339,19 @@ const ComposerConnectionStatusPill = memo(function ComposerConnectionStatusPill(
 
 export const ThreadGoalPassiveLabel = memo(function ThreadGoalPassiveLabel(props: {
   readonly goal: string;
+  readonly goalLoop?: OrchestrationThreadShell["goalLoop"];
 }) {
+  const status = mobileGoalLoopStatus(props.goalLoop ?? null);
   return (
     <View className="flex-row items-center gap-1.5 pt-2">
       <SymbolView name="scope" size={12} tintColorClassName="accent-icon-muted" type="monochrome" />
       <Text
-        accessibilityLabel={`Thread goal: ${props.goal}`}
+        accessibilityLabel={`Thread goal: ${props.goal}${status ? `. ${status}` : ""}`}
         className="min-w-0 flex-1 text-xs text-foreground-muted"
         numberOfLines={1}
       >
         {props.goal}
+        {status ? ` · ${status}` : ""}
       </Text>
     </View>
   );
@@ -528,6 +538,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     controlsVisible: isExpanded,
     supportsThreadGoals,
   });
+  const threadGoalLoop = props.selectedThread.goalLoop ?? null;
+  const goalLoopStatus = mobileGoalLoopStatus(threadGoalLoop);
+  const goalLoopAction = mobileGoalLoopAction(threadGoalLoop);
 
   // Keep the feed inset aligned with the card or compact dictation strip.
   useEffect(() => {
@@ -964,11 +977,15 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                       {threadGoalDisplay === "control" ? (
                         props.selectedThread.goal != null ? (
                           <ComposerInlineControl
-                            accessibilityLabel={`Thread goal: ${props.selectedThread.goal}`}
-                            accessibilityHint="Opens the goal editor"
+                            accessibilityLabel={`Thread goal: ${props.selectedThread.goal}${goalLoopStatus ? `. ${goalLoopStatus}` : ""}`}
+                            accessibilityHint="Opens the goal editor and experiment status"
                             icon="scope"
-                            label={props.selectedThread.goal}
-                            maxWidth={132}
+                            label={
+                              threadGoalLoop?.kind === "experiment"
+                                ? `Experiment · ${props.selectedThread.goal}`
+                                : props.selectedThread.goal
+                            }
+                            maxWidth={164}
                             showChevron={false}
                             onPress={props.onOpenGoalEditor}
                           />
@@ -980,6 +997,20 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                             showChevron={false}
                           />
                         )
+                      ) : null}
+                      {threadGoalDisplay === "control" && goalLoopAction ? (
+                        <ComposerToolbarButton
+                          accessibilityLabel={
+                            goalLoopAction === "pause"
+                              ? "Pause goal loop"
+                              : goalLoopAction === "resume"
+                                ? "Resume goal loop"
+                                : "Continue goal loop"
+                          }
+                          icon={goalLoopAction === "pause" ? "pause" : "play"}
+                          onPress={() => props.onGoalLoopAction(goalLoopAction)}
+                          showChevron={false}
+                        />
                       ) : null}
                       {compactionControl.available ? (
                         <ComposerToolbarButton
@@ -1042,7 +1073,10 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         </ComposerSurface>
 
         {threadGoalDisplay === "passive" ? (
-          <ThreadGoalPassiveLabel goal={props.selectedThread.goal ?? ""} />
+          <ThreadGoalPassiveLabel
+            goal={props.selectedThread.goal ?? ""}
+            goalLoop={props.selectedThread.goalLoop}
+          />
         ) : null}
 
         {/* Queue count */}
@@ -1085,10 +1119,20 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       {props.goalEditorState ? (
         <ThreadGoalEditorSheet
           state={props.goalEditorState}
+          goalLoop={threadGoalLoop}
           onDraftChange={props.onChangeGoalDraft}
           onSave={props.onSaveGoalEditor}
           onClear={props.onClearGoalEditor}
+          onGoalLoopAction={props.onGoalLoopAction}
           onClose={props.onCloseGoalEditor}
+        />
+      ) : null}
+
+      {props.experimentConfirmationState ? (
+        <ThreadExperimentConfirmationSheet
+          state={props.experimentConfirmationState}
+          onCancel={props.onCancelExperimentConfirmation}
+          onConfirm={props.onConfirmExperiment}
         />
       ) : null}
 

@@ -821,6 +821,10 @@ function ThreadRouteContent(
           onChangeGoalDraft={composer.changeThreadGoalDraft}
           onSaveGoalEditor={composer.saveThreadGoalFromEditor}
           onClearGoalEditor={composer.clearThreadGoalFromEditor}
+          onGoalLoopAction={(action) => void composer.onThreadGoalLoopAction(action)}
+          experimentConfirmationState={composer.threadExperimentConfirmationState}
+          onCancelExperimentConfirmation={composer.cancelThreadExperimentConfirmation}
+          onConfirmExperiment={() => void composer.confirmThreadExperiment()}
           executionGoalState={composer.executionGoalPanelState}
           onOpenExecutionGoal={composer.openExecutionGoalPanel}
           onRefreshExecutionGoal={composer.refreshExecutionGoalPanel}

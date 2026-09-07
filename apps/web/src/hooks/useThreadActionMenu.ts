@@ -156,7 +156,7 @@ export function useThreadActionMenu(input: {
           hasReloadableSession: thread.session !== null && thread.session.status !== "stopped",
           supports,
           executionGoal: readThreadSupportsExecutionGoal(threadRef),
-          goalLoop: thread.goalLoop ? { state: thread.goalLoop.state } : null,
+          goalLoop: thread.goalLoop ?? null,
           snoozePresets,
         });
         const clicked = await settlePromise(() => api.contextMenu.show(items, position));

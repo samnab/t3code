@@ -100,6 +100,39 @@ describe("buildThreadActionMenuItems", () => {
     expect(item).toMatchObject({ label: "Regenerating…", disabled: true });
   });
 
+  it("does not offer resume after an experiment exhausts its campaign limits", () => {
+    const items = ids({
+      ...baseState,
+      goalLoop: {
+        kind: "experiment",
+        state: "paused",
+        mode: "t3",
+        iterations: 4,
+        maxIterations: 10,
+        updatedAt: "2026-09-07T02:00:00.000Z",
+        experiment: {
+          runId: "run-1",
+          configDigest: "sha256:config",
+          phase: "exhausted",
+          metric: { name: "score", direction: "maximize", minimumImprovement: 0.1 },
+          experimentsRun: 4,
+          experimentsKept: 1,
+          experimentsRestored: 3,
+          baselineMetric: 10,
+          bestMetric: 11,
+          lastMetric: 10.5,
+          elapsedSeconds: 120,
+          maxExperiments: 4,
+          maxTotalSeconds: 120,
+          lastError: "Time limit reached",
+        },
+      },
+    });
+
+    expect(items).not.toContain("resume-goal-loop");
+    expect(items).not.toContain("pause-goal-loop");
+  });
+
   it("marks delete as destructive and keeps it last", () => {
     const items = buildThreadActionMenuItems({ ...baseState, branch: "main" });
     expect(items.at(-1)).toMatchObject({ id: "delete", destructive: true });

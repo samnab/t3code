@@ -205,6 +205,47 @@ paused or blocked it. Clearing the goal with `/goal clear`, or the pill, stops t
 You can send a `/goal` command while a turn is running — setting, editing, and clearing a goal are
 thread state, not messages to the agent, so the composer sends them instead of queueing them.
 
+#### Goal experiments
+
+Goal experiments let an agent try measured changes inside a fixed set of files. Add
+`.auto/config.json` to a clean repository on a dedicated, unprotected branch:
+
+```json
+{
+  "version": 1,
+  "branch": "experiment/faster-startup",
+  "files": ["src/startup.ts"],
+  "evaluator": {
+    "argv": ["node", "scripts/measure-startup.mjs"],
+    "metric": "milliseconds",
+    "direction": "lower",
+    "minimumImprovement": 5
+  },
+  "checks": [["vp", "test", "run", "src/startup.test.ts"]],
+  "limits": {
+    "maxExperiments": 8,
+    "maxApplyBytes": 262144,
+    "maxOutputBytes": 65536,
+    "evaluatorTimeoutSeconds": 60,
+    "checkTimeoutSeconds": 120,
+    "maxTotalSeconds": 900
+  },
+  "protectedBranches": ["main"]
+}
+```
+
+Run `/goal experiment <objective>` on an existing connected thread without attachments. T3 Code
+shows the exact branch, HEAD, approved files, commands, metric, provider support, digest, and limits
+it read from the server. Nothing starts until you select **Confirm and start**. A changed or expired
+preview is rejected, so review a fresh preview instead of approving stale settings.
+
+Experiments fail closed on providers that cannot enforce the restricted experiment tool set. A run
+measures its baseline first, then keeps only candidates that improve the configured metric by at
+least `minimumImprovement` and pass every check. Rejected candidates are restored. The goal control
+shows the phase, baseline and best values, experiment count, elapsed time, and last error. You can
+pause or clear an active run. Reaching `maxExperiments` or `maxTotalSeconds`, failing, or completing
+is terminal; resume and **Continue anyway** cannot reset those limits.
+
 ## Subscription usage limits
 
 Providers that bill against a subscription report how much of each usage window you have spent.

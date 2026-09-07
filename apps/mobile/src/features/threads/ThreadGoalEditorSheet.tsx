@@ -1,4 +1,4 @@
-import { THREAD_GOAL_MAX_CHARS } from "@t3tools/contracts";
+import { THREAD_GOAL_MAX_CHARS, type ThreadGoalLoop } from "@t3tools/contracts";
 import {
   threadGoalEditorCanSave,
   threadGoalEditorDraftError,
@@ -11,6 +11,11 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
+import {
+  experimentPhaseLabel,
+  formatExperimentDuration,
+  mobileGoalLoopAction,
+} from "./thread-goal-loop";
 
 // Hidden until the draft approaches the cap, matching the web editor.
 const GOAL_COUNTER_THRESHOLD = THREAD_GOAL_MAX_CHARS - 128;
@@ -22,15 +27,19 @@ const GOAL_COUNTER_THRESHOLD = THREAD_GOAL_MAX_CHARS - 128;
  */
 export function ThreadGoalEditorSheet(props: {
   readonly state: ThreadGoalEditorState;
+  readonly goalLoop: ThreadGoalLoop | null;
   readonly onDraftChange: (text: string) => void;
   readonly onSave: () => void;
   readonly onClear: () => void;
+  readonly onGoalLoopAction: (action: "pause" | "resume" | "continue") => void;
   readonly onClose: () => void;
 }) {
   const { state } = props;
   const insets = useSafeAreaInsets();
   const draftError = threadGoalEditorDraftError(state.draft);
   const canSave = threadGoalEditorCanSave(state);
+  const experiment = state.savedGoal !== null ? props.goalLoop?.experiment : null;
+  const loopAction = mobileGoalLoopAction(props.goalLoop);
 
   const actionButton = (
     label: string,
@@ -111,6 +120,31 @@ export function ThreadGoalEditorSheet(props: {
                 {state.error ?? draftError}
               </Text>
             ) : null}
+            {props.goalLoop?.kind === "experiment" && experiment ? (
+              <View className="mt-3 gap-1 rounded-2xl bg-subtle px-3.5 py-3">
+                <Text className="text-sm font-t3-bold text-foreground">Experiment</Text>
+                <Text className="text-xs text-foreground-muted">
+                  Phase: {experimentPhaseLabel(experiment.phase)}
+                </Text>
+                <Text className="text-xs text-foreground-muted">
+                  Baseline: {experiment.baselineMetric ?? "pending"} · Best:{" "}
+                  {experiment.bestMetric ?? "pending"}
+                </Text>
+                <Text className="text-xs text-foreground-muted">
+                  Experiments: {experiment.experimentsRun}/{experiment.maxExperiments} · kept{" "}
+                  {experiment.experimentsKept} · restored {experiment.experimentsRestored}
+                </Text>
+                <Text className="text-xs text-foreground-muted">
+                  Elapsed: {formatExperimentDuration(experiment.elapsedSeconds)}/
+                  {formatExperimentDuration(experiment.maxTotalSeconds)}
+                </Text>
+                {experiment.lastError ? (
+                  <Text accessibilityRole="alert" className="text-xs text-danger-foreground">
+                    Last error: {experiment.lastError}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             <View className="mt-2 flex-row items-center justify-between gap-2">
               <Text className="min-w-0 flex-1 text-xs text-foreground-muted" numberOfLines={1}>
                 {state.draft.length >= GOAL_COUNTER_THRESHOLD
@@ -118,6 +152,16 @@ export function ThreadGoalEditorSheet(props: {
                   : ""}
               </Text>
               <View className="flex-row items-center justify-end gap-1">
+                {loopAction
+                  ? actionButton(
+                      loopAction === "pause"
+                        ? "Pause"
+                        : loopAction === "resume"
+                          ? "Resume"
+                          : "Continue",
+                      () => props.onGoalLoopAction(loopAction),
+                    )
+                  : null}
                 {state.savedGoal !== null
                   ? actionButton(state.saving ? "Clearing…" : "Clear", props.onClear, {
                       disabled: state.saving,

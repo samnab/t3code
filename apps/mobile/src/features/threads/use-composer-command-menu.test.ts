@@ -93,4 +93,50 @@ describe("mobile slash commands", () => {
       }),
     ).toEqual({ text: "/plan ", cursor: 6, interactionMode: null });
   });
+
+  it("offers the experiment command on supported existing threads", () => {
+    const items = buildComposerSlashCommandItems({
+      query: "goal",
+      atMessageStart: true,
+      hasThread: true,
+      supportsThreadGoals: true,
+      allowInteractionMode: true,
+      selectedProviderStatus: {
+        driver: ProviderDriverKind.make("codex"),
+        slashCommands: [],
+      },
+    });
+
+    expect(items.map((item) => item.label)).toEqual(["/goal", "/goal experiment"]);
+    const experiment = items.find((item) => item.id === "cmd:goal-experiment");
+    if (!experiment) throw new Error("Expected the experiment command");
+    expect(
+      resolveComposerCommandSelection({
+        draftMessage: "/goal",
+        trigger: { rangeStart: 0, rangeEnd: 5 },
+        item: experiment,
+        allowInteractionMode: true,
+      }),
+    ).toEqual({ text: "/goal experiment ", cursor: 17, interactionMode: null });
+  });
+
+  it("does not offer goal experiments without an existing supported thread", () => {
+    for (const input of [
+      { hasThread: false, supportsThreadGoals: true },
+      { hasThread: true, supportsThreadGoals: false },
+    ]) {
+      expect(
+        buildComposerSlashCommandItems({
+          query: "goal",
+          atMessageStart: true,
+          ...input,
+          allowInteractionMode: true,
+          selectedProviderStatus: {
+            driver: ProviderDriverKind.make("codex"),
+            slashCommands: [],
+          },
+        }).some((item) => item.id === "cmd:goal-experiment"),
+      ).toBe(false);
+    }
+  });
 });
