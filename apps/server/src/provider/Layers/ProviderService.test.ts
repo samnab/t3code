@@ -54,6 +54,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterProcessError,
   ProviderAdapterSessionNotFoundError,
   ProviderUnsupportedError,
   ProviderValidationError,
@@ -144,27 +145,28 @@ function makeFakeCodexAdapter(
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
-  const startSession = vi.fn((input: ProviderSessionStartInput) =>
-    Effect.sync(() => {
-      const now = "2026-01-01T00:00:00.000Z";
-      const session: ProviderSession = {
-        provider,
-        ...(input.providerInstanceId !== undefined
-          ? { providerInstanceId: input.providerInstanceId }
-          : {}),
-        status: "ready",
-        runtimeMode: input.runtimeMode,
-        threadId: input.threadId,
-        resumeCursor: input.resumeCursor ?? {
-          opaque: `resume-${String(input.threadId)}`,
-        },
-        cwd: input.cwd ?? process.cwd(),
-        createdAt: now,
-        updatedAt: now,
-      };
-      sessions.set(session.threadId, session);
-      return session;
-    }),
+  const startSession = vi.fn(
+    (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, ProviderAdapterError> =>
+      Effect.sync(() => {
+        const now = "2026-01-01T00:00:00.000Z";
+        const session: ProviderSession = {
+          provider,
+          ...(input.providerInstanceId !== undefined
+            ? { providerInstanceId: input.providerInstanceId }
+            : {}),
+          status: "ready",
+          runtimeMode: input.runtimeMode,
+          threadId: input.threadId,
+          resumeCursor: input.resumeCursor ?? {
+            opaque: `resume-${String(input.threadId)}`,
+          },
+          cwd: input.cwd ?? process.cwd(),
+          createdAt: now,
+          updatedAt: now,
+        };
+        sessions.set(session.threadId, session);
+        return session;
+      }),
   );
 
   const sendTurn = vi.fn(
@@ -1081,6 +1083,68 @@ experimentLifecycle.layer("ProviderServiceLive experiment lifecycle", (it) => {
       assert(Option.isSome(stoppedBinding));
       assert.equal(stoppedBinding.value.resumeCursor, undefined);
       assert.equal(stoppedBinding.value.status, "stopped");
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          McpProviderSession.clearAllMcpProviderSessions();
+        }),
+      ),
+    ),
+  );
+
+  it.effect("publishes a terminal projected state when restricted startup fails", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const experimentProviderSession = yield* ProviderService.ExperimentProviderSessionService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("thread-experiment-start-failure");
+      const terminalEvent = yield* provider.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "session.state.changed" &&
+            event.payload.state === "error",
+        ),
+        Stream.runHead,
+        Effect.forkChild({ startImmediately: true }),
+      );
+      experimentLifecycle.claude.startSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterProcessError({
+            provider: CLAUDE_AGENT_DRIVER,
+            threadId,
+            detail: "restricted inventory failed",
+          }),
+        ),
+      );
+
+      const result = yield* experimentProviderSession
+        .start({
+          threadId,
+          providerInstanceId: claudeAgentInstanceId,
+          cwd: fixtureCwd("experiment-start-failure"),
+          runId: "experiment-failed-start",
+          generation: 1,
+        })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+
+      const observed = yield* Fiber.join(terminalEvent);
+      assert(Option.isSome(observed));
+      assert.equal(observed.value.type, "session.state.changed");
+      if (observed.value.type === "session.state.changed") {
+        assert.equal(observed.value.payload.state, "error");
+        assert.equal(
+          observed.value.payload.reason,
+          "Restricted experiment provider session failed to start.",
+        );
+        assert.isAtMost(observed.value.payload.reason?.length ?? 0, 512);
+      }
+      const binding = yield* directory.getBinding(threadId);
+      assert(Option.isSome(binding));
+      assert.equal(binding.value.status, "stopped");
+      assert.propertyVal(binding.value.runtimePayload, "activeTurnId", null);
+      assert.equal(McpProviderSession.readMcpProviderSession(threadId), undefined);
     }).pipe(
       Effect.ensuring(
         Effect.sync(() => {

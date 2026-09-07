@@ -368,6 +368,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const experimentSessions = new Map<ThreadId, ExperimentIdentity>();
+  let experimentStartFailureEventId = 0;
   const sessionTransitionLocks = new Map<ThreadId, Semaphore.Semaphore>();
   const withSessionTransitionLock = <A, E, R>(
     threadId: ThreadId,
@@ -1499,6 +1500,44 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         yield* clearMcpSession(input.threadId);
         experimentSessions.delete(input.threadId);
+        yield* directory
+          .upsert({
+            threadId: input.threadId,
+            provider: instanceInfo.driverKind,
+            providerInstanceId: input.providerInstanceId,
+            status: "stopped",
+            resumeCursor: null,
+            runtimePayload: {
+              activeTurnId: null,
+              continueAfterServerUpdate: null,
+              continueAfterServerUpdatePrepared: null,
+            },
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("provider.experiment.session-settle-failed", {
+                threadId: input.threadId,
+                provider: adapter.provider,
+                cause,
+              }),
+            ),
+          );
+        const createdAt = yield* nowIso;
+        experimentStartFailureEventId += 1;
+        yield* publishRuntimeEvent({
+          type: "session.state.changed",
+          eventId: EventId.make(
+            `provider:experiment-start-failed:${input.threadId}:${createdAt}:${experimentStartFailureEventId}`,
+          ),
+          provider: instanceInfo.driverKind,
+          providerInstanceId: input.providerInstanceId,
+          threadId: input.threadId,
+          createdAt,
+          payload: {
+            state: "error",
+            reason: "Restricted experiment provider session failed to start.",
+          },
+        });
       });
 
       const session = yield* adapter

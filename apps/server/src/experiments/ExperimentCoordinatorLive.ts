@@ -14,6 +14,7 @@ import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEng
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ProviderService from "../provider/Services/ProviderService.ts";
 import { readMcpProviderSession } from "../mcp/McpProviderSession.ts";
+import { sanitizeSubagentTranscriptField } from "../persistence/subagentTranscriptSanitization.ts";
 import { ACTIVATION_COMMAND_PREFIX } from "./ExperimentLifecycleReactor.ts";
 import { ExperimentCoordinator } from "./ExperimentService.ts";
 import { ExperimentError } from "./Model.ts";
@@ -26,8 +27,19 @@ function failure(message: string, cause?: unknown) {
   });
 }
 
+const ARGUMENT_DETAIL =
+  /\b(?:argv|arguments?)\s*[:=]\s*(?:\[[^\]\r\n]*\]|"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n;]+)/giu;
+
+export function translateExperimentCoordinatorFailure(message: string, cause: unknown) {
+  const causeMessage = cause instanceof Error ? cause.message.trim() : "";
+  const withoutArguments = causeMessage.replace(ARGUMENT_DETAIL, "argv=[REDACTED]");
+  const detail = sanitizeSubagentTranscriptField(withoutArguments, 512).text.trim();
+  const publicMessage = detail.length > 0 ? `${message} ${detail}` : message;
+  return failure(sanitizeSubagentTranscriptField(publicMessage, 2_000).text, cause);
+}
+
 const translate = <A, E, R>(message: string, effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.mapError((cause) => failure(message, cause)));
+  effect.pipe(Effect.mapError((cause) => translateExperimentCoordinatorFailure(message, cause)));
 
 function commandId(prefix: string, threadId: string) {
   return CommandId.make(`${prefix}${threadId}:${randomUUID()}`);

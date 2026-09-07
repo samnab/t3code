@@ -727,9 +727,11 @@ export const make = Effect.gen(function* () {
       { sync: profile.providerSessionActive },
     );
     yield* ledger(next, { type: "failure", reason: next.lastError }).pipe(Effect.ignore);
-    yield* coordinator
-      .holdGoal({ threadId: next.threadId, action: "block", reason: failure.message })
-      .pipe(Effect.ignore);
+    if (profile.armed) {
+      yield* coordinator
+        .holdGoal({ threadId: next.threadId, action: "block", reason: failure.message })
+        .pipe(Effect.ignore);
+    }
     return failure;
   });
 

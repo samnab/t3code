@@ -73,11 +73,14 @@ function testLayer(
   contexts: Map<string, ExperimentThreadContext>,
   options: {
     readonly failActivation?: boolean;
+    readonly failProviderStart?: boolean;
     readonly rejectSyncBeforeActivation?: boolean;
   } = {},
 ) {
   const started: Array<string> = [];
   const stopped: Array<string> = [];
+  const held: Array<{ readonly action: "pause" | "block" | "complete"; readonly reason: string }> =
+    [];
   const lifecycle: Array<"activate" | "sync"> = [];
   let activated = false;
   const rows = new Map<string, ExperimentProfile>();
@@ -90,25 +93,32 @@ function testLayer(
         return context;
       }),
     startProvider: (input) =>
-      Effect.sync(() => {
-        const context = contexts.get(input.threadId)!;
-        const count = (startsByThread.get(input.threadId) ?? 0) + 1;
-        startsByThread.set(input.threadId, count);
-        const providerSessionId = `experiment-${input.threadId}-${count}`;
-        contexts.set(input.threadId, {
-          ...context,
-          providerSessionId,
-          providerGeneration: input.generation,
-        });
-        started.push(input.threadId);
-        return {
-          threadId: input.threadId,
-          providerInstanceId: input.providerInstanceId,
-          providerSessionId,
-          runId: input.runId,
-          generation: input.generation,
-        };
-      }),
+      options.failProviderStart
+        ? Effect.fail(
+            new ExperimentError({
+              code: "persistence_failed",
+              message: "restricted provider failed to start",
+            }),
+          )
+        : Effect.sync(() => {
+            const context = contexts.get(input.threadId)!;
+            const count = (startsByThread.get(input.threadId) ?? 0) + 1;
+            startsByThread.set(input.threadId, count);
+            const providerSessionId = `experiment-${input.threadId}-${count}`;
+            contexts.set(input.threadId, {
+              ...context,
+              providerSessionId,
+              providerGeneration: input.generation,
+            });
+            started.push(input.threadId);
+            return {
+              threadId: input.threadId,
+              providerInstanceId: input.providerInstanceId,
+              providerSessionId,
+              runId: input.runId,
+              generation: input.generation,
+            };
+          }),
     stopProvider: (input) => Effect.sync(() => void stopped.push(input.threadId)),
     activateGoal: () =>
       options.failActivation
@@ -132,7 +142,7 @@ function testLayer(
           });
         }
       }),
-    holdGoal: () => Effect.void,
+    holdGoal: (input) => Effect.sync(() => void held.push(input)),
   };
   const store: ThreadExperimentStoreShape = {
     get: (threadId) =>
@@ -147,6 +157,7 @@ function testLayer(
     rows,
     started,
     stopped,
+    held,
     lifecycle,
     layer: experimentLayer.pipe(
       Layer.provide(Layer.succeed(ThreadExperimentStore, store)),
@@ -169,6 +180,52 @@ function context(threadId: string, cwd: string): ExperimentThreadContext {
 }
 
 describe("ExperimentService", () => {
+  it.effect("does not block a goal that was never activated", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts, { failProviderStart: true });
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      const started = yield* service
+        .start({
+          threadId: "thread-1",
+          objective: "Improve score",
+          confirmationId: preview.confirmationId,
+        })
+        .pipe(Effect.result);
+
+      assert(Result.isFailure(started));
+      assert.deepEqual(fixture.held, []);
+      assert.strictEqual((yield* service.get({ threadId: "thread-1" }))?.phase, "failed");
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("blocks an activated goal when a live experiment fails closed", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts);
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+      contexts.set("thread-1", {
+        ...contexts.get("thread-1")!,
+        providerSessionId: "externally-replaced-session",
+      });
+
+      assert.strictEqual((yield* service.get({ threadId: "thread-1" }))?.phase, "failed");
+      assert.deepEqual(
+        fixture.held.map((entry) => entry.action),
+        ["block"],
+      );
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
   it.effect("establishes the baseline before the first goal-loop synchronization", () => {
     const cwd = makeRepo();
     const contexts = new Map([["thread-1", context("thread-1", cwd)]]);

@@ -77,6 +77,7 @@ function parseMcpResponse(raw: string): {
     readonly isError?: boolean;
     readonly structuredContent?: unknown;
     readonly content?: ReadonlyArray<{ readonly text?: string }>;
+    readonly tools?: ReadonlyArray<{ readonly name: string }>;
   };
 } {
   const data = raw
@@ -196,6 +197,27 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
       expect(initializeResponse.status).toBe(200);
       expect(sessionId).not.toBeUndefined();
 
+      const toolsResponse = yield* httpClient.post("/mcp/experiment", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: authorizationHeader,
+          "mcp-session-id": sessionId!,
+          "mcp-protocol-version": "2025-06-18",
+        },
+        body: HttpBody.text(
+          JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+          "application/json",
+        ),
+      });
+      const tools = parseMcpResponse(yield* toolsResponse.text).result?.tools;
+      expect(tools?.map((tool) => tool.name).toSorted()).toEqual([
+        "experiment_apply",
+        "experiment_evaluate",
+        "experiment_list_files",
+        "experiment_read_file",
+        "experiment_status",
+      ]);
+
       const callTool = Effect.fn("test.callExperimentTool")(function* (
         id: number,
         name: string,
@@ -222,7 +244,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         return parseMcpResponse(yield* response.text);
       });
 
-      const status = yield* callTool(2, "experiment_status", {});
+      const status = yield* callTool(3, "experiment_status", {});
       expect(status.result?.isError).not.toBe(true);
       expect(status.result?.structuredContent).toMatchObject({
         runId: started.runId,
@@ -230,13 +252,13 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         baselineMetric: 1,
       });
 
-      const applied = yield* callTool(3, "experiment_apply", {
+      const applied = yield* callTool(4, "experiment_apply", {
         hypothesis: "Increase the score",
         changes: [{ path: "score.txt", content: "2\n" }],
       });
       expect(applied.result?.isError).not.toBe(true);
 
-      const evaluated = yield* callTool(4, "experiment_evaluate", {});
+      const evaluated = yield* callTool(5, "experiment_evaluate", {});
       expect(evaluated.result?.isError).not.toBe(true);
       expect(evaluated.result?.structuredContent).toMatchObject({ outcome: "kept", metric: 2 });
       expect(NodeFS.readFileSync(NodePath.join(cwd, "score.txt"), "utf8")).toBe("2\n");
@@ -258,7 +280,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         body: HttpBody.text(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: 5,
+            id: 6,
             method: "initialize",
             params: {
               protocolVersion: "2025-06-18",
@@ -280,7 +302,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         body: HttpBody.text(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: 6,
+            id: 7,
             method: "tools/call",
             params: { name: "experiment_status", arguments: {} },
           }),
