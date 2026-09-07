@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -37,6 +38,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import type * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -284,7 +286,9 @@ const validationLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-codex-adapter-validation-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -342,6 +346,64 @@ validationLayer("CodexAdapterLive validation", (it) => {
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
       });
+    }),
+  );
+
+  it.effect("ignores inherited state and forces the restricted experiment runtime", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-experiment");
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-1"),
+        threadId,
+        providerSessionId: "provider-session-experiment",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:4317/mcp/experiment",
+        authorizationHeader: "Bearer experiment-secret",
+        experiment: { runId: "run-1", generation: 1 },
+      });
+
+      yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          resumeCursor: { threadId: "unrestricted-native-thread" },
+          runtimeMode: "full-access",
+        })
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              McpProviderSession.clearMcpProviderSession(threadId);
+            }),
+          ),
+        );
+
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      NodeAssert.ok(runtimeOptions);
+      NodeAssert.equal(runtimeOptions.launchArgs, "");
+      NodeAssert.equal(runtimeOptions.runtimeMode, "full-access");
+      NodeAssert.equal(runtimeOptions.environment?.T3_MCP_BEARER_TOKEN, "experiment-secret");
+      NodeAssert.equal(runtimeOptions.environment?.T3CODE_CODEX_LAUNCH_ARGS, undefined);
+      NodeAssert.equal(runtimeOptions.environment?.CODEX_HOME, undefined);
+      NodeAssert.ok(runtimeOptions.homePath?.endsWith("provider-session-experiment"));
+      NodeAssert.equal("resumeCursor" in runtimeOptions, false);
+      NodeAssert.deepStrictEqual(runtimeOptions.experimentRestriction, {
+        mcpServerName: "t3-experiment",
+        toolNames: [
+          "experiment_status",
+          "experiment_list_files",
+          "experiment_read_file",
+          "experiment_apply",
+          "experiment_evaluate",
+        ],
+      });
+      NodeAssert.ok(runtimeOptions.appServerArgs?.includes("--strict-config"));
+      NodeAssert.ok(
+        runtimeOptions.appServerArgs?.includes(
+          "mcp_servers.t3-experiment.url=http://127.0.0.1:4317/mcp/experiment",
+        ),
+      );
     }),
   );
 });

@@ -31,16 +31,7 @@ describe("experiment provider preflight", () => {
     }
   });
 
-  it("keeps Codex unsupported until every canary passes on macOS or Linux", () => {
-    const passed = {
-      applyPatchWriteDenied: true,
-      canaryUnchanged: true,
-      shellToolsAbsent: true,
-      collaborationToolsAbsent: true,
-      networkDenied: true,
-      strictConfigAccepted: true,
-      readOnlySandboxAccepted: true,
-    };
+  it("supports Codex only where its native read-only sandbox is enforced", () => {
     expect(
       preflightExperimentProvider({
         driverKind: ProviderDriverKind.make("codex"),
@@ -52,19 +43,11 @@ describe("experiment provider preflight", () => {
         driverKind: ProviderDriverKind.make("codex"),
         platform: "darwin",
       }),
-    ).toMatchObject({ supported: false });
+    ).toEqual({ supported: true });
     expect(
       preflightExperimentProvider({
         driverKind: ProviderDriverKind.make("codex"),
         platform: "linux",
-        codexCanary: { ...passed, networkDenied: false },
-      }),
-    ).toMatchObject({ supported: false });
-    expect(
-      preflightExperimentProvider({
-        driverKind: ProviderDriverKind.make("codex"),
-        platform: "darwin",
-        codexCanary: passed,
       }),
     ).toEqual({ supported: true });
   });

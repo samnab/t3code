@@ -10,16 +10,6 @@ export const CODEX_EXPERIMENT_TOOL_NAMES = [
   "experiment_evaluate",
 ] as const;
 
-export interface CodexExperimentCanaryProbe {
-  readonly applyPatchWriteDenied: boolean;
-  readonly canaryUnchanged: boolean;
-  readonly shellToolsAbsent: boolean;
-  readonly collaborationToolsAbsent: boolean;
-  readonly networkDenied: boolean;
-  readonly strictConfigAccepted: boolean;
-  readonly readOnlySandboxAccepted: boolean;
-}
-
 export type ExperimentProviderPreflight =
   | { readonly supported: true }
   | {
@@ -38,7 +28,6 @@ const unsupported = (reason: string): ExperimentProviderPreflight => ({
 export function preflightExperimentProvider(input: {
   readonly driverKind: ProviderDriverKind;
   readonly platform: NodeJS.Platform;
-  readonly codexCanary?: CodexExperimentCanaryProbe;
 }): ExperimentProviderPreflight {
   if (input.driverKind === "claudeAgent" || input.driverKind === "pi") {
     return { supported: true };
@@ -49,10 +38,6 @@ export function preflightExperimentProvider(input: {
   const platform = input.platform;
   if (platform !== "darwin" && platform !== "linux") {
     return unsupported(`Codex experiments are not supported on '${platform}'.`);
-  }
-  const probe = input.codexCanary;
-  if (probe === undefined || Object.values(probe).some((passed) => !passed)) {
-    return unsupported("Codex has not passed the restricted runtime canary for this process.");
   }
   return { supported: true };
 }

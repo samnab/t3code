@@ -19,6 +19,7 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
+  matchesCodexExperimentMcpInventory,
   openCodexThread,
   reapDescendantProcessTree,
   toMcpElicitationResponse,
@@ -365,6 +366,98 @@ describe("buildTurnStartParams", () => {
         },
       ],
     });
+  });
+
+  it.effect("forces the experiment turn boundary independently of requested runtime mode", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Run the next experiment.",
+        interactionMode: "default",
+        browserToolsAvailable: true,
+        experimentRestricted: true,
+      });
+
+      NodeAssert.deepStrictEqual(params, {
+        threadId: "provider-thread-1",
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+        sandboxPolicy: {
+          type: "readOnly",
+          networkAccess: false,
+        },
+        input: [
+          {
+            type: "text",
+            text: "Run the next experiment.",
+          },
+        ],
+      });
+    }),
+  );
+});
+
+describe("matchesCodexExperimentMcpInventory", () => {
+  const restriction = {
+    mcpServerName: "t3-experiment",
+    toolNames: ["experiment_status", "experiment_evaluate"],
+  } as const;
+
+  it("accepts only the exact unpaginated experiment server and tool set", () => {
+    NodeAssert.equal(
+      matchesCodexExperimentMcpInventory(
+        {
+          data: [
+            {
+              name: "t3-experiment",
+              tools: { experiment_evaluate: {}, experiment_status: {} },
+            },
+          ],
+          nextCursor: null,
+        },
+        restriction,
+      ),
+      true,
+    );
+  });
+
+  it("rejects extra servers, extra tools, missing tools, and pagination", () => {
+    const inventories = [
+      {
+        data: [
+          {
+            name: "t3-experiment",
+            tools: { experiment_evaluate: {}, experiment_status: {}, shell: {} },
+          },
+        ],
+        nextCursor: null,
+      },
+      {
+        data: [
+          { name: "t3-experiment", tools: { experiment_status: {} } },
+          { name: "other", tools: {} },
+        ],
+        nextCursor: null,
+      },
+      {
+        data: [{ name: "t3-experiment", tools: { experiment_status: {} } }],
+        nextCursor: null,
+      },
+      {
+        data: [
+          {
+            name: "t3-experiment",
+            tools: { experiment_evaluate: {}, experiment_status: {} },
+          },
+        ],
+        nextCursor: "more",
+      },
+    ];
+
+    for (const inventory of inventories) {
+      NodeAssert.equal(matchesCodexExperimentMcpInventory(inventory, restriction), false);
+    }
   });
 });
 

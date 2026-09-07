@@ -314,6 +314,28 @@ export class CodexExperimentRestrictionError extends Schema.TaggedErrorClass<Cod
   { message: Schema.String },
 ) {}
 
+export function matchesCodexExperimentMcpInventory(
+  inventory: {
+    readonly data: ReadonlyArray<{
+      readonly name: string;
+      readonly tools: Readonly<Record<string, unknown>>;
+    }>;
+    readonly nextCursor?: string | null;
+  },
+  restriction: NonNullable<CodexSessionRuntimeOptions["experimentRestriction"]>,
+): boolean {
+  const expectedTools = [...restriction.toolNames].toSorted();
+  const actualServers = inventory.data.map((server) => server.name);
+  const actualTools = inventory.data.flatMap((server) => Object.keys(server.tools)).toSorted();
+  return (
+    inventory.nextCursor == null &&
+    actualServers.length === 1 &&
+    actualServers[0] === restriction.mcpServerName &&
+    actualTools.length === expectedTools.length &&
+    actualTools.every((tool, index) => tool === expectedTools[index])
+  );
+}
+
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
   {
@@ -722,22 +744,24 @@ export function buildTurnStartParams(input: {
   }
 
   const config = runtimeModeToThreadConfig(input.runtimeMode);
-  const collaborationMode = buildCodexCollaborationMode({
-    ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-    ...(input.model ? { model: input.model } : {}),
-    ...(input.effort ? { effort: input.effort } : {}),
-    browserToolsAvailable: input.browserToolsAvailable ?? true,
-  });
+  const experimentRestricted = input.experimentRestricted === true;
+  const collaborationMode = experimentRestricted
+    ? undefined
+    : buildCodexCollaborationMode({
+        ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+        ...(input.model ? { model: input.model } : {}),
+        ...(input.effort ? { effort: input.effort } : {}),
+        browserToolsAvailable: input.browserToolsAvailable ?? true,
+      });
 
   return decodeCodexTurnStartParamsWithCollaborationMode({
     threadId: input.threadId,
     input: turnInput,
-    approvalPolicy: config.approvalPolicy,
-    approvalsReviewer: config.approvalsReviewer,
-    sandboxPolicy:
-      input.experimentRestricted === true
-        ? { type: "readOnly", networkAccess: false }
-        : runtimeModeToTurnSandboxPolicy(input.runtimeMode),
+    approvalPolicy: experimentRestricted ? "never" : config.approvalPolicy,
+    approvalsReviewer: experimentRestricted ? "user" : config.approvalsReviewer,
+    sandboxPolicy: experimentRestricted
+      ? { type: "readOnly", networkAccess: false }
+      : runtimeModeToTurnSandboxPolicy(input.runtimeMode),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
@@ -2358,18 +2382,7 @@ export const makeCodexSessionRuntime = (
         const inventory = yield* client.request("mcpServerStatus/list", {
           detail: "toolsAndAuthOnly",
         });
-        const expectedTools = [...options.experimentRestriction.toolNames].toSorted();
-        const actualServers = inventory.data.map((server) => server.name);
-        const actualTools = inventory.data
-          .flatMap((server) => Object.keys(server.tools))
-          .toSorted();
-        if (
-          inventory.nextCursor != null ||
-          actualServers.length !== 1 ||
-          actualServers[0] !== options.experimentRestriction.mcpServerName ||
-          actualTools.length !== expectedTools.length ||
-          actualTools.some((tool, index) => tool !== expectedTools[index])
-        ) {
+        if (!matchesCodexExperimentMcpInventory(inventory, options.experimentRestriction)) {
           return yield* new CodexExperimentRestrictionError({
             message: "Codex experiment MCP inventory did not match the restricted allowlist.",
           });
