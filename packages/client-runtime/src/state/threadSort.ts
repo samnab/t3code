@@ -2,7 +2,6 @@ import type { OrchestrationMessageOrigin, ProjectId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
-import { isServerAuthoredMessage } from "./messageOrigin.ts";
 
 export interface ThreadSortInput {
   readonly createdAt: string;
@@ -11,7 +10,7 @@ export interface ThreadSortInput {
   readonly messages?: ReadonlyArray<{
     readonly createdAt: string;
     readonly role: string;
-    readonly origin?: OrchestrationMessageOrigin;
+    readonly origin?: OrchestrationMessageOrigin | undefined;
   }>;
 }
 
@@ -43,7 +42,7 @@ function getLatestUserMessageTimestamp(thread: ThreadSortInput): number {
   let latestUserMessageTimestamp: number | null = null;
 
   for (const message of thread.messages ?? []) {
-    if (message.role !== "user" || isServerAuthoredMessage(message)) continue;
+    if (message.role !== "user" || message.origin !== undefined) continue;
     const messageTimestamp = toSortableTimestamp(message.createdAt);
     if (messageTimestamp === null) continue;
     latestUserMessageTimestamp =
