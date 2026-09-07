@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 
 import {
   THREAD_EXPERIMENT_MAX_APPROVED_FILES,
+  THREAD_EXPERIMENT_MAX_ARGV_ITEMS,
   ThreadExperimentPreview,
   ThreadExperimentSummary,
 } from "./experiment.ts";
@@ -72,6 +73,22 @@ describe("thread experiment contracts", () => {
   it("decodes bounded previews and summaries", () => {
     expect(decodePreview(validPreview)).toEqual(validPreview);
     expect(decodeSummary(validSummary)).toEqual(validSummary);
+  });
+
+  it("accepts the largest v1 approved-file and argv lists", () => {
+    const preview = decodePreview({
+      ...validPreview,
+      approvedFiles: Array.from(
+        { length: 1_000 },
+        (_, index) => `src/file-${index}.ts`,
+      ),
+      evaluator: {
+        ...validPreview.evaluator,
+        argv: Array.from({ length: 128 }, (_, index) => `arg-${index}`),
+      },
+    });
+    expect(preview.approvedFiles).toHaveLength(THREAD_EXPERIMENT_MAX_APPROVED_FILES);
+    expect(preview.evaluator.argv).toHaveLength(THREAD_EXPERIMENT_MAX_ARGV_ITEMS);
   });
 
   it("rejects non-finite metrics and unbounded public values", () => {
