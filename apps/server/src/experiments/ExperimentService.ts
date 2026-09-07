@@ -1620,6 +1620,9 @@ export const make = Effect.gen(function* () {
     if (stored === undefined || TERMINAL_PHASES.has(stored.phase)) return;
     let profile = stored;
     profile = yield* save({ ...profile, providerSessionActive: false, armed: false });
+    if (stored.providerSessionActive) {
+      yield* coordinator.stopProvider({ threadId: stored.threadId, runId: stored.runId });
+    }
     if (profile.pending !== null) {
       const restored = yield* restore(profile, null, input.reason).pipe(
         Effect.map(Option.some),
@@ -1655,9 +1658,6 @@ export const make = Effect.gen(function* () {
           try: () => processes.cancel(before.runId),
           catch: (cause) => asExperimentError(cause, "Could not stop experiment processes."),
         });
-        if (before.providerSessionActive) {
-          yield* coordinator.stopProvider({ threadId: before.threadId, runId: before.runId });
-        }
       }
       yield* withThreadLock(input.threadId, settleUnlocked(input));
     });

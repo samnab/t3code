@@ -321,6 +321,46 @@ describe("NativeGoalReactor", () => {
     ),
   );
 
+  it.effect("disarms a paused experiment until its fresh session resumes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          shell: makeShell({ goalLoop: makeLoop({ kind: "experiment", state: "running" }) }),
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* NativeGoalReactor.NativeGoalReactor;
+          yield* reactor.start();
+          yield* Deferred.succeed(fixture.activation, undefined);
+
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          yield* Ref.set(
+            fixture.shell,
+            makeShell({ goalLoop: makeLoop({ kind: "experiment", state: "paused" }) }),
+          );
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          yield* Ref.set(
+            fixture.shell,
+            makeShell({ goalLoop: makeLoop({ kind: "experiment", state: "idle" }) }),
+          );
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          assert.deepEqual(yield* Ref.get(fixture.goalCalls), [
+            { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
+            { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
+          ]);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
   it.effect("touches nothing on a thread whose real driver is not Codex", () =>
     Effect.scoped(
       Effect.gen(function* () {

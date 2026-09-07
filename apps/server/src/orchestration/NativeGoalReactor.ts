@@ -205,6 +205,14 @@ export const make = Effect.gen(function* () {
     // No live session yet: `thread.session-set` brings us back here.
     if (thread.session == null || thread.session.status === "stopped") return;
 
+    // Pausing an experiment tears down its restricted provider session. Do
+    // not race that teardown with a native goal RPC, and forget the old echo
+    // key so the fresh restricted session receives the goal when resumed.
+    if (loop.kind === "experiment" && loop.state === "paused") {
+      lastPushed.delete(threadId);
+      return;
+    }
+
     const desired = desiredCodexGoal(thread.goal ?? null, loop.state);
     const key = pushKey(desired);
     if (key === undefined || lastPushed.get(threadId) === key) return;

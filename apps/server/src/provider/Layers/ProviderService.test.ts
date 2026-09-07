@@ -1076,7 +1076,19 @@ experimentLifecycle.layer("ProviderServiceLive experiment lifecycle", (it) => {
       assert.instanceOf(wrongRunError, ProviderValidationError);
       assert.equal(experimentLifecycle.claude.stopSession.mock.calls.length, 1);
 
+      const stoppedEvent = yield* provider.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            event.type === "session.state.changed" &&
+            event.payload.state === "stopped",
+        ),
+        Stream.runHead,
+        Effect.forkChild({ startImmediately: true }),
+      );
       yield* experimentProviderSession.stop({ threadId, runId: "experiment-run" });
+      const observed = yield* Fiber.join(stoppedEvent);
+      assert(Option.isSome(observed));
       assert.equal(experimentLifecycle.claude.stopSession.mock.calls.length, 2);
       assert.equal(McpProviderSession.readMcpProviderSession(threadId), undefined);
       const stoppedBinding = yield* directory.getBinding(threadId);

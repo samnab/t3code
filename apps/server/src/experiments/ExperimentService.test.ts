@@ -79,6 +79,7 @@ function testLayer(
 ) {
   const started: Array<string> = [];
   const stopped: Array<string> = [];
+  const stoppedWhileArmed: Array<boolean | undefined> = [];
   const held: Array<{ readonly action: "pause" | "block" | "complete"; readonly reason: string }> =
     [];
   const lifecycle: Array<"activate" | "sync"> = [];
@@ -119,7 +120,11 @@ function testLayer(
               generation: input.generation,
             };
           }),
-    stopProvider: (input) => Effect.sync(() => void stopped.push(input.threadId)),
+    stopProvider: (input) =>
+      Effect.sync(() => {
+        stopped.push(input.threadId);
+        stoppedWhileArmed.push(rows.get(input.threadId)?.armed);
+      }),
     activateGoal: () =>
       options.failActivation
         ? Effect.fail(
@@ -157,6 +162,7 @@ function testLayer(
     rows,
     started,
     stopped,
+    stoppedWhileArmed,
     held,
     lifecycle,
     layer: experimentLayer.pipe(
@@ -574,6 +580,7 @@ describe("ExperimentService", () => {
       assert.strictEqual(paused?.phase, "paused");
       assert.strictEqual(paused?.experimentsRun, 0);
       assert.strictEqual(paused?.maxTotalSeconds, started.maxTotalSeconds);
+      assert.deepEqual(fixture.stoppedWhileArmed, [false]);
 
       const resumed = yield* service.resume("thread-1");
       assert.strictEqual(resumed.phase, "ready");

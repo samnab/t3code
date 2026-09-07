@@ -368,7 +368,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const experimentSessions = new Map<ThreadId, ExperimentIdentity>();
-  let experimentStartFailureEventId = 0;
+  let experimentSessionStateEventId = 0;
   const sessionTransitionLocks = new Map<ThreadId, Semaphore.Semaphore>();
   const withSessionTransitionLock = <A, E, R>(
     threadId: ThreadId,
@@ -1523,11 +1523,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ),
           );
         const createdAt = yield* nowIso;
-        experimentStartFailureEventId += 1;
+        experimentSessionStateEventId += 1;
         yield* publishRuntimeEvent({
           type: "session.state.changed",
           eventId: EventId.make(
-            `provider:experiment-start-failed:${input.threadId}:${createdAt}:${experimentStartFailureEventId}`,
+            `provider:experiment-start-failed:${input.threadId}:${createdAt}:${experimentSessionStateEventId}`,
           ),
           provider: instanceInfo.driverKind,
           providerInstanceId: input.providerInstanceId,
@@ -1619,6 +1619,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             continueAfterServerUpdate: null,
             continueAfterServerUpdatePrepared: null,
           },
+        });
+        const createdAt = yield* nowIso;
+        experimentSessionStateEventId += 1;
+        yield* publishRuntimeEvent({
+          type: "session.state.changed",
+          eventId: EventId.make(
+            `provider:experiment-stopped:${input.threadId}:${createdAt}:${experimentSessionStateEventId}`,
+          ),
+          provider: binding.provider,
+          providerInstanceId,
+          threadId: input.threadId,
+          createdAt,
+          payload: { state: "stopped" },
         });
       }
     });
