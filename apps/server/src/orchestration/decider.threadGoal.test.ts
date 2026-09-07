@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
+import { projectEvent } from "./projector.ts";
 
 const UPDATED_AT = "2026-01-01T00:00:00.000Z";
 
@@ -359,6 +360,83 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
           iterations: 0,
           maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
         });
+      }
+    }),
+  );
+
+  it.effect("accepts the experiment sync immediately after goal activation", () =>
+    Effect.gen(function* () {
+      const activation = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-experiment-goal-start"),
+          threadId: ThreadId.make("thread-1"),
+          goal: "Improve the evaluator score",
+        },
+        readModel,
+      });
+      let activated = readModel;
+      const activationEvents = Array.isArray(activation) ? activation : [activation];
+      for (const [index, event] of activationEvents.entries()) {
+        activated = yield* projectEvent(activated, { ...event, sequence: index + 1 });
+      }
+
+      const synced = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.goal.loop",
+          commandId: CommandId.make("cmd-experiment-goal-sync"),
+          threadId: ThreadId.make("thread-1"),
+          action: "sync",
+          state: "idle",
+          mode: "native",
+          kind: "experiment",
+          experiment: {
+            runId: "experiment-run",
+            configDigest: "a".repeat(64),
+            phase: "ready",
+            metric: { name: "score", direction: "maximize", minimumImprovement: 0.5 },
+            experimentsRun: 0,
+            experimentsKept: 0,
+            experimentsRestored: 0,
+            baselineMetric: 1,
+            bestMetric: 1,
+            lastMetric: 1,
+            elapsedSeconds: 1,
+            maxExperiments: 10,
+            maxTotalSeconds: 600,
+            lastError: null,
+          },
+        },
+        readModel: activated,
+      });
+      const event = Array.isArray(synced) ? synced[0] : synced;
+
+      expect(event?.type).toBe("thread.goal-loop-updated");
+      if (event?.type === "thread.goal-loop-updated") {
+        expect(event.payload.loop).toMatchObject({
+          kind: "experiment",
+          state: "idle",
+          mode: "native",
+        });
+        const syncedModel = yield* projectEvent(activated, {
+          ...event,
+          sequence: activationEvents.length + 1,
+        });
+        const wake = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.goal.loop",
+            commandId: CommandId.make("cmd-experiment-goal-wake"),
+            threadId: ThreadId.make("thread-1"),
+            action: "resume",
+          },
+          readModel: syncedModel,
+        });
+        const wakeEvent = Array.isArray(wake) ? wake[0] : wake;
+        expect(wakeEvent?.type).toBe("thread.goal-loop-updated");
+        if (wakeEvent?.type === "thread.goal-loop-updated") {
+          expect(wakeEvent.payload.resumed).toBe(true);
+          expect(wakeEvent.payload.loop).toMatchObject({ kind: "experiment", state: "idle" });
+        }
       }
     }),
   );

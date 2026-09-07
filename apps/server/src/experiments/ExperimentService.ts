@@ -482,7 +482,7 @@ export const make = Effect.gen(function* () {
     argv: ReadonlyArray<string>,
     configuredSeconds: number,
     maxOutputBytes: number,
-    signal?: AbortSignal,
+    options: { readonly signal?: AbortSignal; readonly sync?: boolean } = {},
   ) {
     const timeoutMs = yield* remainingMs(profile, configuredSeconds);
     const result = yield* Effect.tryPromise({
@@ -491,20 +491,24 @@ export const make = Effect.gen(function* () {
           cwd: profile.cwd,
           timeoutMs,
           maxOutputBytes,
-          ...(signal === undefined ? {} : { signal }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
         }),
       catch: (cause) => asExperimentError(cause, "Could not run experiment command."),
     });
-    const next = yield* save({
-      ...profile,
-      commandSeconds: profile.commandSeconds + result.durationSeconds,
-    });
+    const next = yield* save(
+      {
+        ...profile,
+        commandSeconds: profile.commandSeconds + result.durationSeconds,
+      },
+      { sync: options.sync ?? true },
+    );
     yield* validateRepository(next);
     return { result, profile: next };
   });
 
   const evaluateCommands = Effect.fn("ExperimentService.evaluateCommands")(function* (
     initial: ExperimentProfile,
+    options: { readonly sync?: boolean } = {},
   ) {
     let profile = initial;
     const evaluator = yield* runCommand(
@@ -512,6 +516,7 @@ export const make = Effect.gen(function* () {
       profile.config.evaluator.argv,
       profile.config.limits.evaluatorTimeoutSeconds,
       profile.config.limits.maxOutputBytes,
+      { sync: options.sync ?? true },
     );
     profile = evaluator.profile;
     if (evaluator.result.termination !== "exit" || evaluator.result.code !== 0) {
@@ -547,6 +552,7 @@ export const make = Effect.gen(function* () {
         argv,
         profile.config.limits.checkTimeoutSeconds,
         profile.config.limits.maxOutputBytes,
+        { sync: options.sync ?? true },
       );
       profile = check.profile;
       if (check.result.termination !== "exit" || check.result.code !== 0) {
@@ -710,13 +716,16 @@ export const make = Effect.gen(function* () {
         .stopProvider({ threadId: profile.threadId, runId: profile.runId })
         .pipe(Effect.ignore);
     }
-    const next = yield* save({
-      ...profile,
-      phase: "failed",
-      armed: false,
-      providerSessionActive: false,
-      lastError: failure.message.slice(0, 2_000),
-    });
+    const next = yield* save(
+      {
+        ...profile,
+        phase: "failed",
+        armed: false,
+        providerSessionActive: false,
+        lastError: failure.message.slice(0, 2_000),
+      },
+      { sync: profile.providerSessionActive },
+    );
     yield* ledger(next, { type: "failure", reason: next.lastError }).pipe(Effect.ignore);
     yield* coordinator
       .holdGoal({ threadId: next.threadId, action: "block", reason: failure.message })
@@ -915,7 +924,7 @@ export const make = Effect.gen(function* () {
       head: profile.head,
       configDigest: profile.configDigest,
     });
-    const evaluated = yield* evaluateCommands(profile).pipe(
+    const evaluated = yield* evaluateCommands(profile, { sync: false }).pipe(
       Effect.catch((cause) =>
         failClosed(profile, cause).pipe(Effect.flatMap((failure) => Effect.fail(failure))),
       ),

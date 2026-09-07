@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { CommandId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  ProviderInstanceId,
+  resolveThreadGoalLoopMode,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -26,6 +31,13 @@ const translate = <A, E, R>(message: string, effect: Effect.Effect<A, E, R>) =>
 
 function commandId(prefix: string, threadId: string) {
   return CommandId.make(`${prefix}${threadId}:${randomUUID()}`);
+}
+
+export function resolveExperimentGoalLoopMode(input: {
+  readonly providerDriver: string | null | undefined;
+  readonly providerInstanceId: string;
+}) {
+  return resolveThreadGoalLoopMode(input.providerDriver ?? input.providerInstanceId);
 }
 
 export const layer = Layer.effect(
@@ -124,6 +136,11 @@ export const layer = Layer.effect(
       activateGoal: (input) =>
         Effect.gen(function* () {
           const threadId = ThreadId.make(input.threadId);
+          const { thread } = yield* resolveShell(input.threadId);
+          const mode = resolveExperimentGoalLoopMode({
+            providerDriver: thread.session?.providerName,
+            providerInstanceId: thread.modelSelection.instanceId,
+          });
           yield* translate(
             "Could not activate the experiment goal.",
             engine.dispatch({
@@ -141,9 +158,18 @@ export const layer = Layer.effect(
               threadId,
               action: "sync",
               state: "idle",
-              mode: "t3",
+              mode,
               kind: "experiment",
               experiment: input.summary,
+            }),
+          );
+          yield* translate(
+            "Could not start the experiment goal loop.",
+            engine.dispatch({
+              type: "thread.goal.loop",
+              commandId: commandId("server:experiment-start:", input.threadId),
+              threadId,
+              action: "resume",
             }),
           );
         }),
@@ -155,7 +181,6 @@ export const layer = Layer.effect(
             commandId: commandId("server:experiment-progress:", input.threadId),
             threadId: ThreadId.make(input.threadId),
             action: "sync",
-            mode: "t3",
             kind: "experiment",
             experiment: input.summary,
           }),

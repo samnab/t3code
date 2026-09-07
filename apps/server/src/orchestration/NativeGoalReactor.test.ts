@@ -281,6 +281,20 @@ describe("NativeGoalReactor", () => {
     ),
   );
 
+  it.effect("sets the Codex execution goal for a restricted experiment loop", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { goalCalls } = yield* run({
+          shell: makeShell({ goalLoop: makeLoop({ kind: "experiment" }) }),
+          signal: goalChanged,
+        });
+        assert.deepEqual(goalCalls, [
+          { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
+        ]);
+      }),
+    ),
+  );
+
   it.effect("clears the Codex execution goal when the T3 goal is cleared", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -392,6 +406,22 @@ describe("NativeGoalReactor", () => {
         assert.strictEqual(command.action, "sync");
         assert.strictEqual(command.state, "blocked");
         assert.strictEqual(command.reason, NativeGoalReactor.CODEX_CLEARED_REASON);
+      }),
+    ),
+  );
+
+  it.effect("mirrors Codex completion for a restricted experiment loop", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { commands } = yield* run({
+          shell: makeShell({ goalLoop: makeLoop({ kind: "experiment", state: "running" }) }),
+          signal: (fixture) => Queue.offer(fixture.runtimeEvents, makeCodexGoalEvent("complete")),
+        });
+        assert.strictEqual(commands.length, 1);
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.goal.loop");
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+        assert.strictEqual(command.state, "completed");
       }),
     ),
   );

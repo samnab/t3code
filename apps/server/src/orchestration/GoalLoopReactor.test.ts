@@ -24,6 +24,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
+import { ExperimentService } from "../experiments/ExperimentService.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as GoalLoopReactor from "./GoalLoopReactor.ts";
 import {
@@ -212,6 +213,7 @@ interface HarnessOptions {
   /** Shell snapshot the boot sweep reads. Empty by default. */
   readonly sweepThreads?: ReadonlyArray<OrchestrationThreadShell>;
   readonly onDispatch?: (command: OrchestrationCommand) => Effect.Effect<void>;
+  readonly experiment?: boolean;
 }
 
 const makeHarness = Effect.fn("makeGoalLoopHarness")(function* (options: HarnessOptions) {
@@ -263,6 +265,28 @@ const makeHarness = Effect.fn("makeGoalLoopHarness")(function* (options: Harness
     }),
     Layer.succeed(ServerActivation, Deferred.await(activation)),
     RuntimeReceiptBusTest,
+    options.experiment
+      ? Layer.mock(ExperimentService)({
+          resume: () =>
+            Effect.succeed({
+              runId: "experiment-run",
+              configDigest: "a".repeat(64),
+              phase: "ready",
+              metric: { name: "score", direction: "maximize", minimumImprovement: 0.5 },
+              experimentsRun: 0,
+              experimentsKept: 0,
+              experimentsRestored: 0,
+              baselineMetric: 1,
+              bestMetric: 1,
+              lastMetric: 1,
+              elapsedSeconds: 1,
+              maxExperiments: 10,
+              maxTotalSeconds: 600,
+              lastError: null,
+            }),
+          canContinue: () => Effect.succeed(true),
+        })
+      : Layer.empty,
   );
 
   return {
@@ -585,6 +609,26 @@ describe("GoalLoopReactor", () => {
           `server:goal-continue:goal-loop-thread:resume:${RESUMED_AT}`,
         );
         assert.strictEqual(command.continuation, true);
+      }),
+    ),
+  );
+
+  it.effect("the activation wake starts the first T3 experiment continuation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const loop = makeLoop({
+          kind: "experiment",
+          state: "idle",
+          iterations: 0,
+          updatedAt: RESUMED_AT,
+        });
+        const commands = yield* dispatchesForSignals({
+          shell: makeShell({ goalLoop: loop }),
+          signals: [makeGoalLoopUpdatedEvent({ loop, resumed: true })],
+          experiment: true,
+        });
+        assert.strictEqual(commands.length, 1);
+        assert.strictEqual(commands[0]!.type, "thread.turn.start");
       }),
     ),
   );

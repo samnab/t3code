@@ -71,10 +71,15 @@ function makeRepo(maxExperiments = 10): string {
 
 function testLayer(
   contexts: Map<string, ExperimentThreadContext>,
-  options: { readonly failActivation?: boolean } = {},
+  options: {
+    readonly failActivation?: boolean;
+    readonly rejectSyncBeforeActivation?: boolean;
+  } = {},
 ) {
   const started: Array<string> = [];
   const stopped: Array<string> = [];
+  const lifecycle: Array<"activate" | "sync"> = [];
+  let activated = false;
   const rows = new Map<string, ExperimentProfile>();
   const startsByThread = new Map<string, number>();
   const coordinator: ExperimentCoordinatorShape = {
@@ -113,8 +118,20 @@ function testLayer(
               message: "activation failed",
             }),
           )
-        : Effect.void,
-    syncSummary: () => Effect.void,
+        : Effect.sync(() => {
+            activated = true;
+            lifecycle.push("activate");
+          }),
+    syncSummary: () =>
+      Effect.gen(function* () {
+        lifecycle.push("sync");
+        if (options.rejectSyncBeforeActivation && !activated) {
+          return yield* new ExperimentError({
+            code: "persistence_failed",
+            message: "Could not synchronize experiment progress.",
+          });
+        }
+      }),
     holdGoal: () => Effect.void,
   };
   const store: ThreadExperimentStoreShape = {
@@ -130,6 +147,7 @@ function testLayer(
     rows,
     started,
     stopped,
+    lifecycle,
     layer: experimentLayer.pipe(
       Layer.provide(Layer.succeed(ThreadExperimentStore, store)),
       Layer.provide(Layer.succeed(ExperimentCoordinator, coordinator)),
@@ -151,6 +169,24 @@ function context(threadId: string, cwd: string): ExperimentThreadContext {
 }
 
 describe("ExperimentService", () => {
+  it.effect("establishes the baseline before the first goal-loop synchronization", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts, { rejectSyncBeforeActivation: true });
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      const started = yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+
+      assert.strictEqual(started.phase, "ready");
+      assert.deepEqual(fixture.lifecycle, ["activate"]);
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
   it.effect(
     "runs the baseline before arming, keeps strict improvements, and restores rejects",
     () => {

@@ -197,7 +197,6 @@ export const make = Effect.gen(function* () {
       lastPushed.delete(threadId);
       return;
     }
-    if (loop.kind === "experiment") return;
     const mode = derivedMode(thread);
     if (loop.mode !== mode) {
       yield* dispatchSync({ threadId, mode });
@@ -240,7 +239,6 @@ export const make = Effect.gen(function* () {
     const thread = Option.getOrUndefined(yield* snapshots.getThreadShellById(threadId));
     const loop = thread?.goalLoop;
     if (thread === undefined || loop == null || thread.goal == null) return;
-    if (loop.kind === "experiment") return;
     if (derivedMode(thread) !== "native") return;
 
     const { state, reason } = mirrorState(status);
