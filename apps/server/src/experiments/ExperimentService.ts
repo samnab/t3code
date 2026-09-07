@@ -58,11 +58,11 @@ import {
 const TERMINAL_PHASES = new Set<ExperimentPhase>(["exhausted", "failed", "completed"]);
 
 function holdsWorktreeClaim(profile: ExperimentProfile, currentMs: number): boolean {
+  if (profile.providerSessionActive) return true;
   if (TERMINAL_PHASES.has(profile.phase)) return false;
   return !(
     profile.phase === "paused" &&
     !profile.armed &&
-    !profile.providerSessionActive &&
     profile.pending === null &&
     currentMs >= Date.parse(profile.deadlineAt)
   );

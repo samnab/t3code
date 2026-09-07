@@ -995,7 +995,10 @@ describe("ExperimentService", () => {
 
   it.effect("defers completed native provider teardown until the final turn diff", () => {
     const cwd = makeRepo();
-    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const contexts = new Map([
+      ["thread-1", context("thread-1", cwd)],
+      ["thread-2", context("thread-2", cwd)],
+    ]);
     let markCompleted = () => {};
     let markStopped = () => {};
     const completed = new Promise<void>((resolve) => {
@@ -1016,6 +1019,10 @@ describe("ExperimentService", () => {
         const events = yield* Queue.unbounded<OrchestrationEvent>();
         yield* Effect.gen(function* () {
           const service = yield* ExperimentService;
+          const secondPreview = yield* service.preview({
+            threadId: "thread-2",
+            objective: "Reuse the worktree",
+          });
           const preview = yield* service.preview({
             threadId: "thread-1",
             objective: "Improve score",
@@ -1038,6 +1045,20 @@ describe("ExperimentService", () => {
           assert.strictEqual(fixture.stopped.length, 0);
           assert.strictEqual(fixture.rows.get("thread-1")?.armed, false);
           assert.strictEqual(fixture.rows.get("thread-1")?.providerSessionActive, true);
+          const competingPreview = yield* service
+            .preview({ threadId: "thread-2", objective: "Reuse the worktree" })
+            .pipe(Effect.result);
+          const competingStart = yield* service
+            .start({
+              threadId: "thread-2",
+              objective: "Reuse the worktree",
+              confirmationId: secondPreview.confirmationId,
+            })
+            .pipe(Effect.result);
+          assert(Result.isFailure(competingPreview));
+          assert.strictEqual(competingPreview.failure.code, "invalid_phase");
+          assert(Result.isFailure(competingStart));
+          assert.strictEqual(competingStart.failure.code, "invalid_phase");
           const mutation = yield* service
             .apply({
               threadId: "thread-1",
@@ -1057,6 +1078,11 @@ describe("ExperimentService", () => {
           assert.strictEqual(fixture.stopped.length, 1);
           assert.strictEqual(fixture.rows.get("thread-1")?.phase, "completed");
           assert.strictEqual(fixture.rows.get("thread-1")?.providerSessionActive, false);
+          const releasedPreview = yield* service.preview({
+            threadId: "thread-2",
+            objective: "Reuse the worktree",
+          });
+          assert.strictEqual(releasedPreview.cwd, realpathSync.native(cwd));
         }).pipe(
           Effect.provide(
             ExperimentLifecycleReactor.layer.pipe(
