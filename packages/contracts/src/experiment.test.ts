@@ -4,7 +4,14 @@ import * as Schema from "effect/Schema";
 
 import {
   THREAD_EXPERIMENT_MAX_APPROVED_FILES,
+  THREAD_EXPERIMENT_MAX_APPLY_BYTES,
+  THREAD_EXPERIMENT_MAX_ARG_CHARS,
   THREAD_EXPERIMENT_MAX_ARGV_ITEMS,
+  THREAD_EXPERIMENT_MAX_COMMAND_SECONDS,
+  THREAD_EXPERIMENT_MAX_EXPERIMENTS,
+  THREAD_EXPERIMENT_MAX_FILES_PER_APPLY,
+  THREAD_EXPERIMENT_MAX_OUTPUT_BYTES,
+  THREAD_EXPERIMENT_MAX_TOTAL_SECONDS,
   ThreadExperimentHypothesis,
   ThreadExperimentPreview,
   ThreadExperimentSummary,
@@ -81,10 +88,7 @@ describe("thread experiment contracts", () => {
   it("accepts the largest v1 approved-file and argv lists", () => {
     const preview = decodePreview({
       ...validPreview,
-      approvedFiles: Array.from(
-        { length: 1_000 },
-        (_, index) => `src/file-${index}.ts`,
-      ),
+      approvedFiles: Array.from({ length: 1_000 }, (_, index) => `src/file-${index}.ts`),
       evaluator: {
         ...validPreview.evaluator,
         argv: Array.from({ length: 128 }, (_, index) => `arg-${index}`),
@@ -92,6 +96,35 @@ describe("thread experiment contracts", () => {
     });
     expect(preview.approvedFiles).toHaveLength(THREAD_EXPERIMENT_MAX_APPROVED_FILES);
     expect(preview.evaluator.argv).toHaveLength(THREAD_EXPERIMENT_MAX_ARGV_ITEMS);
+  });
+
+  it("decodes a preview projected from maximum v1 server config values", () => {
+    const preview = decodePreview({
+      ...validPreview,
+      evaluator: {
+        ...validPreview.evaluator,
+        argv: ["x".repeat(8_192)],
+      },
+      limits: {
+        maxExperiments: 1_000,
+        maxTotalSeconds: 604_800,
+        evaluatorTimeoutSeconds: 86_400,
+        checkTimeoutSeconds: 86_400,
+        maxEvaluatorOutputBytes: 10_000_000,
+        maxCheckOutputBytes: 10_000_000,
+        maxFilesPerApply: 100,
+        maxBytesPerFile: 10_000_000,
+        maxTotalApplyBytes: 10_000_000,
+      },
+    });
+
+    expect(preview.evaluator.argv[0]).toHaveLength(THREAD_EXPERIMENT_MAX_ARG_CHARS);
+    expect(preview.limits.maxExperiments).toBe(THREAD_EXPERIMENT_MAX_EXPERIMENTS);
+    expect(preview.limits.maxTotalSeconds).toBe(THREAD_EXPERIMENT_MAX_TOTAL_SECONDS);
+    expect(preview.limits.evaluatorTimeoutSeconds).toBe(THREAD_EXPERIMENT_MAX_COMMAND_SECONDS);
+    expect(preview.limits.maxEvaluatorOutputBytes).toBe(THREAD_EXPERIMENT_MAX_OUTPUT_BYTES);
+    expect(preview.limits.maxFilesPerApply).toBe(THREAD_EXPERIMENT_MAX_FILES_PER_APPLY);
+    expect(preview.limits.maxBytesPerFile).toBe(THREAD_EXPERIMENT_MAX_APPLY_BYTES);
   });
 
   it("keeps the 500-character bound on apply hypotheses", () => {
