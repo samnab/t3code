@@ -74,7 +74,8 @@ describe("resolveThreadGoalCommandBlockReason", () => {
 describe("thread experiment goal controls", () => {
   it("rejects obvious empty and oversized objectives locally", () => {
     expect(threadExperimentObjectiveError(" \n\u200b")).toContain("visible character");
-    expect(threadExperimentObjectiveError("x".repeat(501))).toContain("500");
+    expect(threadExperimentObjectiveError("x".repeat(1_024))).toBeNull();
+    expect(threadExperimentObjectiveError("x".repeat(1_025))).toContain("1024");
     expect(threadExperimentObjectiveError("Tune the résumé 🚀")).toBeNull();
   });
 

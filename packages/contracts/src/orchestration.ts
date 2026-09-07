@@ -18,6 +18,7 @@ import {
   ProjectId,
   ProviderItemId,
   RuntimeTaskId,
+  THREAD_GOAL_MAX_CHARS,
   ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -25,6 +26,8 @@ import {
 } from "./baseSchemas.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { ThreadExperimentSummary } from "./experiment.ts";
+
+export { THREAD_GOAL_MAX_CHARS } from "./baseSchemas.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -566,9 +569,6 @@ export const ThreadLinkedPullRequest = Schema.Struct({
 });
 export type ThreadLinkedPullRequest = typeof ThreadLinkedPullRequest.Type;
 
-/** Maximum length of a thread goal, matching {@link ThreadGoal}. */
-export const THREAD_GOAL_MAX_CHARS = 1024;
-
 /**
  * The thread's durable, T3-owned goal (set with `/goal`). Never sent to
  * providers; it is user-facing state only.
@@ -1108,28 +1108,37 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   ),
 );
 
-/**
- * Drives the goal loop. Actions are user or agent intents, never a direct
- * state write: the decider maps them onto ThreadGoalLoop transitions and
- * rejects the ones the current state forbids.
- *
- * `sync` is the one exception, and it is server-only: it writes the `state`
- * and `mode` the server observed rather than an intent it wants applied.
- * `NativeGoalReactor` uses it to mirror a Codex-driven execution goal, whose
- * lifecycle T3 follows instead of deciding, and to correct a mode the decider
- * could only guess from the thread's instance id.
- */
-const ThreadGoalLoopCommand = Schema.Struct({
+/** Client goal-loop intents. The decider owns every resulting state transition. */
+export const ThreadGoalLoopClientCommand = Schema.Struct({
   type: Schema.Literal("thread.goal.loop"),
   commandId: CommandId,
   threadId: ThreadId,
-  action: Schema.Literals(["pause", "resume", "continue", "complete", "block", "reset", "sync"]),
+  action: Schema.Literals(["pause", "resume", "continue", "complete", "block", "reset"]),
+  reason: Schema.optional(TrimmedNonEmptyString),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type ThreadGoalLoopClientCommand = typeof ThreadGoalLoopClientCommand.Type;
+
+/**
+ * Server-only projection update. This schema is absent from every client RPC
+ * input. Native and experiment reactors use it to mirror authoritative state
+ * without exposing direct state writes to clients.
+ */
+export const ThreadGoalLoopSyncCommand = Schema.Struct({
+  type: Schema.Literal("thread.goal.loop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  action: Schema.Literal("sync"),
   reason: Schema.optional(TrimmedNonEmptyString),
   /** `sync` only: the observed loop state. */
   state: Schema.optional(ThreadGoalLoopState),
   /** `sync` only: the mode re-derived from the thread's real provider driver. */
   mode: Schema.optional(ThreadGoalLoopMode),
+  /** `sync` only: the server-owned goal profile. */
+  kind: Schema.optional(ThreadGoalLoopKind),
+  /** `sync` only: bounded public progress, or null to clear it. */
+  experiment: Schema.optional(Schema.NullOr(ThreadExperimentSummary)),
 });
+export type ThreadGoalLoopSyncCommand = typeof ThreadGoalLoopSyncCommand.Type;
 
 const ThreadRuntimeModeSetCommand = Schema.Struct({
   type: Schema.Literal("thread.runtime-mode.set"),
@@ -1317,7 +1326,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadPinReorderCommand,
   ThreadActiveReorderCommand,
   ThreadMetaUpdateCommand,
-  ThreadGoalLoopCommand,
+  ThreadGoalLoopClientCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadVoiceNotificationsSetCommand,
@@ -1349,7 +1358,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadPinReorderCommand,
   ThreadActiveReorderCommand,
   ThreadMetaUpdateCommand,
-  ThreadGoalLoopCommand,
+  ThreadGoalLoopClientCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadVoiceNotificationsSetCommand,
@@ -1468,6 +1477,7 @@ const ThreadPullRequestSyncCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadGoalLoopSyncCommand,
   ThreadAutoSettleCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,

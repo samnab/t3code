@@ -111,6 +111,51 @@ it.effect("defaults old goal loops to the standard kind", () =>
   }),
 );
 
+it.effect("keeps experiment projection fields on internal goal-loop sync only", () =>
+  Effect.gen(function* () {
+    const experiment = {
+      runId: "run-1",
+      configDigest: "a".repeat(64),
+      phase: "ready" as const,
+      metric: { name: "score", direction: "maximize" as const, minimumImprovement: 0.1 },
+      experimentsRun: 0,
+      experimentsKept: 0,
+      experimentsRestored: 0,
+      baselineMetric: null,
+      bestMetric: null,
+      lastMetric: null,
+      elapsedSeconds: 0,
+      maxExperiments: 8,
+      maxTotalSeconds: 600,
+      lastError: null,
+    };
+    const sync = {
+      type: "thread.goal.loop" as const,
+      commandId: "command-1",
+      threadId: "thread-1",
+      action: "sync" as const,
+      state: "idle" as const,
+      mode: "t3" as const,
+      kind: "experiment" as const,
+      experiment,
+    };
+
+    assert.ok(yield* decodeClientOrchestrationCommand(sync).pipe(Effect.flip));
+    const internal = yield* decodeOrchestrationCommand(sync);
+    assert.strictEqual(internal.type, "thread.goal.loop");
+    if (internal.type !== "thread.goal.loop" || internal.action !== "sync") return;
+    assert.strictEqual(internal.kind, "experiment");
+    assert.deepStrictEqual(internal.experiment, experiment);
+
+    assert.ok(
+      yield* decodeClientOrchestrationCommand({
+        ...sync,
+        action: "pause",
+      }).pipe(Effect.flip),
+    );
+  }),
+);
+
 function expectSome<A>(option: Option.Option<A>): A {
   if (Option.isNone(option)) throw new Error("expected Some");
   return option.value;

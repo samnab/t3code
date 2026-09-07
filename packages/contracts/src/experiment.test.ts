@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import {
   THREAD_EXPERIMENT_MAX_APPROVED_FILES,
   THREAD_EXPERIMENT_MAX_ARGV_ITEMS,
+  ThreadExperimentHypothesis,
   ThreadExperimentPreview,
   ThreadExperimentSummary,
 } from "./experiment.ts";
@@ -13,11 +14,13 @@ import {
   WsThreadExperimentPreviewRpc,
   WsThreadExperimentStartRpc,
 } from "./rpc.ts";
+import { THREAD_GOAL_MAX_CHARS } from "./baseSchemas.ts";
 
 const decodePreview = Schema.decodeUnknownSync(ThreadExperimentPreview);
 const decodePreviewExit = Schema.decodeUnknownExit(ThreadExperimentPreview);
 const decodeSummary = Schema.decodeUnknownSync(ThreadExperimentSummary);
 const decodeSummaryExit = Schema.decodeUnknownExit(ThreadExperimentSummary);
+const decodeHypothesisExit = Schema.decodeUnknownExit(ThreadExperimentHypothesis);
 
 const validPreview = {
   objective: "Reduce bundle size",
@@ -91,6 +94,11 @@ describe("thread experiment contracts", () => {
     expect(preview.evaluator.argv).toHaveLength(THREAD_EXPERIMENT_MAX_ARGV_ITEMS);
   });
 
+  it("keeps the 500-character bound on apply hypotheses", () => {
+    expect(Exit.isSuccess(decodeHypothesisExit("x".repeat(500)))).toBe(true);
+    expect(Exit.isFailure(decodeHypothesisExit("x".repeat(501)))).toBe(true);
+  });
+
   it("rejects non-finite metrics and unbounded public values", () => {
     expect(
       Exit.isFailure(
@@ -127,7 +135,15 @@ describe("thread experiment contracts", () => {
       Exit.isFailure(
         Schema.decodeUnknownExit(previewPayload)({
           threadId: "thread-1",
-          objective: "x".repeat(501),
+          objective: "x".repeat(THREAD_GOAL_MAX_CHARS + 1),
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      Exit.isSuccess(
+        Schema.decodeUnknownExit(previewPayload)({
+          threadId: "thread-1",
+          objective: "x".repeat(THREAD_GOAL_MAX_CHARS),
         }),
       ),
     ).toBe(true);

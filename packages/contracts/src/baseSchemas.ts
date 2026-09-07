@@ -18,6 +18,9 @@ export const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 export const PositiveInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 export const PortSchema = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }));
 
+/** Shared maximum for a durable thread goal and an experiment objective. */
+export const THREAD_GOAL_MAX_CHARS = 1_024;
+
 /**
  * Safe categories for a failed DPoP proof. These describe the class of failure
  * without exposing proof contents or server-side authentication details.

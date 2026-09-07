@@ -3,12 +3,14 @@ import * as Schema from "effect/Schema";
 import {
   NonNegativeInt,
   PositiveInt,
+  THREAD_GOAL_MAX_CHARS,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
-export const THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS = 500;
+export const THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS = THREAD_GOAL_MAX_CHARS;
+export const THREAD_EXPERIMENT_HYPOTHESIS_MAX_CHARS = 500;
 export const THREAD_EXPERIMENT_MAX_APPROVED_FILES = 1_000;
 export const THREAD_EXPERIMENT_MAX_CHECKS = 32;
 export const THREAD_EXPERIMENT_MAX_ARGV_ITEMS = 128;
@@ -54,6 +56,11 @@ export const ThreadExperimentObjective = TrimmedNonEmptyString.check(
   Schema.isMaxLength(THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS),
 );
 export type ThreadExperimentObjective = typeof ThreadExperimentObjective.Type;
+
+export const ThreadExperimentHypothesis = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(THREAD_EXPERIMENT_HYPOTHESIS_MAX_CHARS),
+);
+export type ThreadExperimentHypothesis = typeof ThreadExperimentHypothesis.Type;
 
 export const ThreadExperimentMetricDirection = Schema.Literals(["maximize", "minimize"]);
 export type ThreadExperimentMetricDirection = typeof ThreadExperimentMetricDirection.Type;

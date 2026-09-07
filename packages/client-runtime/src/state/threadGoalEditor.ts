@@ -1,6 +1,5 @@
 import {
   type EnvironmentId,
-  THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS,
   THREAD_GOAL_MAX_CHARS,
   type ThreadGoalLoop,
   type ThreadId,
@@ -164,8 +163,8 @@ export function threadExperimentObjectiveError(objective: string): string | null
   if (!hasVisibleThreadGoalText(objective)) {
     return "An experiment objective needs at least one visible character.";
   }
-  if (objective.length > THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS) {
-    return `Keep it under ${THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS} characters.`;
+  if (objective.length > THREAD_GOAL_MAX_CHARS) {
+    return `Keep it under ${THREAD_GOAL_MAX_CHARS} characters.`;
   }
   return null;
 }
