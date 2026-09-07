@@ -32,10 +32,11 @@ import {
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
-import type { TimestampFormat } from "@t3tools/contracts/settings";
+import { SidebarThreadSortOrder, type TimestampFormat } from "@t3tools/contracts/settings";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
+  ArrowUpDownIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
@@ -231,6 +232,12 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Fresh keys deliberately reset both shelves to collapsed for existing users.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
+const isSidebarThreadSortOrder = Schema.is(SidebarThreadSortOrder);
+// "created_at" is the order-key static list, so it reads as "Default".
+const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
+  created_at: "Default",
+  updated_at: "Last updated",
+};
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -2066,6 +2073,7 @@ export default function Sidebar() {
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
+  const sidebarThreadSortOrder = useClientSettings((s) => s.sidebarThreadSortOrder);
   const updateClientSettings = useUpdateClientSettings();
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -2530,13 +2538,23 @@ export default function Sidebar() {
         active.push(thread);
       }
     }
+    // "Last updated" time-sorts the active section, so its rows can neither
+    // be picked up nor dropped into place; pinned and snoozed dragging is
+    // unchanged.
+    if (sidebarThreadSortOrder === "updated_at") {
+      for (const thread of active) {
+        const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+        draggable.delete(threadKey);
+        activeReorderable.delete(threadKey);
+      }
+    }
     // One shared rule on every platform (see sortPinnedThreadsByOrderKey):
     // user-arranged keys first, keyless threads in creation order below.
     // Server capability only gates DRAGGING — it must not influence the
     // sort, or mixed-version fleets would render different pinned orders on
     // web and mobile from the same data.
     const sortedPinned = sortPinnedThreadsForSidebar(pinned);
-    const sortedActive = sortThreadsForSidebar(active);
+    const sortedActive = sortThreadsForSidebar(active, sidebarThreadSortOrder);
     return {
       pinnedThreads:
         optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
@@ -2565,7 +2583,15 @@ export default function Sidebar() {
       settledThreads: sortSettledThreadsForSidebar(settled),
       snoozeNow: preciseNow,
     };
-  }, [nowMinute, optimisticDrop, scopedProjectKeys, serverConfigs, snoozeWakeTick, threads]);
+  }, [
+    nowMinute,
+    optimisticDrop,
+    scopedProjectKeys,
+    serverConfigs,
+    sidebarThreadSortOrder,
+    snoozeWakeTick,
+    threads,
+  ]);
 
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
@@ -4496,6 +4522,43 @@ export default function Sidebar() {
                     </ComboboxList>
                   </ComboboxPopup>
                 </Combobox>
+                <Menu>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <MenuTrigger
+                          render={
+                            <SidebarMenuButton
+                              size="icon"
+                              type="button"
+                              className="relative shrink-0 focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+                              aria-label="Sort threads"
+                            />
+                          }
+                        />
+                      }
+                    >
+                      <ArrowUpDownIcon />
+                    </TooltipTrigger>
+                    <TooltipPopup side="right">Sort threads</TooltipPopup>
+                  </Tooltip>
+                  <MenuPopup align="end" className="min-w-40">
+                    <MenuRadioGroup
+                      value={sidebarThreadSortOrder}
+                      onValueChange={(value) => {
+                        if (isSidebarThreadSortOrder(value)) {
+                          updateClientSettings({ sidebarThreadSortOrder: value });
+                        }
+                      }}
+                    >
+                      {SidebarThreadSortOrder.literals.map((value) => (
+                        <MenuRadioItem key={value} value={value} closeOnClick>
+                          {SIDEBAR_THREAD_SORT_LABELS[value]}
+                        </MenuRadioItem>
+                      ))}
+                    </MenuRadioGroup>
+                  </MenuPopup>
+                </Menu>
                 <Tooltip>
                   <TooltipTrigger
                     render={

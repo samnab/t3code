@@ -938,6 +938,39 @@ describe("sortThreadsForSidebar", () => {
 
     expect(sorted.map((thread) => thread.id)).toEqual(["newest", "stale-stamp"]);
   });
+
+  it("with updated_at sort order, orders by last user message, ignores order keys, and keeps the un-settle anchor", () => {
+    const sorted = sortThreadsForSidebar(
+      [
+        {
+          id: "arranged-first",
+          createdAt: "2026-03-09T08:00:00.000Z",
+          updatedAt: "2026-03-09T08:00:00.000Z",
+          latestUserMessageAt: "2026-03-09T09:00:00.000Z",
+          activeOrderKey: "a0",
+        },
+        {
+          id: "messaged-latest",
+          createdAt: "2026-03-09T07:00:00.000Z",
+          updatedAt: "2026-03-09T07:00:00.000Z",
+          latestUserMessageAt: "2026-03-09T14:00:00.000Z",
+        },
+        {
+          id: "freshly-unsettled",
+          createdAt: "2026-03-09T06:00:00.000Z",
+          updatedAt: "2026-03-09T06:00:00.000Z",
+          unsettledAt: "2026-03-09T13:00:00.000Z",
+        },
+      ],
+      "updated_at",
+    );
+
+    expect(sorted.map((thread) => thread.id)).toEqual([
+      "messaged-latest",
+      "freshly-unsettled",
+      "arranged-first",
+    ]);
+  });
 });
 
 describe("pinOrderKeyBetween", () => {
@@ -1316,11 +1349,10 @@ describe("planSidebarThreadDrop", () => {
   });
 
   it("saves the first Active reorder, then moves only one key on subsequent drops", () => {
-    const rows = ["a1", "a2", "a3"].map((id, index) => ({
-      id,
-      createdAt: new Date(Date.UTC(2026, 8, 4, 12 - index)).toISOString(),
-      activeOrderKey: null as string | null,
-    }));
+    const rows = ["a1", "a2", "a3"].map((id, index) => {
+      const createdAt = new Date(Date.UTC(2026, 8, 4, 12 - index)).toISOString();
+      return { id, createdAt, updatedAt: createdAt, activeOrderKey: null as string | null };
+    });
     const firstOrder = ["a2", "a3", "a1"];
     const first = plan({
       activeKey: "a1",
