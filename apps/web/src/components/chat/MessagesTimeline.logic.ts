@@ -927,7 +927,7 @@ export function deriveMessagesTimelineRows(input: {
           ? input.turnDiffSummaryByAssistantMessageId.get(timelineEntry.message.id)
           : undefined,
       revertTurnCount:
-        timelineEntry.message.role === "user"
+        timelineEntry.message.role === "user" && timelineEntry.message.origin === undefined
           ? input.revertTurnCountByUserMessageId.get(timelineEntry.message.id)
           : undefined,
     });

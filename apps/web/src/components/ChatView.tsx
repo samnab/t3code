@@ -648,7 +648,7 @@ function useLocalDispatchState(input: {
 }) {
   const [localDispatch, setLocalDispatch] = useState<LocalDispatchSnapshot | null>(null);
   const latestUserMessage = input.activeThread?.messages.findLast(
-    (message) => message.role === "user",
+    (message) => message.role === "user" && message.origin === undefined,
   );
   const latestUserMessageId = latestUserMessage?.id ?? null;
 
@@ -2954,7 +2954,12 @@ function ChatViewContent(props: ChatViewProps) {
     const byUserMessageId = new Map<MessageId, number>();
     for (let index = 0; index < timelineEntries.length; index += 1) {
       const entry = timelineEntries[index];
-      if (!entry || entry.kind !== "message" || entry.message.role !== "user") {
+      if (
+        !entry ||
+        entry.kind !== "message" ||
+        entry.message.role !== "user" ||
+        entry.message.origin !== undefined
+      ) {
         continue;
       }
 
@@ -6557,7 +6562,7 @@ function ChatViewContent(props: ChatViewProps) {
     );
     const shouldAnchorFirstMessage =
       activeThread.latestTurn === null &&
-      !timelineMessages.some((message) => message.role === "user");
+      !timelineMessages.some((message) => message.role === "user" && message.origin === undefined);
     if (shouldAnchorFirstMessage) {
       isAtEndRef.current = true;
       timelineScrollModeRef.current = "anchoring-new-turn";
