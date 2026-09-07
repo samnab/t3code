@@ -36,8 +36,8 @@ import {
   RuntimeMode,
   TerminalOpenInput,
   THREAD_GOAL_MAX_CHARS,
-  threadExperimentObjectiveError,
 } from "@t3tools/contracts";
+import { threadExperimentObjectiveError } from "@t3tools/client-runtime/state/threadGoalEditor";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import { type CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";

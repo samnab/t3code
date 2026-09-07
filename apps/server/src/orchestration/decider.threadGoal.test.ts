@@ -56,6 +56,7 @@ function withLoop(
   goal = "Ship the login fix",
 ): OrchestrationReadModel {
   const loop: ThreadGoalLoop = {
+    kind: "standard",
     state: "idle",
     mode: "native",
     iterations: 0,

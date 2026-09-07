@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
-import { EnvironmentId, ThreadId, type ThreadExperimentPreview } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  type ThreadExperimentPreview,
+} from "@t3tools/contracts";
 
 import {
   canConfirmThreadExperiment,
@@ -19,8 +25,8 @@ const preview: ThreadExperimentPreview = {
   configDigest: "sha256:config",
   approvedFiles: ["apps/web/src/main.tsx"],
   provider: {
-    instanceId: "codex",
-    driver: "codex",
+    instanceId: ProviderInstanceId.make("codex"),
+    driver: ProviderDriverKind.make("codex"),
     supported: true,
     reason: null,
   },

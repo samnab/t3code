@@ -44,6 +44,7 @@ const THREAD_ID = ThreadId.make("native-goal-thread");
 
 function makeLoop(overrides: Partial<ThreadGoalLoop> = {}): ThreadGoalLoop {
   return {
+    kind: "standard",
     state: "idle",
     mode: "native",
     iterations: 0,
@@ -332,7 +333,7 @@ describe("NativeGoalReactor", () => {
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop") return;
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
         assert.strictEqual(command.action, "sync");
         assert.strictEqual(command.mode, "native");
         // The corrected mode is native, so the push runs in the same pass.
@@ -386,7 +387,7 @@ describe("NativeGoalReactor", () => {
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop") return;
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
         assert.strictEqual(command.action, "sync");
         assert.strictEqual(command.state, "blocked");
         assert.strictEqual(command.reason, NativeGoalReactor.CODEX_CLEARED_REASON);
@@ -404,7 +405,7 @@ describe("NativeGoalReactor", () => {
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop") return;
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
         assert.strictEqual(command.state, "paused");
         // Mirroring is read-only: nothing goes back to Codex.
         assert.deepEqual(goalCalls, []);

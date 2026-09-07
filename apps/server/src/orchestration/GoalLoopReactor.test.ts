@@ -40,6 +40,7 @@ const TURN_ID = TurnId.make("goal-loop-turn");
 
 function makeLoop(overrides: Partial<ThreadGoalLoop> = {}): ThreadGoalLoop {
   return {
+    kind: "standard",
     state: "running",
     mode: "t3",
     iterations: 1,

@@ -344,6 +344,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           },
           goal: "Ship the projection fix",
           goalLoop: {
+            kind: "standard",
             state: "running",
             mode: "t3",
             iterations: 2,
@@ -484,6 +485,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           },
           goal: "Ship the projection fix",
           goalLoop: {
+            kind: "standard",
             state: "running",
             mode: "t3",
             iterations: 2,

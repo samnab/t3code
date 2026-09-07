@@ -81,6 +81,7 @@ function initialGoalLoop(input: {
   readonly updatedAt: string;
 }): ThreadGoalLoop {
   return {
+    kind: "standard",
     state: "idle",
     mode: resolveThreadGoalLoopMode(input.thread.modelSelection.instanceId),
     iterations: 0,
@@ -428,6 +429,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           commandId: command.commandId,
           occurredAt: command.createdAt,
           loop: {
+            kind: "standard",
             state: "idle",
             mode: resolveThreadGoalLoopMode(command.modelSelection.instanceId),
             iterations: 0,
