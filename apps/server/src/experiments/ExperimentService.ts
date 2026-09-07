@@ -56,6 +56,17 @@ import {
 } from "./Repository.ts";
 
 const TERMINAL_PHASES = new Set<ExperimentPhase>(["exhausted", "failed", "completed"]);
+
+function holdsWorktreeClaim(profile: ExperimentProfile, currentMs: number): boolean {
+  if (TERMINAL_PHASES.has(profile.phase)) return false;
+  return !(
+    profile.phase === "paused" &&
+    !profile.armed &&
+    !profile.providerSessionActive &&
+    profile.pending === null &&
+    currentMs >= Date.parse(profile.deadlineAt)
+  );
+}
 const RECOVERY_PHASES = new Set<ExperimentPhase>([
   "applying",
   "applied",
@@ -650,12 +661,14 @@ export const make = Effect.gen(function* () {
     initial: ExperimentProfile,
     evaluation: CommandEvaluation | null,
     reason: string,
+    options: { readonly sync?: boolean; readonly holdOnExhaustion?: boolean } = {},
   ) {
     return Effect.gen(function* () {
+      const saveOptions = options.sync === undefined ? {} : { sync: options.sync };
       const pending = yield* repositoryEffect("restore validation", () =>
         assertSafeRestore(initial),
       );
-      let profile = yield* save({ ...initial, phase: "restoring", armed: false });
+      let profile = yield* save({ ...initial, phase: "restoring", armed: false }, saveOptions);
       for (const snapshot of pending.snapshots) {
         if (!pending.restoredPaths.includes(snapshot.path)) {
           const currentPending = profile.pending ?? pending;
@@ -674,13 +687,16 @@ export const make = Effect.gen(function* () {
               restoreSnapshot(profile.cwd, snapshot, currentState.hash, currentState.mode),
             );
           }
-          profile = yield* save({
-            ...profile,
-            pending: {
-              ...pending,
-              restoredPaths: [...(profile.pending?.restoredPaths ?? []), snapshot.path],
+          profile = yield* save(
+            {
+              ...profile,
+              pending: {
+                ...pending,
+                restoredPaths: [...(profile.pending?.restoredPaths ?? []), snapshot.path],
+              },
             },
-          });
+            saveOptions,
+          );
         }
       }
       yield* repositoryEffect("post-restore validation", () => assertClean(profile.cwd));
@@ -692,17 +708,20 @@ export const make = Effect.gen(function* () {
         yield* coordinator.stopProvider({ threadId: profile.threadId, runId: profile.runId });
         profile = { ...profile, providerSessionActive: false };
       }
-      profile = yield* save({
-        ...profile,
-        phase: exhausted ? "exhausted" : "ready",
-        armed: !exhausted,
-        providerSessionActive: exhausted ? false : profile.providerSessionActive,
-        experimentsRun: initial.experimentsRun + 1,
-        experimentsRestored: initial.experimentsRestored + 1,
-        lastMetric: evaluation?.metric ?? null,
-        pending: null,
-        lastError: exhausted ? "Experiment limits reached." : null,
-      });
+      profile = yield* save(
+        {
+          ...profile,
+          phase: exhausted ? "exhausted" : "ready",
+          armed: !exhausted,
+          providerSessionActive: exhausted ? false : profile.providerSessionActive,
+          experimentsRun: initial.experimentsRun + 1,
+          experimentsRestored: initial.experimentsRestored + 1,
+          lastMetric: evaluation?.metric ?? null,
+          pending: null,
+          lastError: exhausted ? "Experiment limits reached." : null,
+        },
+        saveOptions,
+      );
       yield* ledger(profile, {
         type: "evaluation",
         outcome: "restored",
@@ -711,7 +730,7 @@ export const make = Effect.gen(function* () {
         metrics: evaluation?.metrics ?? null,
         reason,
       });
-      if (exhausted) {
+      if (exhausted && options.holdOnExhaustion !== false) {
         yield* coordinator.holdGoal({
           threadId: profile.threadId,
           action: "pause",
@@ -777,16 +796,17 @@ export const make = Effect.gen(function* () {
       await assertRepository(cwd, config);
       await assertClean(cwd);
     });
+    const currentMs = yield* Clock.currentTimeMillis;
     const existing = yield* store.list();
     const owned = yield* repositoryEffect("worktree ownership validation", async () =>
       existing.some(
-        (profile) => !TERMINAL_PHASES.has(profile.phase) && repositoryPathsEqual(profile.cwd, cwd),
+        (profile) =>
+          holdsWorktreeClaim(profile, currentMs) && repositoryPathsEqual(profile.cwd, cwd),
       ),
     );
     if (owned) {
       return yield* error("invalid_phase", "Another experiment already owns this worktree.");
     }
-    const currentMs = yield* Clock.currentTimeMillis;
     const confirmationId = randomUUID();
     const expiresAt = nowIso(currentMs + CONFIRMATION_TTL_MS);
     const head = yield* repositoryEffect("read HEAD", () => currentHead(cwd));
@@ -897,7 +917,7 @@ export const make = Effect.gen(function* () {
     const owned = yield* repositoryEffect("worktree ownership revalidation", async () =>
       all.some(
         (profile) =>
-          !TERMINAL_PHASES.has(profile.phase) &&
+          holdsWorktreeClaim(profile, currentMs) &&
           repositoryPathsEqual(profile.cwd, confirmation.cwd),
       ),
     );
@@ -1706,12 +1726,19 @@ export const make = Effect.gen(function* () {
     if (stored === undefined || TERMINAL_PHASES.has(stored.phase)) return;
     let profile = stored;
     yield* cancelOwned(profile.runId);
-    profile = yield* save({ ...profile, providerSessionActive: false, armed: false });
+    const sync = input.terminal !== "clear";
+    profile = yield* save(
+      { ...profile, providerSessionActive: false, armed: false },
+      { sync: false },
+    );
     if (stored.providerSessionActive) {
       yield* coordinator.stopProvider({ threadId: stored.threadId, runId: stored.runId });
     }
     if (profile.pending !== null) {
-      const restored = yield* restore(profile, null, input.reason).pipe(
+      const restored = yield* restore(profile, null, input.reason, {
+        sync: false,
+        holdOnExhaustion: sync,
+      }).pipe(
         Effect.map(Option.some),
         Effect.catch((cause) => failClosed(profile, cause).pipe(Effect.as(Option.none()))),
       );
@@ -1724,12 +1751,15 @@ export const make = Effect.gen(function* () {
         : input.terminal === "capped" || input.terminal === "pause"
           ? "paused"
           : "failed";
-    profile = yield* save({
-      ...profile,
-      phase: nextPhase,
-      armed: false,
-      lastError: nextPhase === "completed" ? null : input.reason.slice(0, 2_000),
-    });
+    profile = yield* save(
+      {
+        ...profile,
+        phase: nextPhase,
+        armed: false,
+        lastError: nextPhase === "completed" ? null : input.reason.slice(0, 2_000),
+      },
+      { sync },
+    );
     yield* ledger(profile, { type: "settled", phase: nextPhase, reason: input.reason });
   });
 

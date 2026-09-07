@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+  CommandId,
   EventId,
   ThreadId,
   type OrchestrationEvent,
@@ -104,6 +105,8 @@ function testLayer(
     readonly beforeStartProvider?: (count: number) => Promise<void>;
     readonly failHold?: boolean;
     readonly onStopProvider?: () => void;
+    readonly rejectSync?: () => boolean;
+    readonly onSave?: (profile: ExperimentProfile) => void;
   } = {},
 ) {
   const started: Array<string> = [];
@@ -115,6 +118,7 @@ function testLayer(
   const holds: Array<"pause" | "block" | "complete"> = [];
   let activated = false;
   const rows = new Map<string, ExperimentProfile>();
+  const saved: Array<ExperimentProfile> = [];
   const startsByThread = new Map<string, number>();
   const coordinator: ExperimentCoordinatorShape = {
     resolveThread: (threadId) =>
@@ -172,7 +176,7 @@ function testLayer(
     syncSummary: () =>
       Effect.gen(function* () {
         lifecycle.push("sync");
-        if (options.rejectSyncBeforeActivation && !activated) {
+        if ((options.rejectSyncBeforeActivation && !activated) || options.rejectSync?.()) {
           return yield* new ExperimentError({
             code: "persistence_failed",
             message: "Could not synchronize experiment progress.",
@@ -197,11 +201,17 @@ function testLayer(
         const profile = rows.get(threadId);
         return Option.fromUndefinedOr(profile === undefined ? undefined : structuredClone(profile));
       }),
-    save: (profile) => Effect.sync(() => void rows.set(profile.threadId, structuredClone(profile))),
+    save: (profile) =>
+      Effect.sync(() => {
+        rows.set(profile.threadId, structuredClone(profile));
+        saved.push(structuredClone(profile));
+        options.onSave?.(profile);
+      }),
     list: () => Effect.sync(() => [...rows.values()].map((profile) => structuredClone(profile))),
   };
   return {
     rows,
+    saved,
     started,
     stopped,
     stoppedWhileArmed,
@@ -258,6 +268,27 @@ function goalLoopUpdatedEvent(input: {
         updatedAt: "2026-09-07T05:38:30.000Z",
       },
       ...(input.resumed === true ? { resumed: true } : {}),
+    },
+  };
+}
+
+function threadGoalClearedEvent(): OrchestrationEvent {
+  const threadId = ThreadId.make("thread-1");
+  return {
+    sequence: 1,
+    eventId: EventId.make("thread-goal-cleared"),
+    aggregateKind: "thread",
+    aggregateId: threadId,
+    occurredAt: "2026-09-07T05:40:25.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.meta-updated",
+    payload: {
+      threadId,
+      goal: null,
+      updatedAt: "2026-09-07T05:40:25.000Z",
     },
   };
 }
@@ -826,6 +857,112 @@ describe("ExperimentService", () => {
         );
       }),
     );
+  });
+
+  it.effect("clears a paused experiment and releases its worktree claim", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([
+      ["thread-1", context("thread-1", cwd)],
+      ["thread-2", context("thread-2", cwd)],
+    ]);
+    let goalCleared = false;
+    let markCompleted = () => {};
+    const completed = new Promise<void>((resolve) => {
+      markCompleted = resolve;
+    });
+    const fixture = testLayer(contexts, {
+      rejectSync: () => goalCleared,
+      onSave: (profile) => {
+        if (profile.threadId === "thread-1" && profile.phase === "completed") markCompleted();
+      },
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const activation = yield* Deferred.make<void>();
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        yield* Effect.gen(function* () {
+          const service = yield* ExperimentService;
+          const preview = yield* service.preview({
+            threadId: "thread-1",
+            objective: "Improve score",
+          });
+          yield* service.start({
+            threadId: "thread-1",
+            objective: "Improve score",
+            confirmationId: preview.confirmationId,
+          });
+          yield* service.settle({
+            threadId: "thread-1",
+            terminal: "pause",
+            reason: "Paused in the browser",
+          });
+
+          const lifecycle = yield* ExperimentLifecycleReactor.ExperimentLifecycleReactor;
+          yield* lifecycle.start();
+          yield* Deferred.succeed(activation, undefined);
+          const savesBeforeClear = fixture.saved.length;
+          goalCleared = true;
+          yield* Queue.offer(events, {
+            ...goalLoopUpdatedEvent({ kind: "experiment", state: "paused" }),
+            commandId: CommandId.make("server:experiment-progress:thread-1:test"),
+          });
+          yield* Queue.offer(events, threadGoalClearedEvent());
+          yield* Effect.promise(() => completed);
+
+          assert.strictEqual(fixture.rows.get("thread-1")?.phase, "completed");
+          assert.strictEqual(fixture.saved.length - savesBeforeClear, 2);
+          const next = yield* service.preview({
+            threadId: "thread-2",
+            objective: "Reuse the worktree",
+          });
+          assert.strictEqual(next.cwd, realpathSync.native(cwd));
+        }).pipe(
+          Effect.provide(
+            ExperimentLifecycleReactor.layer.pipe(
+              Layer.provideMerge(fixture.layer),
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+                    streamDomainEvents: Stream.fromQueue(events),
+                  }),
+                  Layer.succeed(ServerActivation, Deferred.await(activation)),
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
+    );
+  });
+
+  it.effect("does not retain an expired fully disarmed paused worktree claim", () => {
+    const cwd = makeRepo(10, 1);
+    const contexts = new Map([
+      ["thread-1", context("thread-1", cwd)],
+      ["thread-2", context("thread-2", cwd)],
+    ]);
+    const fixture = testLayer(contexts);
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+      yield* service.settle({
+        threadId: "thread-1",
+        terminal: "pause",
+        reason: "Paused until later",
+      });
+      yield* TestClock.adjust("2 seconds");
+
+      const next = yield* service.preview({
+        threadId: "thread-2",
+        objective: "Reuse expired worktree",
+      });
+      assert.strictEqual(next.cwd, realpathSync.native(cwd));
+    }).pipe(Effect.provide(fixture.layer));
   });
 
   it.effect("stops a provider that resumes while settlement waits for the thread lock", () => {

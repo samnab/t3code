@@ -15,7 +15,10 @@ import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSn
 import * as ProviderService from "../provider/Services/ProviderService.ts";
 import { readMcpProviderSession } from "../mcp/McpProviderSession.ts";
 import { sanitizeSubagentTranscriptField } from "../persistence/subagentTranscriptSanitization.ts";
-import { ACTIVATION_COMMAND_PREFIX } from "./ExperimentLifecycleReactor.ts";
+import {
+  ACTIVATION_COMMAND_PREFIX,
+  PROGRESS_COMMAND_PREFIX,
+} from "./ExperimentLifecycleReactor.ts";
 import { ExperimentCoordinator } from "./ExperimentService.ts";
 import { ExperimentError } from "./Model.ts";
 
@@ -190,7 +193,7 @@ export const layer = Layer.effect(
           "Could not synchronize experiment progress.",
           engine.dispatch({
             type: "thread.goal.loop",
-            commandId: commandId("server:experiment-progress:", input.threadId),
+            commandId: commandId(PROGRESS_COMMAND_PREFIX, input.threadId),
             threadId: ThreadId.make(input.threadId),
             action: "sync",
             kind: "experiment",

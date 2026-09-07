@@ -11,6 +11,7 @@ import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEng
 import { ExperimentService } from "./ExperimentService.ts";
 
 export const ACTIVATION_COMMAND_PREFIX = "server:experiment-activate:";
+export const PROGRESS_COMMAND_PREFIX = "server:experiment-progress:";
 
 export class ExperimentLifecycleReactor extends Context.Service<
   ExperimentLifecycleReactor,
@@ -23,6 +24,7 @@ export const make = Effect.gen(function* () {
 
   const handle = (event: OrchestrationEvent) => {
     if (event.type === "thread.goal-loop-updated") {
+      if (event.commandId?.startsWith(PROGRESS_COMMAND_PREFIX)) return Effect.void;
       const loop = event.payload.loop;
       if (loop === null) {
         return experiments.settle({
@@ -74,8 +76,11 @@ export const make = Effect.gen(function* () {
     ) {
       return experiments.settle({
         threadId: event.payload.threadId,
-        terminal: "block",
-        reason: "Thread goal, provider, or worktree metadata changed during the experiment.",
+        terminal: event.payload.goal === null ? "clear" : "block",
+        reason:
+          event.payload.goal === null
+            ? "Experiment goal was cleared."
+            : "Thread goal, provider, or worktree metadata changed during the experiment.",
       });
     }
     if (event.type === "thread.deleted" || event.type === "thread.archived") {
