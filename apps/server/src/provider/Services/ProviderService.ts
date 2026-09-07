@@ -180,3 +180,35 @@ export interface ProviderServiceShape {
 export class ProviderService extends Context.Service<ProviderService, ProviderServiceShape>()(
   "t3/provider/Services/ProviderService",
 ) {}
+
+export interface ExperimentProviderSessionServiceShape {
+  /**
+   * Replace any ordinary provider process with a fresh experiment-bound
+   * process. The returned id is the credential/session pin that the
+   * authoritative experiment profile persists before it arms the run.
+   */
+  readonly start: (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly cwd: string;
+    readonly runId: string;
+    readonly generation: number;
+    readonly modelSelection?: ProviderSessionStartInput["modelSelection"];
+    readonly voiceNotifications?: boolean;
+  }) => Effect.Effect<
+    { readonly session: ProviderSession; readonly providerSessionId: string },
+    ProviderServiceError
+  >;
+
+  /** Stop an experiment process without recovering a persisted provider cursor. */
+  readonly stop: (input: {
+    readonly threadId: ThreadId;
+    readonly runId?: string;
+  }) => Effect.Effect<void, ProviderServiceError>;
+}
+
+/** Server-only provider transition used by the authoritative experiment service. */
+export class ExperimentProviderSessionService extends Context.Service<
+  ExperimentProviderSessionService,
+  ExperimentProviderSessionServiceShape
+>()("t3/provider/Services/ExperimentProviderSessionService") {}

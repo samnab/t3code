@@ -20,7 +20,7 @@ export interface McpCredentialRequest {
 export interface ExperimentMcpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
-  readonly providerSessionId: string;
+  readonly providerSessionId?: string;
   readonly runId: string;
   readonly generation: number;
 }
@@ -165,12 +165,14 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     "McpSessionRegistry.issueExperiment",
   )(function* (request) {
     const issuedAt = yield* currentTimeMillis;
+    const providerSessionId =
+      request.providerSessionId ?? (yield* crypto.randomUUIDv4.pipe(Effect.orDie));
     const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
     const tokenHash = yield* hashToken(rawToken);
     const scope: McpInvocationContext.McpInvocationScope = {
       environmentId,
       threadId: ThreadId.make(request.threadId),
-      providerSessionId: request.providerSessionId,
+      providerSessionId,
       providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
       capabilities: new Set(["experiment"]),
       experiment: {

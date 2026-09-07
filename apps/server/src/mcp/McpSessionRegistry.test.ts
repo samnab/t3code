@@ -180,6 +180,25 @@ it.effect("replaces a thread credential with an experiment-only run binding", ()
   }),
 );
 
+it.effect("mints the experiment provider session pin when the caller omits it", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("experiment-thread-fresh-pin");
+    const issued = yield* registry.issueExperiment({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      runId: "experiment-run-fresh-pin",
+      generation: 2,
+    });
+
+    expect(issued.config.providerSessionId.length).toBeGreaterThan(0);
+    const scope = yield* registry.resolve(
+      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    );
+    expect(scope?.providerSessionId).toBe(issued.config.providerSessionId);
+  }),
+);
+
 it.effect("revokes an experiment credential by its provider session", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry(() => 1_000);

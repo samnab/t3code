@@ -329,7 +329,10 @@ validationLayer("CodexAdapterLive validation", (it) => {
         runtimeMode: "full-access",
       });
 
-      NodeAssert.deepStrictEqual(validationRuntimeFactory.factory.mock.calls[0]?.[0], {
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      NodeAssert.ok(runtimeOptions !== undefined);
+      const { environment: _environment, ...runtimeOptionsWithoutEnvironment } = runtimeOptions;
+      NodeAssert.deepStrictEqual(runtimeOptionsWithoutEnvironment, {
         binaryPath: "codex",
         cwd: process.cwd(),
         launchArgs: "",

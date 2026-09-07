@@ -78,6 +78,8 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import type { ProviderServiceLiveOptions } from "./ProviderService.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
@@ -418,6 +420,7 @@ function makeProviderServiceLayer(
     readonly supportsConversationRollback?: boolean;
     readonly analyticsLayer?: Layer.Layer<AnalyticsService.AnalyticsService>;
     readonly registry?: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"];
+    readonly providerServiceOptions?: ProviderServiceLiveOptions;
   } = {},
 ) {
   const codex = makeFakeCodexAdapter(CODEX_DRIVER, input.supportsConversationRollback);
@@ -445,7 +448,7 @@ function makeProviderServiceLayer(
 
   const layer = it.layer(
     Layer.mergeAll(
-      makeProviderServiceLive().pipe(
+      makeProviderServiceLive(input.providerServiceOptions).pipe(
         Layer.provide(NodeServices.layer),
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
@@ -986,6 +989,106 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
 );
 
 const routing = makeProviderServiceLayer();
+
+const experimentProviderSessionId = "experiment-provider-session";
+const issueExperimentMcpCredential = vi.fn(
+  (
+    request: Parameters<NonNullable<ProviderServiceLiveOptions["issueExperimentMcpCredential"]>>[0],
+  ) =>
+    Effect.succeed({
+      config: {
+        environmentId: EnvironmentId.make("environment-experiment"),
+        threadId: request.threadId,
+        providerSessionId: experimentProviderSessionId,
+        providerInstanceId: request.providerInstanceId,
+        endpoint: "http://127.0.0.1:43123/mcp/experiment",
+        authorizationHeader: "Bearer experiment-token",
+        experiment: {
+          runId: request.runId,
+          generation: request.generation,
+        },
+      },
+    }),
+);
+const experimentLifecycle = makeProviderServiceLayer({
+  providerServiceOptions: { issueExperimentMcpCredential },
+});
+
+experimentLifecycle.layer("ProviderServiceLive experiment lifecycle", (it) => {
+  it.effect("replaces an ordinary session without preserving its resume cursor", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const experimentProviderSession = yield* ProviderService.ExperimentProviderSessionService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("thread-experiment-transition");
+      const cwd = fixtureCwd("experiment-transition");
+
+      yield* provider.startSession(threadId, {
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        cwd,
+        runtimeMode: "full-access",
+      });
+      experimentLifecycle.claude.startSession.mockClear();
+      experimentLifecycle.claude.stopSession.mockClear();
+      issueExperimentMcpCredential.mockClear();
+
+      const started = yield* experimentProviderSession.start({
+        threadId,
+        providerInstanceId: claudeAgentInstanceId,
+        cwd,
+        runId: "experiment-run",
+        generation: 3,
+      });
+
+      assert.equal(started.providerSessionId, experimentProviderSessionId);
+      assert.equal(experimentLifecycle.claude.stopSession.mock.calls.length, 1);
+      assert.equal(issueExperimentMcpCredential.mock.calls.length, 1);
+      assert.equal(experimentLifecycle.claude.startSession.mock.calls.length, 1);
+      assert.equal(
+        experimentLifecycle.claude.stopSession.mock.invocationCallOrder[0]! <
+          issueExperimentMcpCredential.mock.invocationCallOrder[0]!,
+        true,
+      );
+      assert.equal(
+        issueExperimentMcpCredential.mock.invocationCallOrder[0]! <
+          experimentLifecycle.claude.startSession.mock.invocationCallOrder[0]!,
+        true,
+      );
+      assert.equal(
+        experimentLifecycle.claude.startSession.mock.calls[0]?.[0].resumeCursor,
+        undefined,
+      );
+      assert.equal(
+        McpProviderSession.readMcpProviderSession(threadId)?.providerSessionId,
+        experimentProviderSessionId,
+      );
+      const binding = yield* directory.getBinding(threadId);
+      assert(Option.isSome(binding));
+      assert.equal(binding.value.resumeCursor, undefined);
+
+      const wrongRunError = yield* Effect.flip(
+        experimentProviderSession.stop({ threadId, runId: "different-run" }),
+      );
+      assert.instanceOf(wrongRunError, ProviderValidationError);
+      assert.equal(experimentLifecycle.claude.stopSession.mock.calls.length, 1);
+
+      yield* experimentProviderSession.stop({ threadId, runId: "experiment-run" });
+      assert.equal(experimentLifecycle.claude.stopSession.mock.calls.length, 2);
+      assert.equal(McpProviderSession.readMcpProviderSession(threadId), undefined);
+      const stoppedBinding = yield* directory.getBinding(threadId);
+      assert(Option.isSome(stoppedBinding));
+      assert.equal(stoppedBinding.value.resumeCursor, undefined);
+      assert.equal(stoppedBinding.value.status, "stopped");
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          McpProviderSession.clearAllMcpProviderSessions();
+        }),
+      ),
+    ),
+  );
+});
 
 const customCompactionDriver = ProviderDriverKind.make("custom-compaction-provider");
 const nativeCompactionInstanceId = ProviderInstanceId.make("native-compaction");
