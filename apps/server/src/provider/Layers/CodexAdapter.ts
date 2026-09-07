@@ -36,6 +36,8 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as NodeCrypto from "node:crypto";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -63,6 +65,7 @@ import {
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { withVoiceNotificationsEnv } from "../ProviderInstanceEnvironment.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { expandHomePath } from "../../pathExpansion.ts";
 
 import { ServerConfig } from "../../config.ts";
 import {
@@ -76,6 +79,11 @@ import {
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import {
+  buildCodexExperimentAppServerArgs,
+  CODEX_EXPERIMENT_MCP_SERVER_NAME,
+  CODEX_EXPERIMENT_TOOL_NAMES,
+} from "../ExperimentProviderSupport.ts";
 import { codexRateLimitsToUpdate } from "./codexUsageLimits.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
@@ -2337,24 +2345,86 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const isExperiment = mcpSession?.experiment !== undefined;
         // Voice-notification preference rides the spawn env; see
         // withVoiceNotificationsEnv.
         const sessionEnvironment = withVoiceNotificationsEnv(
           options?.environment ?? process.env,
           input.voiceNotifications,
         );
+        if (isExperiment) {
+          delete sessionEnvironment.CODEX_HOME;
+          delete sessionEnvironment.T3CODE_CODEX_LAUNCH_ARGS;
+        }
+        const experimentHomePath =
+          isExperiment && mcpSession !== undefined
+            ? NodePath.join(
+                serverConfig.providerStatusCacheDir,
+                "codex-experiments",
+                mcpSession.providerSessionId,
+              )
+            : undefined;
+        if (experimentHomePath !== undefined) {
+          yield* fileSystem.makeDirectory(experimentHomePath, { recursive: true }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Failed to create the restricted Codex home.",
+                  cause,
+                }),
+            ),
+          );
+          const sharedHomePath = expandHomePath(
+            codexConfig.homePath.trim() || NodePath.join(NodeOS.homedir(), ".codex"),
+          );
+          const sharedAuthPath = NodePath.join(sharedHomePath, "auth.json");
+          const sharedAuthExists = yield* fileSystem.exists(sharedAuthPath).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Failed to inspect authentication for the restricted Codex home.",
+                  cause,
+                }),
+            ),
+          );
+          if (sharedAuthExists) {
+            yield* fileSystem
+              .copyFile(sharedAuthPath, NodePath.join(experimentHomePath, "auth.json"))
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterProcessError({
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      detail: "Failed to copy authentication into the restricted Codex home.",
+                      cause,
+                    }),
+                ),
+              );
+          }
+        }
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
           binaryPath: codexConfig.binaryPath,
-          launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
+          launchArgs: isExperiment
+            ? ""
+            : resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
           environment: sessionEnvironment,
           ...(codexConfig.maxConcurrentSubagents
             ? { maxConcurrentSubagents: codexConfig.maxConcurrentSubagents }
             : {}),
-          ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
-          ...(isCodexResumeCursorSchema(input.resumeCursor)
+          ...(experimentHomePath
+            ? { homePath: experimentHomePath }
+            : codexConfig.homePath
+              ? { homePath: codexConfig.homePath }
+              : {}),
+          ...(!isExperiment && isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
             : {}),
           runtimeMode: input.runtimeMode,
@@ -2369,11 +2439,20 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
                 appServerArgs: [
+                  ...(isExperiment ? buildCodexExperimentAppServerArgs().slice(1) : []),
                   "-c",
-                  `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
+                  `mcp_servers.${isExperiment ? CODEX_EXPERIMENT_MCP_SERVER_NAME : "t3-code"}.url=${mcpSession.endpoint}`,
                   "-c",
-                  'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+                  `mcp_servers.${isExperiment ? CODEX_EXPERIMENT_MCP_SERVER_NAME : "t3-code"}.bearer_token_env_var="T3_MCP_BEARER_TOKEN"`,
                 ],
+                ...(isExperiment
+                  ? {
+                      experimentRestriction: {
+                        mcpServerName: CODEX_EXPERIMENT_MCP_SERVER_NAME,
+                        toolNames: CODEX_EXPERIMENT_TOOL_NAMES,
+                      },
+                    }
+                  : {}),
               }
             : {}),
         };

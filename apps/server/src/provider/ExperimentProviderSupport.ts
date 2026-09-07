@@ -1,6 +1,14 @@
 import type { ProviderDriverKind } from "@t3tools/contracts";
 
 export const PROVIDER_EXPERIMENT_UNSUPPORTED = "PROVIDER_EXPERIMENT_UNSUPPORTED" as const;
+export const CODEX_EXPERIMENT_MCP_SERVER_NAME = "t3-experiment";
+export const CODEX_EXPERIMENT_TOOL_NAMES = [
+  "experiment_status",
+  "experiment_list_files",
+  "experiment_read_file",
+  "experiment_apply",
+  "experiment_evaluate",
+] as const;
 
 export interface CodexExperimentCanaryProbe {
   readonly applyPatchWriteDenied: boolean;
