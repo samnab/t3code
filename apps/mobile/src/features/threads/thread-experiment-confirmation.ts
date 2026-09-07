@@ -1,5 +1,8 @@
 import type { EnvironmentId, ThreadExperimentPreview, ThreadId } from "@t3tools/contracts";
 
+export const THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE =
+  "The evaluator and checks run on this environment's host with your user permissions.";
+
 export interface ThreadExperimentConfirmationState {
   readonly threadKey: string;
   readonly environmentId: EnvironmentId;

@@ -6,6 +6,7 @@ import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
 import {
+  THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE,
   canConfirmThreadExperiment,
   formatThreadExperimentArgv,
   type ThreadExperimentConfirmationState,
@@ -156,6 +157,9 @@ export function ThreadExperimentConfirmationSheet(props: {
                   </View>
                 ))}
               </View>
+            </ConfigRow>
+            <ConfigRow label="Host permissions">
+              <Value>{THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE}</Value>
             </ConfigRow>
             <ConfigRow label="Run limits">
               <Value>

@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import {
+  THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE,
   canConfirmThreadExperiment,
   formatThreadExperimentArgv,
   threadExperimentMetricLabel,
@@ -91,6 +92,9 @@ function ReviewedConfiguration(props: { readonly preview: ThreadExperimentPrevie
       <ConfigRow label="Metric">{threadExperimentMetricLabel(preview.evaluator.metric)}</ConfigRow>
       <ConfigRow label="Checks">
         {preview.checks.length > 0 ? <CommandList commands={preview.checks} /> : <span>None</span>}
+      </ConfigRow>
+      <ConfigRow label="Host permissions">
+        {THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE}
       </ConfigRow>
       <ConfigRow label="Run limits">
         {limits.maxExperiments} experiments · {limits.maxTotalSeconds}s total

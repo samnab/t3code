@@ -1,6 +1,9 @@
 import type { EnvironmentId, ThreadExperimentPreview, ThreadId } from "@t3tools/contracts";
 import type { ThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 
+export const THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE =
+  "The evaluator and checks run on this environment's host with your user permissions.";
+
 export function threadExperimentCommandObjective(command: ThreadGoalCommand): string | null {
   return command.action === "experiment" ? command.objective : null;
 }

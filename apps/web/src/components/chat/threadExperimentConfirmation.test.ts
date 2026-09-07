@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 
 import {
+  THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE,
   canConfirmThreadExperiment,
   formatThreadExperimentArgv,
   isCurrentThreadExperimentPreviewRequest,
@@ -62,6 +63,12 @@ function openState() {
 }
 
 describe("thread experiment confirmation", () => {
+  it("discloses where evaluator and check commands run", () => {
+    expect(THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE).toBe(
+      "The evaluator and checks run on this environment's host with your user permissions.",
+    );
+  });
+
   it("cancels without changing the reviewed objective", () => {
     const state = openState();
     expect(state?.objective).toBe("Reduce startup time");

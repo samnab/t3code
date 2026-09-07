@@ -8,6 +8,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE,
   canConfirmThreadExperiment,
   isCurrentThreadExperimentPreviewRequest,
   isThreadExperimentConfirmationForThread,
@@ -60,6 +61,12 @@ function openState() {
 }
 
 describe("mobile experiment confirmation", () => {
+  it("discloses where evaluator and check commands run", () => {
+    expect(THREAD_EXPERIMENT_HOST_PERMISSIONS_DISCLOSURE).toBe(
+      "The evaluator and checks run on this environment's host with your user permissions.",
+    );
+  });
+
   it("cancels without consuming the preview", () => {
     expect(threadExperimentConfirmationReducer(openState(), { type: "cancel" })).toBeNull();
   });
