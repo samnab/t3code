@@ -389,7 +389,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
       NodeAssert.ok(runtimeOptions.homePath?.endsWith("provider-session-experiment"));
       NodeAssert.equal("resumeCursor" in runtimeOptions, false);
       NodeAssert.deepStrictEqual(runtimeOptions.experimentRestriction, {
-        mcpServerName: "t3-experiment",
+        mcpServerName: "t3_experiment",
         toolNames: [
           "experiment_status",
           "experiment_list_files",
@@ -401,7 +401,12 @@ validationLayer("CodexAdapterLive validation", (it) => {
       NodeAssert.ok(runtimeOptions.appServerArgs?.includes("--strict-config"));
       NodeAssert.ok(
         runtimeOptions.appServerArgs?.includes(
-          "mcp_servers.t3-experiment.url=http://127.0.0.1:4317/mcp/experiment",
+          "mcp_servers.t3_experiment.url=http://127.0.0.1:4317/mcp/experiment",
+        ),
+      );
+      NodeAssert.ok(
+        runtimeOptions.appServerArgs?.includes(
+          'mcp_servers.t3_experiment.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
         ),
       );
     }),

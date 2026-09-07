@@ -314,14 +314,41 @@ export class CodexExperimentRestrictionError extends Schema.TaggedErrorClass<Cod
   { message: Schema.String },
 ) {}
 
+interface CodexExperimentMcpInventory {
+  readonly data: ReadonlyArray<{
+    readonly name: string;
+    readonly authStatus: string;
+    readonly tools: Readonly<Record<string, unknown>>;
+  }>;
+  readonly nextCursor?: string | null;
+}
+
+const CODEX_EXPERIMENT_MCP_MISMATCH_MESSAGE_LIMIT = 1_000;
+
+/** Formats only bounded, non-sensitive inventory metadata for a failed restriction check. */
+export function formatCodexExperimentMcpInventoryMismatch(
+  inventory: CodexExperimentMcpInventory,
+): string {
+  const summary = {
+    serverCount: inventory.data.length,
+    paginated: inventory.nextCursor != null,
+    servers: inventory.data.map((server) => {
+      const toolNames = Object.keys(server.tools).toSorted();
+      return {
+        name: server.name,
+        authStatus: server.authStatus,
+        toolCount: toolNames.length,
+        toolNames,
+      };
+    }),
+  };
+  const message = `Codex experiment MCP inventory did not match the restricted allowlist. Actual inventory: ${JSON.stringify(summary)}`;
+  if (message.length <= CODEX_EXPERIMENT_MCP_MISMATCH_MESSAGE_LIMIT) return message;
+  return `${message.slice(0, CODEX_EXPERIMENT_MCP_MISMATCH_MESSAGE_LIMIT - 3)}...`;
+}
+
 export function matchesCodexExperimentMcpInventory(
-  inventory: {
-    readonly data: ReadonlyArray<{
-      readonly name: string;
-      readonly tools: Readonly<Record<string, unknown>>;
-    }>;
-    readonly nextCursor?: string | null;
-  },
+  inventory: CodexExperimentMcpInventory,
   restriction: NonNullable<CodexSessionRuntimeOptions["experimentRestriction"]>,
 ): boolean {
   const expectedTools = [...restriction.toolNames].toSorted();
@@ -2384,7 +2411,7 @@ export const makeCodexSessionRuntime = (
         });
         if (!matchesCodexExperimentMcpInventory(inventory, options.experimentRestriction)) {
           return yield* new CodexExperimentRestrictionError({
-            message: "Codex experiment MCP inventory did not match the restricted allowlist.",
+            message: formatCodexExperimentMcpInventoryMismatch(inventory),
           });
         }
       }

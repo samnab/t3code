@@ -4,6 +4,7 @@ import { ProviderDriverKind } from "@t3tools/contracts";
 import {
   buildCodexExperimentAppServerArgs,
   CODEX_EXPERIMENT_DISABLED_FEATURES,
+  CODEX_EXPERIMENT_MCP_SERVER_NAME,
   preflightExperimentProvider,
 } from "./ExperimentProviderSupport.ts";
 
@@ -64,5 +65,10 @@ describe("experiment provider preflight", () => {
     for (const feature of CODEX_EXPERIMENT_DISABLED_FEATURES) {
       expect(args).toContain(`features.${feature}=false`);
     }
+  });
+
+  it("uses an underscore-safe Codex MCP server name", () => {
+    expect(CODEX_EXPERIMENT_MCP_SERVER_NAME).toBe("t3_experiment");
+    expect(CODEX_EXPERIMENT_MCP_SERVER_NAME).toMatch(/^[A-Za-z0-9_]+$/);
   });
 });

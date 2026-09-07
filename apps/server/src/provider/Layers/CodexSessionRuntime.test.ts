@@ -12,12 +12,17 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import {
+  CODEX_EXPERIMENT_MCP_SERVER_NAME,
+  CODEX_EXPERIMENT_TOOL_NAMES,
+} from "../ExperimentProviderSupport.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildTurnStartParams,
   describeMcpElicitation,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
+  formatCodexExperimentMcpInventoryMismatch,
   makeMemoryConsolidationNotificationFilter,
   matchesCodexExperimentMcpInventory,
   openCodexThread,
@@ -400,9 +405,16 @@ describe("buildTurnStartParams", () => {
 
 describe("matchesCodexExperimentMcpInventory", () => {
   const restriction = {
-    mcpServerName: "t3-experiment",
-    toolNames: ["experiment_status", "experiment_evaluate"],
-  } as const;
+    mcpServerName: CODEX_EXPERIMENT_MCP_SERVER_NAME,
+    toolNames: CODEX_EXPERIMENT_TOOL_NAMES,
+  };
+  const exactTools = {
+    experiment_status: {},
+    experiment_list_files: {},
+    experiment_read_file: {},
+    experiment_apply: {},
+    experiment_evaluate: {},
+  };
 
   it("accepts only the exact unpaginated experiment server and tool set", () => {
     NodeAssert.equal(
@@ -410,8 +422,9 @@ describe("matchesCodexExperimentMcpInventory", () => {
         {
           data: [
             {
-              name: "t3-experiment",
-              tools: { experiment_evaluate: {}, experiment_status: {} },
+              name: "t3_experiment",
+              authStatus: "bearerToken",
+              tools: exactTools,
             },
           ],
           nextCursor: null,
@@ -427,28 +440,40 @@ describe("matchesCodexExperimentMcpInventory", () => {
       {
         data: [
           {
-            name: "t3-experiment",
-            tools: { experiment_evaluate: {}, experiment_status: {}, shell: {} },
+            name: "t3_experiment",
+            authStatus: "bearerToken",
+            tools: { ...exactTools, shell: {} },
           },
         ],
         nextCursor: null,
       },
       {
         data: [
-          { name: "t3-experiment", tools: { experiment_status: {} } },
-          { name: "other", tools: {} },
+          {
+            name: "t3_experiment",
+            authStatus: "bearerToken",
+            tools: { experiment_status: {} },
+          },
+          { name: "other", authStatus: "unsupported", tools: {} },
         ],
-        nextCursor: null,
-      },
-      {
-        data: [{ name: "t3-experiment", tools: { experiment_status: {} } }],
         nextCursor: null,
       },
       {
         data: [
           {
-            name: "t3-experiment",
-            tools: { experiment_evaluate: {}, experiment_status: {} },
+            name: "t3_experiment",
+            authStatus: "bearerToken",
+            tools: { experiment_status: {} },
+          },
+        ],
+        nextCursor: null,
+      },
+      {
+        data: [
+          {
+            name: "t3_experiment",
+            authStatus: "bearerToken",
+            tools: exactTools,
           },
         ],
         nextCursor: "more",
@@ -458,6 +483,51 @@ describe("matchesCodexExperimentMcpInventory", () => {
     for (const inventory of inventories) {
       NodeAssert.equal(matchesCodexExperimentMcpInventory(inventory, restriction), false);
     }
+  });
+
+  it("reports only bounded inventory metadata on a mismatch", () => {
+    const message = formatCodexExperimentMcpInventoryMismatch({
+      data: [
+        {
+          name: "t3_experiment",
+          authStatus: "notLoggedIn",
+          tools: {
+            z_tool: { inputSchema: "hidden-schema", token: "hidden-token" },
+            a_tool: { endpoint: "hidden-endpoint", argv: "hidden-argv", env: "hidden-env" },
+          },
+        },
+      ],
+      nextCursor: "hidden-cursor",
+    });
+
+    NodeAssert.ok(message.length <= 1_000);
+    NodeAssert.match(message, /"serverCount":1/);
+    NodeAssert.match(message, /"paginated":true/);
+    NodeAssert.match(message, /"authStatus":"notLoggedIn"/);
+    NodeAssert.match(message, /"toolCount":2/);
+    NodeAssert.match(message, /"toolNames":\["a_tool","z_tool"\]/);
+    for (const hidden of [
+      "hidden-schema",
+      "hidden-token",
+      "hidden-endpoint",
+      "hidden-argv",
+      "hidden-env",
+      "hidden-cursor",
+    ]) {
+      NodeAssert.equal(message.includes(hidden), false);
+    }
+
+    const oversized = formatCodexExperimentMcpInventoryMismatch({
+      data: [
+        {
+          name: "t3_experiment",
+          authStatus: "bearerToken",
+          tools: { [`experiment_${"x".repeat(2_000)}`]: {} },
+        },
+      ],
+      nextCursor: null,
+    });
+    NodeAssert.equal(oversized.length, 1_000);
   });
 });
 
