@@ -85,6 +85,7 @@ import {
 } from "../Errors.ts";
 import {
   buildPiRpcLaunch,
+  buildPiExperimentRpcLaunch,
   materializePiT3McpExtension,
   resolvePiLaunchArgs,
 } from "../piLaunchArgs.ts";
@@ -2021,14 +2022,6 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         if (existing !== undefined) {
           yield* stopSessionInternal(existing);
         }
-        const resolvedLaunchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
-        if (!resolvedLaunchArgs.ok) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "startSession",
-            issue: resolvedLaunchArgs.message,
-          });
-        }
         const candidateMcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const mcpSession =
           candidateMcpSession !== undefined &&
@@ -2036,19 +2029,33 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             candidateMcpSession.providerInstanceId === boundInstanceId)
             ? candidateMcpSession
             : undefined;
+        const isExperiment = mcpSession?.experiment !== undefined;
+        const resolvedLaunchArgs = isExperiment
+          ? ({ ok: true, args: [] } as const)
+          : resolvePiLaunchArgs(piSettings.launchArgs);
+        if (!resolvedLaunchArgs.ok) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: resolvedLaunchArgs.message,
+          });
+        }
         const extensionPath = yield* materializePiT3McpExtension(
           serverConfig.providerStatusCacheDir,
         ).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.mapError((cause) => adapterError(input.threadId, "materialize_t3_mcp", cause)),
         );
-        const launch = buildPiRpcLaunch({
-          launchArgs: resolvedLaunchArgs.args,
-          environment,
-          extensionPath,
-          runtimeMode: input.runtimeMode,
-          ...(mcpSession === undefined ? {} : { mcpSession }),
-        });
+        const launch =
+          isExperiment && mcpSession !== undefined
+            ? buildPiExperimentRpcLaunch({ environment, extensionPath, mcpSession })
+            : buildPiRpcLaunch({
+                launchArgs: resolvedLaunchArgs.args,
+                environment,
+                extensionPath,
+                runtimeMode: input.runtimeMode,
+                ...(mcpSession === undefined ? {} : { mcpSession }),
+              });
         const scope = yield* Scope.make("sequential");
         return yield* Effect.gen(function* () {
           const connection = yield* makePiRpcConnection({
@@ -2061,7 +2068,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
             Effect.provideService(Scope.Scope, scope),
           );
-          const resume = parseResumeCursor(input.resumeCursor);
+          const resume = isExperiment ? undefined : parseResumeCursor(input.resumeCursor);
           if (resume !== undefined) {
             // `switch_session` can be vetoed by a `session_before_switch`
             // extension handler; proceeding would silently adopt whatever

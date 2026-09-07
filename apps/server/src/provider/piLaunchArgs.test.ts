@@ -1,7 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 
-import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./piLaunchArgs.ts";
+import {
+  buildPiExperimentRpcLaunch,
+  buildPiRpcLaunch,
+  PI_EXPERIMENT_TOOL_NAMES,
+  resolvePiLaunchArgs,
+} from "./piLaunchArgs.ts";
 import { PI_T3_MCP_EXTENSION_SOURCE } from "./piT3McpExtensionSource.ts";
 
 describe("resolvePiLaunchArgs", () => {
@@ -114,6 +119,48 @@ describe("buildPiRpcLaunch", () => {
     expect(launch.env.T3_MCP_URL).toBe("http://127.0.0.1/mcp");
     expect(launch.env.T3_MCP_BEARER_TOKEN).toBe("secret");
     expect(launch.env.T3_PI_RUNTIME_MODE).toBe("full-access");
+  });
+});
+
+describe("buildPiExperimentRpcLaunch", () => {
+  it("uses only the T3 bridge and experiment tools", () => {
+    const launch = buildPiExperimentRpcLaunch({
+      environment: {
+        PATH: "/usr/bin",
+        T3_MCP_URL: "http://hostile.example/mcp",
+        T3_MCP_BEARER_TOKEN: "hostile-token",
+      },
+      extensionPath: "/cache/pi-t3-mcp-extension.ts",
+      mcpSession: {
+        environmentId: EnvironmentId.make("environment"),
+        threadId: ThreadId.make("thread"),
+        providerSessionId: "restricted-session",
+        providerInstanceId: ProviderInstanceId.make("pi"),
+        endpoint: "http://127.0.0.1/mcp/experiment",
+        authorizationHeader: "Bearer restricted-token",
+        experiment: { runId: "run-1", generation: 2 },
+      },
+    });
+
+    expect(launch.args).toEqual([
+      "--mode",
+      "rpc",
+      "--no-session",
+      "--no-extensions",
+      "--extension",
+      "/cache/pi-t3-mcp-extension.ts",
+      "--no-builtin-tools",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-context-files",
+      "--no-approve",
+      "--tools",
+      PI_EXPERIMENT_TOOL_NAMES.join(","),
+    ]);
+    expect(launch.args).not.toContain("-e");
+    expect(launch.args).not.toContain("bash");
+    expect(launch.env.T3_MCP_URL).toBe("http://127.0.0.1/mcp/experiment");
+    expect(launch.env.T3_MCP_BEARER_TOKEN).toBe("restricted-token");
   });
 });
 

@@ -215,6 +215,53 @@ export interface BuildPiRpcLaunchInput {
   readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
 }
 
+export const PI_EXPERIMENT_TOOL_NAMES = [
+  "experiment_status",
+  "experiment_list_files",
+  "experiment_read_file",
+  "experiment_apply",
+  "experiment_evaluate",
+] as const;
+
+export interface BuildPiExperimentRpcLaunchInput {
+  readonly environment: NodeJS.ProcessEnv;
+  readonly mcpSession: McpProviderSessionConfig;
+  readonly extensionPath: string;
+}
+
+/** Builds a fresh Pi process without consulting user launch arguments or resources. */
+export function buildPiExperimentRpcLaunch(input: BuildPiExperimentRpcLaunchInput): {
+  readonly args: ReadonlyArray<string>;
+  readonly env: NodeJS.ProcessEnv;
+} {
+  const environment = { ...input.environment };
+  delete environment[T3_MCP_URL_ENV];
+  delete environment[T3_MCP_BEARER_ENV];
+  delete environment[T3_PI_RUNTIME_MODE_ENV];
+  return {
+    args: [
+      "--mode",
+      "rpc",
+      "--no-session",
+      "--no-extensions",
+      "--extension",
+      input.extensionPath,
+      "--no-builtin-tools",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-context-files",
+      "--no-approve",
+      "--tools",
+      PI_EXPERIMENT_TOOL_NAMES.join(","),
+    ],
+    env: {
+      ...environment,
+      [T3_MCP_URL_ENV]: input.mcpSession.endpoint,
+      [T3_MCP_BEARER_ENV]: input.mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
+    },
+  };
+}
+
 export function buildPiRpcLaunch(input: BuildPiRpcLaunchInput): {
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
