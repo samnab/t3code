@@ -97,6 +97,7 @@ const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unk
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as ServerConfig from "./config.ts";
+import * as ExperimentService from "./experiments/ExperimentService.ts";
 import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
 import {
   isThreadDetailEvent,
@@ -506,6 +507,7 @@ const buildAppUnderTest = (options?: {
     providerAdapterRegistry?: Partial<ProviderAdapterRegistry.ProviderAdapterRegistry["Service"]>;
     usageLimitSources?: Partial<UsageLimitSources.UsageLimitSources["Service"]>;
     providerService?: Partial<ProviderService.ProviderService["Service"]>;
+    experimentService?: Partial<ExperimentService.ExperimentService["Service"]>;
     providerAuth?: Partial<ProviderAuthService["Service"]>;
     providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
     antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
@@ -786,6 +788,9 @@ const buildAppUnderTest = (options?: {
           Layer.mock(ProviderService.ProviderService)({
             uploadFeedback: () => Effect.die("Provider feedback is not stubbed in this test"),
             ...options?.layers?.providerService,
+          }),
+          Layer.mock(ExperimentService.ExperimentService)({
+            ...options?.layers?.experimentService,
           }),
           Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistry)({
             getByInstance: () =>

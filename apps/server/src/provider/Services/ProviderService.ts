@@ -33,6 +33,7 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
+import type { ExperimentIdentity } from "../../experiments/Model.ts";
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
@@ -191,19 +192,19 @@ export interface ExperimentProviderSessionServiceShape {
     readonly threadId: ThreadId;
     readonly providerInstanceId: ProviderInstanceId;
     readonly cwd: string;
-    readonly runId: string;
-    readonly generation: number;
+    readonly runId: ExperimentIdentity["runId"];
+    readonly generation: ExperimentIdentity["generation"];
     readonly modelSelection?: ProviderSessionStartInput["modelSelection"];
     readonly voiceNotifications?: boolean;
   }) => Effect.Effect<
-    { readonly session: ProviderSession; readonly providerSessionId: string },
+    { readonly session: ProviderSession; readonly identity: ExperimentIdentity },
     ProviderServiceError
   >;
 
   /** Stop an experiment process without recovering a persisted provider cursor. */
   readonly stop: (input: {
     readonly threadId: ThreadId;
-    readonly runId?: string;
+    readonly runId?: ExperimentIdentity["runId"];
   }) => Effect.Effect<void, ProviderServiceError>;
 }
 

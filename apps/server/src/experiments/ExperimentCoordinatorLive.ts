@@ -76,7 +76,9 @@ export const layer = Layer.effect(
             providerSessionId:
               mcpSession?.providerSessionId ??
               `${String(session?.providerInstanceId ?? thread.modelSelection.instanceId)}:${session?.updatedAt ?? thread.updatedAt}`,
-            providerGeneration: mcpSession?.experiment?.generation,
+            ...(mcpSession?.experiment === undefined
+              ? {}
+              : { providerGeneration: mcpSession.experiment.generation }),
             providerDriver: driver,
             providerSupported: supported,
             ...(supported

@@ -56,6 +56,7 @@ import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/Provide
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as ExperimentMcpHttpServer from "./mcp/ExperimentMcpHttpServer.ts";
+import * as ExperimentMcpServiceLive from "./mcp/ExperimentMcpServiceLive.ts";
 import * as ChildRunService from "./mcp/ChildRunService.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -286,19 +287,18 @@ const ExperimentServiceLive = ExperimentService.layer.pipe(
   Layer.provide(ExperimentCoordinatorLive.layer),
 );
 
-const ExperimentRuntimeLayerLive = ExperimentLifecycleReactor.layer.pipe(
+const ExperimentServicesLive = ExperimentLifecycleReactor.layer.pipe(
   Layer.provideMerge(ExperimentServiceLive),
-  Layer.provideMerge(
-    Layer.effectDiscard(
-      Effect.gen(function* () {
-        const experiments = yield* ExperimentService.ExperimentService;
-        const lifecycle = yield* ExperimentLifecycleReactor.ExperimentLifecycleReactor;
-        yield* experiments.recoverAll();
-        yield* lifecycle.start();
-      }),
-    ),
-  ),
 );
+
+const ExperimentRuntimeLayerLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const experiments = yield* ExperimentService.ExperimentService;
+    const lifecycle = yield* ExperimentLifecycleReactor.ExperimentLifecycleReactor;
+    yield* experiments.recoverAll();
+    yield* lifecycle.start();
+  }),
+).pipe(Layer.provideMerge(ExperimentServicesLive));
 
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ExperimentRuntimeLayerLive),
@@ -570,7 +570,7 @@ const commandReadinessLayer = HttpRouter.middleware(
 
 const McpRoutesLayerLive = Layer.mergeAll(
   McpHttpServer.layer,
-  ExperimentMcpHttpServer.layer,
+  ExperimentMcpHttpServer.layer.pipe(Layer.provide(ExperimentMcpServiceLive.layer)),
 ).pipe(Layer.provide(McpSessionRegistry.layer));
 
 export const makeRoutesLayer = Layer.mergeAll(

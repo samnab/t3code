@@ -1041,7 +1041,8 @@ experimentLifecycle.layer("ProviderServiceLive experiment lifecycle", (it) => {
         generation: 3,
       });
 
-      assert.equal(started.providerSessionId, experimentProviderSessionId);
+      assert.equal(started.identity.providerSessionId, experimentProviderSessionId);
+      assert.equal(started.identity.generation, 3);
       assert.equal(experimentLifecycle.claude.stopSession.mock.calls.length, 1);
       assert.equal(issueExperimentMcpCredential.mock.calls.length, 1);
       assert.equal(experimentLifecycle.claude.startSession.mock.calls.length, 1);
@@ -1083,6 +1084,107 @@ experimentLifecycle.layer("ProviderServiceLive experiment lifecycle", (it) => {
     }).pipe(
       Effect.ensuring(
         Effect.sync(() => {
+          McpProviderSession.clearAllMcpProviderSessions();
+        }),
+      ),
+    ),
+  );
+});
+
+let concurrentIssueEntered: Deferred.Deferred<void> | undefined;
+let concurrentIssueRelease: Deferred.Deferred<void> | undefined;
+const issueConcurrentExperimentCredential = vi.fn(
+  (
+    request: Parameters<NonNullable<ProviderServiceLiveOptions["issueExperimentMcpCredential"]>>[0],
+  ) =>
+    Effect.gen(function* () {
+      const entered = concurrentIssueEntered;
+      const release = concurrentIssueRelease;
+      if (entered === undefined || release === undefined) {
+        return yield* Effect.die("Concurrent experiment transition test is not initialized.");
+      }
+      yield* Deferred.succeed(entered, undefined).pipe(Effect.orDie);
+      yield* Deferred.await(release);
+      return {
+        config: {
+          environmentId: EnvironmentId.make("environment-concurrent-experiment"),
+          threadId: request.threadId,
+          providerSessionId: "concurrent-experiment-provider-session",
+          providerInstanceId: request.providerInstanceId,
+          endpoint: "http://127.0.0.1:43123/mcp/experiment",
+          authorizationHeader: "Bearer concurrent-experiment-token",
+          experiment: {
+            runId: request.runId,
+            generation: request.generation,
+          },
+        },
+      };
+    }),
+);
+const concurrentExperimentLifecycle = makeProviderServiceLayer({
+  providerServiceOptions: {
+    issueExperimentMcpCredential: issueConcurrentExperimentCredential,
+  },
+});
+
+concurrentExperimentLifecycle.layer("ProviderServiceLive experiment transition lock", (it) => {
+  it.effect("does not admit an ordinary start during a restricted transition", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const experimentProviderSession = yield* ProviderService.ExperimentProviderSessionService;
+      const threadId = asThreadId("thread-concurrent-experiment-transition");
+      const cwd = fixtureCwd("concurrent-experiment-transition");
+      concurrentIssueEntered = yield* Deferred.make<void>();
+      concurrentIssueRelease = yield* Deferred.make<void>();
+
+      yield* provider.startSession(threadId, {
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        cwd,
+        runtimeMode: "full-access",
+      });
+      concurrentExperimentLifecycle.claude.startSession.mockClear();
+
+      const restrictedStart = yield* experimentProviderSession
+        .start({
+          threadId,
+          providerInstanceId: claudeAgentInstanceId,
+          cwd,
+          runId: "concurrent-experiment-run",
+          generation: 1,
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(concurrentIssueEntered);
+      const ordinaryStart = yield* provider
+        .startSession(threadId, {
+          providerInstanceId: claudeAgentInstanceId,
+          threadId,
+          cwd,
+          resumeCursor: { opaque: "unrestricted-resume" },
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+      yield* Effect.yieldNow;
+
+      assert.equal(concurrentExperimentLifecycle.claude.startSession.mock.calls.length, 0);
+      yield* Deferred.succeed(concurrentIssueRelease, undefined).pipe(Effect.orDie);
+      yield* Fiber.join(restrictedStart);
+      const ordinaryResult = yield* Fiber.join(ordinaryStart);
+
+      if (ordinaryResult._tag !== "Failure") {
+        throw new Error("The ordinary start was admitted during an experiment transition.");
+      }
+      assert.instanceOf(ordinaryResult.failure, ProviderValidationError);
+      assert.equal(concurrentExperimentLifecycle.claude.startSession.mock.calls.length, 1);
+      assert.equal(
+        concurrentExperimentLifecycle.claude.startSession.mock.calls[0]?.[0].resumeCursor,
+        undefined,
+      );
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          concurrentIssueEntered = undefined;
+          concurrentIssueRelease = undefined;
           McpProviderSession.clearAllMcpProviderSessions();
         }),
       ),

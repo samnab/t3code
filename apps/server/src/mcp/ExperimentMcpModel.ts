@@ -1,13 +1,6 @@
-import { type ProviderInstanceId, type ThreadId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-export interface ExperimentMcpIdentity {
-  readonly threadId: ThreadId;
-  readonly providerInstanceId: ProviderInstanceId;
-  readonly providerSessionId: string;
-  readonly runId: string;
-  readonly generation: number;
-}
+export type { ExperimentIdentity as ExperimentMcpIdentity } from "../experiments/Model.ts";
 
 export class ExperimentMcpError extends Schema.TaggedErrorClass<ExperimentMcpError>()(
   "ExperimentMcpError",

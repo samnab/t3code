@@ -45,9 +45,11 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import type { ExperimentIdentity } from "../../experiments/Model.ts";
 import * as ServerConfig from "../../config.ts";
 import {
   increment,
@@ -365,10 +367,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
-  const experimentSessions = new Map<
-    ThreadId,
-    { readonly runId: string; readonly providerSessionId: string }
-  >();
+  const experimentSessions = new Map<ThreadId, ExperimentIdentity>();
+  const sessionTransitionLocks = new Map<ThreadId, Semaphore.Semaphore>();
+  const withSessionTransitionLock = <A, E, R>(
+    threadId: ThreadId,
+    effect: Effect.Effect<A, E, R>,
+  ) => {
+    let lock = sessionTransitionLocks.get(threadId);
+    if (lock === undefined) {
+      lock = Semaphore.makeUnsafe(1);
+      sessionTransitionLocks.set(threadId, lock);
+    }
+    return lock.withPermits(1)(effect);
+  };
   const timedOutNativeCompactions = new Set<ThreadId>();
   const settleCompaction = (threadId: ThreadId, pending: PendingCompaction, terminal: string) =>
     Effect.gen(function* () {
@@ -1221,7 +1232,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
-  const startSession: ProviderServiceMethod<"startSession"> = Effect.fn("startSession")(
+  const startSessionUnlocked: ProviderServiceMethod<"startSession"> = Effect.fn("startSession")(
     function* (threadId, rawInput) {
       const parsed = yield* decodeInputOrValidationError({
         operation: "ProviderService.startSession",
@@ -1399,7 +1410,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
-  const startExperimentSession: ProviderService.ExperimentProviderSessionServiceShape["start"] =
+  const startSession: ProviderServiceMethod<"startSession"> = (threadId, input) =>
+    withSessionTransitionLock(threadId, startSessionUnlocked(threadId, input));
+
+  const startExperimentSessionUnlocked: ProviderService.ExperimentProviderSessionServiceShape["start"] =
     Effect.fn("ExperimentProviderSessionService.start")(function* (input) {
       const instanceInfo = yield* registry.getInstanceInfo(input.providerInstanceId);
       if (!instanceInfo.enabled) {
@@ -1453,10 +1467,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
 
       yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));
-      experimentSessions.set(input.threadId, {
-        runId: input.runId,
+      const identity = {
+        threadId: input.threadId,
+        providerInstanceId: input.providerInstanceId,
         providerSessionId: credential.config.providerSessionId,
-      });
+        runId: input.runId,
+        generation: input.generation,
+      } satisfies ExperimentIdentity;
+      experimentSessions.set(input.threadId, identity);
 
       const cleanupFailedStart = Effect.gen(function* () {
         const hasSession = yield* adapter.hasSession(input.threadId).pipe(
@@ -1521,11 +1539,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       return {
         session: sessionWithInstance,
-        providerSessionId: credential.config.providerSessionId,
+        identity,
       };
     });
 
-  const stopExperimentSession: ProviderService.ExperimentProviderSessionServiceShape["stop"] =
+  const startExperimentSession: ProviderService.ExperimentProviderSessionServiceShape["start"] = (
+    input,
+  ) => withSessionTransitionLock(input.threadId, startExperimentSessionUnlocked(input));
+
+  const stopExperimentSessionUnlocked: ProviderService.ExperimentProviderSessionServiceShape["stop"] =
     Effect.fn("ExperimentProviderSessionService.stop")(function* (input) {
       const active = experimentSessions.get(input.threadId);
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
@@ -1561,6 +1583,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
       }
     });
+
+  const stopExperimentSession: ProviderService.ExperimentProviderSessionServiceShape["stop"] = (
+    input,
+  ) => withSessionTransitionLock(input.threadId, stopExperimentSessionUnlocked(input));
 
   const sendTurn: ProviderServiceMethod<"sendTurn"> = Effect.fn("sendTurn")(function* (rawInput) {
     const parsed = yield* decodeInputOrValidationError({
