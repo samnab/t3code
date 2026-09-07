@@ -3,6 +3,7 @@ import {
   ProviderDriverKind,
   RuntimeTaskId,
   ThreadId,
+  TurnId,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -82,6 +83,56 @@ describe("runtimeEventToActivities task progress", () => {
     expect(usagePayload).not.toHaveProperty("status");
   });
 });
+
+describe("runtimeEventToActivities turn usage", () => {
+  it("persists terminal output usage by turn id", () => {
+    const event = {
+      ...base,
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-usage"),
+      turnId: TurnId.make("turn-1"),
+      payload: {
+        state: "completed",
+        tokenUsage: {
+          usageStatus: "complete",
+          usageScope: "main_agent",
+          hasSubagents: true,
+          inputTokens: 400,
+          outputTokens: 125,
+        },
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    const [activity] = runtimeEventToActivities(event);
+
+    expect(activity).toMatchObject({
+      id: "turn-usage:evt-turn-completed-usage",
+      kind: "turn.usage",
+      turnId: TurnId.make("turn-1"),
+      payload: event.payload.tokenUsage,
+    });
+  });
+
+  it("does not persist a rate activity when output usage is unavailable", () => {
+    const event = {
+      ...base,
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-completed-no-usage"),
+      turnId: TurnId.make("turn-2"),
+      payload: {
+        state: "completed",
+        tokenUsage: {
+          usageStatus: "unavailable",
+          usageScope: "main_agent",
+          hasSubagents: false,
+        },
+      },
+    } satisfies ProviderRuntimeEvent;
+
+    expect(runtimeEventToActivities(event)).toEqual([]);
+  });
+});
+
 describe("runtimeEventToActivities tool streaming persistence", () => {
   const accumulatedStdout = [
     "first line of output",

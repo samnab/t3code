@@ -532,6 +532,26 @@ export function runtimeEventToActivities(
       ];
     }
 
+    case "turn.completed":
+    case "turn.aborted": {
+      const tokenUsage = event.payload.tokenUsage;
+      if (event.turnId === undefined || tokenUsage?.outputTokens === undefined) {
+        return [];
+      }
+      return [
+        {
+          id: EventId.make(`turn-usage:${event.eventId}`),
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "turn.usage",
+          summary: "Turn usage",
+          payload: tokenUsage,
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "user-input.requested": {
       return [
         {

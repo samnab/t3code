@@ -910,10 +910,12 @@ export function reconcileSubagentInventory(
       reconciled.set(activityAgent.id, activityAgent);
       continue;
     }
+    const mergedUsage = mergeUsageMax(persisted.usage, activityAgent.usage ?? undefined);
     if (activityAgent.updatedAt > persisted.updatedAt) {
       reconciled.set(activityAgent.id, {
         ...persisted,
         ...activityAgent,
+        usage: mergedUsage,
         ...(persisted.runNumber !== undefined ? { runNumber: persisted.runNumber } : {}),
         ...(persisted.historyAvailability !== undefined
           ? { historyAvailability: persisted.historyAvailability }
@@ -921,6 +923,24 @@ export function reconcileSubagentInventory(
         ...(persisted.controlAvailability !== undefined
           ? { controlAvailability: persisted.controlAvailability }
           : {}),
+      });
+    } else if (mergedUsage !== persisted.usage) {
+      // Retained activities can have the same timestamp as the durable
+      // inventory row (or an older ingestion timestamp). Keep the inventory's
+      // status and lifecycle authoritative while preserving usage that the
+      // inventory projection intentionally does not store.
+      reconciled.set(activityAgent.id, {
+        ...persisted,
+        usage: mergedUsage,
+        // The inventory has one durable run record, while retained activity
+        // rows may prove that this identity was reactivated. Preserve that
+        // provenance so the UI does not claim a rate for an unscoped resume.
+        activationCount: Math.max(persisted.activationCount, activityAgent.activationCount),
+      });
+    } else if (activityAgent.activationCount > persisted.activationCount) {
+      reconciled.set(activityAgent.id, {
+        ...persisted,
+        activationCount: activityAgent.activationCount,
       });
     }
   }

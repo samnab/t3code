@@ -207,6 +207,10 @@
       "types": "./src/state/subagentRuntime.ts",
       "default": "./src/state/subagentRuntime.ts"
     },
+    "./state/tokenThroughput": {
+      "types": "./src/state/tokenThroughput.ts",
+      "default": "./src/state/tokenThroughput.ts"
+    },
     "./state/thread-sort": {
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"

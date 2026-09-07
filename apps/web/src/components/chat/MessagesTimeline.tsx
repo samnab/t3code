@@ -22,6 +22,11 @@ import {
   emptyAgentPanelModel,
   formatSubagentTokenCount,
 } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  deriveAverageOutputTokensPerSecond,
+  formatAverageOutputTokensPerSecond,
+  type TurnOutputUsage,
+} from "@t3tools/client-runtime/state/tokenThroughput";
 
 const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
@@ -218,6 +223,9 @@ interface TimelineRowSharedState {
   workGroupViewState: WorkGroupViewState;
   agentPanelModel: AgentPanelModel;
   onOpenAgents: () => void;
+  turnOutputUsage: TurnOutputUsage | null;
+  turnStartedAt: string | null;
+  turnCompletedAt: string | null;
 }
 
 interface TimelineRowActivityState {
@@ -313,6 +321,7 @@ interface MessagesTimelineProps {
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
   latestTurn: TimelineLatestTurn | null;
+  turnOutputUsage?: TurnOutputUsage | null;
   runningTurnId: TurnId | null;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
@@ -371,6 +380,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   listRef,
   timelineEntries,
   latestTurn,
+  turnOutputUsage = null,
   runningTurnId,
   turnDiffSummaries,
   routeThreadKey,
@@ -749,6 +759,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workGroupViewState,
       agentPanelModel,
       onOpenAgents,
+      turnOutputUsage,
+      turnStartedAt: latestTurn?.startedAt ?? null,
+      turnCompletedAt: latestTurn?.completedAt ?? null,
     }),
     [
       readyCitationRequest,
@@ -773,6 +786,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workGroupViewState,
       agentPanelModel,
       onOpenAgents,
+      turnOutputUsage,
+      latestTurn?.startedAt,
+      latestTurn?.completedAt,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -1713,6 +1729,9 @@ function AssistantMessageMeta({
   alwaysVisible?: boolean;
 }) {
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  const showOutputRate =
+    ctx.turnOutputUsage !== null && activity.latestTurnId === message.turnId && !message.streaming;
 
   return (
     <div
@@ -1739,7 +1758,50 @@ function AssistantMessageMeta({
           </TooltipPopup>
         </Tooltip>
       )}
+      {showOutputRate ? (
+        <AverageOutputRate
+          outputTokens={ctx.turnOutputUsage!.outputTokens}
+          startedAt={ctx.turnStartedAt}
+          completedAt={ctx.turnCompletedAt}
+        />
+      ) : null}
     </div>
+  );
+}
+
+function AverageOutputRate({
+  outputTokens,
+  startedAt,
+  completedAt,
+}: {
+  outputTokens: number;
+  startedAt: string | null;
+  completedAt: string | null;
+}) {
+  const label =
+    completedAt === null
+      ? null
+      : formatAverageOutputTokensPerSecond(
+          deriveAverageOutputTokensPerSecond(outputTokens, startedAt, completedAt),
+        );
+  if (!label) return null;
+  const description =
+    "Average output tokens per second over the whole turn, including tools and waiting.";
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            className="text-muted-foreground tabular-nums"
+            aria-label={`${description} ${label}`}
+            title={description}
+          />
+        }
+      >
+        {label}
+      </TooltipTrigger>
+      <TooltipPopup>{description}</TooltipPopup>
+    </Tooltip>
   );
 }
 

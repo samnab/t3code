@@ -43,6 +43,8 @@ import {
 } from "@t3tools/client-runtime/work-log/presentation";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import { commandProgramName } from "@t3tools/client-runtime/work-log/command-label";
+import type { SubagentUsage } from "@t3tools/client-runtime/state/subagentRuntime";
+import type { TurnOutputUsage } from "@t3tools/client-runtime/state/tokenThroughput";
 
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
@@ -140,6 +142,10 @@ export interface WorkLogEntry {
       readonly detail: string | undefined;
       /** When this member last reported, so the card can show the newest activity. */
       readonly updatedAt: string;
+      readonly usage?: Pick<SubagentUsage, "outputTokens" | "durationMs">;
+      readonly startedAt?: string | null;
+      readonly completedAt?: string | null;
+      readonly activationCount?: number;
     }>;
   };
   toolData?: unknown;
@@ -153,6 +159,10 @@ interface DerivedWorkLogEntry extends WorkLogEntry {
   collapseKey?: string;
   /** Grouping key for subagent lifecycle rows (one row per agent). */
   taskId?: string;
+  taskUsage?: Pick<SubagentUsage, "outputTokens" | "durationMs">;
+  taskStartedAt?: string;
+  taskCompletedAt?: string;
+  taskActivationCount?: number;
   /** The tool call that launched this agent, when the provider reports one. */
   agentSpawnToolCallId?: string;
   isWorkflowCoordinator?: boolean;
@@ -248,8 +258,14 @@ export interface AgentSpawnSummary {
     readonly tone: "working" | "completed" | "failed" | "stopped";
     readonly detail: string | undefined;
     readonly updatedAt: string;
+    readonly usage?: Pick<SubagentUsage, "outputTokens" | "durationMs">;
+    readonly startedAt?: string | null;
+    readonly completedAt?: string | null;
+    readonly activationCount?: number;
   }>;
 }
+
+export type ThreadFeedTurnOutputUsage = TurnOutputUsage;
 
 export type ThreadFeedLatestTurn = Pick<
   OrchestrationLatestTurn,
@@ -479,6 +495,7 @@ function deriveWorkLogEntries(
     if (activity.kind === "task.updated" && !isTerminalTaskUpdate(activity)) continue;
     if (activity.kind === "tool.progress") continue;
     if (activity.kind === "context-window.updated") continue;
+    if (activity.kind === "turn.usage") continue;
     if (activity.kind === "usage-limits.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;
     if (isNoContentRuntimeWarning(activity)) continue;
@@ -662,6 +679,17 @@ function toDerivedWorkLogEntry(
   if (toolLifecycleStatus) {
     entry.toolLifecycleStatus = toolLifecycleStatus;
   }
+  if (isTaskActivity) {
+    const taskUsage = parseTaskUsage(payload?.typedUsage);
+    if (taskUsage) entry.taskUsage = taskUsage;
+    entry.taskActivationCount = 1;
+    if (activity.kind === "task.started") {
+      entry.taskStartedAt = activity.createdAt;
+    }
+    if (toolLifecycleStatus !== undefined && toolLifecycleStatus !== "inProgress") {
+      entry.taskCompletedAt = activity.createdAt;
+    }
+  }
   const collapseKey = deriveToolLifecycleCollapseKey(entry);
   if (collapseKey) {
     entry.collapseKey = collapseKey;
@@ -720,11 +748,43 @@ function agentSpawnMember(
   entry: DerivedWorkLogEntry,
   previous?: NonNullable<WorkLogEntry["agentSpawn"]>["agents"][number],
 ) {
+  const previousStatus = previous?.status;
+  const reactivated =
+    previousStatus !== undefined &&
+    previousStatus !== "inProgress" &&
+    entry.toolLifecycleStatus === "inProgress";
+  const activationCount = (previous?.activationCount ?? 1) + (reactivated ? 1 : 0);
+  const previousUsage = previous?.usage;
+  const outputTokens =
+    entry.taskUsage?.outputTokens === undefined
+      ? previousUsage?.outputTokens
+      : previousUsage?.outputTokens === undefined
+        ? entry.taskUsage.outputTokens
+        : Math.max(previousUsage.outputTokens, entry.taskUsage.outputTokens);
+  const durationMs =
+    entry.taskUsage?.durationMs === undefined
+      ? previousUsage?.durationMs
+      : previousUsage?.durationMs === undefined
+        ? entry.taskUsage.durationMs
+        : Math.max(previousUsage.durationMs, entry.taskUsage.durationMs);
+  const usage =
+    outputTokens === undefined && durationMs === undefined
+      ? undefined
+      : {
+          ...(outputTokens !== undefined ? { outputTokens } : {}),
+          ...(durationMs !== undefined ? { durationMs } : {}),
+        };
   return {
     title: entry.toolTitle ?? previous?.title ?? entry.label,
     status: entry.toolLifecycleStatus ?? previous?.status,
     detail: entry.detail ?? previous?.detail,
     updatedAt: entry.createdAt,
+    usage,
+    startedAt: reactivated
+      ? entry.createdAt
+      : (previous?.startedAt ?? entry.taskStartedAt ?? entry.createdAt),
+    completedAt: reactivated ? null : (entry.taskCompletedAt ?? previous?.completedAt ?? null),
+    activationCount,
   };
 }
 
@@ -1200,6 +1260,10 @@ export function agentSpawnSummary(
       tone,
       detail: agent.detail,
       updatedAt: agent.updatedAt,
+      usage: agent.usage,
+      startedAt: agent.startedAt,
+      completedAt: agent.completedAt,
+      activationCount: agent.activationCount,
     };
   });
   const tone = agentSpawnTone(batchStatus);
@@ -1273,6 +1337,24 @@ function asTrimmedString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function asNonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function parseTaskUsage(
+  value: unknown,
+): Pick<SubagentUsage, "outputTokens" | "durationMs"> | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const outputTokens = asNonNegativeNumber(record.outputTokens);
+  const durationMs = asNonNegativeNumber(record.durationMs);
+  if (outputTokens === undefined && durationMs === undefined) return undefined;
+  return {
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  };
 }
 
 function trimMatchingOuterQuotes(value: string): string {

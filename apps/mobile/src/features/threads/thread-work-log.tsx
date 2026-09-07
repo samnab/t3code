@@ -62,6 +62,10 @@ import {
 } from "@t3tools/client-runtime/work-log/presentation";
 import { formatUserInputAnswer } from "@t3tools/client-runtime/pending-requests";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
+import {
+  deriveSubagentAverageOutputTokensPerSecond,
+  formatAverageOutputTokensPerSecond,
+} from "@t3tools/client-runtime/state/tokenThroughput";
 import type { MarkdownImageRenderer } from "../../native/SelectableMarkdownText";
 import Animated, {
   cancelAnimation,
@@ -1210,6 +1214,50 @@ const AGENT_SPAWN_TONE_DOT_CLASS = {
   stopped: "bg-foreground-muted",
 } as const satisfies Record<AgentSpawnSummary["tone"], string>;
 
+function AgentOutputRate({ member }: { member: AgentSpawnSummary["members"][number] }) {
+  const [label, setLabel] = useState(() =>
+    formatAverageOutputTokensPerSecond(
+      deriveSubagentAverageOutputTokensPerSecond({
+        outputTokens: member.usage?.outputTokens,
+        durationMs: member.usage?.durationMs,
+        startedAt: member.startedAt ?? null,
+        completedAt: member.completedAt ?? null,
+        activationCount: member.activationCount ?? 1,
+      }),
+    ),
+  );
+  const live = member.completedAt === null || member.completedAt === undefined;
+
+  useEffect(() => {
+    const update = () =>
+      setLabel(
+        formatAverageOutputTokensPerSecond(
+          deriveSubagentAverageOutputTokensPerSecond({
+            outputTokens: member.usage?.outputTokens,
+            durationMs: member.usage?.durationMs,
+            startedAt: member.startedAt ?? null,
+            completedAt: live ? null : (member.completedAt ?? null),
+            activationCount: member.activationCount ?? 1,
+          }),
+        ),
+      );
+    update();
+    if (!live) return;
+    const id = setInterval(update, 1_000);
+    return () => clearInterval(id);
+  }, [live, member]);
+
+  if (!label) return null;
+  return (
+    <Text
+      accessibilityLabel="Average output tokens per second over the whole subagent run, including tools and waiting"
+      className="shrink-0 text-2xs tabular-nums text-foreground-muted"
+    >
+      {label}
+    </Text>
+  );
+}
+
 /**
  * A batch of spawned subagents. The status line updates in place as members
  * report progress; expanding lists each member. Text nodes carry keys tied to
@@ -1317,6 +1365,7 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
                   <Text className="min-w-0 flex-1 text-xs text-foreground" numberOfLines={1}>
                     {member.title}
                   </Text>
+                  <AgentOutputRate member={member} />
                   <Text className="shrink-0 text-2xs text-foreground-muted">{member.status}</Text>
                 </View>
                 {member.detail ? (

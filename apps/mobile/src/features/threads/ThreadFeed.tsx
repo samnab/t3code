@@ -28,6 +28,11 @@ import {
 } from "@t3tools/client-runtime/markdown-images";
 import { resolveViewedImageAsset } from "@t3tools/client-runtime/work-log/presentation";
 import {
+  deriveAverageOutputTokensPerSecond,
+  formatAverageOutputTokensPerSecond,
+  type TurnOutputUsage,
+} from "@t3tools/client-runtime/state/tokenThroughput";
+import {
   renderCodexFileCitationsAsMarkdown,
   splitCodexArtifactTemplateMarkdown,
 } from "@t3tools/client-runtime/codex-markdown-directives";
@@ -242,6 +247,7 @@ export interface ThreadFeedProps {
   readonly contentPresentation: ThreadContentPresentation;
   readonly agentLabel: string;
   readonly latestTurn: ThreadFeedLatestTurn | null;
+  readonly turnOutputUsage?: TurnOutputUsage | null;
   readonly activeWorkStartedAt: string | null;
   readonly listRef: RefObject<LegendListRef | null>;
   readonly freeze: SharedValue<boolean>;
@@ -1327,6 +1333,33 @@ function useMarkdownStyles(
   ]);
 }
 
+function MobileAverageOutputRate({
+  outputTokens,
+  startedAt,
+  completedAt,
+}: {
+  readonly outputTokens: number;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
+}) {
+  const label =
+    completedAt === null
+      ? null
+      : formatAverageOutputTokensPerSecond(
+          deriveAverageOutputTokensPerSecond(outputTokens, startedAt, completedAt),
+        );
+
+  if (!label) return null;
+  return (
+    <Text
+      accessibilityLabel="Average output tokens per second over the whole turn, including tools and waiting"
+      className="font-t3-medium text-xs tabular-nums text-adaptive-neutral-600-400"
+    >
+      {label}
+    </Text>
+  );
+}
+
 function renderFeedEntry(
   info: { item: ThreadFeedEntry; index: number },
   props: Pick<
@@ -1339,6 +1372,10 @@ function renderFeedEntry(
     readonly workGroupScrollPositions: Map<string, ThreadWorkGroupScrollPosition>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
     readonly unsettledTurnId: TurnId | null;
+    readonly latestTurnId: TurnId | null;
+    readonly turnOutputUsage: TurnOutputUsage | null;
+    readonly turnStartedAt: string | null;
+    readonly turnCompletedAt: string | null;
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey: string) => void;
@@ -1476,6 +1513,12 @@ function renderFeedEntry(
       props.terminalAssistantMessageIds.has(message.id) &&
       !assistantTurnStillInProgress &&
       !message.streaming;
+    const showOutputRate =
+      message.role === "assistant" &&
+      props.turnOutputUsage !== null &&
+      props.latestTurnId === message.turnId &&
+      props.terminalAssistantMessageIds.has(message.id) &&
+      !message.streaming;
 
     if (isOrigin) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
@@ -1592,7 +1635,7 @@ function renderFeedEntry(
     const enterAnimated = isFreshTimestamp(message.createdAt);
     return (
       <Animated.View
-        className={cn(showAssistantMeta ? "mb-5 px-1" : "mb-1 px-1")}
+        className={cn(showAssistantMeta || showOutputRate ? "mb-5 px-1" : "mb-1 px-1")}
         {...(enterAnimated ? { entering: FadeIn.duration(220) } : {})}
       >
         {renderedText.trim().length > 0 ? (
@@ -1630,7 +1673,7 @@ function renderFeedEntry(
             <MessageAttachmentUnknown key={attachment.id} name={attachment.name} />
           );
         })}
-        {showAssistantMeta ? (
+        {showAssistantMeta || showOutputRate ? (
           <View className="mt-1 flex-row items-center gap-1">
             <CopyTextButton
               accessibilityLabel="Copy message"
@@ -1642,6 +1685,13 @@ function renderFeedEntry(
             <Text className="font-t3-medium text-xs tabular-nums text-adaptive-neutral-600-400">
               {timestampLabel}
             </Text>
+            {showOutputRate ? (
+              <MobileAverageOutputRate
+                outputTokens={props.turnOutputUsage!.outputTokens}
+                startedAt={props.turnStartedAt}
+                completedAt={props.turnCompletedAt}
+              />
+            ) : null}
           </View>
         ) : null}
       </Animated.View>
@@ -2712,6 +2762,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             workGroupScrollPositions,
             terminalAssistantMessageIds,
             unsettledTurnId,
+            latestTurnId: props.latestTurn?.turnId ?? null,
+            turnOutputUsage: props.turnOutputUsage ?? null,
+            turnStartedAt: props.latestTurn?.startedAt ?? null,
+            turnCompletedAt: props.latestTurn?.completedAt ?? null,
             onCopyWorkRow,
             onToggleWorkGroup,
             onToggleWorkRow,
@@ -2744,6 +2798,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       workGroupScrollPositions,
       terminalAssistantMessageIds,
       unsettledTurnId,
+      props.latestTurn?.turnId,
+      props.latestTurn?.completedAt,
+      props.latestTurn?.startedAt,
+      props.turnOutputUsage,
       iconSubtleColor,
       screenColor,
       userBubbleColor,

@@ -23,6 +23,10 @@ import {
   formatSubagentTokenCount,
   isTerminalSubagentStatus,
 } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  deriveSubagentAverageOutputTokensPerSecond,
+  formatAverageOutputTokensPerSecond,
+} from "@t3tools/client-runtime/state/tokenThroughput";
 import { RuntimeTaskId, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
 import { ArrowLeft, Bot, Braces, Check, ChevronDown, ChevronRight, Send, X } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -35,6 +39,7 @@ import { useResizableWidth } from "~/hooks/useResizableWidth";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 
 const BACKGROUND_HEIGHT_STORAGE_KEY = "agents-panel:background-height";
 const DEFAULT_BACKGROUND_HEIGHT = 200;
@@ -144,6 +149,64 @@ function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
     <span ref={textRef} className="tabular-nums">
       {elapsedBetween(startedAt, live ? null : agent.completedAt)}
     </span>
+  );
+}
+
+/** Whole-run output rate. Resumed children omit the metric until a scoped
+ * activation timeline is available rather than dividing cumulative output by
+ * one activation. */
+function AgentOutputRate({ agent, separated }: { agent: RuntimeSubagent; separated: boolean }) {
+  const textRef = useRef<HTMLSpanElement>(null);
+  const live = agent.status === "running" || agent.status === "waiting";
+  const label = formatAverageOutputTokensPerSecond(
+    deriveSubagentAverageOutputTokensPerSecond({
+      outputTokens: agent.usage?.outputTokens,
+      durationMs: agent.usage?.durationMs,
+      startedAt: agent.startedAt,
+      completedAt: agent.completedAt,
+      activationCount: agent.activationCount,
+    }),
+  );
+
+  useEffect(() => {
+    if (!live || !label) return;
+    const update = () => {
+      const next = formatAverageOutputTokensPerSecond(
+        deriveSubagentAverageOutputTokensPerSecond({
+          outputTokens: agent.usage?.outputTokens,
+          durationMs: agent.usage?.durationMs,
+          startedAt: agent.startedAt,
+          completedAt: null,
+          activationCount: agent.activationCount,
+        }),
+      );
+      if (textRef.current) textRef.current.textContent = next ?? "";
+    };
+    update();
+    const id = setInterval(update, 1_000);
+    return () => clearInterval(id);
+  }, [agent, label, live]);
+
+  if (!label) return null;
+  const description =
+    "Average output tokens per second over the whole agent run, including tools and waiting.";
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            ref={textRef}
+            className="tabular-nums"
+            aria-label={`${description} ${label}`}
+            title={description}
+          />
+        }
+      >
+        {separated ? " · " : ""}
+        {label}
+      </TooltipTrigger>
+      <TooltipPopup>{description}</TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -443,6 +506,7 @@ function AgentRow({
       </span>
       <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
         {metadata.join(" · ")}
+        <AgentOutputRate agent={agent} separated={metadata.length > 0} />
       </span>
       <span className="sr-only">{statusLabel}</span>
     </button>

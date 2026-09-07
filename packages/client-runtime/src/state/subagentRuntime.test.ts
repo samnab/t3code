@@ -1079,4 +1079,109 @@ describe("reconcileSubagentInventory", () => {
       controlAvailability: "read-only",
     });
   });
+
+  it("retains usage from an equal or older activity without replacing durable status", () => {
+    const runId = RuntimeTaskId.make("retained-usage-run");
+    const inventory: ReadonlyArray<OrchestrationSubagentRun> = [
+      {
+        runId,
+        runNumber: 7,
+        threadId: ThreadId.make("thread-retained-usage"),
+        parentRunId: null,
+        runtimeFamily: "t3-native",
+        harness: "claudeAgent",
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: null,
+        model: "claude-sonnet",
+        effort: null,
+        title: "Retained usage",
+        summary: null,
+        status: "active",
+        terminalReason: null,
+        controlAvailability: "unsupported",
+        historyAvailability: "summary-only",
+        capabilities: { steer: false, cancel: false, resume: false },
+        createdAt: "2026-08-01T10:00:00.000Z",
+        updatedAt: "2026-08-01T10:00:00.000Z",
+        terminalAt: null,
+      },
+    ];
+    const activityAgents = foldSubagentActivities([
+      activity(
+        "task.progress",
+        {
+          taskId: runId,
+          taskType: "subagent",
+          typedUsage: { totalTokens: 900, outputTokens: 300, durationMs: 4_000 },
+        },
+        "2026-08-01T09:59:00.000Z",
+      ),
+    ]);
+
+    const reconciled = reconcileSubagentInventory(inventory, activityAgents);
+
+    expect(reconciled[0]).toMatchObject({
+      status: "running",
+      usage: { totalTokens: 900, outputTokens: 300, durationMs: 4_000 },
+      activationCount: 1,
+    });
+  });
+
+  it("preserves resumed activation provenance while retaining durable usage", () => {
+    const runId = RuntimeTaskId.make("retained-resumed-run");
+    const inventory: ReadonlyArray<OrchestrationSubagentRun> = [
+      {
+        runId,
+        runNumber: 8,
+        threadId: ThreadId.make("thread-retained-resumed"),
+        parentRunId: null,
+        runtimeFamily: "t3-native",
+        harness: "claudeAgent",
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: null,
+        model: "claude-sonnet",
+        effort: null,
+        title: "Retained resumed",
+        summary: null,
+        status: "active",
+        terminalReason: null,
+        controlAvailability: "unsupported",
+        historyAvailability: "summary-only",
+        capabilities: { steer: false, cancel: false, resume: false },
+        createdAt: "2026-08-01T10:00:00.000Z",
+        updatedAt: "2026-08-01T10:00:00.000Z",
+        terminalAt: null,
+      },
+    ];
+    const activityAgents = foldSubagentActivities([
+      activity("task.started", { taskId: runId, taskType: "subagent" }, "2026-08-01T09:55:00.000Z"),
+      activity(
+        "task.completed",
+        { taskId: runId, taskType: "subagent", status: "completed" },
+        "2026-08-01T09:56:00.000Z",
+      ),
+      activity(
+        "task.updated",
+        { taskId: runId, taskType: "subagent", status: "running" },
+        "2026-08-01T09:58:00.000Z",
+      ),
+      activity(
+        "task.progress",
+        {
+          taskId: runId,
+          taskType: "subagent",
+          typedUsage: { totalTokens: 1_200, outputTokens: 500 },
+        },
+        "2026-08-01T10:00:00.000Z",
+      ),
+    ]);
+
+    const reconciled = reconcileSubagentInventory(inventory, activityAgents);
+
+    expect(reconciled[0]).toMatchObject({
+      status: "running",
+      usage: { totalTokens: 1_200, outputTokens: 500 },
+      activationCount: 2,
+    });
+  });
 });

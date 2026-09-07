@@ -217,6 +217,7 @@ import {
   foldSubagentActivities,
   reconcileSubagentInventory,
 } from "@t3tools/client-runtime/state/subagentRuntime";
+import { deriveTurnOutputUsage } from "@t3tools/client-runtime/state/tokenThroughput";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
@@ -2737,6 +2738,11 @@ export default function ChatView(props: ChatViewProps) {
   const activeContextWindow = useMemo(
     () => deriveLatestContextWindowSnapshot(threadActivities),
     [threadActivities],
+  );
+  const activeTurnOutputUsage = useMemo(
+    () =>
+      activeLatestTurn ? deriveTurnOutputUsage(threadActivities, activeLatestTurn.turnId) : null,
+    [activeLatestTurn, threadActivities],
   );
   const activeUsageLimits = useMemo(
     () => mergeUsageLimitActivities(threadActivities),
@@ -8305,6 +8311,7 @@ export default function ChatView(props: ChatViewProps) {
                 listRef={legendListRef}
                 timelineEntries={timelineEntries}
                 latestTurn={activeLatestTurn}
+                turnOutputUsage={activeTurnOutputUsage}
                 runningTurnId={activeRunningTurnId}
                 turnDiffSummaries={activeThread.checkpoints}
                 activeThreadEnvironmentId={activeThread.environmentId}

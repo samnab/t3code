@@ -77,6 +77,7 @@ import type {
   PendingApproval,
   PendingUserInput,
   PendingUserInputDraftAnswer,
+  ThreadFeedTurnOutputUsage,
   ThreadFeedEntry,
 } from "../../lib/threadActivity";
 import { PendingApprovalCard } from "./PendingApprovalCard";
@@ -116,6 +117,7 @@ export interface ThreadDetailScreenProps {
   readonly feedbackSubmissions: ReadonlyArray<CodexFeedbackSubmission>;
   readonly onDismissFeedback: (id: MessageId) => void;
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
+  readonly turnOutputUsage?: ThreadFeedTurnOutputUsage | null;
   readonly activeWorkStartedAt: string | null;
   readonly isCompacting: boolean;
   readonly activePendingApproval: PendingApproval | null;
@@ -830,6 +832,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             contentPresentation={props.contentPresentation}
             agentLabel={agentLabel}
             latestTurn={props.selectedThread.latestTurn}
+            turnOutputUsage={props.turnOutputUsage ?? null}
             activeWorkStartedAt={props.activeWorkStartedAt}
             listRef={listRef}
             freeze={freeze}

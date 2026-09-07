@@ -17,6 +17,7 @@ import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
 } from "@t3tools/client-runtime/state/threads";
+import { deriveTurnOutputUsage } from "@t3tools/client-runtime/state/tokenThroughput";
 import {
   projectScriptCwd,
   projectScriptRuntimeEnv,
@@ -204,6 +205,16 @@ function ThreadRouteContent(
     useThreadSelection();
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  const selectedThreadOutputUsage = useMemo(
+    () =>
+      selectedThreadDetail?.latestTurn
+        ? deriveTurnOutputUsage(
+            selectedThreadDetail.activities,
+            selectedThreadDetail.latestTurn.turnId,
+          )
+        : null,
+    [selectedThreadDetail],
+  );
   // "Load earlier turns" header state for windowed (paginated) thread loads.
   const loadEarlierTurns = useMemo(() => {
     if (selectedThread === null || !threadHasOlderTurns(selectedThreadDetailState)) {
@@ -790,6 +801,7 @@ function ThreadRouteContent(
           feedbackSubmissions={composer.feedbackSubmissions}
           onDismissFeedback={composer.dismissFeedback}
           selectedThreadFeed={composer.selectedThreadFeed}
+          turnOutputUsage={selectedThreadOutputUsage}
           activeWorkStartedAt={composer.activeWorkStartedAt}
           isCompacting={composer.isCompacting}
           activePendingApproval={requests.activePendingApproval}
