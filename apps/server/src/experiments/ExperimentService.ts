@@ -39,7 +39,7 @@ import {
   changedPaths,
   commitCandidate,
   currentHead,
-  fileHash,
+  fileState,
   git,
   hashContent,
   normalizeApprovedPath,
@@ -316,6 +316,7 @@ export const make = Effect.gen(function* () {
   const store = yield* ThreadExperimentStore;
   const coordinator = yield* ExperimentCoordinator;
   const processes = new ExperimentProcessRegistry();
+  const repositoryControllers = new Map<string, AbortController>();
   const confirmations = new Map<string, ExperimentConfirmation>();
   const threadLocks = new Map<string, Semaphore.Semaphore>();
   const startLock = Semaphore.makeUnsafe(1);
@@ -328,6 +329,15 @@ export const make = Effect.gen(function* () {
     }
     return lock.withPermits(1)(effect);
   };
+
+  const cancelOwned = (runId: string) =>
+    Effect.tryPromise({
+      try: async () => {
+        repositoryControllers.get(runId)?.abort();
+        await processes.cancel(runId);
+      },
+      catch: (cause) => asExperimentError(cause, "Could not stop experiment processes."),
+    });
 
   const ledger = (profile: ExperimentProfile, entry: Readonly<Record<string, unknown>>) =>
     Effect.tryPromise({
@@ -361,10 +371,7 @@ export const make = Effect.gen(function* () {
     profile: ExperimentProfile,
     reason: string,
   ) {
-    yield* Effect.tryPromise({
-      try: () => processes.cancel(profile.runId),
-      catch: (cause) => asExperimentError(cause, "Could not stop experiment processes."),
-    });
+    yield* cancelOwned(profile.runId);
     if (profile.providerSessionActive) {
       yield* coordinator.stopProvider({ threadId: profile.threadId, runId: profile.runId });
     }
@@ -616,11 +623,11 @@ export const make = Effect.gen(function* () {
         "Unowned worktree changes were found; rollback was not attempted.",
       );
     }
-    const hashes = await Promise.all(
-      pending.snapshots.map((snapshot) => fileHash(profile.cwd, snapshot.path)),
+    const states = await Promise.all(
+      pending.snapshots.map((snapshot) => fileState(profile.cwd, snapshot.path)),
     );
     for (const [index, snapshot] of pending.snapshots.entries()) {
-      if (!expectedRecoveryHashes(profile, pending, snapshot.path).has(hashes[index]!)) {
+      if (!expectedRecoveryHashes(profile, pending, snapshot.path).has(states[index]!.hash)) {
         throw error(
           "external_drift",
           `Owned file ${snapshot.path} changed unexpectedly; rollback was not attempted.`,
@@ -643,19 +650,19 @@ export const make = Effect.gen(function* () {
       for (const snapshot of pending.snapshots) {
         if (!pending.restoredPaths.includes(snapshot.path)) {
           const currentPending = profile.pending ?? pending;
-          const currentHash = yield* repositoryEffect(`inspect ${snapshot.path}`, () =>
-            fileHash(profile.cwd, snapshot.path),
+          const currentState = yield* repositoryEffect(`inspect ${snapshot.path}`, () =>
+            fileState(profile.cwd, snapshot.path),
           );
           const acceptable = expectedRecoveryHashes(profile, currentPending, snapshot.path);
-          if (!acceptable.has(currentHash)) {
+          if (!acceptable.has(currentState.hash)) {
             return yield* error(
               "external_drift",
               `Owned file ${snapshot.path} changed before it could be restored.`,
             );
           }
-          if (currentHash !== snapshot.hash) {
+          if (currentState.hash !== snapshot.hash || currentState.mode !== snapshot.mode) {
             yield* repositoryEffect(`restore ${snapshot.path}`, () =>
-              restoreSnapshot(profile.cwd, snapshot, currentHash),
+              restoreSnapshot(profile.cwd, snapshot, currentState.hash, currentState.mode),
             );
           }
           profile = yield* save({
@@ -762,11 +769,12 @@ export const make = Effect.gen(function* () {
       await assertClean(cwd);
     });
     const existing = yield* store.list();
-    if (
+    const owned = yield* repositoryEffect("worktree ownership validation", async () =>
       existing.some(
-        (profile) => repositoryPathsEqual(profile.cwd, cwd) && !TERMINAL_PHASES.has(profile.phase),
-      )
-    ) {
+        (profile) => !TERMINAL_PHASES.has(profile.phase) && repositoryPathsEqual(profile.cwd, cwd),
+      ),
+    );
+    if (owned) {
       return yield* error("invalid_phase", "Another experiment already owns this worktree.");
     }
     const currentMs = yield* Clock.currentTimeMillis;
@@ -877,13 +885,14 @@ export const make = Effect.gen(function* () {
       await assertClean(confirmation.cwd);
     });
     const all = yield* store.list();
-    if (
+    const owned = yield* repositoryEffect("worktree ownership revalidation", async () =>
       all.some(
         (profile) =>
-          repositoryPathsEqual(profile.cwd, confirmation.cwd) &&
-          !TERMINAL_PHASES.has(profile.phase),
-      )
-    ) {
+          !TERMINAL_PHASES.has(profile.phase) &&
+          repositoryPathsEqual(profile.cwd, confirmation.cwd),
+      ),
+    );
+    if (owned) {
       return yield* error("invalid_phase", "Another experiment already owns this worktree.");
     }
     const previous = Option.getOrUndefined(yield* store.get(input.threadId));
@@ -1242,11 +1251,13 @@ export const make = Effect.gen(function* () {
           "Candidate must change exactly the requested approved paths.",
         );
       }
-      const actualHashes = yield* repositoryEffect("post-apply hashes", () =>
-        Promise.all(changes.map((change) => fileHash(profile.cwd, change.path))),
+      const actualStates = yield* repositoryEffect("post-apply file state", () =>
+        Promise.all(changes.map((change) => fileState(profile.cwd, change.path))),
       );
       for (const [index, change] of changes.entries()) {
-        if (actualHashes[index] !== expectedHashes[change.path]) {
+        const snapshot = snapshots[index]!;
+        const actual = actualStates[index]!;
+        if (actual.hash !== expectedHashes[change.path] || actual.mode !== snapshot.mode) {
           throw error(
             "external_drift",
             `Candidate content for ${change.path} did not match the applied payload.`,
@@ -1409,6 +1420,22 @@ export const make = Effect.gen(function* () {
       },
     });
     const candidateFiles = pending.snapshots.map((entry) => entry.path);
+    const commitBudget = yield* remainingMs(profile, profile.config.limits.maxTotalSeconds).pipe(
+      Effect.result,
+    );
+    if (Result.isFailure(commitBudget)) {
+      const failure = asExperimentError(commitBudget.failure, "Experiment deadline reached.");
+      profile = yield* restore(profile, evaluated.evaluation, failure.message);
+      return {
+        outcome: "restored",
+        metric: evaluated.evaluation.metric,
+        metrics: evaluated.evaluation.metrics ?? {},
+        commit: null,
+        reason: failure.message,
+      } satisfies ExperimentEvaluationResult;
+    }
+    const repositoryController = new AbortController();
+    repositoryControllers.set(profile.runId, repositoryController);
     const commitAttempt = yield* repositoryEffect("commit", () =>
       commitCandidate(
         profile.cwd,
@@ -1416,8 +1443,18 @@ export const make = Effect.gen(function* () {
         pending.hypothesis,
         profile.config.evaluator.metric,
         evaluated.evaluation.metric!,
+        { timeoutMs: commitBudget.success, signal: repositoryController.signal },
       ),
-    ).pipe(Effect.result);
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (repositoryControllers.get(profile.runId) === repositoryController) {
+            repositoryControllers.delete(profile.runId);
+          }
+        }),
+      ),
+      Effect.result,
+    );
     if (Result.isFailure(commitAttempt)) {
       const failure = asExperimentError(commitAttempt.failure, "Experiment commit failed.");
       yield* repositoryEffect("unstage rejected candidate", () =>
@@ -1442,14 +1479,24 @@ export const make = Effect.gen(function* () {
     }
     const commit = commitAttempt.success;
     yield* Effect.gen(function* () {
+      const verificationTimeoutMs = yield* remainingMs(
+        profile,
+        profile.config.limits.maxTotalSeconds,
+      );
       const [parentResult, committedResult, changed, staged] = yield* repositoryEffect(
         "commit verification",
         () =>
           Promise.all([
-            git(profile.cwd, ["rev-parse", "HEAD^"]),
-            git(profile.cwd, ["diff", "--name-only", "-z", "HEAD^", "HEAD", "--"]),
-            changedPaths(profile.cwd),
-            stagedPaths(profile.cwd),
+            git(profile.cwd, ["rev-parse", "HEAD^"], false, undefined, verificationTimeoutMs),
+            git(
+              profile.cwd,
+              ["diff", "--name-only", "-z", "HEAD^", "HEAD", "--"],
+              false,
+              undefined,
+              verificationTimeoutMs,
+            ),
+            changedPaths(profile.cwd, verificationTimeoutMs),
+            stagedPaths(profile.cwd, verificationTimeoutMs),
           ]),
       );
       const parent = parentResult.stdout.trim();
@@ -1545,9 +1592,18 @@ export const make = Effect.gen(function* () {
                 ? "Server restarted before the baseline completed."
                 : "Server restarted; resume to start a fresh restricted provider session.",
           },
-          { sync: initial.phase !== "baseline" },
+          { sync: false },
         );
         yield* ledger(recovered, { type: "recovery", outcome: recovered.phase });
+        if (recovered.phase === "paused") {
+          yield* coordinator
+            .holdGoal({
+              threadId: recovered.threadId,
+              action: "pause",
+              reason: recovered.lastError ?? "Experiment paused after server restart.",
+            })
+            .pipe(Effect.ignore);
+        }
       }
       return;
     }
@@ -1583,31 +1639,52 @@ export const make = Effect.gen(function* () {
           changed.length === 0 &&
           staged.length === 0
         ) {
-          profile = yield* save({
-            ...profile,
-            head,
-            phase: "paused",
-            armed: false,
-            providerSessionActive: false,
-            bestMetric: pending.metric,
-            lastMetric: pending.metric,
-            experimentsRun: profile.experimentsRun + 1,
-            experimentsKept: profile.experimentsKept + 1,
-            pending: null,
-          });
+          profile = yield* save(
+            {
+              ...profile,
+              head,
+              phase: "paused",
+              armed: false,
+              providerSessionActive: false,
+              bestMetric: pending.metric,
+              lastMetric: pending.metric,
+              experimentsRun: profile.experimentsRun + 1,
+              experimentsKept: profile.experimentsKept + 1,
+              pending: null,
+            },
+            { sync: false },
+          );
           yield* ledger(profile, { type: "recovery", outcome: "commit_recovered" });
+          yield* coordinator
+            .holdGoal({
+              threadId: profile.threadId,
+              action: "pause",
+              reason: "Recovered an interrupted experiment commit.",
+            })
+            .pipe(Effect.ignore);
           return;
         }
       }
       profile = yield* restore(profile, null, `Recovered interrupted ${profile.phase} phase.`);
-      profile = yield* save({
-        ...profile,
-        phase: "paused",
-        armed: false,
-        providerSessionActive: false,
-        lastError: "Recovered an interrupted candidate; resume to start a fresh provider session.",
-      });
+      profile = yield* save(
+        {
+          ...profile,
+          phase: "paused",
+          armed: false,
+          providerSessionActive: false,
+          lastError:
+            "Recovered an interrupted candidate; resume to start a fresh provider session.",
+        },
+        { sync: false },
+      );
       yield* ledger(profile, { type: "recovery", outcome: "candidate_restored" });
+      yield* coordinator
+        .holdGoal({
+          threadId: profile.threadId,
+          action: "pause",
+          reason: profile.lastError ?? "Experiment paused after server restart.",
+        })
+        .pipe(Effect.ignore);
     }).pipe(Effect.catch((cause) => failClosed(profile, cause).pipe(Effect.asVoid)));
   });
 
@@ -1619,6 +1696,7 @@ export const make = Effect.gen(function* () {
     const stored = Option.getOrUndefined(yield* store.get(input.threadId));
     if (stored === undefined || TERMINAL_PHASES.has(stored.phase)) return;
     let profile = stored;
+    yield* cancelOwned(profile.runId);
     profile = yield* save({ ...profile, providerSessionActive: false, armed: false });
     if (stored.providerSessionActive) {
       yield* coordinator.stopProvider({ threadId: stored.threadId, runId: stored.runId });
@@ -1654,10 +1732,7 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const before = Option.getOrUndefined(yield* store.get(input.threadId));
       if (before !== undefined) {
-        yield* Effect.tryPromise({
-          try: () => processes.cancel(before.runId),
-          catch: (cause) => asExperimentError(cause, "Could not stop experiment processes."),
-        });
+        yield* cancelOwned(before.runId);
       }
       yield* withThreadLock(input.threadId, settleUnlocked(input));
     });

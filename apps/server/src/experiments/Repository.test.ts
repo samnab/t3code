@@ -1,12 +1,27 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, assert, describe, it } from "@effect/vitest";
 
 import { ExperimentError } from "./Model.ts";
-import { assertClean, assertRepository, normalizeApprovedPath, readConfig } from "./Repository.ts";
+import {
+  assertClean,
+  assertRepository,
+  commitCandidate,
+  currentHead,
+  normalizeApprovedPath,
+  readConfig,
+} from "./Repository.ts";
 
 const roots: Array<string> = [];
 afterEach(() => {
@@ -108,5 +123,22 @@ describe("experiment repository validation", () => {
       () => assert.fail("expected dirty-worktree rejection"),
       (cause: unknown) => assert.instanceOf(cause, ExperimentError),
     );
+  });
+
+  it("bounds commit hooks by the caller's remaining campaign time", async () => {
+    const cwd = repo();
+    const before = await currentHead(cwd);
+    writeFileSync(path.join(cwd, "train.py"), "print('better')\n");
+    const hook = path.join(cwd, ".git/hooks/pre-commit");
+    writeFileSync(hook, "#!/bin/sh\nsleep 1\n");
+    chmodSync(hook, 0o755);
+
+    await commitCandidate(cwd, ["train.py"], "Improve output", "score", 2, {
+      timeoutMs: 50,
+    }).then(
+      () => assert.fail("expected the commit hook to exceed its campaign budget"),
+      (cause: unknown) => assert.instanceOf(cause, ExperimentError),
+    );
+    assert.strictEqual(await currentHead(cwd), before);
   });
 });

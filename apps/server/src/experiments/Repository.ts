@@ -44,7 +44,11 @@ function samePath(left: string, right: string): boolean {
 }
 
 export function canonicalRepositoryPath(cwd: string): string {
-  return realPath(cwd);
+  try {
+    return realPath(cwd);
+  } catch (cause) {
+    fail("unsafe_repository", `Repository path is unavailable: ${cwd}.`, cause);
+  }
 }
 
 export function repositoryPathsEqual(left: string, right: string): boolean {
@@ -136,8 +140,14 @@ export function git(
   args: ReadonlyArray<string>,
   allowFailure = false,
   input?: string | Buffer,
+  timeoutMs = GIT_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<GitResult> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(gitFailure("limits_exhausted", `git ${args[0] ?? "command"} was cancelled.`));
+      return;
+    }
     const child = spawn("git", args, {
       cwd,
       detached: true,
@@ -149,7 +159,9 @@ export function git(
     const stderr: Array<Buffer> = [];
     let outputBytes = 0;
     let timedOut = false;
+    let aborted = false;
     let settled = false;
+    let escalation: ReturnType<typeof setTimeout> | undefined;
     const capture = (target: Array<Buffer>, chunk: Buffer) => {
       outputBytes += chunk.byteLength;
       if (outputBytes <= GIT_OUTPUT_CAP) target.push(chunk);
@@ -158,16 +170,30 @@ export function git(
     child.stdout?.on("data", (chunk: Buffer) => capture(stdout, chunk));
     child.stderr?.on("data", (chunk: Buffer) => capture(stderr, chunk));
     if (input !== undefined) child.stdin?.end(input);
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      terminateGroup(child.pid, "SIGTERM");
-      setTimeout(() => terminateGroup(child.pid, "SIGKILL"), 1_000).unref?.();
-    }, GIT_TIMEOUT_MS);
+    const timeout = setTimeout(
+      () => {
+        timedOut = true;
+        terminateGroup(child.pid, "SIGTERM");
+        escalation = setTimeout(() => terminateGroup(child.pid, "SIGKILL"), 1_000);
+        escalation.unref?.();
+      },
+      Math.max(1, Math.min(GIT_TIMEOUT_MS, timeoutMs)),
+    );
     timeout.unref?.();
+    const onAbort = () => {
+      aborted = true;
+      clearTimeout(timeout);
+      terminateGroup(child.pid, "SIGTERM");
+      escalation = setTimeout(() => terminateGroup(child.pid, "SIGKILL"), 1_000);
+      escalation.unref?.();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const finish = (code: number | null, cause?: unknown) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      if (escalation !== undefined) clearTimeout(escalation);
+      signal?.removeEventListener("abort", onAbort);
       const result = {
         code: code ?? -1,
         stdout: Buffer.concat(stdout).toString("utf8"),
@@ -177,12 +203,17 @@ export function git(
         reject(gitFailure("unsafe_repository", `git ${args[0] ?? "command"} failed.`, cause));
         return;
       }
-      if (timedOut || outputBytes > GIT_OUTPUT_CAP || (result.code !== 0 && !allowFailure)) {
+      if (
+        timedOut ||
+        aborted ||
+        outputBytes > GIT_OUTPUT_CAP ||
+        (result.code !== 0 && !allowFailure)
+      ) {
         const detail = `${result.stdout}\n${result.stderr}`.trim().slice(-2_000);
         reject(
           gitFailure(
             "unsafe_repository",
-            `git ${args[0] ?? "command"} failed (${timedOut ? "timeout" : result.code}): ${detail}`,
+            `git ${args[0] ?? "command"} failed (${timedOut ? "timeout" : aborted ? "cancelled" : result.code}): ${detail}`,
           ),
         );
         return;
@@ -194,8 +225,12 @@ export function git(
   });
 }
 
-export const currentHead = async (cwd: string): Promise<string> =>
-  (await git(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+export const currentHead = async (
+  cwd: string,
+  timeoutMs?: number,
+  signal?: AbortSignal,
+): Promise<string> =>
+  (await git(cwd, ["rev-parse", "HEAD"], false, undefined, timeoutMs, signal)).stdout.trim();
 export const currentBranch = async (cwd: string): Promise<string> =>
   (await git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim();
 
@@ -206,14 +241,40 @@ function nulPaths(output: string): Array<string> {
     .map((entry) => entry.replaceAll("\\", "/"));
 }
 
-export async function stagedPaths(cwd: string): Promise<Array<string>> {
-  return nulPaths((await git(cwd, ["diff", "--cached", "--name-only", "-z", "--"])).stdout).sort();
+export async function stagedPaths(
+  cwd: string,
+  timeoutMs?: number,
+  signal?: AbortSignal,
+): Promise<Array<string>> {
+  return nulPaths(
+    (
+      await git(
+        cwd,
+        ["diff", "--cached", "--name-only", "-z", "--"],
+        false,
+        undefined,
+        timeoutMs,
+        signal,
+      )
+    ).stdout,
+  ).sort();
 }
 
-export async function changedPaths(cwd: string): Promise<Array<string>> {
+export async function changedPaths(
+  cwd: string,
+  timeoutMs?: number,
+  signal?: AbortSignal,
+): Promise<Array<string>> {
   const [tracked, untracked] = await Promise.all([
-    git(cwd, ["diff", "--name-only", "-z", "HEAD", "--"]),
-    git(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--"]),
+    git(cwd, ["diff", "--name-only", "-z", "HEAD", "--"], false, undefined, timeoutMs, signal),
+    git(
+      cwd,
+      ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+      false,
+      undefined,
+      timeoutMs,
+      signal,
+    ),
   ]);
   return [...new Set([...nulPaths(tracked.stdout), ...nulPaths(untracked.stdout)])]
     .filter((entry) => entry !== ".auto" && !entry.startsWith(".auto/"))
@@ -404,6 +465,27 @@ export async function assertFileMatches(
   }
 }
 
+export async function fileState(
+  cwd: string,
+  relativePath: string,
+): Promise<{ readonly hash: string; readonly mode: number }> {
+  const absolute = resolveApprovedFile(cwd, relativePath);
+  const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+  const handle = await open(absolute, constants.O_RDONLY | noFollow);
+  try {
+    const before = await handle.stat();
+    const content = await handle.readFile();
+    const after = await handle.stat();
+    const current = await lstat(absolute);
+    if (!before.isFile() || !sameFileIdentity(before, after) || !sameFileIdentity(after, current)) {
+      fail("external_drift", `Owned file ${relativePath} changed while it was inspected.`);
+    }
+    return { hash: await hashBytes(cwd, content), mode: after.mode & 0o777 };
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function snapshotFiles(
   cwd: string,
   paths: ReadonlyArray<string>,
@@ -466,13 +548,14 @@ export async function restoreSnapshot(
   cwd: string,
   snapshot: FileSnapshot,
   expectedCurrentHash: string,
+  expectedCurrentMode: number,
 ): Promise<void> {
   const absolute = resolveApprovedFile(cwd, snapshot.path);
   await writeFileAtomically(
     absolute,
     Buffer.from(snapshot.contentBase64, "base64"),
     snapshot.mode,
-    () => assertFileMatches(cwd, snapshot.path, expectedCurrentHash),
+    () => assertFileMatches(cwd, snapshot.path, expectedCurrentHash, expectedCurrentMode),
   );
 }
 
@@ -488,9 +571,20 @@ export async function commitCandidate(
   hypothesis: string,
   metricName: string,
   metric: number,
+  options: { readonly timeoutMs?: number; readonly signal?: AbortSignal } = {},
 ): Promise<string> {
-  await git(cwd, ["add", "--", ...files]);
-  const [staged, changed] = await Promise.all([stagedPaths(cwd), changedPaths(cwd)]);
+  const deadline = performance.now() + Math.max(1, options.timeoutMs ?? GIT_TIMEOUT_MS);
+  const budget = () => {
+    if (options.signal?.aborted) fail("limits_exhausted", "Experiment commit was cancelled.");
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) fail("limits_exhausted", "Experiment commit exceeded its time limit.");
+    return remaining;
+  };
+  await git(cwd, ["add", "--", ...files], false, undefined, budget(), options.signal);
+  const [staged, changed] = await Promise.all([
+    stagedPaths(cwd, budget(), options.signal),
+    changedPaths(cwd, budget(), options.signal),
+  ]);
   if (!setEquals(staged, files) || !setEquals(changed, files)) {
     fail(
       "external_drift",
@@ -502,17 +596,24 @@ export async function commitCandidate(
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 72);
-  await git(cwd, [
-    "commit",
-    "--only",
-    "-m",
-    `experiment: ${subject || "qualifying improvement"}`,
-    "-m",
-    `Experiment-Metric: ${metricName}=${metric}`,
-    "--",
-    ...files,
-  ]);
-  return currentHead(cwd);
+  await git(
+    cwd,
+    [
+      "commit",
+      "--only",
+      "-m",
+      `experiment: ${subject || "qualifying improvement"}`,
+      "-m",
+      `Experiment-Metric: ${metricName}=${metric}`,
+      "--",
+      ...files,
+    ],
+    false,
+    undefined,
+    budget(),
+    options.signal,
+  );
+  return currentHead(cwd, budget(), options.signal);
 }
 
 /** Removes only experiment-owned paths from the index after a rejected commit hook. */
