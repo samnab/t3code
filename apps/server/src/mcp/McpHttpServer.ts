@@ -227,7 +227,8 @@ export const DelegationToolkitRegistrationLive = McpServer.toolkit(DelegationToo
   Layer.provide(DelegationHandlersLive),
 );
 
-export const layer = Layer.mergeAll(
-  PreviewToolkitRegistrationLive,
-  DelegationToolkitRegistrationLive,
-).pipe(Layer.provideMerge(McpTransportLive));
+export const layer = Layer.fresh(
+  Layer.mergeAll(PreviewToolkitRegistrationLive, DelegationToolkitRegistrationLive).pipe(
+    Layer.provideMerge(McpTransportLive),
+  ),
+);

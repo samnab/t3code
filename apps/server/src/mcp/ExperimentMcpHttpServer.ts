@@ -76,6 +76,6 @@ const ExperimentMcpTransportLive = McpServer.layerHttp({
 }).pipe(Layer.provide(ExperimentMcpAuthMiddlewareLive));
 
 /** Mount beside the general MCP layer after providing ExperimentMcpService. */
-export const layer = ExperimentToolkitRegistrationLive.pipe(
-  Layer.provideMerge(ExperimentMcpTransportLive),
+export const layer = Layer.fresh(
+  ExperimentToolkitRegistrationLive.pipe(Layer.provideMerge(ExperimentMcpTransportLive)),
 );

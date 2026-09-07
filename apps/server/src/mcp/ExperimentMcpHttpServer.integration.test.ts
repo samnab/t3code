@@ -20,9 +20,12 @@ import {
 } from "../experiments/ExperimentService.ts";
 import type { ExperimentIdentity, ExperimentThreadContext } from "../experiments/Model.ts";
 import * as ThreadExperiments from "../persistence/ThreadExperiments.ts";
+import * as ChildRunService from "./ChildRunService.ts";
 import * as ExperimentMcpHttpServer from "./ExperimentMcpHttpServer.ts";
 import * as ExperimentMcpServiceLive from "./ExperimentMcpServiceLive.ts";
+import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
+import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
 const roots: Array<string> = [];
 
@@ -149,8 +152,20 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
     Layer.provide(CoordinatorLive),
   );
   const RegistryAndDomainLive = DomainLive.pipe(Layer.provideMerge(McpSessionRegistry.layer));
-  const RoutesLive = ExperimentMcpHttpServer.layer.pipe(
-    Layer.provide(ExperimentMcpServiceLive.layer),
+  const RoutesLive = Layer.mergeAll(
+    McpHttpServer.layer.pipe(
+      Layer.provide(PreviewAutomationBroker.layer),
+      Layer.provide(
+        Layer.mock(ChildRunService.ChildRunService)({
+          controlPlane: {
+            status: () => Effect.succeed([]),
+            steer: () => Effect.die("unused"),
+            cancel: () => Effect.die("unused"),
+          },
+        }),
+      ),
+    ),
+    ExperimentMcpHttpServer.layer.pipe(Layer.provide(ExperimentMcpServiceLive.layer)),
   );
   const AppLive = HttpRouter.serve(RoutesLive, {
     disableListenLog: true,
@@ -264,6 +279,46 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
       expect(NodeFS.readFileSync(NodePath.join(cwd, "score.txt"), "utf8")).toBe("2\n");
 
       const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const generalCredential = yield* registry.issue({
+        threadId: ThreadId.make("thread-general-mcp"),
+        providerInstanceId,
+        capabilities: ["preview", "delegation"],
+      });
+      const generalInitialize = yield* httpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: generalCredential.config.authorizationHeader,
+        },
+        body: HttpBody.text(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 6,
+            method: "initialize",
+            params: {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              clientInfo: { name: "general-integration-test", version: "1.0.0" },
+            },
+          }),
+          "application/json",
+        ),
+      });
+      const generalSessionId = generalInitialize.headers["mcp-session-id"];
+      const generalToolsResponse = yield* httpClient.post("/mcp", {
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: generalCredential.config.authorizationHeader,
+          "mcp-session-id": generalSessionId!,
+          "mcp-protocol-version": "2025-06-18",
+        },
+        body: HttpBody.text(
+          JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list", params: {} }),
+          "application/json",
+        ),
+      });
+      const generalTools = parseMcpResponse(yield* generalToolsResponse.text).result?.tools;
+      expect(generalTools?.some((tool) => tool.name.startsWith("experiment_"))).toBe(false);
+
       const mismatched = yield* registry.issueExperiment({
         threadId,
         providerInstanceId,
@@ -280,7 +335,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         body: HttpBody.text(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: 6,
+            id: 8,
             method: "initialize",
             params: {
               protocolVersion: "2025-06-18",
@@ -302,7 +357,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         body: HttpBody.text(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: 7,
+            id: 9,
             method: "tools/call",
             params: { name: "experiment_status", arguments: {} },
           }),
