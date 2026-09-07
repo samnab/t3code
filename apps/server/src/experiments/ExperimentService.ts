@@ -605,7 +605,10 @@ export const make = Effect.gen(function* () {
     return new Set([candidateHash]);
   }
 
-  async function assertSafeRestore(profile: ExperimentProfile): Promise<PendingExperiment> {
+  async function assertSafeRestore(
+    profile: ExperimentProfile,
+    options: { readonly requireCandidateState?: boolean } = {},
+  ): Promise<PendingExperiment> {
     const pending = profile.pending;
     if (pending === null) throw error("persistence_failed", "Rollback metadata is missing.");
     const [head, staged, actualChanged] = await Promise.all([
@@ -627,7 +630,13 @@ export const make = Effect.gen(function* () {
       pending.snapshots.map((snapshot) => fileState(profile.cwd, snapshot.path)),
     );
     for (const [index, snapshot] of pending.snapshots.entries()) {
-      if (!expectedRecoveryHashes(profile, pending, snapshot.path).has(states[index]!.hash)) {
+      const state = states[index]!;
+      const candidateHash = pending.expectedHashes[snapshot.path];
+      if (
+        !expectedRecoveryHashes(profile, pending, snapshot.path).has(state.hash) ||
+        (options.requireCandidateState === true &&
+          (state.hash !== candidateHash || state.mode !== snapshot.mode))
+      ) {
         throw error(
           "external_drift",
           `Owned file ${snapshot.path} changed unexpectedly; rollback was not attempted.`,
@@ -1322,7 +1331,7 @@ export const make = Effect.gen(function* () {
       profile = evaluated.profile;
       if (candidate) {
         yield* repositoryEffect("post-evaluation candidate validation", () =>
-          assertSafeRestore(profile),
+          assertSafeRestore(profile, { requireCandidateState: true }),
         );
       } else {
         yield* repositoryEffect("post-evaluation baseline validation", () =>

@@ -38,7 +38,11 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function makeRepo(maxExperiments = 10, maxTotalSeconds = 600): string {
+function makeRepo(
+  maxExperiments = 10,
+  maxTotalSeconds = 600,
+  checks: ReadonlyArray<ReadonlyArray<string>> = [["node", "-e", "process.exit(0)"]],
+): string {
   const root = mkdtempSync(path.join(tmpdir(), "t3-experiment-service-"));
   roots.push(root);
   execFileSync("git", ["init", "-b", "experiment/test"], { cwd: root });
@@ -65,7 +69,7 @@ function makeRepo(maxExperiments = 10, maxTotalSeconds = 600): string {
         direction: "higher",
         minimumImprovement: 0.5,
       },
-      checks: [["node", "-e", "process.exit(0)"]],
+      checks,
       limits: {
         maxExperiments,
         maxApplyBytes: 10_000,
@@ -759,6 +763,46 @@ describe("ExperimentService", () => {
 
       assert.deepEqual(fixture.stopped, ["thread-1"]);
       assert.strictEqual((yield* service.get({ threadId: "thread-1" }))?.phase, "paused");
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("restores a candidate when a check changes only its file mode", () => {
+    const cwd = makeRepo(10, 600, [
+      [
+        "node",
+        "-e",
+        "const fs=require('fs');if(fs.readFileSync('score.txt','utf8').trim()==='2')fs.chmodSync('score.txt',0o755)",
+      ],
+    ]);
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts);
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      const started = yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+      const identity = {
+        threadId: "thread-1",
+        providerInstanceId: "claude",
+        providerSessionId: "experiment-thread-1-1",
+        runId: started.runId,
+        generation: 1,
+      };
+      yield* service.apply({
+        ...identity,
+        hypothesis: "Increase the score without changing its mode",
+        changes: [{ path: "score.txt", content: "2\n" }],
+      });
+
+      const evaluated = yield* service.evaluate(identity);
+
+      assert.strictEqual(evaluated.outcome, "restored");
+      assert.strictEqual(readFileSync(path.join(cwd, "score.txt"), "utf8"), "1\n");
+      assert.strictEqual(statSync(path.join(cwd, "score.txt")).mode & 0o777, 0o644);
+      assert.strictEqual((yield* service.get({ threadId: "thread-1" }))?.experimentsKept, 0);
     }).pipe(Effect.provide(fixture.layer));
   });
 
