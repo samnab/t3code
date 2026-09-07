@@ -302,6 +302,35 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
     }),
   );
 
+  it.effect("carries a server-authored message origin into the message-sent event", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-origin-turn"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-origin"),
+            role: "user",
+            text: "continue",
+            attachments: [],
+            origin: "goal-continue",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: UPDATED_AT,
+        },
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      const messageSent = events.find((event) => event.type === "thread.message-sent");
+
+      expect(messageSent?.type === "thread.message-sent" && messageSent.payload.origin).toBe(
+        "goal-continue",
+      );
+    }),
+  );
+
   it.effect("starting a goal also starts its loop", () =>
     Effect.gen(function* () {
       const result = yield* decideOrchestrationCommand({

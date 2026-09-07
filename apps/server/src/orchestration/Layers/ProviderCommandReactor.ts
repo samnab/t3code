@@ -4,6 +4,7 @@ import {
   EventId,
   type ModelSelection,
   type OrchestrationEvent,
+  type OrchestrationMessageOrigin,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
@@ -127,10 +128,13 @@ type ThreadTitleMessage = {
   readonly role: "user" | "assistant" | "system";
   readonly text: string;
   readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+  readonly origin?: OrchestrationMessageOrigin | undefined;
 };
 
 function formatThreadTitleSection(message: ThreadTitleMessage): string | undefined {
-  if (message.role === "system") {
+  // Server-authored turn starts (subagent delivery, goal-loop continuation)
+  // never came from the user, so they must not seed or appear in the title.
+  if (message.role === "system" || message.origin !== undefined) {
     return undefined;
   }
   const text = assistantCitationsToPlainText(message.text).trim();
@@ -1217,7 +1221,8 @@ const make = Effect.gen(function* () {
     yield* ensureThreadWorktree(thread);
 
     const isFirstUserMessageTurn =
-      thread.messages.filter((entry) => entry.role === "user").length === 1;
+      thread.messages.filter((entry) => entry.role === "user" && entry.origin === undefined)
+        .length === 1;
     if (isFirstUserMessageTurn) {
       const project = yield* resolveProject(thread.projectId);
       const generationCwd =

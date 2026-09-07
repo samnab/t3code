@@ -350,6 +350,7 @@ const make = Effect.gen(function* () {
             role: "user",
             text: deliveryText(run),
             attachments: [],
+            origin: "subagent-delivery",
           },
           runtimeMode: run.runtimeMode,
           interactionMode: "default",

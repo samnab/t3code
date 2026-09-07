@@ -22,3 +22,7 @@ by a server restart is reported as failed rather than left running. Explicitly
 stopping the parent cancels its active children without restarting the
 conversation. Long output is truncated explicitly. Delegation is independent
 of agent browser access.
+
+Delivery appears as a subagent result card in the conversation rather than as
+something you typed yourself, even though the agent receives it as a normal
+turn.

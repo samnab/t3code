@@ -298,6 +298,35 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
   }),
 );
 
+it.effect("strips a client-supplied origin from thread.turn.start; clients cannot forge it", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-origin",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-origin",
+        role: "user",
+        text: "hello",
+        attachments: [],
+        origin: "subagent-delivery",
+      },
+      runtimeMode: DEFAULT_RUNTIME_MODE,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    if (command.type !== "thread.turn.start") {
+      throw new Error(`expected thread.turn.start, got ${command.type}`);
+    }
+    assert.deepStrictEqual(Object.keys(command.message).sort(), [
+      "attachments",
+      "messageId",
+      "role",
+      "text",
+    ]);
+  }),
+);
+
 it.effect("decodes thread.context.compact and rejects summarizer fields", () =>
   Effect.gen(function* () {
     const command = yield* decodeClientOrchestrationCommand({
