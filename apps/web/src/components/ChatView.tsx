@@ -36,6 +36,7 @@ import {
   RuntimeMode,
   TerminalOpenInput,
   THREAD_GOAL_MAX_CHARS,
+  threadExperimentObjectiveError,
 } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
@@ -85,6 +86,7 @@ import {
   useEffectEvent,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -126,6 +128,14 @@ import {
   type TimelineEntriesProjection,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
+import { ThreadExperimentConfirmationDialog } from "./chat/ThreadExperimentConfirmationDialog";
+import {
+  canConfirmThreadExperiment,
+  threadExperimentCommandObjective,
+  threadExperimentConfirmationReducer,
+  threadExperimentStartInput,
+  type ThreadExperimentConfirmationState,
+} from "./chat/threadExperimentConfirmation";
 import {
   CHAT_TIMELINE_ANCHOR_OFFSET,
   getAnchoredTurnMetrics,
@@ -1409,6 +1419,12 @@ export default function ChatView(props: ChatViewProps) {
   const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
     reportFailure: false,
   });
+  const previewThreadExperiment = useAtomCommand(threadEnvironment.experimentPreview, {
+    reportFailure: false,
+  });
+  const startThreadExperiment = useAtomCommand(threadEnvironment.experimentStart, {
+    reportFailure: false,
+  });
   const switchGitRef = useAtomCommand(vcsEnvironment.switchRef, { reportFailure: false });
   const setThreadRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
     reportFailure: false,
@@ -1681,6 +1697,19 @@ export default function ChatView(props: ChatViewProps) {
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
+  const [threadExperimentConfirmationState, dispatchThreadExperimentConfirmation] = useReducer(
+    threadExperimentConfirmationReducer,
+    null,
+  );
+  const threadExperimentConfirmationStateRef = useRef<ThreadExperimentConfirmationState | null>(
+    null,
+  );
+  threadExperimentConfirmationStateRef.current = threadExperimentConfirmationState;
+  const submittedExperimentDraftRef = useRef<{
+    readonly threadKey: string;
+    readonly draftTarget: ScopedThreadRef;
+    readonly prompt: string;
+  } | null>(null);
   const [terminalUiLaunchContext, setTerminalUiLaunchContext] =
     useState<TerminalLaunchContext | null>(null);
   const [attachmentPreviewHandoffByMessageId, setAttachmentPreviewHandoffByMessageId] = useState<
@@ -1726,7 +1755,77 @@ export default function ChatView(props: ChatViewProps) {
   // Guards /goal metadata writes so a rapid Enter can never interleave a set
   // with a clear.
   const goalMetadataInFlightRef = useRef(false);
+  const experimentPreviewInFlightRef = useRef(false);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const confirmation = threadExperimentConfirmationStateRef.current;
+    if (
+      confirmation &&
+      scopedThreadKey(scopeThreadRef(confirmation.environmentId, confirmation.threadId)) !==
+        routeThreadKey
+    ) {
+      submittedExperimentDraftRef.current = null;
+      dispatchThreadExperimentConfirmation({ type: "cancel" });
+    }
+  }, [routeThreadKey]);
+
+  const cancelThreadExperimentConfirmation = useCallback(() => {
+    const confirmation = threadExperimentConfirmationStateRef.current;
+    if (confirmation?.confirming) return;
+    submittedExperimentDraftRef.current = null;
+    dispatchThreadExperimentConfirmation({ type: "cancel" });
+    composerRef.current?.focusAtEnd();
+  }, [composerRef]);
+
+  const confirmThreadExperiment = useCallback(async () => {
+    const confirmation = threadExperimentConfirmationStateRef.current;
+    if (!canConfirmThreadExperiment(confirmation)) return;
+    dispatchThreadExperimentConfirmation({ type: "beginConfirm" });
+    const result = await startThreadExperiment({
+      environmentId: confirmation.environmentId,
+      input: threadExperimentStartInput(confirmation),
+    });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        dispatchThreadExperimentConfirmation({
+          type: "confirmFailure",
+          error: error instanceof Error ? error.message : "The experiment could not start.",
+        });
+      } else {
+        dispatchThreadExperimentConfirmation({
+          type: "confirmFailure",
+          error: "The experiment start was interrupted. Review the configuration and try again.",
+        });
+      }
+      return;
+    }
+
+    const submitted = submittedExperimentDraftRef.current;
+    dispatchThreadExperimentConfirmation({ type: "cancel" });
+    submittedExperimentDraftRef.current = null;
+    if (!submitted || submitted.threadKey !== routeThreadKey) return;
+    const latestDraft = useComposerDraftStore.getState().getComposerDraft(submitted.draftTarget);
+    if (
+      latestDraft &&
+      shouldClearSubmittedThreadGoalDraft({
+        submittedPrompt: submitted.prompt,
+        currentPrompt: latestDraft.prompt,
+        attachmentCount: latestDraft.images.length + latestDraft.files.length,
+        contextCount:
+          latestDraft.terminalContexts.length +
+          latestDraft.elementContexts.length +
+          latestDraft.previewAnnotations.length +
+          latestDraft.reviewComments.length,
+      })
+    ) {
+      promptRef.current = "";
+      clearComposerDraftContent(submitted.draftTarget);
+      composerRef.current?.resetCursorState();
+      composerRef.current?.setGoalMode(false);
+    }
+  }, [composerRef, routeThreadKey, startThreadExperiment]);
 
   const terminalUiState = useTerminalUiStateStore((state) =>
     selectThreadTerminalUiState(state.terminalUiStateByThreadKey, routeThreadRef),
@@ -6384,9 +6483,13 @@ export default function ChatView(props: ChatViewProps) {
       stripInlineTerminalContextPlaceholders(promptForSend),
     );
     if (goalCommand) {
+      const experimentObjective = threadExperimentCommandObjective(goalCommand);
       const goalBlockReason = resolveThreadGoalCommandBlockReason({
-        isServerThread: (isServerThread && activeServerThread !== null) || isDraftGoalTarget,
-        attachmentCount: composerImages.length,
+        isServerThread:
+          experimentObjective !== null
+            ? isServerThread && activeServerThread !== null
+            : (isServerThread && activeServerThread !== null) || isDraftGoalTarget,
+        attachmentCount: composerImages.length + composerFiles.length,
         contextCount:
           composerTerminalContexts.length +
           composerElementContexts.length +
@@ -6422,6 +6525,55 @@ export default function ChatView(props: ChatViewProps) {
                       description: "Update the connected T3 Code server before using /goal.",
                     };
         toastManager.add(stackedThreadToast({ type: "warning", ...copy }));
+        return;
+      }
+      if (experimentObjective !== null) {
+        const objectiveError = threadExperimentObjectiveError(experimentObjective);
+        if (objectiveError !== null) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Experiment needs an objective",
+              description: objectiveError,
+            }),
+          );
+          return;
+        }
+        if (!activeServerThread || experimentPreviewInFlightRef.current) return;
+        experimentPreviewInFlightRef.current = true;
+        const result = await previewThreadExperiment({
+          environmentId: activeServerThread.environmentId,
+          input: { threadId: activeServerThread.id, objective: experimentObjective },
+        });
+        experimentPreviewInFlightRef.current = false;
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not preview experiment",
+                description:
+                  error instanceof Error
+                    ? error.message
+                    : "Check the experiment configuration and try again.",
+              }),
+            );
+          }
+          return;
+        }
+        submittedExperimentDraftRef.current = {
+          threadKey: routeThreadKey,
+          draftTarget: routeThreadRef,
+          prompt: rawPrompt,
+        };
+        dispatchThreadExperimentConfirmation({
+          type: "open",
+          environmentId: activeServerThread.environmentId,
+          threadId: activeServerThread.id,
+          objective: experimentObjective,
+          preview: result.value,
+        });
         return;
       }
       if (goalCommand.action === "set" && goalCommand.goal.length > THREAD_GOAL_MAX_CHARS) {
@@ -8586,6 +8738,14 @@ export default function ChatView(props: ChatViewProps) {
             {rightPanelContent}
           </RightPanelTabs>
         </RightPanelSheet>
+      ) : null}
+
+      {threadExperimentConfirmationState ? (
+        <ThreadExperimentConfirmationDialog
+          state={threadExperimentConfirmationState}
+          onCancel={cancelThreadExperimentConfirmation}
+          onConfirm={() => void confirmThreadExperiment()}
+        />
       ) : null}
 
       {expandedImage && (
