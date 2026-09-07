@@ -15,12 +15,13 @@ const identity = {
   providerInstanceId: ProviderInstanceId.make("claudeAgent"),
   providerSessionId: "provider-session-experiment",
   runId: "run-experiment",
+  generation: 3,
 };
 const invocation = {
   environmentId: EnvironmentId.make("environment-experiment"),
   ...identity,
   capabilities: new Set(["experiment"] as const),
-  experiment: { runId: identity.runId, generation: 3 },
+  experiment: { runId: identity.runId, generation: identity.generation },
   issuedAt: 1,
 };
 const client = McpSchema.McpServerClient.of({
@@ -171,6 +172,70 @@ it.effect("rejects credentials without the exact experiment-only binding", () =>
       ),
     ),
   ),
+);
+
+it.effect(
+  "passes credential generation to the authoritative service and rejects a stale rearm",
+  () => {
+    const acceptedGenerations: Array<number> = [];
+    const service = ExperimentMcpService.of({
+      status: (input) =>
+        input.generation === 4
+          ? Effect.sync(() => (acceptedGenerations.push(input.generation), summary))
+          : Effect.fail(
+              new ExperimentModel.ExperimentMcpError({
+                code: "PROVIDER_EXPERIMENT_UNAUTHORIZED",
+                message: "Experiment credential generation is stale.",
+              }),
+            ),
+      listFiles: () => Effect.die("unused"),
+      readFile: () => Effect.die("unused"),
+      apply: () => Effect.die("unused"),
+      evaluate: () => Effect.die("unused"),
+    });
+
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const stale = yield* server
+        .callTool({ name: "experiment_status", arguments: {} })
+        .pipe(
+          Effect.provideService(McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(stale.isError).toBe(true);
+      expect(JSON.stringify(stale)).toContain("Experiment credential generation is stale.");
+
+      const currentInvocation = {
+        ...invocation,
+        experiment: { ...invocation.experiment, generation: 4 },
+      };
+      const current = yield* server
+        .callTool({ name: "experiment_status", arguments: {} })
+        .pipe(
+          Effect.provideService(McpInvocationContext, currentInvocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(current.isError).not.toBe(true);
+      expect(acceptedGenerations).toEqual([4]);
+
+      const callerSuppliedGeneration = yield* server
+        .callTool({ name: "experiment_status", arguments: { generation: 4 } })
+        .pipe(
+          Effect.provideService(McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+          Effect.result,
+        );
+      expect(callerSuppliedGeneration._tag).toBe("Failure");
+      expect(acceptedGenerations).toEqual([4]);
+    }).pipe(
+      Effect.provide(
+        ExperimentToolkitRegistrationLive.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(Layer.succeed(ExperimentMcpService, service)),
+        ),
+      ),
+    );
+  },
 );
 
 it.effect("rejects absolute, parent-traversing, and backslash paths", () =>

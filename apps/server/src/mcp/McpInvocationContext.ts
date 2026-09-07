@@ -7,7 +7,7 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-import { ExperimentMcpError } from "./ExperimentMcpModel.ts";
+import { ExperimentMcpError, type ExperimentMcpIdentity } from "./ExperimentMcpModel.ts";
 
 export type McpCapability = "preview" | "delegation" | "experiment";
 
@@ -60,11 +60,13 @@ export const requireExperimentMcpInvocation = Effect.fn("mcp.requireExperimentIn
         message: "MCP credential is not bound to an experiment run.",
       });
     }
-    return {
+    const identity: ExperimentMcpIdentity = {
       threadId: invocation.threadId,
       providerInstanceId: invocation.providerInstanceId,
       providerSessionId: invocation.providerSessionId,
       runId: invocation.experiment.runId,
+      generation: invocation.experiment.generation,
     };
+    return identity;
   },
 );

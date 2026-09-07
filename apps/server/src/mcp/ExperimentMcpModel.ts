@@ -6,6 +6,7 @@ export interface ExperimentMcpIdentity {
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerSessionId: string;
   readonly runId: string;
+  readonly generation: number;
 }
 
 export class ExperimentMcpError extends Schema.TaggedErrorClass<ExperimentMcpError>()(

@@ -217,3 +217,29 @@ it.effect("revokes an experiment credential by its provider session", () =>
     expect(yield* registry.resolve(token)).toBeUndefined();
   }),
 );
+
+it.effect("revokes the prior generation when an experiment is rearmed with identical ids", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const binding = {
+      threadId: ThreadId.make("experiment-thread-rearm"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerSessionId: "experiment-provider-session-reused",
+      runId: "experiment-run-reused",
+    };
+    const stale = yield* registry.issueExperiment({ ...binding, generation: 1 });
+    const current = yield* registry.issueExperiment({ ...binding, generation: 2 });
+
+    expect(
+      yield* registry.resolve(stale.config.authorizationHeader.replace(/^Bearer\s+/, "")),
+    ).toBeUndefined();
+    expect(
+      yield* registry.resolve(current.config.authorizationHeader.replace(/^Bearer\s+/, "")),
+    ).toMatchObject({
+      threadId: binding.threadId,
+      providerInstanceId: binding.providerInstanceId,
+      providerSessionId: binding.providerSessionId,
+      experiment: { runId: binding.runId, generation: 2 },
+    });
+  }),
+);
