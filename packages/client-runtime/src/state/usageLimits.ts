@@ -1,4 +1,17 @@
-import type { OrchestrationThreadActivity, UsageLimitWindow } from "@t3tools/contracts";
+import type { OrchestrationThreadActivity } from "@t3tools/contracts";
+
+/**
+ * One usage window as carried by a `usage-limits.updated` thread activity.
+ * Local to this fold: the published provider snapshot uses
+ * `ServerProviderUsageWindow` (ISO reset time), while the activity payload
+ * stays on epoch milliseconds.
+ */
+export type UsageLimitWindow = {
+  readonly id: string;
+  readonly label: string;
+  readonly usedPercent: number;
+  readonly resetsAt: number | null;
+};
 
 export type ProviderUsageLimits = {
   readonly provider: string;

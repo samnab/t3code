@@ -1,21 +1,20 @@
 import type { ServerProvider } from "@t3tools/contracts";
 
-/** How manual compaction is requested for this thread's provider. */
-export type ThreadCompactionMode = "prompt" | "native";
-
 export interface ThreadCompactionControl {
-  /** Server-declared mode; null hides the control (unsupported or old server). */
-  readonly mode: ThreadCompactionMode | null;
+  /** False hides the control (provider does not declare /compact, or an old server). */
+  readonly available: boolean;
   readonly disabled: boolean;
   readonly disabledReason: string | null;
 }
 
 /**
- * Resolve the composer's Compact context control from the server-declared
- * capability plus the same guards web uses: session busy, pending turn work,
- * a dirty draft, a live connection requirement for native dispatch (prompt
- * mode queues like any message), and an in-flight native request. All inputs
- * are plain values so the matrix stays testable.
+ * Resolve the composer's Compact context control. Availability now comes
+ * from the provider's declared `/compact` slash command — the server decides
+ * internally whether that dispatches a turn or a native call, so the client
+ * always sends "/compact" as an ordinary message. The rest of the matrix
+ * mirrors web's guards: session busy, pending turn work, a dirty draft, and
+ * an in-flight compact. All inputs are plain values so the matrix stays
+ * testable.
  */
 export function resolveThreadCompactionControl(input: {
   readonly provider: ServerProvider | null;
@@ -24,44 +23,35 @@ export function resolveThreadCompactionControl(input: {
   readonly pendingUserInputCount: number;
   readonly draftHasContent: boolean;
   readonly compactInFlight: boolean;
-  readonly connected: boolean;
 }): ThreadCompactionControl {
-  const mode = input.provider?.contextCompaction ?? null;
-  if (mode === null) {
-    return { mode: null, disabled: true, disabledReason: null };
+  const available =
+    input.provider?.slashCommands.some((command) => command.name === "compact") ?? false;
+  if (!available) {
+    return { available: false, disabled: true, disabledReason: null };
   }
   if (input.sessionStatus === "running" || input.sessionStatus === "starting") {
     return {
-      mode,
+      available,
       disabled: true,
       disabledReason: "Stop the running turn before compacting.",
     };
   }
   if (input.pendingApprovalCount > 0 || input.pendingUserInputCount > 0) {
     return {
-      mode,
+      available,
       disabled: true,
       disabledReason: "Resolve the pending request before compacting.",
     };
   }
   if (input.draftHasContent) {
     return {
-      mode,
+      available,
       disabled: true,
       disabledReason: "Send or clear your message before compacting.",
     };
   }
   if (input.compactInFlight) {
-    return { mode, disabled: true, disabledReason: "Compacting…" };
+    return { available, disabled: true, disabledReason: "Compacting…" };
   }
-  // Native compaction is a direct dispatch with no offline queue; the /compact
-  // prompt is an ordinary message and queues like any other.
-  if (mode === "native" && !input.connected) {
-    return {
-      mode,
-      disabled: true,
-      disabledReason: "Reconnect before compacting.",
-    };
-  }
-  return { mode, disabled: false, disabledReason: null };
+  return { available, disabled: false, disabledReason: null };
 }

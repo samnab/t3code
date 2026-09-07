@@ -467,7 +467,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         yield* offerRuntimeEvent({
           ...base,
           type: "account.rate-limits.updated",
-          payload: { windows, replace: true },
+          payload: { limits: { windows } },
         });
       });
 
@@ -2461,7 +2461,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       startSession,
       sendTurn,
       interruptTurn,
-      compactContext,
+      compaction: { type: "native", start: compactContext },
       respondToRequest,
       respondToUserInput,
       stopSession,

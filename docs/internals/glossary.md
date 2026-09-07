@@ -17,6 +17,18 @@ This is a living glossary for T3 Code. It explains what common terms mean in thi
 
 ### Project and workspace
 
+#### Environment
+
+One running server and the machine, credentials, workspace access, and state it owns.
+
+#### Client
+
+A web, desktop, or mobile UI connected to an environment. The desktop app can also host a server.
+
+#### T3 home
+
+The base data directory. Runtime state normally lives under its `userdata` directory.
+
 #### Project
 
 The top-level workspace record in the app. In [the orchestration contracts][1], a project has a `workspaceRoot` and a title. It does not contain threads: `OrchestrationProject` and `OrchestrationThread` are separate arrays on the read model, and a project can have zero threads. See [workspace-layout.md][2].
@@ -93,9 +105,13 @@ The current materialized view of orchestration state. In [the contracts][1], it 
 
 A side-effecting service that handles follow-up work after events or runtime signals. Examples include [CheckpointReactor.ts][6], [ProviderCommandReactor.ts][12], and [ProviderRuntimeIngestion.ts][5].
 
-#### Receipt
+#### Command receipt
 
-A typed signal emitted when an async milestone completes, such as `checkpoint.baseline.captured`, `checkpoint.diff.finalized`, or `turn.processing.quiesced`. Receipts are a test-only mechanism: the production `RuntimeReceiptBusLive` publish is a no-op and only the test layer is PubSub-backed. Do not build production behavior on them. See [RuntimeReceiptBus.ts][13] and [CheckpointReactor.ts][6].
+A durable record of a command's result, used to make retries idempotent.
+
+#### Runtime receipt
+
+A typed signal emitted when an async milestone completes, such as `checkpoint.baseline.captured`, `checkpoint.diff.finalized`, or `turn.processing.quiesced`. Runtime receipts are a test-only mechanism: the production `RuntimeReceiptBusLive` publish is a no-op and only the test layer is PubSub-backed. Do not build production behavior on them. See [RuntimeReceiptBus.ts][13] and [CheckpointReactor.ts][6].
 
 #### Quiesced
 
@@ -107,7 +123,15 @@ The live backend agent implementation and its event stream. The main service is 
 
 #### Provider
 
-The backend agent runtime that actually performs work. Six drivers ship built in: Codex, Claude, Cursor, Grok, Pi, and OpenCode. See [ProviderService.ts][14], [ProviderAdapter.ts][15], and [CodexAdapter.ts][17] as a representative adapter.
+The backend agent runtime that actually performs work. Drivers ship built in for Codex, Claude, Cursor, Grok, Pi, OpenCode, and Antigravity. See [ProviderService.ts][14], [ProviderAdapter.ts][15], and [CodexAdapter.ts][17] as a representative adapter.
+
+#### Driver
+
+The integration for a provider kind.
+
+#### Provider instance
+
+One configured provider, with its own settings and lifecycle. Multiple instances can use the same driver.
 
 #### Session
 

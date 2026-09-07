@@ -3,9 +3,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
   formatContextWindowCompactionMessage,
-  hasAvailableClaudeCompactionProvider,
+  hasAvailableCompactionProvider,
   hasDismissedResumeCompaction,
-  resolveContextCompactionMode,
   resolveContextWindowModelDisplayName,
   shouldOfferResumeCompaction,
 } from "./ContextWindowMeter.logic";
@@ -26,12 +25,12 @@ function claudeProvider(input: {
     auth: { status: "authenticated" },
     checkedAt: "2026-08-24T12:00:00.000Z",
     models: [],
-    slashCommands: [],
+    slashCommands: [{ name: "compact", description: "" }],
     skills: [],
   };
 }
 
-describe("hasAvailableClaudeCompactionProvider", () => {
+describe("hasAvailableCompactionProvider", () => {
   const originalInstanceId = ProviderInstanceId.make("claude_original");
 
   it("rejects a fallback in a different locked continuation group", () => {
@@ -48,8 +47,9 @@ describe("hasAvailableClaudeCompactionProvider", () => {
     ]);
 
     expect(
-      hasAvailableClaudeCompactionProvider({
+      hasAvailableCompactionProvider({
         providers,
+        driverKind: ProviderDriverKind.make("claudeAgent"),
         instanceId: originalInstanceId,
         lockedInstanceId: originalInstanceId,
       }),
@@ -70,8 +70,9 @@ describe("hasAvailableClaudeCompactionProvider", () => {
     ]);
 
     expect(
-      hasAvailableClaudeCompactionProvider({
+      hasAvailableCompactionProvider({
         providers,
+        driverKind: ProviderDriverKind.make("claudeAgent"),
         instanceId: originalInstanceId,
         lockedInstanceId: originalInstanceId,
       }),
@@ -233,59 +234,5 @@ describe("hasDismissedResumeCompaction", () => {
         { kind: "user-input.resolved", payload: { answers: ["Don't ask again"] } },
       ]),
     ).toBe(false);
-  });
-});
-
-describe("resolveContextCompactionMode", () => {
-  function provider(input: {
-    instanceId: string;
-    driver: string;
-    contextCompaction?: "prompt" | "native";
-  }): ServerProvider {
-    return {
-      instanceId: ProviderInstanceId.make(input.instanceId),
-      driver: ProviderDriverKind.make(input.driver),
-      ...(input.contextCompaction ? { contextCompaction: input.contextCompaction } : {}),
-      enabled: true,
-      installed: true,
-      version: null,
-      status: "ready",
-      auth: { status: "authenticated" },
-      checkedAt: "2026-08-24T12:00:00.000Z",
-      models: [],
-      slashCommands: [],
-      skills: [],
-    };
-  }
-
-  it("resolves the server-declared mode for the thread's instance", () => {
-    const providers = deriveProviderInstanceEntries([
-      provider({ instanceId: "claude", driver: "claudeAgent", contextCompaction: "prompt" }),
-      provider({ instanceId: "codex", driver: "codex", contextCompaction: "native" }),
-      provider({ instanceId: "pi", driver: "pi", contextCompaction: "native" }),
-      provider({ instanceId: "grok", driver: "grok" }),
-    ]);
-    expect(
-      resolveContextCompactionMode({ providers, instanceId: ProviderInstanceId.make("claude") }),
-    ).toBe("prompt");
-    expect(
-      resolveContextCompactionMode({ providers, instanceId: ProviderInstanceId.make("codex") }),
-    ).toBe("native");
-    expect(
-      resolveContextCompactionMode({ providers, instanceId: ProviderInstanceId.make("pi") }),
-    ).toBe("native");
-  });
-
-  it("returns null for unsupported providers, unknown instances, and old servers", () => {
-    const providers = deriveProviderInstanceEntries([
-      provider({ instanceId: "grok", driver: "grok" }),
-    ]);
-    expect(
-      resolveContextCompactionMode({ providers, instanceId: ProviderInstanceId.make("grok") }),
-    ).toBeNull();
-    expect(
-      resolveContextCompactionMode({ providers, instanceId: ProviderInstanceId.make("missing") }),
-    ).toBeNull();
-    expect(resolveContextCompactionMode({ providers: [], instanceId: null })).toBeNull();
   });
 });

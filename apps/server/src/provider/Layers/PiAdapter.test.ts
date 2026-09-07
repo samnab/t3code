@@ -1989,7 +1989,8 @@ describe("PiAdapter compaction", () => {
         runtimeMode: "full-access",
       });
 
-      yield* adapter.compactContext?.(THREAD_ID);
+      if (adapter.compaction?.type !== "native") throw new Error("expected native compaction");
+      yield* adapter.compaction.start(THREAD_ID);
 
       const itemStarted = yield* collector.waitFor(
         (event) => event.type === "item.started" && event.payload.itemType === "context_compaction",
@@ -2026,7 +2027,8 @@ describe("PiAdapter compaction", () => {
       });
       yield* adapter.sendTurn({ threadId: THREAD_ID, input: "WAIT_FOR_ABORT" });
 
-      const blocked = yield* adapter.compactContext?.(THREAD_ID).pipe(Effect.flip);
+      if (adapter.compaction?.type !== "native") throw new Error("expected native compaction");
+      const blocked = yield* adapter.compaction.start(THREAD_ID).pipe(Effect.flip);
       expect(blocked?._tag).toBe("ProviderAdapterRequestError");
       if (blocked?._tag === "ProviderAdapterRequestError") {
         expect(blocked.detail).toContain("cannot start while a turn is running");
@@ -2051,7 +2053,8 @@ describe("PiAdapter compaction", () => {
         runtimeMode: "full-access",
       });
 
-      const failure = yield* adapter.compactContext?.(THREAD_ID).pipe(Effect.flip);
+      if (adapter.compaction?.type !== "native") throw new Error("expected native compaction");
+      const failure = yield* adapter.compaction.start(THREAD_ID).pipe(Effect.flip);
       expect(failure?._tag).toBe("ProviderAdapterProcessError");
       yield* collector.waitFor(
         (event) =>

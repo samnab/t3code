@@ -1,53 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import {
-  normalizeClaudeRateLimit,
-  normalizeCodexRateLimits,
-  normalizeZaiQuota,
-  usageLimitWindowLabel,
-} from "./usageLimits.ts";
-
-describe("normalizeCodexRateLimits", () => {
-  it("normalizes both windows and converts reset seconds to milliseconds", () => {
-    expect(
-      normalizeCodexRateLimits({
-        primary: { usedPercent: 42, resetsAt: 1_700_000_000, windowDurationMins: 300 },
-        secondary: { usedPercent: 7, resetsAt: null, windowDurationMins: 10_080 },
-      }),
-    ).toEqual([
-      { id: "primary", label: "5-hour", usedPercent: 42, resetsAt: 1_700_000_000_000 },
-      { id: "secondary", label: "Weekly", usedPercent: 7, resetsAt: null },
-    ]);
-  });
-
-  it("drops windows without a usable percentage", () => {
-    expect(normalizeCodexRateLimits({ primary: null, secondary: {} })).toEqual([]);
-    expect(normalizeCodexRateLimits(undefined)).toEqual([]);
-  });
-});
-
-describe("normalizeClaudeRateLimit", () => {
-  it("emits the single window the SDK event carries", () => {
-    expect(
-      normalizeClaudeRateLimit({
-        status: "allowed",
-        rateLimitType: "seven_day_opus",
-        utilization: 63.5,
-        resetsAt: 1_700_000_000,
-      }),
-    ).toEqual([
-      {
-        id: "seven_day_opus",
-        label: "Weekly (Opus)",
-        usedPercent: 63.5,
-        resetsAt: 1_700_000_000_000,
-      },
-    ]);
-  });
-
-  it("ignores events without a type or utilization", () => {
-    expect(normalizeClaudeRateLimit({ status: "allowed" })).toEqual([]);
-  });
-});
+import { normalizeZaiQuota, usageLimitWindowLabel } from "./usageLimits.ts";
 
 describe("usageLimitWindowLabel", () => {
   it("title-cases unknown keys instead of dropping them", () => {
@@ -76,7 +28,16 @@ describe("normalizeZaiQuota", () => {
           ],
         },
       }),
-    ).toEqual([{ id: "tokens_5h", label: "5-hour", usedPercent: 12, resetsAt: 1_700_000_000_000 }]);
+    ).toEqual([
+      {
+        id: "tokens_5h",
+        kind: "session",
+        label: "5-hour",
+        usedPercent: 12,
+        resetsAt: "2023-11-14T22:13:20.000Z",
+        windowDurationMins: 300,
+      },
+    ]);
   });
 
   it("returns nothing for malformed payloads", () => {

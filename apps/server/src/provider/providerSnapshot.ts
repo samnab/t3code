@@ -1,21 +1,22 @@
 import type {
+  CustomModelSetting,
   ProviderDriverKind,
   ModelCapabilities,
   ServerProvider,
   ServerProviderAuth,
-  ServerProviderContextCompaction,
   ServerProviderExecutionGoal,
   ServerProviderSkill,
   ServerProviderSlashCommand,
   ServerProviderModel,
   ServerProviderState,
+  ServerProviderUsageLimits,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { normalizeCustomModelSlug } from "@t3tools/shared/model";
+import { readCustomModelEntries } from "@t3tools/shared/model";
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { createProviderVersionAdvisory } from "./providerMaintenance.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
@@ -23,6 +24,11 @@ import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 export const DEFAULT_TIMEOUT_MS = 4_000;
 // Auth status checks involve disk/network lookups and can be slow on first run (especially Windows)
 export const AUTH_PROBE_TIMEOUT_MS = 10_000;
+
+export const COMPACT_SLASH_COMMAND = {
+  name: "compact",
+  description: "Summarize the conversation and reduce context usage",
+} satisfies ServerProviderSlashCommand;
 
 export interface CommandResult {
   readonly stdout: string;
@@ -52,6 +58,7 @@ export interface ProviderProbeResult {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProviderAuth;
   readonly message?: string;
+  readonly usageLimits?: ServerProviderUsageLimits;
 }
 
 export interface ServerProviderPresentation {
@@ -60,7 +67,6 @@ export interface ServerProviderPresentation {
   readonly showInteractionModeToggle?: boolean;
   readonly requiresNewThreadForModelChange?: boolean;
   /** How manual context compaction is requested; absent = unsupported. */
-  readonly contextCompaction?: ServerProviderContextCompaction;
   /** Whether the provider exposes native execution goals; absent = unsupported. */
   readonly executionGoal?: ServerProviderExecutionGoal;
 }
@@ -144,26 +150,30 @@ export function parseGenericCliVersion(output: string): string | null {
   return match?.[1] ?? null;
 }
 
+/**
+ * Append the user's custom models after the built-ins. A custom entry that
+ * declares its own capabilities keeps them; a bare slug gets the driver's
+ * default set. Slugs that collide with a built-in are dropped.
+ */
 export function providerModelsFromSettings(
   builtInModels: ReadonlyArray<ServerProviderModel>,
-  customModels: ReadonlyArray<string>,
+  customModels: ReadonlyArray<CustomModelSetting>,
   customModelCapabilities: ModelCapabilities,
 ): ReadonlyArray<ServerProviderModel> {
   const resolvedBuiltInModels = [...builtInModels];
   const seen = new Set(resolvedBuiltInModels.map((model) => model.slug));
   const customEntries: ServerProviderModel[] = [];
 
-  for (const candidate of customModels) {
-    const normalized = normalizeCustomModelSlug(candidate);
-    if (!normalized || seen.has(normalized)) {
+  for (const entry of readCustomModelEntries(customModels)) {
+    if (seen.has(entry.slug)) {
       continue;
     }
-    seen.add(normalized);
+    seen.add(entry.slug);
     customEntries.push({
-      slug: normalized,
-      name: normalized,
+      slug: entry.slug,
+      name: entry.name,
       isCustom: true,
-      capabilities: customModelCapabilities,
+      capabilities: entry.capabilities ?? customModelCapabilities,
     });
   }
 
@@ -245,9 +255,6 @@ export function buildServerProvider(input: {
     ...(typeof input.presentation.requiresNewThreadForModelChange === "boolean"
       ? { requiresNewThreadForModelChange: input.presentation.requiresNewThreadForModelChange }
       : {}),
-    ...(input.presentation.contextCompaction !== undefined
-      ? { contextCompaction: input.presentation.contextCompaction }
-      : {}),
     ...(input.presentation.executionGoal !== undefined
       ? { executionGoal: input.presentation.executionGoal }
       : {}),
@@ -261,6 +268,7 @@ export function buildServerProvider(input: {
     models: input.models,
     slashCommands: [...(input.slashCommands ?? [])],
     skills: [...(input.skills ?? [])],
+    ...(input.probe.usageLimits ? { usageLimits: input.probe.usageLimits } : {}),
     ...(versionAdvisory ? { versionAdvisory } : {}),
   };
 }

@@ -373,6 +373,8 @@ function AgentRow({
   onSelect: (agentId: string) => void;
 }) {
   const visuals = STATUS_VISUALS[agent.status];
+  const statusLabel =
+    agent.kind === "subagent_batch" && agent.status === "idle" ? "Idle" : visuals.label;
   const activity = agentActivityText(agent);
   const modelLabel = formatSubagentModelLabel(agent.model, agent.effort);
   const role =
@@ -437,12 +439,12 @@ function AgentRow({
           agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
         )}
       >
-        {activity ?? visuals.label}
+        {activity ?? statusLabel}
       </span>
       <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
         {metadata.join(" · ")}
       </span>
-      <span className="sr-only">{visuals.label}</span>
+      <span className="sr-only">{statusLabel}</span>
     </button>
   );
 }
@@ -1163,13 +1165,19 @@ export function AgentsPanel({
       )}
       <footer className="flex items-center justify-between border-t border-border/60 px-3 py-1.5 font-mono text-[.7rem] text-muted-foreground">
         <span className="flex items-center gap-2">
-          {model.runningCount + model.waitingCount + model.liveBackgroundCount > 0 ? (
+          {model.runningCount + model.waitingCount > 0 ? (
             <span className="text-info-foreground">
-              ● {model.runningCount + model.waitingCount + model.liveBackgroundCount} working
+              ● {model.runningCount + model.waitingCount} working
             </span>
           ) : null}
           {model.idleCount > 0 ? <span>{model.idleCount} idle</span> : null}
           {model.settledCount > 0 ? <span>{model.settledCount} settled</span> : null}
+          {model.liveBackgroundCount > 0 ? (
+            <span>
+              {model.liveBackgroundCount}{" "}
+              {model.liveBackgroundCount === 1 ? "process" : "processes"}
+            </span>
+          ) : null}
         </span>
         <span className="tabular-nums">Σ {formatSubagentTokenCount(model.totalTokens)} tok</span>
       </footer>

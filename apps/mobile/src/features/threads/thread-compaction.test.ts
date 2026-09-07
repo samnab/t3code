@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { resolveThreadCompactionControl } from "./thread-compaction";
 
-function provider(input?: { contextCompaction?: "prompt" | "native" }): ServerProvider {
+function provider(input?: { supportsCompact?: boolean }): ServerProvider {
   return {
     instanceId: ProviderInstanceId.make("pi"),
     driver: ProviderDriverKind.make("pi"),
@@ -14,9 +14,8 @@ function provider(input?: { contextCompaction?: "prompt" | "native" }): ServerPr
     auth: { status: "authenticated" },
     checkedAt: "2026-08-24T12:00:00.000Z",
     models: [],
-    slashCommands: [],
+    slashCommands: input?.supportsCompact ? [{ name: "compact" }] : [],
     skills: [],
-    ...(input?.contextCompaction ? { contextCompaction: input.contextCompaction } : {}),
   };
 }
 
@@ -26,29 +25,22 @@ const idle = {
   pendingUserInputCount: 0,
   draftHasContent: false,
   compactInFlight: false,
-  connected: true,
 } as const;
 
 describe("resolveThreadCompactionControl", () => {
-  it("exposes each mode and hides the control for unsupported providers and old servers", () => {
+  it("shows the control only when the provider declares /compact", () => {
     expect(
       resolveThreadCompactionControl({
         ...idle,
-        provider: provider({ contextCompaction: "prompt" }),
-      }).mode,
-    ).toBe("prompt");
-    expect(
-      resolveThreadCompactionControl({
-        ...idle,
-        provider: provider({ contextCompaction: "native" }),
-      }).mode,
-    ).toBe("native");
-    expect(resolveThreadCompactionControl({ ...idle, provider: provider() }).mode).toBeNull();
-    expect(resolveThreadCompactionControl({ ...idle, provider: null }).mode).toBeNull();
+        provider: provider({ supportsCompact: true }),
+      }).available,
+    ).toBe(true);
+    expect(resolveThreadCompactionControl({ ...idle, provider: provider() }).available).toBe(false);
+    expect(resolveThreadCompactionControl({ ...idle, provider: null }).available).toBe(false);
   });
 
   it("disables while a turn runs, a request waits, the draft is dirty, or a compact is in flight", () => {
-    const base = { ...idle, provider: provider({ contextCompaction: "native" }) };
+    const base = { ...idle, provider: provider({ supportsCompact: true }) };
     expect(resolveThreadCompactionControl({ ...base, sessionStatus: "running" })).toMatchObject({
       disabled: true,
       disabledReason: "Stop the running turn before compacting.",
@@ -72,22 +64,11 @@ describe("resolveThreadCompactionControl", () => {
     });
   });
 
-  it("requires a live connection only for native dispatch — prompt mode queues like any message", () => {
-    const native = resolveThreadCompactionControl({
+  it("is enabled otherwise", () => {
+    const control = resolveThreadCompactionControl({
       ...idle,
-      connected: false,
-      provider: provider({ contextCompaction: "native" }),
+      provider: provider({ supportsCompact: true }),
     });
-    expect(native).toMatchObject({
-      disabled: true,
-      disabledReason: "Reconnect before compacting.",
-    });
-
-    const prompt = resolveThreadCompactionControl({
-      ...idle,
-      connected: false,
-      provider: provider({ contextCompaction: "prompt" }),
-    });
-    expect(prompt.disabled).toBe(false);
+    expect(control).toMatchObject({ available: true, disabled: false, disabledReason: null });
   });
 });

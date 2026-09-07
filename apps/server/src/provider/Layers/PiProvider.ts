@@ -16,7 +16,12 @@
  *
  * @module provider/Layers/PiProvider
  */
-import { type PiSettings, type ServerProvider, type ServerProviderModel } from "@t3tools/contracts";
+import {
+  type CustomModelSetting,
+  type PiSettings,
+  type ServerProvider,
+  type ServerProviderModel,
+} from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
@@ -58,7 +63,6 @@ const PI_PRESENTATION = {
   showInteractionModeToggle: false,
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
   requiresNewThreadForModelChange: false,
-  contextCompaction: "native",
 } as const;
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
@@ -84,7 +88,7 @@ interface PiDiscovery extends PiDiscoveredCommands {
 }
 
 function piModelsFromSettings(
-  customModels: ReadonlyArray<string> | undefined,
+  customModels: ReadonlyArray<CustomModelSetting> | undefined,
   discovered: ReadonlyArray<ServerProviderModel> = [],
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(

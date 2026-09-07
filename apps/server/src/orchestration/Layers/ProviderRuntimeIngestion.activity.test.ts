@@ -144,14 +144,23 @@ describe("runtimeEventToActivities tool streaming persistence", () => {
 });
 
 describe("runtimeEventToActivities usage limits", () => {
-  it("carries the provider and merge mode onto a usage-limits activity", () => {
+  it("carries the provider onto a usage-limits activity with epoch reset times", () => {
     const activities = runtimeEventToActivities({
       ...base,
       type: "account.rate-limits.updated",
       eventId: EventId.make("evt-limits"),
       payload: {
-        windows: [{ id: "primary", label: "5-hour", usedPercent: 42, resetsAt: 1_700_000_000_000 }],
-        replace: true,
+        limits: {
+          windows: [
+            {
+              id: "primary",
+              kind: "session",
+              label: "5-hour",
+              usedPercent: 42,
+              resetsAt: "2023-11-14T22:13:20.000Z",
+            },
+          ],
+        },
       },
     } satisfies ProviderRuntimeEvent);
 
@@ -160,7 +169,6 @@ describe("runtimeEventToActivities usage limits", () => {
     expect(activities[0]?.payload).toEqual({
       provider: "codex",
       windows: [{ id: "primary", label: "5-hour", usedPercent: 42, resetsAt: 1_700_000_000_000 }],
-      replace: true,
     });
   });
 
@@ -170,7 +178,7 @@ describe("runtimeEventToActivities usage limits", () => {
         ...base,
         type: "account.rate-limits.updated",
         eventId: EventId.make("evt-limits-empty"),
-        payload: { windows: [], replace: false },
+        payload: { limits: { windows: [] } },
       } satisfies ProviderRuntimeEvent),
     ).toEqual([]);
   });
