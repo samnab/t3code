@@ -226,7 +226,8 @@ export const make = Effect.gen(function* () {
       // The T3 goal change already landed; only the provider mirror failed.
       // Surface it instead of silently leaving the two out of sync.
       Effect.catch((error) =>
-        error._tag === "ProviderSessionNotFoundError"
+        error._tag === "ProviderSessionNotFoundError" ||
+        error._tag === "ProviderAdapterSessionNotFoundError"
           ? Effect.void
           : appendFailureActivity({
               threadId,

@@ -13,9 +13,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+  CheckpointRef,
   CommandId,
   EventId,
   ThreadId,
+  TurnId,
   type OrchestrationEvent,
   type ThreadGoalLoop,
 } from "@t3tools/contracts";
@@ -289,6 +291,32 @@ function threadGoalClearedEvent(): OrchestrationEvent {
       threadId,
       goal: null,
       updatedAt: "2026-09-07T05:40:25.000Z",
+    },
+  };
+}
+
+function turnDiffCompletedEvent(): OrchestrationEvent {
+  const threadId = ThreadId.make("thread-1");
+  return {
+    sequence: 2,
+    eventId: EventId.make("thread-turn-diff-completed"),
+    aggregateKind: "thread",
+    aggregateId: threadId,
+    occurredAt: "2026-09-07T05:56:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.turn-diff-completed",
+    payload: {
+      threadId,
+      turnId: TurnId.make("experiment-final-turn"),
+      checkpointTurnCount: 1,
+      checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-1/final"),
+      status: "ready",
+      files: [],
+      assistantMessageId: null,
+      completedAt: "2026-09-07T05:56:00.000Z",
     },
   };
 }
@@ -963,6 +991,89 @@ describe("ExperimentService", () => {
       });
       assert.strictEqual(next.cwd, realpathSync.native(cwd));
     }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("defers completed native provider teardown until the final turn diff", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    let markCompleted = () => {};
+    let markStopped = () => {};
+    const completed = new Promise<void>((resolve) => {
+      markCompleted = resolve;
+    });
+    const stopped = new Promise<void>((resolve) => {
+      markStopped = resolve;
+    });
+    const fixture = testLayer(contexts, {
+      onSave: (profile) => {
+        if (profile.phase === "completed" && profile.providerSessionActive) markCompleted();
+      },
+      onStopProvider: () => markStopped(),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const activation = yield* Deferred.make<void>();
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        yield* Effect.gen(function* () {
+          const service = yield* ExperimentService;
+          const preview = yield* service.preview({
+            threadId: "thread-1",
+            objective: "Improve score",
+          });
+          const started = yield* service.start({
+            threadId: "thread-1",
+            objective: "Improve score",
+            confirmationId: preview.confirmationId,
+          });
+
+          const lifecycle = yield* ExperimentLifecycleReactor.ExperimentLifecycleReactor;
+          yield* lifecycle.start();
+          yield* Deferred.succeed(activation, undefined);
+          yield* Queue.offer(
+            events,
+            goalLoopUpdatedEvent({ kind: "experiment", state: "completed" }),
+          );
+          yield* Effect.promise(() => completed);
+
+          assert.strictEqual(fixture.stopped.length, 0);
+          assert.strictEqual(fixture.rows.get("thread-1")?.armed, false);
+          assert.strictEqual(fixture.rows.get("thread-1")?.providerSessionActive, true);
+          const mutation = yield* service
+            .apply({
+              threadId: "thread-1",
+              providerInstanceId: "claude",
+              providerSessionId: "experiment-thread-1-1",
+              runId: started.runId,
+              generation: 1,
+              hypothesis: "Too late",
+              changes: [],
+            })
+            .pipe(Effect.result);
+          assert(Result.isFailure(mutation));
+          assert.strictEqual(mutation.failure.code, "invalid_phase");
+
+          yield* Queue.offer(events, turnDiffCompletedEvent());
+          yield* Effect.promise(() => stopped);
+          assert.strictEqual(fixture.stopped.length, 1);
+          assert.strictEqual(fixture.rows.get("thread-1")?.phase, "completed");
+          assert.strictEqual(fixture.rows.get("thread-1")?.providerSessionActive, false);
+        }).pipe(
+          Effect.provide(
+            ExperimentLifecycleReactor.layer.pipe(
+              Layer.provideMerge(fixture.layer),
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+                    streamDomainEvents: Stream.fromQueue(events),
+                  }),
+                  Layer.succeed(ServerActivation, Deferred.await(activation)),
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
+    );
   });
 
   it.effect("stops a provider that resumes while settlement waits for the thread lock", () => {

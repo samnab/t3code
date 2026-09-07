@@ -275,6 +275,8 @@ export interface ExperimentServiceShape {
     readonly threadId: string;
     readonly reason: string;
     readonly terminal: "pause" | "block" | "complete" | "clear" | "capped";
+    readonly deferProviderStop?: boolean;
+    readonly afterTurn?: boolean;
   }) => Effect.Effect<void, ExperimentError>;
   readonly resume: (threadId: string) => Effect.Effect<ThreadExperimentSummary, ExperimentError>;
   readonly canContinue: (threadId: string) => Effect.Effect<boolean, ExperimentError>;
@@ -1721,17 +1723,37 @@ export const make = Effect.gen(function* () {
     readonly threadId: string;
     readonly reason: string;
     readonly terminal: "pause" | "block" | "complete" | "clear" | "capped";
+    readonly deferProviderStop?: boolean;
+    readonly afterTurn?: boolean;
   }) {
     const stored = Option.getOrUndefined(yield* store.get(input.threadId));
-    if (stored === undefined || TERMINAL_PHASES.has(stored.phase)) return;
+    if (stored === undefined) return;
+    if (TERMINAL_PHASES.has(stored.phase)) {
+      if (
+        stored.phase === "completed" &&
+        stored.providerSessionActive &&
+        (input.afterTurn === true || input.terminal === "clear")
+      ) {
+        yield* save({ ...stored, armed: false, providerSessionActive: false }, { sync: false });
+        yield* coordinator.stopProvider({ threadId: stored.threadId, runId: stored.runId });
+      }
+      return;
+    }
+    if (input.afterTurn === true) return;
     let profile = stored;
     yield* cancelOwned(profile.runId);
     const sync = input.terminal !== "clear";
+    const deferProviderStop =
+      input.terminal === "complete" && input.deferProviderStop === true && stored.pending === null;
     profile = yield* save(
-      { ...profile, providerSessionActive: false, armed: false },
+      {
+        ...profile,
+        providerSessionActive: deferProviderStop ? stored.providerSessionActive : false,
+        armed: false,
+      },
       { sync: false },
     );
-    if (stored.providerSessionActive) {
+    if (stored.providerSessionActive && !deferProviderStop) {
       yield* coordinator.stopProvider({ threadId: stored.threadId, runId: stored.runId });
     }
     if (profile.pending !== null) {
@@ -1756,6 +1778,7 @@ export const make = Effect.gen(function* () {
         ...profile,
         phase: nextPhase,
         armed: false,
+        providerSessionActive: deferProviderStop ? stored.providerSessionActive : false,
         lastError: nextPhase === "completed" ? null : input.reason.slice(0, 2_000),
       },
       { sync },
@@ -1767,10 +1790,18 @@ export const make = Effect.gen(function* () {
     readonly threadId: string;
     readonly reason: string;
     readonly terminal: "pause" | "block" | "complete" | "clear" | "capped";
+    readonly deferProviderStop?: boolean;
+    readonly afterTurn?: boolean;
   }) =>
     Effect.gen(function* () {
       const before = Option.getOrUndefined(yield* store.get(input.threadId));
       if (before !== undefined) {
+        if (
+          input.afterTurn === true &&
+          (before.phase !== "completed" || !before.providerSessionActive)
+        ) {
+          return;
+        }
         yield* cancelOwned(before.runId);
       }
       yield* withThreadLock(input.threadId, settleUnlocked(input));

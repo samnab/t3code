@@ -23,7 +23,11 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
-import { ProviderSessionNotFoundError, ProviderValidationError } from "../provider/Errors.ts";
+import {
+  ProviderAdapterSessionNotFoundError,
+  ProviderSessionNotFoundError,
+  ProviderValidationError,
+} from "../provider/Errors.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as NativeGoalReactor from "./NativeGoalReactor.ts";
@@ -128,6 +132,7 @@ interface HarnessOptions {
   readonly shell: OrchestrationThreadShell;
   /** Fails every set/clear with this error instead of succeeding. */
   readonly providerFailure?: ProviderValidationError | ProviderSessionNotFoundError;
+  readonly providerFailures?: ReadonlyArray<ProviderAdapterSessionNotFoundError>;
 }
 
 const makeHarness = Effect.fn("makeNativeGoalHarness")(function* (options: HarnessOptions) {
@@ -138,14 +143,17 @@ const makeHarness = Effect.fn("makeNativeGoalHarness")(function* (options: Harne
   const goalCalls = yield* Ref.make<ReadonlyArray<ProviderExecutionGoalSetInput | "clear">>([]);
   const events = yield* Queue.unbounded<OrchestrationEvent>();
   const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+  const providerFailures = [...(options.providerFailures ?? [])];
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
     Ref.update(commands, (recorded) => [...recorded, command]).pipe(Effect.as({ sequence: 1 }));
 
-  const record = (call: ProviderExecutionGoalSetInput | "clear") =>
-    Ref.update(goalCalls, (recorded) => [...recorded, call]).pipe(
-      Effect.andThen(options.providerFailure ? Effect.fail(options.providerFailure) : Effect.void),
+  const record = (call: ProviderExecutionGoalSetInput | "clear") => {
+    const failure = providerFailures.shift() ?? options.providerFailure;
+    return Ref.update(goalCalls, (recorded) => [...recorded, call]).pipe(
+      Effect.andThen(failure ? Effect.fail(failure) : Effect.void),
     );
+  };
 
   const dependencies = Layer.mergeAll(
     Layer.mock(ProjectionSnapshotQuery)({
@@ -291,6 +299,37 @@ describe("NativeGoalReactor", () => {
         assert.deepEqual(goalCalls, [
           { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
         ]);
+      }),
+    ),
+  );
+
+  it.effect("retries after the session projection arrives before adapter registration", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          shell: makeShell({ goalLoop: makeLoop({ kind: "experiment" }) }),
+          providerFailures: [
+            new ProviderAdapterSessionNotFoundError({
+              provider: ProviderDriverKind.make("codex"),
+              threadId: THREAD_ID,
+            }),
+          ],
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* NativeGoalReactor.NativeGoalReactor;
+          yield* reactor.start();
+          yield* Deferred.succeed(fixture.activation, undefined);
+
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          assert.strictEqual((yield* Ref.get(fixture.goalCalls)).length, 2);
+          assert.deepEqual(yield* Ref.get(fixture.commands), []);
+        }).pipe(Effect.provide(fixture.layer));
       }),
     ),
   );

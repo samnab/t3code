@@ -58,6 +58,7 @@ export const make = Effect.gen(function* () {
             threadId: event.payload.threadId,
             terminal: "complete",
             reason: "Experiment goal completed.",
+            deferProviderStop: true,
           });
         case "idle":
         case "running":
@@ -65,6 +66,14 @@ export const make = Effect.gen(function* () {
             ? experiments.resume(event.payload.threadId)
             : Effect.void;
       }
+    }
+    if (event.type === "thread.turn-diff-completed") {
+      return experiments.settle({
+        threadId: event.payload.threadId,
+        terminal: "complete",
+        reason: "Experiment turn completed.",
+        afterTurn: true,
+      });
     }
     if (
       event.type === "thread.meta-updated" &&
