@@ -1,11 +1,11 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId, OrchestrationThread } from "@t3tools/contracts";
-import { isOriginMessage } from "../lib/messageOrigin";
+import { isServerAuthoredMessage } from "@t3tools/client-runtime/state/messageOrigin";
 
 function latestUserMessageAt(thread: OrchestrationThread): OrchestrationThread["updatedAt"] | null {
   for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
     const message = thread.messages[index];
-    if (message?.role === "user" && !isOriginMessage(message)) {
+    if (message?.role === "user" && !isServerAuthoredMessage(message)) {
       return message.createdAt;
     }
   }

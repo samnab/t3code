@@ -17,7 +17,10 @@ import {
   type CodexArtifactTemplate,
 } from "@t3tools/client-runtime/codex-artifact-templates";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
-import { isOriginMessage, parseSubagentDeliveryHeader } from "../../lib/messageOrigin";
+import {
+  isServerAuthoredMessage,
+  parseSubagentDeliveryText,
+} from "@t3tools/client-runtime/state/messageOrigin";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
@@ -1539,7 +1542,7 @@ function renderFeedEntry(
 
   if (entry.type === "message") {
     const { message } = entry;
-    const isOrigin = isOriginMessage(message);
+    const isOrigin = isServerAuthoredMessage(message);
     const isUser = message.role === "user" && !isOrigin;
     const renderedText = renderAssistantCitationsAsText(message.text);
     const styles = isUser ? markdownStyles.user : markdownStyles.assistant;
@@ -1565,7 +1568,7 @@ function renderFeedEntry(
     if (isOrigin) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
       const header =
-        message.origin === "subagent-delivery" ? parseSubagentDeliveryHeader(message.text) : null;
+        message.origin === "subagent-delivery" ? parseSubagentDeliveryText(message.text) : null;
       const label =
         message.origin === "goal-continue"
           ? "Goal loop continued"
@@ -2519,7 +2522,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         (entry) =>
           entry.type === "message" &&
           entry.message.role === "user" &&
-          !isOriginMessage(entry.message)
+          !isServerAuthoredMessage(entry.message)
             ? entry.id
             : null,
         { anchorOffset: anchorTopInset + CHAT_LIST_ANCHOR_OFFSET },
