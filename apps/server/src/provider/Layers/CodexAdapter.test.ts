@@ -415,6 +415,16 @@ validationLayer("CodexAdapterLive validation", (it) => {
           'mcp_servers.t3_experiment.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
         ),
       );
+      NodeAssert.ok(
+        runtimeOptions.appServerArgs?.includes(
+          'mcp_servers.t3_experiment.default_tools_approval_mode="approve"',
+        ),
+      );
+      NodeAssert.ok(
+        runtimeOptions.appServerArgs?.includes(
+          'mcp_servers.t3_experiment.enabled_tools=["experiment_status","experiment_list_files","experiment_read_file","experiment_apply","experiment_evaluate"]',
+        ),
+      );
     }),
   );
 });

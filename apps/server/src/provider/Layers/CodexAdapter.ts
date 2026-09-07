@@ -2444,6 +2444,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   `mcp_servers.${isExperiment ? CODEX_EXPERIMENT_MCP_SERVER_NAME : "t3-code"}.url=${mcpSession.endpoint}`,
                   "-c",
                   `mcp_servers.${isExperiment ? CODEX_EXPERIMENT_MCP_SERVER_NAME : "t3-code"}.bearer_token_env_var="T3_MCP_BEARER_TOKEN"`,
+                  ...(isExperiment
+                    ? [
+                        "-c",
+                        `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.default_tools_approval_mode="approve"`,
+                        "-c",
+                        `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.enabled_tools=${JSON.stringify(CODEX_EXPERIMENT_TOOL_NAMES)}`,
+                      ]
+                    : []),
                 ],
                 ...(isExperiment
                   ? {
