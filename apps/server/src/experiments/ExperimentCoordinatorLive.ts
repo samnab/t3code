@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ProviderService from "../provider/Services/ProviderService.ts";
+import { readMcpProviderSession } from "../mcp/McpProviderSession.ts";
 import { ACTIVATION_COMMAND_PREFIX } from "./ExperimentLifecycleReactor.ts";
 import { ExperimentCoordinator } from "./ExperimentService.ts";
 import { ExperimentError } from "./Model.ts";
@@ -60,6 +61,7 @@ export const layer = Layer.effect(
         Effect.gen(function* () {
           const { thread, cwd } = yield* resolveShell(rawThreadId);
           const session = thread.session;
+          const mcpSession = readMcpProviderSession(thread.id);
           const driver = session?.providerName ?? "unknown";
           const supported =
             driver === "claudeAgent" ||
@@ -71,7 +73,10 @@ export const layer = Layer.effect(
             providerInstanceId: String(
               session?.providerInstanceId ?? thread.modelSelection.instanceId,
             ),
-            providerSessionId: `${String(session?.providerInstanceId ?? thread.modelSelection.instanceId)}:${session?.updatedAt ?? thread.updatedAt}`,
+            providerSessionId:
+              mcpSession?.providerSessionId ??
+              `${String(session?.providerInstanceId ?? thread.modelSelection.instanceId)}:${session?.updatedAt ?? thread.updatedAt}`,
+            providerGeneration: mcpSession?.experiment?.generation,
             providerDriver: driver,
             providerSupported: supported,
             ...(supported
@@ -107,7 +112,7 @@ export const layer = Layer.effect(
               voiceNotifications: thread.voiceNotifications,
             }),
           );
-          return { providerSessionId: started.providerSessionId };
+          return started.identity;
         }),
       stopProvider: (input) =>
         translate(

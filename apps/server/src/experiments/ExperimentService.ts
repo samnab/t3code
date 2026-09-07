@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFile as readFileFromDisk, stat } from "node:fs/promises";
 
 import {
   ProviderDriverKind,
@@ -12,6 +11,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
@@ -33,7 +33,9 @@ import {
   appendLedger,
   assertClean,
   assertConfigDigest,
+  assertFileMatches,
   assertRepository,
+  canonicalRepositoryPath,
   changedPaths,
   commitCandidate,
   currentHead,
@@ -41,12 +43,15 @@ import {
   git,
   hashContent,
   normalizeApprovedPath,
+  readApprovedFile,
   readConfig,
+  repositoryPathsEqual,
   resolveApprovedFile,
   restoreSnapshot,
   setEquals,
   snapshotFiles,
   stagedPaths,
+  unstageCandidate,
   writeFileAtomically,
 } from "./Repository.ts";
 
@@ -140,6 +145,25 @@ export function publicSummary(
   };
 }
 
+export function toolSummary(profile: ExperimentProfile): ExperimentToolSummary {
+  return {
+    runId: profile.runId,
+    configDigest: profile.configDigest,
+    phase: profile.phase,
+    metric: profile.lastMetric,
+    experimentsRun: profile.experimentsRun,
+    experimentsKept: profile.experimentsKept,
+    experimentsRestored: profile.experimentsRestored,
+    baselineMetric: profile.baselineMetric,
+    bestMetric: profile.bestMetric,
+    lastMetric: profile.lastMetric,
+    elapsedCommandSeconds: profile.commandSeconds,
+    maxExperiments: profile.config.limits.maxExperiments,
+    maxTotalSeconds: profile.config.limits.maxTotalSeconds,
+    lastError: profile.lastError,
+  };
+}
+
 export interface ExperimentCoordinatorShape {
   readonly resolveThread: (
     threadId: string,
@@ -155,7 +179,7 @@ export interface ExperimentCoordinatorShape {
     readonly cwd: string;
     readonly runId: string;
     readonly generation: number;
-  }) => Effect.Effect<{ readonly providerSessionId: string }, ExperimentError>;
+  }) => Effect.Effect<ExperimentIdentity, ExperimentError>;
   readonly stopProvider: (input: {
     readonly threadId: string;
     readonly runId: string;
@@ -180,9 +204,26 @@ export class ExperimentCoordinator extends Context.Service<
 export interface ExperimentEvaluationResult {
   readonly outcome: "baseline" | "kept" | "restored" | "failed";
   readonly metric: number | null;
-  readonly metrics: Readonly<Record<string, number>> | null;
+  readonly metrics: Readonly<Record<string, number>>;
   readonly commit: string | null;
   readonly reason: string;
+}
+
+export interface ExperimentToolSummary {
+  readonly runId: string;
+  readonly configDigest: string;
+  readonly phase: string;
+  readonly metric: number | null;
+  readonly experimentsRun: number;
+  readonly experimentsKept: number;
+  readonly experimentsRestored: number;
+  readonly baselineMetric: number | null;
+  readonly bestMetric: number | null;
+  readonly lastMetric: number | null;
+  readonly elapsedCommandSeconds: number;
+  readonly maxExperiments: number;
+  readonly maxTotalSeconds: number;
+  readonly lastError: string | null;
 }
 
 export interface ExperimentServiceShape {
@@ -200,7 +241,7 @@ export interface ExperimentServiceShape {
   }) => Effect.Effect<ThreadExperimentSummary | null, ExperimentError>;
   readonly status: (
     identity: ExperimentIdentity,
-  ) => Effect.Effect<ThreadExperimentSummary, ExperimentError>;
+  ) => Effect.Effect<ExperimentToolSummary, ExperimentError>;
   readonly listFiles: (
     identity: ExperimentIdentity,
   ) => Effect.Effect<{ readonly files: ReadonlyArray<string> }, ExperimentError>;
@@ -327,6 +368,17 @@ export const make = Effect.gen(function* () {
     if (profile.providerSessionActive) {
       yield* coordinator.stopProvider({ threadId: profile.threadId, runId: profile.runId });
     }
+    if (profile.pending !== null) {
+      return yield* restore(
+        { ...profile, armed: false, providerSessionActive: false },
+        null,
+        reason,
+      ).pipe(
+        Effect.catch((cause) =>
+          failClosed(profile, cause).pipe(Effect.flatMap((failure) => Effect.fail(failure))),
+        ),
+      );
+    }
     const next = yield* save({
       ...profile,
       phase: "exhausted",
@@ -355,12 +407,19 @@ export const make = Effect.gen(function* () {
 
   const assertLiveContext = Effect.fn("ExperimentService.assertLiveContext")(function* (
     profile: ExperimentProfile,
+    options: { readonly session?: boolean } = {},
   ) {
     const context = yield* coordinator.resolveThread(profile.threadId);
+    const cwd = yield* repositoryEffect("canonicalize live repository", async () =>
+      canonicalRepositoryPath(context.cwd),
+    );
     if (
-      context.cwd !== profile.cwd ||
+      cwd !== profile.cwd ||
       context.providerInstanceId !== profile.providerInstanceId ||
-      (profile.providerSessionActive && context.providerSessionId !== profile.providerSessionId) ||
+      (options.session !== false &&
+        profile.providerSessionActive &&
+        (context.providerSessionId !== profile.providerSessionId ||
+          context.providerGeneration !== profile.goalGeneration)) ||
       context.providerDriver !== profile.providerDriver
     ) {
       return yield* error(
@@ -373,11 +432,13 @@ export const make = Effect.gen(function* () {
 
   const loadIdentity = Effect.fn("ExperimentService.loadIdentity")(function* (
     identity: ExperimentIdentity,
+    options: { readonly requireArmed?: boolean } = {},
   ) {
     const stored = Option.getOrUndefined(yield* store.get(identity.threadId));
     if (stored === undefined) return yield* error("authentication_failed", "Experiment not found.");
     if (
       stored.runId !== identity.runId ||
+      stored.goalGeneration !== identity.generation ||
       stored.providerInstanceId !== identity.providerInstanceId ||
       stored.providerSessionId !== identity.providerSessionId
     ) {
@@ -387,7 +448,10 @@ export const make = Effect.gen(function* () {
       );
     }
     const profile = yield* enforceLimits(stored);
-    if (!profile.armed || TERMINAL_PHASES.has(profile.phase) || profile.phase === "paused") {
+    if (
+      options.requireArmed !== false &&
+      (!profile.armed || TERMINAL_PHASES.has(profile.phase) || profile.phase === "paused")
+    ) {
       return yield* error("invalid_phase", `Experiment is not armed (phase ${profile.phase}).`);
     }
     yield* assertLiveContext(profile);
@@ -510,24 +574,25 @@ export const make = Effect.gen(function* () {
     };
   });
 
-  const expectedRecoveryHash = (
+  function expectedRecoveryHashes(
     profile: ExperimentProfile,
     pending: PendingExperiment,
     path: string,
-  ) => {
+  ): ReadonlySet<string> {
     const snapshot = pending.snapshots.find((entry) => entry.path === path);
     if (snapshot === undefined)
       throw error("persistence_failed", `Snapshot is missing for ${path}.`);
-    if (profile.phase === "applying") {
-      return pending.writtenPaths.includes(path) ? pending.expectedHashes[path] : snapshot.hash;
+    const candidateHash = pending.expectedHashes[path];
+    if (candidateHash === undefined) {
+      throw error("persistence_failed", `Candidate hash is missing for ${path}.`);
     }
-    if (profile.phase === "restoring") {
-      return pending.restoredPaths.includes(path) ? snapshot.hash : pending.expectedHashes[path];
+    if (profile.phase === "applying" || profile.phase === "restoring") {
+      return new Set([snapshot.hash, candidateHash]);
     }
-    return pending.expectedHashes[path];
-  };
+    return new Set([candidateHash]);
+  }
 
-  const assertSafeRestore = async (profile: ExperimentProfile): Promise<PendingExperiment> => {
+  async function assertSafeRestore(profile: ExperimentProfile): Promise<PendingExperiment> {
     const pending = profile.pending;
     if (pending === null) throw error("persistence_failed", "Rollback metadata is missing.");
     const [head, staged, actualChanged] = await Promise.all([
@@ -549,7 +614,7 @@ export const make = Effect.gen(function* () {
       pending.snapshots.map((snapshot) => fileHash(profile.cwd, snapshot.path)),
     );
     for (const [index, snapshot] of pending.snapshots.entries()) {
-      if (hashes[index] !== expectedRecoveryHash(profile, pending, snapshot.path)) {
+      if (!expectedRecoveryHashes(profile, pending, snapshot.path).has(hashes[index]!)) {
         throw error(
           "external_drift",
           `Owned file ${snapshot.path} changed unexpectedly; rollback was not attempted.`,
@@ -557,66 +622,83 @@ export const make = Effect.gen(function* () {
       }
     }
     return pending;
-  };
+  }
 
-  const restore = Effect.fn("ExperimentService.restore")(function* (
+  function restore(
     initial: ExperimentProfile,
     evaluation: CommandEvaluation | null,
     reason: string,
   ) {
-    const pending = yield* repositoryEffect("restore validation", () => assertSafeRestore(initial));
-    let profile = yield* save({ ...initial, phase: "restoring", armed: false });
-    for (const snapshot of pending.snapshots) {
-      if (!pending.restoredPaths.includes(snapshot.path)) {
-        yield* repositoryEffect(`restore ${snapshot.path}`, () =>
-          restoreSnapshot(profile.cwd, snapshot),
-        );
-        profile = yield* save({
-          ...profile,
-          pending: {
-            ...pending,
-            restoredPaths: [...(profile.pending?.restoredPaths ?? []), snapshot.path],
-          },
+    return Effect.gen(function* () {
+      const pending = yield* repositoryEffect("restore validation", () =>
+        assertSafeRestore(initial),
+      );
+      let profile = yield* save({ ...initial, phase: "restoring", armed: false });
+      for (const snapshot of pending.snapshots) {
+        if (!pending.restoredPaths.includes(snapshot.path)) {
+          const currentPending = profile.pending ?? pending;
+          const currentHash = yield* repositoryEffect(`inspect ${snapshot.path}`, () =>
+            fileHash(profile.cwd, snapshot.path),
+          );
+          const acceptable = expectedRecoveryHashes(profile, currentPending, snapshot.path);
+          if (!acceptable.has(currentHash)) {
+            return yield* error(
+              "external_drift",
+              `Owned file ${snapshot.path} changed before it could be restored.`,
+            );
+          }
+          if (currentHash !== snapshot.hash) {
+            yield* repositoryEffect(`restore ${snapshot.path}`, () =>
+              restoreSnapshot(profile.cwd, snapshot, currentHash),
+            );
+          }
+          profile = yield* save({
+            ...profile,
+            pending: {
+              ...pending,
+              restoredPaths: [...(profile.pending?.restoredPaths ?? []), snapshot.path],
+            },
+          });
+        }
+      }
+      yield* repositoryEffect("post-restore validation", () => assertClean(profile.cwd));
+      const currentMs = yield* Clock.currentTimeMillis;
+      const exhausted =
+        initial.experimentsRun + 1 >= initial.config.limits.maxExperiments ||
+        currentMs >= Date.parse(initial.deadlineAt);
+      if (exhausted && profile.providerSessionActive) {
+        yield* coordinator.stopProvider({ threadId: profile.threadId, runId: profile.runId });
+        profile = { ...profile, providerSessionActive: false };
+      }
+      profile = yield* save({
+        ...profile,
+        phase: exhausted ? "exhausted" : "ready",
+        armed: !exhausted,
+        providerSessionActive: exhausted ? false : profile.providerSessionActive,
+        experimentsRun: initial.experimentsRun + 1,
+        experimentsRestored: initial.experimentsRestored + 1,
+        lastMetric: evaluation?.metric ?? null,
+        pending: null,
+        lastError: exhausted ? "Experiment limits reached." : null,
+      });
+      yield* ledger(profile, {
+        type: "evaluation",
+        outcome: "restored",
+        hypothesis: pending.hypothesis,
+        metric: evaluation?.metric ?? null,
+        metrics: evaluation?.metrics ?? null,
+        reason,
+      });
+      if (exhausted) {
+        yield* coordinator.holdGoal({
+          threadId: profile.threadId,
+          action: "pause",
+          reason: "Experiment limits reached.",
         });
       }
-    }
-    yield* repositoryEffect("post-restore validation", () => assertClean(profile.cwd));
-    const currentMs = yield* Clock.currentTimeMillis;
-    const exhausted =
-      initial.experimentsRun + 1 >= initial.config.limits.maxExperiments ||
-      currentMs >= Date.parse(initial.deadlineAt);
-    if (exhausted && profile.providerSessionActive) {
-      yield* coordinator.stopProvider({ threadId: profile.threadId, runId: profile.runId });
-      profile = { ...profile, providerSessionActive: false };
-    }
-    profile = yield* save({
-      ...profile,
-      phase: exhausted ? "exhausted" : "ready",
-      armed: !exhausted,
-      providerSessionActive: exhausted ? false : profile.providerSessionActive,
-      experimentsRun: initial.experimentsRun + 1,
-      experimentsRestored: initial.experimentsRestored + 1,
-      lastMetric: evaluation?.metric ?? null,
-      pending: null,
-      lastError: exhausted ? "Experiment limits reached." : null,
+      return profile;
     });
-    yield* ledger(profile, {
-      type: "evaluation",
-      outcome: "restored",
-      hypothesis: pending.hypothesis,
-      metric: evaluation?.metric ?? null,
-      metrics: evaluation?.metrics ?? null,
-      reason,
-    });
-    if (exhausted) {
-      yield* coordinator.holdGoal({
-        threadId: profile.threadId,
-        action: "pause",
-        reason: "Experiment limits reached.",
-      });
-    }
-    return profile;
-  });
+  }
 
   const failClosed = Effect.fn("ExperimentService.failClosed")(function* (
     profile: ExperimentProfile,
@@ -660,29 +742,32 @@ export const make = Effect.gen(function* () {
     if (!context.idle || context.pendingChildRun) {
       return yield* error("thread_busy", "Thread must be idle with no pending child run.");
     }
-    const { config, digest } = yield* repositoryEffect("config preview", () =>
-      readConfig(context.cwd),
+    const cwd = yield* repositoryEffect("canonicalize repository", async () =>
+      canonicalRepositoryPath(context.cwd),
     );
+    const { config, digest } = yield* repositoryEffect("config preview", () => readConfig(cwd));
     yield* repositoryEffect("preview validation", async () => {
-      await assertRepository(context.cwd, config);
-      await assertClean(context.cwd);
+      await assertRepository(cwd, config);
+      await assertClean(cwd);
     });
     const existing = yield* store.list();
     if (
-      existing.some((profile) => profile.cwd === context.cwd && !TERMINAL_PHASES.has(profile.phase))
+      existing.some(
+        (profile) => repositoryPathsEqual(profile.cwd, cwd) && !TERMINAL_PHASES.has(profile.phase),
+      )
     ) {
       return yield* error("invalid_phase", "Another experiment already owns this worktree.");
     }
     const currentMs = yield* Clock.currentTimeMillis;
     const confirmationId = randomUUID();
     const expiresAt = nowIso(currentMs + CONFIRMATION_TTL_MS);
-    const head = yield* repositoryEffect("read HEAD", () => currentHead(context.cwd));
+    const head = yield* repositoryEffect("read HEAD", () => currentHead(cwd));
     confirmations.set(confirmationId, {
       threadId: input.threadId,
       objective,
       confirmationId,
       expiresAt,
-      cwd: context.cwd,
+      cwd,
       branch: config.branch,
       head,
       configDigest: digest,
@@ -695,7 +780,7 @@ export const make = Effect.gen(function* () {
       objective,
       confirmationId,
       expiresAt,
-      cwd: context.cwd,
+      cwd,
       branch: config.branch,
       head,
       configDigest: digest,
@@ -761,8 +846,11 @@ export const make = Effect.gen(function* () {
     if (!context.idle || context.pendingChildRun) {
       return yield* error("thread_busy", "Thread became busy after confirmation.");
     }
+    const currentCwd = yield* repositoryEffect("canonicalize repository", async () =>
+      canonicalRepositoryPath(context.cwd),
+    );
     if (
-      context.cwd !== confirmation.cwd ||
+      currentCwd !== confirmation.cwd ||
       context.providerInstanceId !== confirmation.providerInstanceId ||
       context.providerSessionId !== confirmation.providerSessionId ||
       context.providerDriver !== confirmation.providerDriver
@@ -779,7 +867,11 @@ export const make = Effect.gen(function* () {
     });
     const all = yield* store.list();
     if (
-      all.some((profile) => profile.cwd === confirmation.cwd && !TERMINAL_PHASES.has(profile.phase))
+      all.some(
+        (profile) =>
+          repositoryPathsEqual(profile.cwd, confirmation.cwd) &&
+          !TERMINAL_PHASES.has(profile.phase),
+      )
     ) {
       return yield* error("invalid_phase", "Another experiment already owns this worktree.");
     }
@@ -870,6 +962,21 @@ export const make = Effect.gen(function* () {
           failClosed(profile, cause).pipe(Effect.flatMap((failure) => Effect.fail(failure))),
         ),
       );
+    if (
+      started.threadId !== profile.threadId ||
+      started.providerInstanceId !== profile.providerInstanceId ||
+      started.runId !== profile.runId ||
+      started.generation !== profile.goalGeneration
+    ) {
+      yield* coordinator.stopProvider({ threadId: profile.threadId, runId: profile.runId });
+      const failure = error(
+        "authentication_failed",
+        "Restricted provider returned a mismatched experiment identity.",
+      );
+      return yield* failClosed(profile, failure).pipe(
+        Effect.flatMap((closed) => Effect.fail(closed)),
+      );
+    }
     profile = yield* save(
       {
         ...profile,
@@ -878,13 +985,52 @@ export const make = Effect.gen(function* () {
         armed: true,
       },
       { sync: false },
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.gen(function* () {
+          yield* coordinator
+            .stopProvider({ threadId: profile.threadId, runId: profile.runId })
+            .pipe(Effect.ignore);
+          return yield* failClosed(profile, cause).pipe(
+            Effect.flatMap((closed) => Effect.fail(closed)),
+          );
+        }),
+      ),
     );
     const summary = publicSummary(profile, yield* Clock.currentTimeMillis);
-    yield* coordinator.activateGoal({
-      threadId: profile.threadId,
-      objective: profile.objective,
-      summary,
-    });
+    yield* coordinator
+      .activateGoal({
+        threadId: profile.threadId,
+        objective: profile.objective,
+        summary,
+      })
+      .pipe(
+        Effect.catch((cause) =>
+          Effect.gen(function* () {
+            yield* coordinator
+              .stopProvider({ threadId: profile.threadId, runId: profile.runId })
+              .pipe(Effect.ignore);
+            const failure = asExperimentError(cause, "Could not activate the experiment goal.");
+            profile = yield* save(
+              {
+                ...profile,
+                phase: "failed",
+                armed: false,
+                providerSessionActive: false,
+                lastError: failure.message.slice(0, 2_000),
+              },
+              { sync: false },
+            );
+            yield* ledger(profile, { type: "failure", reason: profile.lastError }).pipe(
+              Effect.ignore,
+            );
+            yield* coordinator
+              .holdGoal({ threadId: profile.threadId, action: "block", reason: failure.message })
+              .pipe(Effect.ignore);
+            return yield* failure;
+          }),
+        ),
+      );
     return summary;
   });
 
@@ -935,6 +1081,7 @@ export const make = Effect.gen(function* () {
     if (stored === undefined) return yield* error("authentication_failed", "Experiment not found.");
     if (
       stored.runId !== identity.runId ||
+      stored.goalGeneration !== identity.generation ||
       stored.providerInstanceId !== identity.providerInstanceId ||
       stored.providerSessionId !== identity.providerSessionId
     ) {
@@ -944,38 +1091,37 @@ export const make = Effect.gen(function* () {
       );
     }
     const profile = yield* refreshForRead(stored);
-    return publicSummary(profile, yield* Clock.currentTimeMillis);
+    return toolSummary(profile);
   });
   const status = (identity: ExperimentIdentity) =>
     withThreadLock(identity.threadId, statusUnlocked(identity));
 
-  const listFiles = Effect.fn("ExperimentService.listFiles")(function* (
+  const listFilesUnlocked = Effect.fn("ExperimentService.listFilesUnlocked")(function* (
     identity: ExperimentIdentity,
   ) {
-    const profile = yield* loadIdentity(identity);
+    const profile = yield* loadIdentity(identity, { requireArmed: false });
     yield* validateRepository(profile);
     return { files: profile.config.files };
   });
+  const listFiles = (identity: ExperimentIdentity) =>
+    withThreadLock(identity.threadId, listFilesUnlocked(identity));
 
-  const readFile = Effect.fn("ExperimentService.readFile")(function* (
+  const readFileUnlocked = Effect.fn("ExperimentService.readFileUnlocked")(function* (
     input: ExperimentIdentity & { readonly path: string },
   ) {
-    const profile = yield* loadIdentity(input);
+    const profile = yield* loadIdentity(input, { requireArmed: false });
     yield* validateRepository(profile);
     const normalized = normalizeApprovedPath(input.path);
     if (!profile.config.files.includes(normalized)) {
       return yield* error("authentication_failed", "File is not approved for this experiment.");
     }
-    const absolute = resolveApprovedFile(profile.cwd, normalized);
-    const info = yield* repositoryEffect("read approved file metadata", () => stat(absolute));
-    if (info.size > profile.config.limits.maxApplyBytes) {
-      return yield* error("unsafe_repository", "Approved file exceeds the configured read limit.");
-    }
     const content = yield* repositoryEffect("read approved file", () =>
-      readFileFromDisk(absolute, "utf8"),
+      readApprovedFile(profile.cwd, normalized, profile.config.limits.maxApplyBytes),
     );
     return { path: normalized, content };
   });
+  const readFile = (input: ExperimentIdentity & { readonly path: string }) =>
+    withThreadLock(input.threadId, readFileUnlocked(input));
 
   const applyUnlocked = Effect.fn("ExperimentService.applyUnlocked")(function* (
     input: ExperimentIdentity & {
@@ -1065,6 +1211,7 @@ export const make = Effect.gen(function* () {
             resolveApprovedFile(profile.cwd, change.path),
             Buffer.from(change.content, "utf8"),
             snapshot.mode,
+            () => assertFileMatches(profile.cwd, change.path, snapshot.hash, snapshot.mode),
           ),
         );
         profile = yield* save({
@@ -1172,7 +1319,7 @@ export const make = Effect.gen(function* () {
                   result: {
                     outcome: "restored",
                     metric: null,
-                    metrics: null,
+                    metrics: {},
                     commit: null,
                     reason: asExperimentError(cause, "Evaluation failed; candidate restored.")
                       .message,
@@ -1211,12 +1358,12 @@ export const make = Effect.gen(function* () {
         type: "baseline",
         outcome: "established",
         metric: evaluated.evaluation.metric,
-        metrics: evaluated.evaluation.metrics,
+        metrics: evaluated.evaluation.metrics ?? {},
       });
       return {
         outcome: "baseline",
         metric: evaluated.evaluation.metric,
-        metrics: evaluated.evaluation.metrics,
+        metrics: evaluated.evaluation.metrics ?? {},
         commit: null,
         reason: evaluated.evaluation.reason,
       } satisfies ExperimentEvaluationResult;
@@ -1235,7 +1382,7 @@ export const make = Effect.gen(function* () {
       return {
         outcome: "restored",
         metric: evaluated.evaluation.metric,
-        metrics: evaluated.evaluation.metrics,
+        metrics: evaluated.evaluation.metrics ?? {},
         commit: null,
         reason,
       } satisfies ExperimentEvaluationResult;
@@ -1250,19 +1397,39 @@ export const make = Effect.gen(function* () {
         metrics: evaluated.evaluation.metrics,
       },
     });
-    const commit = yield* repositoryEffect("commit", () =>
+    const candidateFiles = pending.snapshots.map((entry) => entry.path);
+    const commitAttempt = yield* repositoryEffect("commit", () =>
       commitCandidate(
         profile.cwd,
-        pending.snapshots.map((entry) => entry.path),
+        candidateFiles,
         pending.hypothesis,
         profile.config.evaluator.metric,
         evaluated.evaluation.metric!,
       ),
-    ).pipe(
-      Effect.catch((cause) =>
-        failClosed(profile, cause).pipe(Effect.flatMap((failure) => Effect.fail(failure))),
-      ),
-    );
+    ).pipe(Effect.result);
+    if (Result.isFailure(commitAttempt)) {
+      const failure = asExperimentError(commitAttempt.failure, "Experiment commit failed.");
+      yield* repositoryEffect("unstage rejected candidate", () =>
+        unstageCandidate(profile.cwd, candidateFiles),
+      ).pipe(
+        Effect.catch((cause) =>
+          failClosed(profile, cause).pipe(Effect.flatMap((closed) => Effect.fail(closed))),
+        ),
+      );
+      profile = yield* restore(profile, evaluated.evaluation, failure.message).pipe(
+        Effect.catch((cause) =>
+          failClosed(profile, cause).pipe(Effect.flatMap((closed) => Effect.fail(closed))),
+        ),
+      );
+      return {
+        outcome: "restored",
+        metric: evaluated.evaluation.metric,
+        metrics: evaluated.evaluation.metrics ?? {},
+        commit: null,
+        reason: failure.message,
+      } satisfies ExperimentEvaluationResult;
+    }
+    const commit = commitAttempt.success;
     yield* Effect.gen(function* () {
       const [parentResult, committedResult, changed, staged] = yield* repositoryEffect(
         "commit verification",
@@ -1325,7 +1492,7 @@ export const make = Effect.gen(function* () {
       outcome: "kept",
       hypothesis: pending.hypothesis,
       metric: evaluated.evaluation.metric,
-      metrics: evaluated.evaluation.metrics,
+      metrics: evaluated.evaluation.metrics ?? {},
       commit,
     });
     if (exhausted) {
@@ -1350,10 +1517,32 @@ export const make = Effect.gen(function* () {
   const recoverOne = Effect.fn("ExperimentService.recoverOne")(function* (
     initial: ExperimentProfile,
   ) {
-    if (!RECOVERY_PHASES.has(initial.phase) || initial.pending === null) return;
+    if (!RECOVERY_PHASES.has(initial.phase) || initial.pending === null) {
+      if (
+        initial.phase === "baseline" ||
+        initial.phase === "ready" ||
+        (initial.phase === "paused" && initial.providerSessionActive)
+      ) {
+        const recovered = yield* save(
+          {
+            ...initial,
+            phase: initial.phase === "baseline" ? "failed" : "paused",
+            armed: false,
+            providerSessionActive: false,
+            lastError:
+              initial.phase === "baseline"
+                ? "Server restarted before the baseline completed."
+                : "Server restarted; resume to start a fresh restricted provider session.",
+          },
+          { sync: initial.phase !== "baseline" },
+        );
+        yield* ledger(recovered, { type: "recovery", outcome: recovered.phase });
+      }
+      return;
+    }
     let profile = initial;
     yield* Effect.gen(function* () {
-      yield* assertLiveContext(profile);
+      yield* assertLiveContext(profile, { session: false });
       yield* repositoryEffect("recovery config validation", () =>
         assertConfigDigest(profile.cwd, profile.configDigest),
       );
@@ -1386,8 +1575,9 @@ export const make = Effect.gen(function* () {
           profile = yield* save({
             ...profile,
             head,
-            phase: "ready",
-            armed: true,
+            phase: "paused",
+            armed: false,
+            providerSessionActive: false,
             bestMetric: pending.metric,
             lastMetric: pending.metric,
             experimentsRun: profile.experimentsRun + 1,
@@ -1399,6 +1589,13 @@ export const make = Effect.gen(function* () {
         }
       }
       profile = yield* restore(profile, null, `Recovered interrupted ${profile.phase} phase.`);
+      profile = yield* save({
+        ...profile,
+        phase: "paused",
+        armed: false,
+        providerSessionActive: false,
+        lastError: "Recovered an interrupted candidate; resume to start a fresh provider session.",
+      });
       yield* ledger(profile, { type: "recovery", outcome: "candidate_restored" });
     }).pipe(Effect.catch((cause) => failClosed(profile, cause).pipe(Effect.asVoid)));
   });
@@ -1471,15 +1668,29 @@ export const make = Effect.gen(function* () {
     yield* validateRepository(profile);
     const cwd = profile.cwd;
     yield* repositoryEffect("resume clean-tree validation", () => assertClean(cwd));
+    const generation = profile.goalGeneration + 1;
     const started = yield* coordinator.startProvider({
       threadId: profile.threadId,
       providerInstanceId: profile.providerInstanceId,
       cwd: profile.cwd,
       runId: profile.runId,
-      generation: profile.goalGeneration,
+      generation,
     });
+    if (
+      started.threadId !== profile.threadId ||
+      started.providerInstanceId !== profile.providerInstanceId ||
+      started.runId !== profile.runId ||
+      started.generation !== generation
+    ) {
+      yield* coordinator.stopProvider({ threadId: profile.threadId, runId: profile.runId });
+      return yield* error(
+        "authentication_failed",
+        "Restricted provider returned a mismatched experiment identity.",
+      );
+    }
     profile = yield* save({
       ...profile,
+      goalGeneration: generation,
       phase: "ready",
       armed: true,
       providerSessionActive: true,

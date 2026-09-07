@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, lstatSync, realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -41,6 +41,14 @@ function realPath(existingPath: string): string {
 function samePath(left: string, right: string): boolean {
   const normalize = (value: string) => (process.platform === "win32" ? value.toLowerCase() : value);
   return normalize(left) === normalize(right);
+}
+
+export function canonicalRepositoryPath(cwd: string): string {
+  return realPath(cwd);
+}
+
+export function repositoryPathsEqual(left: string, right: string): boolean {
+  return samePath(canonicalRepositoryPath(left), canonicalRepositoryPath(right));
 }
 
 export function normalizeApprovedPath(rawPath: string): string {
@@ -127,7 +135,7 @@ export function git(
   cwd: string,
   args: ReadonlyArray<string>,
   allowFailure = false,
-  input?: string,
+  input?: string | Buffer,
 ): Promise<GitResult> {
   return new Promise((resolve, reject) => {
     const child = spawn("git", args, {
@@ -277,14 +285,12 @@ export async function readConfig(
   assertRealDirectory(auto, ".auto");
   const file = path.join(auto, "config.json");
   if (!existsSync(file)) fail("invalid_config", `Missing ${CONFIG_PATH}.`);
-  const info = await lstat(file);
-  if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_CONFIG_BYTES) {
-    fail(
-      "invalid_config",
-      `${CONFIG_PATH} must be a regular file no larger than ${MAX_CONFIG_BYTES} bytes.`,
-    );
-  }
-  const bytes = await readFile(file);
+  const bytes = await readStableRegularFile(
+    file,
+    MAX_CONFIG_BYTES,
+    "invalid_config",
+    `${CONFIG_PATH} must be a regular file no larger than ${MAX_CONFIG_BYTES} bytes.`,
+  );
   try {
     const config = decodeExperimentConfig(JSON.parse(bytes.toString("utf8")));
     return { config, digest: createHash("sha256").update(bytes).digest("hex") };
@@ -312,6 +318,92 @@ export async function hashContent(cwd: string, content: string): Promise<string>
   return (await git(cwd, ["hash-object", "--stdin"], false, content)).stdout.trim();
 }
 
+async function hashBytes(cwd: string, content: Buffer): Promise<string> {
+  return (await git(cwd, ["hash-object", "--stdin"], false, content)).stdout.trim();
+}
+
+function sameFileIdentity(
+  left: { readonly dev: number | bigint; readonly ino: number | bigint },
+  right: { readonly dev: number | bigint; readonly ino: number | bigint },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function readStableRegularFile(
+  absolute: string,
+  maxBytes: number,
+  code: ConstructorParameters<typeof ExperimentError>[0]["code"],
+  message: string,
+): Promise<Buffer> {
+  const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+  const handle = await open(absolute, constants.O_RDONLY | noFollow).catch((cause) =>
+    fail(code, message, cause),
+  );
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.size > maxBytes) fail(code, message);
+    const content = await handle.readFile();
+    const after = await handle.stat();
+    const current = await lstat(absolute);
+    if (
+      content.byteLength > maxBytes ||
+      !after.isFile() ||
+      !sameFileIdentity(before, after) ||
+      !sameFileIdentity(after, current) ||
+      before.size !== after.size
+    ) {
+      fail(code, message);
+    }
+    return content;
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function readApprovedFile(
+  cwd: string,
+  relativePath: string,
+  maxBytes: number,
+): Promise<string> {
+  const absolute = resolveApprovedFile(cwd, relativePath);
+  const bytes = await readStableRegularFile(
+    absolute,
+    maxBytes,
+    "unsafe_repository",
+    `Approved file ${relativePath} is unsafe or exceeds the configured read limit.`,
+  );
+  return bytes.toString("utf8");
+}
+
+export async function assertFileMatches(
+  cwd: string,
+  relativePath: string,
+  expectedHash: string,
+  expectedMode?: number,
+): Promise<void> {
+  const absolute = resolveApprovedFile(cwd, relativePath);
+  const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+  const handle = await open(absolute, constants.O_RDONLY | noFollow);
+  try {
+    const before = await handle.stat();
+    const content = await handle.readFile();
+    const after = await handle.stat();
+    const current = await lstat(absolute);
+    if (
+      !before.isFile() ||
+      before.isSymbolicLink() ||
+      !sameFileIdentity(before, after) ||
+      !sameFileIdentity(after, current) ||
+      (expectedMode !== undefined && (after.mode & 0o777) !== expectedMode) ||
+      (await hashBytes(cwd, content)) !== expectedHash
+    ) {
+      fail("external_drift", `Owned file ${relativePath} changed during the experiment operation.`);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function snapshotFiles(
   cwd: string,
   paths: ReadonlyArray<string>,
@@ -319,17 +411,32 @@ export async function snapshotFiles(
   return Promise.all(
     paths.map(async (relativePath) => {
       const absolute = resolveApprovedFile(cwd, relativePath);
-      const [info, content, hash] = await Promise.all([
-        stat(absolute),
-        readFile(absolute),
-        fileHash(cwd, relativePath),
-      ]);
-      return {
-        path: relativePath,
-        contentBase64: content.toString("base64"),
-        mode: info.mode & 0o777,
-        hash,
-      };
+      const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+      const handle = await open(absolute, constants.O_RDONLY | noFollow);
+      try {
+        const before = await handle.stat();
+        const content = await handle.readFile();
+        const after = await handle.stat();
+        const current = await lstat(absolute);
+        if (
+          !before.isFile() ||
+          before.isSymbolicLink() ||
+          !sameFileIdentity(before, after) ||
+          !sameFileIdentity(after, current)
+        ) {
+          fail("external_drift", `Approved file ${relativePath} changed while it was snapshotted.`);
+        }
+        const hash = await hashBytes(cwd, content);
+        await assertFileMatches(cwd, relativePath, hash, after.mode & 0o777);
+        return {
+          path: relativePath,
+          contentBase64: content.toString("base64"),
+          mode: after.mode & 0o777,
+          hash,
+        };
+      } finally {
+        await handle.close();
+      }
     }),
   );
 }
@@ -338,19 +445,35 @@ export async function writeFileAtomically(
   absolute: string,
   content: Buffer,
   mode: number,
+  beforeRename?: () => Promise<void>,
 ): Promise<void> {
   const temporary = path.join(
     path.dirname(absolute),
     `.${path.basename(absolute)}.t3-experiment-${process.pid}-${randomUUID()}.tmp`,
   );
-  await writeFile(temporary, content, { mode, flag: "wx" });
-  await rename(temporary, absolute);
-  await chmod(absolute, mode);
+  try {
+    await writeFile(temporary, content, { mode, flag: "wx" });
+    if (beforeRename !== undefined) await beforeRename();
+    await rename(temporary, absolute);
+    await chmod(absolute, mode);
+  } catch (cause) {
+    await unlink(temporary).catch(() => undefined);
+    throw cause;
+  }
 }
 
-export async function restoreSnapshot(cwd: string, snapshot: FileSnapshot): Promise<void> {
+export async function restoreSnapshot(
+  cwd: string,
+  snapshot: FileSnapshot,
+  expectedCurrentHash: string,
+): Promise<void> {
   const absolute = resolveApprovedFile(cwd, snapshot.path);
-  await writeFileAtomically(absolute, Buffer.from(snapshot.contentBase64, "base64"), snapshot.mode);
+  await writeFileAtomically(
+    absolute,
+    Buffer.from(snapshot.contentBase64, "base64"),
+    snapshot.mode,
+    () => assertFileMatches(cwd, snapshot.path, expectedCurrentHash),
+  );
 }
 
 export function setEquals(left: Iterable<string>, right: Iterable<string>): boolean {
@@ -381,12 +504,24 @@ export async function commitCandidate(
     .slice(0, 72);
   await git(cwd, [
     "commit",
+    "--only",
     "-m",
     `experiment: ${subject || "qualifying improvement"}`,
     "-m",
     `Experiment-Metric: ${metricName}=${metric}`,
+    "--",
+    ...files,
   ]);
   return currentHead(cwd);
+}
+
+/** Removes only experiment-owned paths from the index after a rejected commit hook. */
+export async function unstageCandidate(cwd: string, files: ReadonlyArray<string>): Promise<void> {
+  await git(cwd, ["restore", "--staged", "--", ...files]);
+  const owned = new Set(files);
+  if ((await stagedPaths(cwd)).some((entry) => owned.has(entry))) {
+    fail("external_drift", "Could not remove the experiment candidate from the index.");
+  }
 }
 
 async function ensureChildDirectory(parent: string, name: string): Promise<string> {
@@ -420,7 +555,15 @@ export async function appendLedger(
   try {
     const info = await handle.stat();
     if (!info.isFile()) fail("unsafe_repository", "Experiment ledger is not a regular file.");
-    await handle.write(record);
+    let offset = 0;
+    while (offset < record.byteLength) {
+      const result = await handle.write(record, offset, record.byteLength - offset);
+      if (result.bytesWritten <= 0) {
+        fail("persistence_failed", "Experiment ledger write made no progress.");
+      }
+      offset += result.bytesWritten;
+    }
+    await handle.datasync();
   } finally {
     await handle.close();
   }

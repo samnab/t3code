@@ -127,6 +127,7 @@ export interface ExperimentThreadContext {
   readonly unsupportedReason?: string;
   readonly idle: boolean;
   readonly pendingChildRun: boolean;
+  readonly providerGeneration?: number;
 }
 
 export interface ExperimentConfirmation {
@@ -149,6 +150,7 @@ export interface ExperimentIdentity {
   readonly providerInstanceId: string;
   readonly providerSessionId: string;
   readonly runId: string;
+  readonly generation: number;
 }
 
 export interface ExperimentChange {

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -87,6 +87,18 @@ describe("experiment repository validation", () => {
         () => assert.fail("expected protected-branch rejection"),
         (cause: unknown) => assert.instanceOf(cause, ExperimentError),
       );
+  });
+
+  it("opens the config itself without following symlinks", async () => {
+    const cwd = repo();
+    const config = path.join(cwd, ".auto/config.json");
+    const target = path.join(cwd, ".auto/config.real.json");
+    renameSync(config, target);
+    symlinkSync("config.real.json", config);
+    await readConfig(cwd).then(
+      () => assert.fail("expected config symlink rejection"),
+      (cause: unknown) => assert.instanceOf(cause, ExperimentError),
+    );
   });
 
   it("rejects worktree and index dirt outside .auto", async () => {

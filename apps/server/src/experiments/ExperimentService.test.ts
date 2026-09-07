@@ -1,21 +1,26 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as TestClock from "effect/testing/TestClock";
 
-import { memoryLayer } from "../persistence/ThreadExperiments.ts";
+import {
+  ThreadExperimentStore,
+  type ThreadExperimentStoreShape,
+} from "../persistence/ThreadExperiments.ts";
 import {
   ExperimentCoordinator,
   ExperimentService,
   layer as experimentLayer,
   type ExperimentCoordinatorShape,
 } from "./ExperimentService.ts";
-import type { ExperimentThreadContext } from "./Model.ts";
+import { ExperimentError, type ExperimentProfile, type ExperimentThreadContext } from "./Model.ts";
 
 const roots: Array<string> = [];
 
@@ -64,8 +69,13 @@ function makeRepo(maxExperiments = 10): string {
   return root;
 }
 
-function testLayer(contexts: Map<string, ExperimentThreadContext>) {
+function testLayer(
+  contexts: Map<string, ExperimentThreadContext>,
+  options: { readonly failActivation?: boolean } = {},
+) {
   const started: Array<string> = [];
+  const stopped: Array<string> = [];
+  const rows = new Map<string, ExperimentProfile>();
   const startsByThread = new Map<string, number>();
   const coordinator: ExperimentCoordinatorShape = {
     resolveThread: (threadId) =>
@@ -80,19 +90,48 @@ function testLayer(contexts: Map<string, ExperimentThreadContext>) {
         const count = (startsByThread.get(input.threadId) ?? 0) + 1;
         startsByThread.set(input.threadId, count);
         const providerSessionId = `experiment-${input.threadId}-${count}`;
-        contexts.set(input.threadId, { ...context, providerSessionId });
+        contexts.set(input.threadId, {
+          ...context,
+          providerSessionId,
+          providerGeneration: input.generation,
+        });
         started.push(input.threadId);
-        return { providerSessionId };
+        return {
+          threadId: input.threadId,
+          providerInstanceId: input.providerInstanceId,
+          providerSessionId,
+          runId: input.runId,
+          generation: input.generation,
+        };
       }),
-    stopProvider: () => Effect.void,
-    activateGoal: () => Effect.void,
+    stopProvider: (input) => Effect.sync(() => void stopped.push(input.threadId)),
+    activateGoal: () =>
+      options.failActivation
+        ? Effect.fail(
+            new ExperimentError({
+              code: "persistence_failed",
+              message: "activation failed",
+            }),
+          )
+        : Effect.void,
     syncSummary: () => Effect.void,
     holdGoal: () => Effect.void,
   };
+  const store: ThreadExperimentStoreShape = {
+    get: (threadId) =>
+      Effect.sync(() => {
+        const profile = rows.get(threadId);
+        return Option.fromUndefinedOr(profile === undefined ? undefined : structuredClone(profile));
+      }),
+    save: (profile) => Effect.sync(() => void rows.set(profile.threadId, structuredClone(profile))),
+    list: () => Effect.sync(() => [...rows.values()].map((profile) => structuredClone(profile))),
+  };
   return {
+    rows,
     started,
+    stopped,
     layer: experimentLayer.pipe(
-      Layer.provide(memoryLayer),
+      Layer.provide(Layer.succeed(ThreadExperimentStore, store)),
       Layer.provide(Layer.succeed(ExperimentCoordinator, coordinator)),
     ),
   };
@@ -138,6 +177,7 @@ describe("ExperimentService", () => {
           providerInstanceId: "claude",
           providerSessionId: "experiment-thread-1-1",
           runId: started.runId,
+          generation: 1,
         };
         yield* service.apply({
           ...identity,
@@ -173,7 +213,7 @@ describe("ExperimentService", () => {
     const cwd = makeRepo();
     const contexts = new Map([
       ["thread-1", context("thread-1", cwd)],
-      ["thread-2", context("thread-2", cwd)],
+      ["thread-2", context("thread-2", `${cwd}${path.sep}.`)],
     ]);
     const fixture = testLayer(contexts);
     return Effect.gen(function* () {
@@ -231,6 +271,7 @@ describe("ExperimentService", () => {
         providerInstanceId: "claude",
         providerSessionId: "experiment-thread-1-1",
         runId: started.runId,
+        generation: 1,
       };
       yield* service.apply({
         ...identity,
@@ -265,14 +306,157 @@ describe("ExperimentService", () => {
         providerInstanceId: "claude",
         providerSessionId: "experiment-thread-1-1",
         runId: started.runId,
+        generation: 1,
         hypothesis: "Interrupted candidate",
         changes: [{ path: "score.txt", content: "2\n" }],
       });
       yield* service.recoverAll();
       assert.strictEqual(readFileSync(path.join(cwd, "score.txt"), "utf8"), "1\n");
       const summary = yield* service.get({ threadId: "thread-1" });
-      assert.strictEqual(summary?.phase, "ready");
+      assert.strictEqual(summary?.phase, "paused");
       assert.strictEqual(summary?.experimentsRestored, 1);
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("recovers an apply rename that happened before its path checkpoint", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts);
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      const started = yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+      const identity = {
+        threadId: "thread-1",
+        providerInstanceId: "claude",
+        providerSessionId: "experiment-thread-1-1",
+        runId: started.runId,
+        generation: 1,
+      };
+      yield* service.apply({
+        ...identity,
+        hypothesis: "Interrupted after rename",
+        changes: [{ path: "score.txt", content: "2\n" }],
+      });
+      const persisted = fixture.rows.get("thread-1");
+      assert(persisted?.pending !== null && persisted?.pending !== undefined);
+      fixture.rows.set("thread-1", {
+        ...persisted,
+        phase: "applying",
+        armed: false,
+        pending: { ...persisted.pending, writtenPaths: [] },
+      });
+
+      yield* service.recoverAll();
+      assert.strictEqual(readFileSync(path.join(cwd, "score.txt"), "utf8"), "1\n");
+      assert.strictEqual((yield* service.get({ threadId: "thread-1" }))?.phase, "paused");
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("recovers a restore rename that happened before its path checkpoint", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts);
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      const started = yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+      yield* service.apply({
+        threadId: "thread-1",
+        providerInstanceId: "claude",
+        providerSessionId: "experiment-thread-1-1",
+        runId: started.runId,
+        generation: 1,
+        hypothesis: "Interrupted during restore",
+        changes: [{ path: "score.txt", content: "2\n" }],
+      });
+      const persisted = fixture.rows.get("thread-1");
+      assert(persisted?.pending !== null && persisted?.pending !== undefined);
+      writeFileSync(path.join(cwd, "score.txt"), "1\n");
+      fixture.rows.set("thread-1", {
+        ...persisted,
+        phase: "restoring",
+        armed: false,
+        pending: { ...persisted.pending, restoredPaths: [] },
+      });
+
+      yield* service.recoverAll();
+      assert.strictEqual(readFileSync(path.join(cwd, "score.txt"), "utf8"), "1\n");
+      assert.strictEqual((yield* service.get({ threadId: "thread-1" }))?.phase, "paused");
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("pauses an inert ready profile during startup recovery", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts);
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+      const persisted = fixture.rows.get("thread-1");
+      assert(persisted !== undefined);
+      fixture.rows.set("thread-1", {
+        ...persisted,
+        phase: "ready",
+        armed: false,
+        providerSessionActive: false,
+      });
+
+      yield* service.recoverAll();
+      const recovered = yield* service.get({ threadId: "thread-1" });
+      assert.strictEqual(recovered?.phase, "paused");
+      assert.match(recovered?.lastError ?? "", /fresh restricted provider session/);
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("unstages and restores a candidate rejected by a normal commit hook", () => {
+    const cwd = makeRepo();
+    const hook = path.join(cwd, ".git/hooks/pre-commit");
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+    chmodSync(hook, 0o755);
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts);
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      const started = yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+      const identity = {
+        threadId: "thread-1",
+        providerInstanceId: "claude",
+        providerSessionId: "experiment-thread-1-1",
+        runId: started.runId,
+        generation: 1,
+      };
+      yield* service.apply({
+        ...identity,
+        hypothesis: "Candidate rejected by hook",
+        changes: [{ path: "score.txt", content: "2\n" }],
+      });
+      const evaluated = yield* service.evaluate(identity);
+
+      assert.strictEqual(evaluated.outcome, "restored");
+      assert.strictEqual(readFileSync(path.join(cwd, "score.txt"), "utf8"), "1\n");
+      assert.strictEqual(
+        execFileSync("git", ["diff", "--cached", "--name-only"], { cwd, encoding: "utf8" }),
+        "",
+      );
     }).pipe(Effect.provide(fixture.layer));
   });
 
@@ -306,8 +490,9 @@ describe("ExperimentService", () => {
         .status({
           threadId: "thread-1",
           providerInstanceId: "claude",
-          providerSessionId: "experiment-thread-1-1",
+          providerSessionId: "experiment-thread-1-2",
           runId: started.runId,
+          generation: 1,
         })
         .pipe(Effect.result);
       assert(Result.isFailure(oldIdentity));
@@ -316,8 +501,61 @@ describe("ExperimentService", () => {
         providerInstanceId: "claude",
         providerSessionId: "experiment-thread-1-2",
         runId: started.runId,
+        generation: 2,
       });
       assert.strictEqual(current.phase, "ready");
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("restores an applied candidate before exhausting the wall-clock deadline", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts);
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      const started = yield* service.start({
+        threadId: "thread-1",
+        objective: "Improve score",
+        confirmationId: preview.confirmationId,
+      });
+      yield* service.apply({
+        threadId: "thread-1",
+        providerInstanceId: "claude",
+        providerSessionId: "experiment-thread-1-1",
+        runId: started.runId,
+        generation: 1,
+        hypothesis: "Candidate at the campaign deadline",
+        changes: [{ path: "score.txt", content: "2\n" }],
+      });
+      yield* TestClock.adjust("601 seconds");
+      const summary = yield* service.get({ threadId: "thread-1" });
+      assert.strictEqual(summary?.phase, "exhausted");
+      assert.strictEqual(summary?.experimentsRun, 1);
+      assert.strictEqual(summary?.experimentsRestored, 1);
+      assert.strictEqual(readFileSync(path.join(cwd, "score.txt"), "utf8"), "1\n");
+    }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("revokes the restricted provider when goal activation fails", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    const fixture = testLayer(contexts, { failActivation: true });
+    return Effect.gen(function* () {
+      const service = yield* ExperimentService;
+      const preview = yield* service.preview({ threadId: "thread-1", objective: "Improve score" });
+      const result = yield* service
+        .start({
+          threadId: "thread-1",
+          objective: "Improve score",
+          confirmationId: preview.confirmationId,
+        })
+        .pipe(Effect.result);
+      assert(Result.isFailure(result));
+      assert.deepEqual(fixture.started, ["thread-1"]);
+      assert.deepEqual(fixture.stopped, ["thread-1"]);
+      const summary = yield* service.get({ threadId: "thread-1" });
+      assert.strictEqual(summary?.phase, "failed");
     }).pipe(Effect.provide(fixture.layer));
   });
 });
