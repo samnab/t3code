@@ -192,6 +192,7 @@ export const make = Effect.gen(function* () {
         role: "user",
         text: GOAL_CONTINUE_MESSAGE,
         attachments: [],
+        origin: "goal-continue",
       },
       runtimeMode: thread.runtimeMode,
       interactionMode: thread.interactionMode,

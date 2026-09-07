@@ -73,6 +73,32 @@ describe("sortThreads", () => {
 
     expect(sorted.map((thread) => thread.id)).toEqual(["thread-1", "thread-2"]);
   });
+
+  it("ignores server-authored origin messages when falling back to the latest user message", () => {
+    const sorted = sortThreads(
+      [
+        makeThread({
+          id: "thread-1",
+          latestUserMessageAt: "invalid-latest-user-message-at",
+          updatedAt: "2026-03-09T10:00:00.000Z",
+          messages: [
+            { role: "user", createdAt: "2026-03-09T10:05:00.000Z" },
+            { role: "user", createdAt: "2026-03-09T10:30:00.000Z", origin: "goal-continue" },
+          ],
+        }),
+        makeThread({
+          id: "thread-2",
+          createdAt: "2026-03-09T10:10:00.000Z",
+          updatedAt: "2026-03-09T10:10:00.000Z",
+        }),
+      ],
+      "updated_at",
+    );
+
+    // thread-1's real user message (10:05) is older than thread-2's updatedAt
+    // (10:10); the origin message at 10:30 must not count as the user speaking.
+    expect(sorted.map((thread) => thread.id)).toEqual(["thread-2", "thread-1"]);
+  });
 });
 
 describe("planPinnedMove", () => {

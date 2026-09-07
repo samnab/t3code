@@ -644,6 +644,41 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRow?.assistantTurnDiffSummary).toBe(assistantTurnDiffSummary);
   });
 
+  it("does not project a revert count onto server-authored origin messages", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "origin-entry",
+          kind: "message",
+          createdAt: "2026-01-01T00:00:00Z",
+          message: {
+            id: "user-1" as never,
+            role: "user",
+            text: "[T3 subagent result: Fix bug (claude/sonnet, done, run run-1)]\nDone.",
+            origin: "subagent-delivery",
+            turnId: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+            streaming: false,
+          },
+        },
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      // Even if some stale entry exists for this id, an origin message must
+      // never surface a revert affordance — it is not the user's own turn.
+      revertTurnCountByUserMessageId: new Map([["user-1" as never, 3]]),
+    });
+
+    const originRow = rows.find(
+      (row): row is Extract<(typeof rows)[number], { kind: "message" }> =>
+        row.kind === "message" && row.message.role === "user",
+    );
+
+    expect(originRow?.revertTurnCount).toBeUndefined();
+  });
+
   it("folds the first assistant message and settled work before the terminal response", () => {
     const timelineEntries = [
       {

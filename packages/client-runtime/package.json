@@ -99,6 +99,10 @@
       "types": "./src/state/git.ts",
       "default": "./src/state/git.ts"
     },
+    "./state/messageOrigin": {
+      "types": "./src/state/messageOrigin.ts",
+      "default": "./src/state/messageOrigin.ts"
+    },
     "./state/models": {
       "types": "./src/state/models.ts",
       "default": "./src/state/models.ts"

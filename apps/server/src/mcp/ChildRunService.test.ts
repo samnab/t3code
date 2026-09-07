@@ -270,9 +270,13 @@ for (const [parentDriver, childDriver] of [
             model: "native-model",
           });
           expect(h.stopped).toEqual([h.starts[0]?.threadId]);
-          expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
-            1,
+          const deliveryCommands = h.commands.filter(
+            (command) => command.type === "thread.turn.start",
           );
+          expect(deliveryCommands).toHaveLength(1);
+          expect(
+            deliveryCommands[0]?.type === "thread.turn.start" && deliveryCommands[0].message.origin,
+          ).toBe("subagent-delivery");
         }).pipe(Effect.provide(h.services));
       }),
   );

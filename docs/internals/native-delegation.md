@@ -51,3 +51,18 @@ server cache and injects the session's MCP endpoint and bearer credential. The
 extension completes the MCP handshake, discovers tools and forwards calls
 through Pi's public tool API. It is a transport adapter only; Pi never becomes
 the shared engine for Codex or Claude children.
+
+Delivery and goal-loop continuation both dispatch an ordinary
+`thread.turn.start` with `role: "user"`, so the provider still receives the
+text as a user turn — that part of the contract does not change. What changes
+is `OrchestrationMessage.origin`: `"subagent-delivery"` on the result-delivery
+turn, `"goal-continue"` on the goal loop's continuation turn, absent on
+anything the user actually typed. `origin` is set only on the server-side
+`ThreadTurnStartCommand`, never on `ClientThreadTurnStartCommand`, so a client
+cannot forge authorship of its own message; the decider copies it verbatim
+into `thread.message-sent`, and it is persisted alongside the projected
+message (migration 052). Clients use it to render these turns as a delivery or
+continuation marker instead of the user's own words. Server-side "did the user
+send this" heuristics — thread title generation and
+`projection_threads.latest_user_message_at` — treat an origin-tagged message
+as if it were not a user message.

@@ -15,6 +15,7 @@ import {
   workEntryViewedImagePath,
 } from "@t3tools/client-runtime/work-log/presentation";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
+import { parseSubagentDeliveryText } from "@t3tools/client-runtime/state/messageOrigin";
 import type { AgentPanelModel } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   emptyAgentPanelModel,
@@ -809,7 +810,11 @@ function deriveTimelineMinimapItems(
   const items: TimelineMinimapItem[] = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    if (row?.kind !== "message" || row.message.role !== "user") {
+    if (
+      row?.kind !== "message" ||
+      row.message.role !== "user" ||
+      row.message.origin !== undefined
+    ) {
       continue;
     }
 
@@ -1111,7 +1116,12 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "work-live" ? <LiveWorkEntryTimelineRow row={row} /> : null}
       {row.kind === "work-toggle" ? <WorkGroupToggleTimelineRow row={row} /> : null}
       {row.kind === "turn-fold" ? <TurnFoldTimelineRow row={row} /> : null}
-      {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
+      {row.kind === "message" && row.message.origin !== undefined ? (
+        <OriginMessageTimelineRow row={row} />
+      ) : null}
+      {row.kind === "message" && row.message.role === "user" && row.message.origin === undefined ? (
+        <UserTimelineRow row={row} />
+      ) : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
@@ -1330,6 +1340,70 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
       </TooltipTrigger>
       <TooltipPopup side="top">Revert to this message</TooltipPopup>
     </Tooltip>
+  );
+}
+
+// Server-authored messages (subagent deliveries, goal-continue prompts) are
+// not the user's own words: no bubble, no alignment, no edit/resend/revert
+// controls, just a muted system-style row with a label and the body text.
+function OriginMessageTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
+  const [expanded, setExpanded] = useState(false);
+  const text = row.message.text ?? "";
+  const parsedHeader = useMemo(
+    () => (row.message.origin === "subagent-delivery" ? parseSubagentDeliveryText(text) : null),
+    [row.message.origin, text],
+  );
+  const bodyText = parsedHeader ? parsedHeader.body : text;
+  const label =
+    row.message.origin === "goal-continue"
+      ? "Goal loop continued"
+      : parsedHeader
+        ? `Subagent result: ${parsedHeader.title} (${parsedHeader.provider}/${parsedHeader.model}, ${parsedHeader.status})`
+        : "Subagent result";
+  const canCollapse = shouldCollapseUserMessage(bodyText);
+  const isCollapsed = canCollapse && !expanded;
+
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-sm">
+      <div className="flex items-center gap-1.5 text-muted-foreground text-xs">
+        <BotIcon className="size-3.5 shrink-0" />
+        <span className="truncate">{label}</span>
+      </div>
+      <div
+        className={cn("relative", isCollapsed && "max-h-44 overflow-hidden")}
+        style={
+          isCollapsed
+            ? {
+                WebkitMaskImage: COLLAPSED_USER_MESSAGE_FADE_MASK,
+                maskImage: COLLAPSED_USER_MESSAGE_FADE_MASK,
+              }
+            : undefined
+        }
+      >
+        <ChatMarkdown
+          text={bodyText.trim().length > 0 ? bodyText : "(no output)"}
+          cwd={ctx.markdownCwd}
+          threadRef={ctx.threadRef ?? undefined}
+          skills={ctx.skills}
+          className="text-muted-foreground"
+          lineBreaks
+        />
+      </div>
+      {canCollapse ? (
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          aria-expanded={expanded}
+          data-scroll-anchor-ignore
+          onClick={() => setExpanded((value) => !value)}
+          className="-ml-1 h-6 w-fit rounded-md px-1.5 text-secondary-label text-xs hover:bg-muted/55 hover:text-message-foreground"
+        >
+          {expanded ? "Show less" : "Show full message"}
+        </Button>
+      ) : null}
+    </div>
   );
 }
 

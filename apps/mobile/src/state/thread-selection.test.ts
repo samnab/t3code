@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -39,5 +40,25 @@ describe("threadDetailToShell", () => {
     expect(threadDetailToShell(environmentId, { ...thread, goal: "Ship it" }).goal).toBe("Ship it");
     expect(threadDetailToShell(environmentId, { ...thread, goal: null }).goal).toBeNull();
     expect("goal" in threadDetailToShell(environmentId, thread)).toBe(false);
+  });
+
+  it("skips server-authored origin messages when finding the latest user message", () => {
+    const withOriginOnly = {
+      ...thread,
+      messages: [
+        {
+          id: MessageId.make("m1"),
+          role: "user",
+          text: "[T3 subagent result: Title (codex/gpt, done, run r1)]\nbody",
+          turnId: null,
+          streaming: false,
+          origin: "subagent-delivery",
+          createdAt: "2026-04-02T00:00:00.000Z",
+          updatedAt: "2026-04-02T00:00:00.000Z",
+        },
+      ],
+    } satisfies OrchestrationThread;
+
+    expect(threadDetailToShell(environmentId, withOriginOnly).latestUserMessageAt).toBeNull();
   });
 });
