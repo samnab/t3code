@@ -2676,6 +2676,12 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           if (isContextCompactionActivityGroup(entry)) {
             return undefined;
           }
+          // Answered question cards contain one variable-height block per
+          // question, so let LegendList measure them instead of using the
+          // one-line work-row estimate.
+          if (entry.activities.some((activity) => activity.workEntry.userInput !== undefined)) {
+            return undefined;
+          }
           // Expanded rows append a variable detail block — fall back to
           // measurement for those groups.
           return entry.activities.some((activity) => expandedWorkRows[activity.id])

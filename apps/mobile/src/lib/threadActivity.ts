@@ -1,7 +1,10 @@
 import {
+  deriveUserInputHistory,
+  formatUserInputAnswer,
   requestKindFromRequestType,
+  userInputRequestId,
   type PendingApproval,
-  type PendingUserInput,
+  type UserInputHistory,
 } from "@t3tools/client-runtime/pending-requests";
 export type { PendingApproval, PendingUserInput } from "@t3tools/client-runtime/pending-requests";
 import {
@@ -141,6 +144,8 @@ export interface WorkLogEntry {
   };
   toolData?: unknown;
   subagentRun?: SubagentRunMetadata;
+  /** Canonical question/answer history anchored at the request activity. */
+  userInput?: UserInputHistory;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -445,8 +450,14 @@ function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): DerivedWorkLogEntry[] {
   const ordered = Arr.sort(activities, activityOrder);
+  const userInputHistory = deriveUserInputHistory(ordered);
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
+    const requestId = userInputRequestId(activity);
+    const history = requestId === null ? undefined : userInputHistory.get(requestId);
+    // Keep the request row as the stable chronological anchor and consume its
+    // separate resolution into that row once an answer is available.
+    if (activity.kind === "user-input.resolved" && history !== undefined) continue;
     if (activity.tone !== "error" && isWorktreeSetupActivity(activity.kind)) continue;
     if (activity.kind === "tool.started") continue;
     const payload =
@@ -473,7 +484,7 @@ function deriveWorkLogEntries(
     if (isNoContentRuntimeWarning(activity)) continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
     if (isAgentInternalActivity(activity)) continue;
-    entries.push(toDerivedWorkLogEntry(activity));
+    entries.push(toDerivedWorkLogEntry(activity, history));
   }
   return collapseDerivedWorkLogEntries(entries);
 }
@@ -501,7 +512,10 @@ function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): bool
   return typeof payload?.detail === "string" && payload.detail.startsWith("ExitPlanMode:");
 }
 
-function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
+function toDerivedWorkLogEntry(
+  activity: OrchestrationThreadActivity,
+  userInput?: UserInputHistory,
+): DerivedWorkLogEntry {
   const payload =
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
@@ -550,6 +564,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           ? "info"
           : activity.tone,
     sourceActivityKind: activity.kind,
+    ...(userInput ? { userInput } : {}),
   };
   const toolCallId =
     asTrimmedString(payload?.toolCallId) ?? asTrimmedString(asRecord(payload?.data)?.toolCallId);
@@ -1017,6 +1032,16 @@ function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
 
 function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
   if (entry.agentSpawn) return agentSpawnExpandedBody(entry.agentSpawn);
+  const userInput = entry.userInput;
+  if (userInput?.answers !== null && userInput !== undefined) {
+    const answers = userInput.answers;
+    return userInput.questions
+      .map(
+        (question) =>
+          `${question.question}\nAnswer: ${formatUserInputAnswer(question, answers[question.id])}`,
+      )
+      .join("\n\n");
+  }
   const blocks: string[] = [];
   const appendBlock = (value: string | null | undefined) => {
     const trimmed = value?.trim();
@@ -1663,12 +1688,13 @@ function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): Th
     }
 
     const isCompaction = entry.activity.workEntry.sourceActivityKind === "context-compaction";
-    if (isCompaction || firstActivityEntry?.turnId !== entry.turnId) {
+    const isUserInput = entry.activity.workEntry.userInput !== undefined;
+    if (isCompaction || isUserInput || firstActivityEntry?.turnId !== entry.turnId) {
       flushGroup();
     }
     firstActivityEntry ??= entry;
     openGroupActivities.push(entry.activity);
-    if (isCompaction) {
+    if (isCompaction || isUserInput) {
       flushGroup();
     }
   }
@@ -1775,6 +1801,13 @@ function deriveThreadFeedTurnFolds(
         .filter(
           (entry) =>
             entry.id !== firstAssistantMessageId && entry.id !== terminalAssistantMessageId,
+        )
+        .filter(
+          (entry) =>
+            !(
+              entry.type === "activity-group" &&
+              entry.activities.some((activity) => activity.workEntry.userInput !== undefined)
+            ),
         )
         .map((entry) => entry.id),
     );
@@ -2025,6 +2058,17 @@ function appendActivityGroupRows(
   };
   for (const activity of activities) {
     const spawn = activity.workEntry.agentSpawn;
+    if (activity.workEntry.userInput !== undefined) {
+      flushGroupableRun(false);
+      result.push({
+        type: "activity-group",
+        id: activity.id,
+        createdAt: activity.createdAt,
+        turnId: activity.turnId,
+        activities: [activity],
+      });
+      continue;
+    }
     if (activity.workEntry.tone !== "error" && spawn === undefined) {
       groupableRun.push(activity);
       continue;

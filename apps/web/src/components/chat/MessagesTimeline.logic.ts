@@ -620,6 +620,11 @@ function deriveTurnFolds(input: {
       if (entry.id === group.terminalEntry?.id) {
         continue;
       }
+      // Answered question cards are the user's conversation history and must
+      // remain visible outside the collapsed Worked block.
+      if (entry.kind === "work" && entry.entry.userInput !== undefined) {
+        continue;
+      }
       const isCompaction =
         entry.kind === "work" && entry.entry.sourceActivityKind === "context-compaction";
       const isSingleTrailingActivity =
@@ -1015,6 +1020,16 @@ export function deriveMessagesTimelineRows(input: {
     }
 
     if (timelineEntry.kind === "work") {
+      if (timelineEntry.entry.userInput !== undefined) {
+        nextRows.push({
+          kind: "work",
+          id: timelineEntry.id,
+          createdAt: timelineEntry.createdAt,
+          groupedEntries: [timelineEntry.entry],
+          isExpandedToolGroup: false,
+        });
+        continue;
+      }
       if (timelineEntry.entry.agentSpawn !== undefined || timelineEntry.entry.tone === "error") {
         nextRows.push({
           kind: "work",
@@ -1032,6 +1047,7 @@ export function deriveMessagesTimelineRows(input: {
         if (
           !nextEntry ||
           nextEntry.kind !== "work" ||
+          nextEntry.entry.userInput !== undefined ||
           nextEntry.entry.agentSpawn !== undefined ||
           nextEntry.entry.sourceActivityKind === "context-compaction" ||
           nextEntry.entry.tone === "error" ||

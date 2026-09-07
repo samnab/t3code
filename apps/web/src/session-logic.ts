@@ -1,6 +1,9 @@
 import {
+  deriveUserInputHistory,
   requestKindFromRequestType,
+  userInputRequestId,
   type PendingApproval,
+  type UserInputHistory,
 } from "@t3tools/client-runtime/pending-requests";
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
@@ -75,6 +78,8 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
+  /** Canonical question/answer history anchored at the request activity. */
+  userInput?: UserInputHistory;
   /** Grouping key for subagent lifecycle rows (one row per agent). */
   taskId?: string;
   /** Agent role (subagent_type) for labeled timeline rows. */
@@ -466,8 +471,14 @@ export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): WorkLogEntry[] {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const userInputHistory = deriveUserInputHistory(ordered);
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
+    const requestId = userInputRequestId(activity);
+    const history = requestId === null ? undefined : userInputHistory.get(requestId);
+    // The request row is the stable chronological anchor. Once it has a
+    // resolution, consume the separate resolution activity into that row.
+    if (activity.kind === "user-input.resolved" && history !== undefined) continue;
     if (activity.tone !== "error" && isWorktreeSetupActivity(activity.kind)) continue;
     if (activity.kind === "tool.started") continue;
     // Agent task.started rows are CTA seeds: they carry the true spawn turn,
@@ -489,7 +500,7 @@ export function deriveWorkLogEntries(
     if (isNoContentRuntimeWarning(activity)) continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
     if (isAgentInternalActivity(activity)) continue;
-    entries.push(toDerivedWorkLogEntry(activity));
+    entries.push(toDerivedWorkLogEntry(activity, history));
   }
   return collapseDerivedWorkLogEntries(entries);
 }
@@ -517,9 +528,15 @@ function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): bool
   return typeof payload?.detail === "string" && payload.detail.startsWith("ExitPlanMode:");
 }
 
-function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
+function toDerivedWorkLogEntry(
+  activity: OrchestrationThreadActivity,
+  userInput?: UserInputHistory,
+): DerivedWorkLogEntry {
   const cachedEntry = derivedWorkLogEntryByActivity.get(activity);
-  if (cachedEntry) {
+  if (cachedEntry && userInput === undefined) {
+    return cachedEntry;
+  }
+  if (cachedEntry && cachedEntry.userInput === userInput) {
     return cachedEntry;
   }
   const payload =
@@ -567,6 +584,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           ? "info"
           : activity.tone,
     sourceActivityKind: activity.kind,
+    ...(userInput ? { userInput } : {}),
   };
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);

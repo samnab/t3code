@@ -1,6 +1,10 @@
 import { EventId, TurnId, type OrchestrationThreadActivity } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { derivePendingRequests } from "./pendingRequests.ts";
+import {
+  derivePendingRequests,
+  deriveUserInputHistory,
+  formatUserInputAnswer,
+} from "./pendingRequests.ts";
 
 let nextActivityId = 0;
 
@@ -246,6 +250,53 @@ describe("pending approvals", () => {
 });
 
 describe("pending questions", () => {
+  it("pairs resolved custom and multi-select answers with the original request", () => {
+    const questions = [
+      {
+        id: "name",
+        header: "Name",
+        question: "What should it be named?",
+        options: [],
+        allowCustomAnswer: true,
+        multiSelect: false,
+      },
+      {
+        id: "scope",
+        header: "Scope",
+        question: "Which areas should be included?",
+        options: [
+          { label: "Orders", description: "Receipts", value: "orders" },
+          { label: "Listings", description: "Inventory", value: "listings" },
+        ],
+        multiSelect: true,
+      },
+    ];
+    const requested = makeActivity({
+      id: "history-requested",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      kind: "user-input.requested",
+      payload: { requestId: "history-request", questions },
+    });
+    const resolved = makeActivity({
+      id: "history-resolved",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      kind: "user-input.resolved",
+      payload: {
+        requestId: "history-request",
+        answers: { name: "Example", scope: ["orders", "listings"] },
+      },
+    });
+
+    const history = deriveUserInputHistory([requested, resolved]).get("history-request");
+    expect(history).toEqual({
+      requestId: "history-request",
+      questions,
+      answers: { name: "Example", scope: ["orders", "listings"] },
+    });
+    expect(formatUserInputAnswer(questions[0]!, history?.answers?.name)).toBe("Example");
+    expect(formatUserInputAnswer(questions[1]!, history?.answers?.scope)).toBe("Orders, Listings");
+  });
+
   it("preserves native answer keys while ignoring malformed options", () => {
     const question = {
       id: "  Which path?\n",

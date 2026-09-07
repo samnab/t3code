@@ -274,6 +274,101 @@ function makeThread(
 }
 
 describe("buildThreadFeed", () => {
+  it("keeps answered questions at their request position outside Worked", () => {
+    const turnId = TurnId.make("question-turn");
+    const thread = makeThread({
+      id: ThreadId.make("answered-question-history"),
+      projectId: ProjectId.make("project-1"),
+      title: "Answered question history",
+      messages: [
+        {
+          id: MessageId.make("question-user"),
+          role: "user",
+          text: "Start",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-04-01T00:00:00.000Z",
+          updatedAt: "2026-04-01T00:00:00.000Z",
+        },
+        {
+          id: MessageId.make("question-assistant"),
+          role: "assistant",
+          text: "Done",
+          turnId,
+          streaming: false,
+          createdAt: "2026-04-01T00:00:03.000Z",
+          updatedAt: "2026-04-01T00:00:03.000Z",
+        },
+      ],
+      activities: [
+        makeActivity({
+          id: EventId.make("question-requested"),
+          kind: "user-input.requested",
+          summary: "User input requested",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          turnId,
+          payload: {
+            requestId: "question-history",
+            questions: [
+              {
+                id: "scope",
+                header: "Scope",
+                question: "Which areas should be included?",
+                options: [
+                  { label: "Orders", description: "Receipts", value: "orders" },
+                  { label: "Listings", description: "Inventory", value: "listings" },
+                ],
+                multiSelect: true,
+              },
+            ],
+          },
+        }),
+        makeActivity({
+          id: EventId.make("question-tool"),
+          kind: "tool.completed",
+          summary: "Ran command",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId,
+          payload: { itemType: "command_execution", status: "completed" },
+        }),
+        makeActivity({
+          id: EventId.make("question-resolved"),
+          kind: "user-input.resolved",
+          summary: "User input submitted",
+          createdAt: "2026-04-01T00:00:02.500Z",
+          turnId,
+          payload: { requestId: "question-history", answers: { scope: ["orders", "listings"] } },
+        }),
+      ],
+    });
+
+    const feed = buildThreadFeed(thread);
+    const questionGroup = feed.find(
+      (entry): entry is Extract<ThreadFeedEntry, { type: "activity-group" }> =>
+        entry.type === "activity-group" &&
+        entry.activities.some((activity) => activity.workEntry.userInput !== undefined),
+    );
+    expect(questionGroup?.id).toBe("question-requested");
+    expect(
+      questionGroup?.activities.find((activity) => activity.id === "question-requested"),
+    ).toMatchObject({
+      workEntry: {
+        userInput: {
+          answers: { scope: ["orders", "listings"] },
+        },
+      },
+    });
+    expect(feed.some((entry) => entry.id === "question-resolved")).toBe(false);
+
+    const rows = deriveThreadFeedPresentation(feed, null, new Set());
+    expect(rows.map((entry) => entry.id)).toEqual([
+      "question-user",
+      "question-requested",
+      "turn-fold:question-turn",
+      "question-assistant",
+    ]);
+  });
+
   it("reuses unchanged feed and presentation rows during an assistant text update", () => {
     const completedTurnId = TurnId.make("completed-turn");
     const activeTurnId = TurnId.make("active-turn");

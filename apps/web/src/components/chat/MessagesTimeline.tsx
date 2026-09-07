@@ -8,6 +8,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import { formatUserInputAnswer } from "@t3tools/client-runtime/pending-requests";
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import {
   resolveWorkEntryToolPresentation,
@@ -3255,6 +3256,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   if (workEntry.agentSpawn) {
     return <AgentSpawnCtaRow workEntry={workEntry} />;
   }
+  if (workEntry.userInput && workEntry.userInput.answers !== null) {
+    return <AnsweredUserInputRow userInput={workEntry.userInput} />;
+  }
   return (
     <PlainWorkEntryRow
       workEntry={workEntry}
@@ -3263,6 +3267,37 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       displayLabel={displayLabel}
       onToggleEntry={props.onToggleEntry}
     />
+  );
+});
+
+const AnsweredUserInputRow = memo(function AnsweredUserInputRow({
+  userInput,
+}: {
+  userInput: NonNullable<TimelineWorkEntry["userInput"]>;
+}) {
+  const answers = userInput.answers;
+  if (answers === null) return null;
+
+  return (
+    <section className="-mx-1 space-y-1 rounded-md px-1 py-1" aria-label="Answered questions">
+      <div className="flex min-h-6 items-center gap-1.5 px-0.5 text-sm text-foreground/80">
+        <span className="flex size-6 shrink-0 items-center justify-center text-icon-muted">
+          <MessageCircleIcon aria-hidden className="size-4 stroke-[1.8]" />
+        </span>
+        <span>Answered questions</span>
+      </div>
+      <div className="ms-7 space-y-1.5">
+        {userInput.questions.map((question) => (
+          <div key={question.id} className="space-y-px text-sm leading-relaxed">
+            <div className="text-foreground/80">{question.question}</div>
+            <div className="text-secondary-label">
+              <span className="font-medium text-foreground/60">Answer: </span>
+              {formatUserInputAnswer(question, answers[question.id])}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 });
 

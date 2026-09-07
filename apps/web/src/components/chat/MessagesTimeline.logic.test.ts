@@ -1089,6 +1089,102 @@ describe("resolveAssistantMessageCopyState", () => {
 });
 
 describe("deriveMessagesTimelineRows", () => {
+  it("keeps answered user input visible outside the collapsed Worked row", () => {
+    const turnId = TurnId.make("turn-questions");
+    const questionEntry: WorkLogEntry = {
+      id: "question-requested",
+      createdAt: "2026-01-01T00:00:01Z",
+      turnId,
+      label: "User input requested",
+      tone: "info",
+      sourceActivityKind: "user-input.requested",
+      userInput: {
+        requestId: "question-history",
+        questions: [
+          {
+            id: "name",
+            header: "Name",
+            question: "What should it be named?",
+            options: [],
+            allowCustomAnswer: true,
+          },
+        ],
+        answers: { name: "Example" },
+      },
+    };
+    const timelineEntries = [
+      {
+        id: "user-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:00Z",
+        message: {
+          id: "user-message" as never,
+          role: "user" as const,
+          text: "Start",
+          turnId: null,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "question-entry",
+        kind: "work" as const,
+        createdAt: questionEntry.createdAt,
+        entry: questionEntry,
+      },
+      {
+        id: "tool-entry",
+        kind: "work" as const,
+        createdAt: "2026-01-01T00:00:02Z",
+        entry: {
+          id: "tool",
+          createdAt: "2026-01-01T00:00:02Z",
+          turnId,
+          label: "Ran command",
+          tone: "tool" as const,
+          itemType: "command_execution" as const,
+          toolLifecycleStatus: "completed" as const,
+        },
+      },
+      {
+        id: "assistant-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:03Z",
+        message: {
+          id: "assistant-message" as never,
+          role: "assistant" as const,
+          text: "Done",
+          turnId,
+          createdAt: "2026-01-01T00:00:03Z",
+          updatedAt: "2026-01-01T00:00:04Z",
+          streaming: false,
+        },
+      },
+    ];
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries,
+      latestTurn: {
+        turnId,
+        state: "completed",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:00:04Z",
+      },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+    expect(rows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "question-entry",
+      "turn-fold:turn-questions",
+      "assistant-entry",
+    ]);
+  });
+
   it("keeps context compaction visible outside folded work", () => {
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [

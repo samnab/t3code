@@ -24,6 +24,14 @@ export interface PendingUserInput {
   readonly questions: ReadonlyArray<UserInputQuestion>;
 }
 
+/** The question/answer pair rendered in a thread's activity history. */
+export interface UserInputHistory {
+  readonly requestId: string;
+  readonly questions: ReadonlyArray<UserInputQuestion>;
+  /** `null` means the request is still waiting for a response. */
+  readonly answers: Readonly<Record<string, unknown>> | null;
+}
+
 const isRequestId = Schema.is(ApprovalRequestId);
 const isProviderRequestKind = Schema.is(ProviderRequestKind);
 const isProviderApprovalOption = Schema.is(ProviderApprovalOption);
@@ -90,6 +98,79 @@ const requestActivityKinds = new Set([
   "user-input.resolved",
   "provider.user-input.respond.failed",
 ]);
+
+/** Returns the request id carried by a canonical user-input lifecycle activity. */
+export function userInputRequestId(
+  activity: Pick<OrchestrationThreadActivity, "kind" | "payload">,
+): string | null {
+  if (activity.kind !== "user-input.requested" && activity.kind !== "user-input.resolved") {
+    return null;
+  }
+  if (!Predicate.isObject(activity.payload) || typeof activity.payload.requestId !== "string") {
+    return null;
+  }
+  return activity.payload.requestId;
+}
+
+/**
+ * Pairs canonical question requests with their eventual answers while keeping
+ * the request's identity and position available to the history renderers.
+ * Requests and resolutions are collected independently so a page arriving
+ * out of order can still settle the original question row.
+ */
+export function deriveUserInputHistory(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ReadonlyMap<string, UserInputHistory> {
+  const requested = new Map<string, UserInputHistory>();
+  const resolved = new Map<string, Readonly<Record<string, unknown>>>();
+
+  for (const activity of activities) {
+    const requestId = userInputRequestId(activity);
+    if (requestId === null) continue;
+    const payload = Predicate.isObject(activity.payload) ? activity.payload : undefined;
+    if (!payload) continue;
+
+    if (activity.kind === "user-input.requested") {
+      const questions = parseQuestions(payload.questions);
+      if (questions.length === 0) continue;
+      requested.set(requestId, {
+        requestId,
+        questions,
+        answers: resolved.get(requestId) ?? null,
+      });
+    } else if (Predicate.isObject(payload.answers)) {
+      resolved.set(requestId, payload.answers);
+      const existing = requested.get(requestId);
+      if (existing) {
+        requested.set(requestId, { ...existing, answers: payload.answers });
+      }
+    }
+  }
+
+  return requested;
+}
+
+/** Formats native choice values, custom text, and multi-select answers alike. */
+export function formatUserInputAnswer(question: UserInputQuestion, value: unknown): string {
+  const values = Array.isArray(value) ? value : [value];
+  const formatted = values.flatMap((answer) => {
+    if (answer === null || answer === undefined) return [];
+    const option = question.options.find(
+      (candidate) =>
+        candidate.value === answer || (candidate.value === undefined && candidate.label === answer),
+    );
+    if (option) return [option.label];
+    if (typeof answer === "string") return [answer];
+    if (typeof answer === "number" || typeof answer === "boolean") return [String(answer)];
+    try {
+      const serialized = JSON.stringify(answer);
+      return serialized === undefined ? [String(answer)] : [serialized];
+    } catch {
+      return [String(answer)];
+    }
+  });
+  return formatted.length > 0 ? formatted.join(", ") : "No answer";
+}
 
 // The server reports a stale or unknown request through the failure text.
 // A failed reply with any other text stays open so the user can retry.

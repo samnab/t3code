@@ -60,6 +60,7 @@ import {
   type ToolGroupSummaryKind,
   workEntryViewedImagePath,
 } from "@t3tools/client-runtime/work-log/presentation";
+import { formatUserInputAnswer } from "@t3tools/client-runtime/pending-requests";
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
 import type { MarkdownImageRenderer } from "../../native/SelectableMarkdownText";
 import Animated, {
@@ -899,6 +900,9 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
   },
 ) {
   const { row, expanded } = props;
+  if (row.workEntry.userInput?.answers !== null && row.workEntry.userInput !== undefined) {
+    return <AnsweredUserInputWorkLogRow {...props} />;
+  }
   const canExpand = row.canExpand;
   const transcriptRun =
     expanded && subagentTranscriptDisclosureAvailable(row) ? row.subagentRun : null;
@@ -1064,6 +1068,55 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
           </ScrollView>
         </Animated.View>
       ) : null}
+    </Animated.View>
+  );
+});
+
+const AnsweredUserInputWorkLogRow = memo(function AnsweredUserInputWorkLogRow(
+  props: Parameters<typeof ThreadWorkLogRow>[0],
+) {
+  const { row } = props;
+  const userInput = row.workEntry.userInput;
+  if (!userInput || userInput.answers === null) return null;
+  const answers = userInput.answers;
+
+  return (
+    <Animated.View
+      layout={WORK_LOG_LAYOUT_TRANSITION}
+      className="overflow-hidden"
+      {...(isFreshRow(row.createdAt) ? { entering: FadeIn.duration(200) } : {})}
+    >
+      <Pressable
+        accessibilityLabel="Answered questions"
+        accessibilityHint="Long press to copy."
+        hitSlop={4}
+        onLongPress={() => props.onCopyRow(row.id, row.getCopyText())}
+        className="rounded-md px-0.5 py-0 active:bg-subtle"
+      >
+        <View className="min-h-8 flex-row items-start gap-1.5 py-0.5">
+          <View className="h-6 w-6 shrink-0 items-center justify-center">
+            <WorkLogIcon
+              icon="message"
+              color={props.iconSubtleColor}
+              colorClassName="text-foreground-muted"
+            />
+          </View>
+          <View className="min-w-0 flex-1 gap-1">
+            <Text className="text-sm text-foreground">Answered questions</Text>
+            {userInput.questions.map((question) => (
+              <View key={question.id} className="gap-px">
+                <Text className="text-sm leading-normal text-foreground-muted">
+                  {question.question}
+                </Text>
+                <Text className="text-sm leading-normal text-foreground-muted">
+                  <Text className="font-t3-medium text-foreground-muted">Answer: </Text>
+                  {formatUserInputAnswer(question, answers[question.id])}
+                </Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      </Pressable>
     </Animated.View>
   );
 });

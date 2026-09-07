@@ -450,6 +450,63 @@ describe("workEntryIndicatesToolNeutralStatus", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("keeps answered questions anchored at one visible history entry", () => {
+    const requested = makeActivity({
+      id: "user-input-requested",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      sequence: 1,
+      kind: "user-input.requested",
+      summary: "User input requested",
+      turnId: "turn-questions",
+      payload: {
+        requestId: "question-history",
+        questions: [
+          {
+            id: "name",
+            header: "Name",
+            question: "What should it be named?",
+            options: [],
+            allowCustomAnswer: true,
+          },
+          {
+            id: "scope",
+            header: "Scope",
+            question: "Which areas should be included?",
+            options: [
+              { label: "Orders", description: "Receipts", value: "orders" },
+              { label: "Listings", description: "Inventory", value: "listings" },
+            ],
+            multiSelect: true,
+          },
+        ],
+      },
+    });
+    const resolved = makeActivity({
+      id: "user-input-resolved",
+      createdAt: "2026-02-23T00:00:02.000Z",
+      sequence: 2,
+      kind: "user-input.resolved",
+      summary: "User input submitted",
+      turnId: "turn-questions",
+      payload: {
+        requestId: "question-history",
+        answers: { name: "Example", scope: ["orders", "listings"] },
+      },
+    });
+
+    const entries = deriveWorkLogEntries([resolved, requested]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "user-input-requested",
+      createdAt: requested.createdAt,
+      userInput: {
+        requestId: "question-history",
+        answers: { name: "Example", scope: ["orders", "listings"] },
+      },
+    });
+  });
+
   it("keeps the latest task progress without emitting plan-update log entries", () => {
     const activities = [
       makeActivity({ id: "before", kind: "tool.completed", summary: "Read files", sequence: 0 }),
