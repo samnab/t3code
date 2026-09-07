@@ -71,6 +71,7 @@ import {
   type TerminalError,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
+  ThreadExperimentError,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -151,6 +152,8 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
+import { ExperimentService } from "./experiments/ExperimentService.ts";
+import type { ExperimentError } from "./experiments/Model.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
@@ -223,6 +226,39 @@ function toExecutionGoalRpcError(
     threadId,
     reason: "provider-error",
     message: cause.message,
+  });
+}
+
+function toThreadExperimentRpcError(threadId: ThreadId, cause: ExperimentError) {
+  const reason: ThreadExperimentError["reason"] = (() => {
+    switch (cause.code) {
+      case "invalid_config":
+        return cause.message.startsWith("Objective") ? "invalid-objective" : "invalid-config";
+      case "unsafe_repository":
+        return "unsafe-repository";
+      case "unsupported_provider":
+        return "unsupported-provider";
+      case "confirmation_invalid":
+        return cause.message.includes("does not match")
+          ? "confirmation-mismatch"
+          : "confirmation-expired";
+      case "authentication_failed":
+        return "not-found";
+      case "thread_busy":
+      case "external_drift":
+      case "limits_exhausted":
+        return "conflict";
+      case "invalid_phase":
+        return cause.message.includes("already owns") ? "already-running" : "conflict";
+      case "evaluation_failed":
+      case "persistence_failed":
+        return "internal";
+    }
+  })();
+  return new ThreadExperimentError({
+    threadId,
+    reason,
+    message: cause.message.slice(0, 2_000),
   });
 }
 
@@ -571,6 +607,7 @@ const makeWsRpcLayer = (
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerAdapterRegistry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
       const providerService = yield* ProviderService.ProviderService;
+      const experimentService = yield* ExperimentService;
       const providerSessionDirectory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const providerAuth = yield* ProviderAuthService;
@@ -1959,6 +1996,30 @@ const makeWsRpcLayer = (
               Effect.mapError((cause) => toExecutionGoalRpcError(input.threadId, cause)),
               Effect.as({}),
             ),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.threadExperimentPreview]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.threadExperimentPreview,
+            experimentService
+              .preview(input)
+              .pipe(Effect.mapError((cause) => toThreadExperimentRpcError(input.threadId, cause))),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.threadExperimentStart]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.threadExperimentStart,
+            experimentService
+              .start(input)
+              .pipe(Effect.mapError((cause) => toThreadExperimentRpcError(input.threadId, cause))),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.threadExperimentGet]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.threadExperimentGet,
+            experimentService
+              .get(input)
+              .pipe(Effect.mapError((cause) => toThreadExperimentRpcError(input.threadId, cause))),
             { "rpc.aggregate": "provider" },
           ),
         [WS_METHODS.serverUpdateProvider]: (input) =>

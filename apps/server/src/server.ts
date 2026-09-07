@@ -74,6 +74,10 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import * as GoalLoopReactor from "./orchestration/GoalLoopReactor.ts";
 import * as NativeGoalReactor from "./orchestration/NativeGoalReactor.ts";
+import * as ExperimentCoordinatorLive from "./experiments/ExperimentCoordinatorLive.ts";
+import * as ExperimentLifecycleReactor from "./experiments/ExperimentLifecycleReactor.ts";
+import * as ExperimentService from "./experiments/ExperimentService.ts";
+import * as ThreadExperiments from "./persistence/ThreadExperiments.ts";
 import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReactor.ts";
 import * as ThreadPullRequestReactor from "./orchestration/ThreadPullRequestReactor.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
@@ -277,7 +281,27 @@ const PlatformServicesLive = Layer.unwrap(
   }),
 );
 
+const ExperimentServiceLive = ExperimentService.layer.pipe(
+  Layer.provide(ThreadExperiments.layer),
+  Layer.provide(ExperimentCoordinatorLive.layer),
+);
+
+const ExperimentRuntimeLayerLive = ExperimentLifecycleReactor.layer.pipe(
+  Layer.provideMerge(ExperimentServiceLive),
+  Layer.provideMerge(
+    Layer.effectDiscard(
+      Effect.gen(function* () {
+        const experiments = yield* ExperimentService.ExperimentService;
+        const lifecycle = yield* ExperimentLifecycleReactor.ExperimentLifecycleReactor;
+        yield* experiments.recoverAll();
+        yield* lifecycle.start();
+      }),
+    ),
+  ),
+);
+
 const ReactorLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(ExperimentRuntimeLayerLive),
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),

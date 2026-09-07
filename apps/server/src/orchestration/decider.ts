@@ -87,6 +87,7 @@ function initialGoalLoop(input: {
     iterations: 0,
     maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
     reason: null,
+    experiment: null,
     updatedAt: input.updatedAt,
   };
 }
@@ -435,6 +436,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             iterations: 0,
             maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
             reason: null,
+            experiment: null,
             updatedAt: command.createdAt,
           },
         }),
@@ -1018,6 +1020,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           return yield* emit({
             ...(command.state !== undefined ? { state: command.state } : {}),
             ...(command.mode !== undefined ? { mode: command.mode } : {}),
+            ...(command.kind !== undefined ? { kind: command.kind } : {}),
+            ...(command.experiment !== undefined ? { experiment: command.experiment } : {}),
             ...(command.reason !== undefined ? { reason: command.reason } : {}),
           });
       }

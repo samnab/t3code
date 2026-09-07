@@ -46,6 +46,7 @@ function makeLoop(overrides: Partial<ThreadGoalLoop> = {}): ThreadGoalLoop {
     iterations: 1,
     maxIterations: 10,
     reason: null,
+    experiment: null,
     updatedAt: NOW,
     ...overrides,
   };

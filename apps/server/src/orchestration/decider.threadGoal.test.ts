@@ -62,6 +62,7 @@ function withLoop(
     iterations: 0,
     maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
     reason: null,
+    experiment: null,
     updatedAt: UPDATED_AT,
     ...patch,
   };

@@ -47,6 +47,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import { forkParked } from "../serverActivation.ts";
+import { ExperimentService } from "../experiments/ExperimentService.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "./Services/RuntimeReceiptBus.ts";
@@ -150,6 +151,7 @@ export const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const receipts = yield* RuntimeReceiptBus;
+  const experiments = yield* Effect.serviceOption(ExperimentService);
 
   // Consecutive continuations that produced no assistant text, per thread.
   // ponytail: in-memory, so a server restart forgives one empty turn. The
@@ -210,6 +212,11 @@ export const make = Effect.gen(function* () {
   const evaluate = Effect.fn("GoalLoopReactor.evaluate")(function* (signal: Signal) {
     const thread = Option.getOrUndefined(yield* snapshots.getThreadShellById(signal.threadId));
     if (thread === undefined || !canDriveGoalLoop(thread)) return;
+    if (thread.goalLoop?.kind === "experiment") {
+      if (Option.isNone(experiments)) return;
+      if (signal.resumedAt !== undefined) yield* experiments.value.resume(thread.id);
+      if (!(yield* experiments.value.canContinue(thread.id))) return;
+    }
     if (signal.resumedAt !== undefined) {
       // Explicit user intent, so it outranks the error-session hold below.
       emptyRuns.delete(signal.threadId);
