@@ -1277,7 +1277,7 @@ export const make = Effect.gen(function* () {
         Promise.all([changedPaths(profile.cwd), stagedPaths(profile.cwd)]),
       );
       if (actual.length === 0 || !setEquals(actual, paths) || staged.length > 0) {
-        throw error(
+        return yield* error(
           "external_drift",
           "Candidate must change exactly the requested approved paths.",
         );
@@ -1289,7 +1289,7 @@ export const make = Effect.gen(function* () {
         const snapshot = snapshots[index]!;
         const actual = actualStates[index]!;
         if (actual.hash !== expectedHashes[change.path] || actual.mode !== snapshot.mode) {
-          throw error(
+          return yield* error(
             "external_drift",
             `Candidate content for ${change.path} did not match the applied payload.`,
           );
@@ -1306,13 +1306,13 @@ export const make = Effect.gen(function* () {
     }).pipe(
       Effect.catch((cause) =>
         restore(profile, null, "Applying the candidate failed.").pipe(
-          Effect.flatMap(() =>
-            Effect.fail(asExperimentError(cause, "Applying the candidate failed.")),
-          ),
           Effect.catch((restoreCause) =>
             failClosed(profile, restoreCause).pipe(
               Effect.flatMap((failure) => Effect.fail(failure)),
             ),
+          ),
+          Effect.flatMap(() =>
+            Effect.fail(asExperimentError(cause, "Applying the candidate failed.")),
           ),
         ),
       ),

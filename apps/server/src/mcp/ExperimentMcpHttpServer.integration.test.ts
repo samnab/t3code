@@ -9,6 +9,7 @@ import { afterEach, expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { HttpBody, HttpClient, HttpRouter } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -76,6 +77,10 @@ function makeRepo(): string {
 }
 
 function parseMcpResponse(raw: string): {
+  readonly error?: {
+    readonly code: number;
+    readonly message: string;
+  };
   readonly result?: {
     readonly isError?: boolean;
     readonly structuredContent?: unknown;
@@ -147,11 +152,14 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
       return ExperimentCoordinator.of(coordinator);
     }),
   );
+  const ThreadExperimentsLive = ThreadExperiments.memoryLayer;
   const DomainLive = ExperimentServiceLive.pipe(
-    Layer.provide(ThreadExperiments.memoryLayer),
+    Layer.provide(ThreadExperimentsLive),
     Layer.provide(CoordinatorLive),
   );
-  const RegistryAndDomainLive = DomainLive.pipe(Layer.provideMerge(McpSessionRegistry.layer));
+  const RegistryAndDomainLive = Layer.merge(DomainLive, ThreadExperimentsLive).pipe(
+    Layer.provideMerge(McpSessionRegistry.layer),
+  );
   const RoutesLive = Layer.mergeAll(
     McpHttpServer.layer.pipe(
       Layer.provide(PreviewAutomationBroker.layer),
@@ -267,13 +275,70 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         baselineMetric: 1,
       });
 
-      const applied = yield* callTool(4, "experiment_apply", {
+      const store = yield* ThreadExperiments.ThreadExperimentStore;
+      const approvedFile = NodePath.join(cwd, "score.txt");
+      const baselineBytes = NodeFS.readFileSync(approvedFile);
+      const baselineMode = NodeFS.statSync(approvedFile).mode;
+      const baselineHead = NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd,
+        encoding: "utf8",
+      }).trim();
+
+      const noOp = yield* callTool(4, "experiment_apply", {
+        hypothesis: "Leave the score unchanged",
+        changes: [{ path: "score.txt", content: "1\n" }],
+      });
+      expect(noOp.result?.isError).toBe(true);
+      expect(noOp.result?.content?.[0]?.text).toContain(
+        "Candidate must change exactly the requested approved paths.",
+      );
+      const afterNoOp = Option.getOrThrow(yield* store.get(threadId));
+      expect(afterNoOp).toMatchObject({
+        phase: "ready",
+        armed: true,
+        pending: null,
+        experimentsRun: 1,
+        experimentsRestored: 1,
+      });
+      expect(NodeFS.readFileSync(approvedFile)).toEqual(baselineBytes);
+      expect(NodeFS.statSync(approvedFile).mode).toBe(baselineMode);
+      expect(
+        NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd,
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(baselineHead);
+
+      const malformed = yield* callTool(5, "experiment_apply", {
+        hypothesis: "Malformed candidate",
+        changes: [{ path: "score.txt" }],
+      });
+      expect(malformed.error?.code).toBe(-32602);
+      expect(malformed.error?.message).toContain("Invalid parameters for tool 'experiment_apply'");
+      const afterMalformed = Option.getOrThrow(yield* store.get(threadId));
+      expect(afterMalformed).toMatchObject({
+        phase: "ready",
+        armed: true,
+        pending: null,
+        experimentsRun: 1,
+        experimentsRestored: 1,
+      });
+      expect(NodeFS.readFileSync(approvedFile)).toEqual(baselineBytes);
+      expect(NodeFS.statSync(approvedFile).mode).toBe(baselineMode);
+      expect(
+        NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd,
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(baselineHead);
+
+      const applied = yield* callTool(6, "experiment_apply", {
         hypothesis: "Increase the score",
         changes: [{ path: "score.txt", content: "2\n" }],
       });
       expect(applied.result?.isError).not.toBe(true);
 
-      const evaluated = yield* callTool(5, "experiment_evaluate", {});
+      const evaluated = yield* callTool(7, "experiment_evaluate", {});
       expect(evaluated.result?.isError).not.toBe(true);
       expect(evaluated.result?.structuredContent).toMatchObject({ outcome: "kept", metric: 2 });
       expect(NodeFS.readFileSync(NodePath.join(cwd, "score.txt"), "utf8")).toBe("2\n");
@@ -292,7 +357,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         body: HttpBody.text(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: 6,
+            id: 8,
             method: "initialize",
             params: {
               protocolVersion: "2025-06-18",
@@ -312,7 +377,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
           "mcp-protocol-version": "2025-06-18",
         },
         body: HttpBody.text(
-          JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list", params: {} }),
+          JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list", params: {} }),
           "application/json",
         ),
       });
@@ -335,7 +400,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         body: HttpBody.text(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: 8,
+            id: 10,
             method: "initialize",
             params: {
               protocolVersion: "2025-06-18",
@@ -357,7 +422,7 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
         body: HttpBody.text(
           JSON.stringify({
             jsonrpc: "2.0",
-            id: 9,
+            id: 11,
             method: "tools/call",
             params: { name: "experiment_status", arguments: {} },
           }),
