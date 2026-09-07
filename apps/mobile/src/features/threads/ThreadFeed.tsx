@@ -17,6 +17,7 @@ import {
   type CodexArtifactTemplate,
 } from "@t3tools/client-runtime/codex-artifact-templates";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import { isOriginMessage, parseSubagentDeliveryHeader } from "../../lib/messageOrigin";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
@@ -1538,7 +1539,8 @@ function renderFeedEntry(
 
   if (entry.type === "message") {
     const { message } = entry;
-    const isUser = message.role === "user";
+    const isOrigin = isOriginMessage(message);
+    const isUser = message.role === "user" && !isOrigin;
     const renderedText = renderAssistantCitationsAsText(message.text);
     const styles = isUser ? markdownStyles.user : markdownStyles.assistant;
     const timestampLabel = formatMessageTime(isUser ? message.createdAt : message.updatedAt);
@@ -1559,6 +1561,37 @@ function renderFeedEntry(
       props.terminalAssistantMessageIds.has(message.id) &&
       !assistantTurnStillInProgress &&
       !message.streaming;
+
+    if (isOrigin) {
+      const enterAnimated = isFreshTimestamp(message.createdAt);
+      const header =
+        message.origin === "subagent-delivery" ? parseSubagentDeliveryHeader(message.text) : null;
+      const label =
+        message.origin === "goal-continue"
+          ? "Goal loop continued"
+          : header
+            ? `Subagent result · ${header.title} (${header.provider}/${header.model}, ${header.status})`
+            : "Subagent result";
+      const body = header ? header.body : message.text;
+      return (
+        <Animated.View
+          className="mb-5 px-1"
+          {...(enterAnimated ? { entering: FadeIn.duration(220) } : {})}
+        >
+          <Text className="mb-1 font-t3-medium text-xs text-foreground-muted">{label}</Text>
+          {body.trim().length > 0 ? (
+            <AssistantMarkdownContent
+              markdown={renderAssistantCitationsAsText(body)}
+              markdownStyles={markdownStyles.assistant}
+              linkHandlers={props.markdownLinkHandlers}
+              onUseArtifactTemplate={props.onUseArtifactTemplate}
+              renderImage={props.renderMarkdownImage}
+              skills={props.skills}
+            />
+          ) : null}
+        </Animated.View>
+      );
+    }
 
     if (isUser) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
@@ -2483,7 +2516,12 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       resolveChatListAnchoredEndSpace(
         presentedFeed,
         props.anchorMessageId,
-        (entry) => (entry.type === "message" && entry.message.role === "user" ? entry.id : null),
+        (entry) =>
+          entry.type === "message" &&
+          entry.message.role === "user" &&
+          !isOriginMessage(entry.message)
+            ? entry.id
+            : null,
         { anchorOffset: anchorTopInset + CHAT_LIST_ANCHOR_OFFSET },
       ),
     [presentedFeed, props.anchorMessageId, anchorTopInset],
