@@ -10,6 +10,30 @@ export interface ThreadExperimentConfirmationState {
   readonly error: string | null;
 }
 
+export interface ThreadExperimentPreviewRequest {
+  readonly id: number;
+  readonly threadKey: string;
+}
+
+export function isCurrentThreadExperimentPreviewRequest(
+  request: ThreadExperimentPreviewRequest,
+  currentRequest: ThreadExperimentPreviewRequest | null,
+  currentThreadKey: string | null,
+): boolean {
+  return (
+    currentRequest?.id === request.id &&
+    currentRequest.threadKey === request.threadKey &&
+    currentThreadKey === request.threadKey
+  );
+}
+
+export function isThreadExperimentConfirmationForThread(
+  state: ThreadExperimentConfirmationState,
+  threadKey: string | null,
+): boolean {
+  return state.threadKey === threadKey;
+}
+
 export type ThreadExperimentConfirmationAction =
   | {
       readonly type: "open";

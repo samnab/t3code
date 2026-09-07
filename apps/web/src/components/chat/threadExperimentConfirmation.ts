@@ -5,6 +5,38 @@ export function threadExperimentCommandObjective(command: ThreadGoalCommand): st
   return command.action === "experiment" ? command.objective : null;
 }
 
+export function threadGoalCommandAttachmentCount(
+  command: ThreadGoalCommand,
+  imageCount: number,
+  fileCount: number,
+): number {
+  return imageCount + (command.action === "experiment" ? fileCount : 0);
+}
+
+export interface ThreadExperimentPreviewRequest {
+  readonly id: number;
+  readonly threadKey: string;
+}
+
+export function isCurrentThreadExperimentPreviewRequest(
+  request: ThreadExperimentPreviewRequest,
+  currentRequest: ThreadExperimentPreviewRequest | null,
+  currentThreadKey: string,
+): boolean {
+  return (
+    currentRequest?.id === request.id &&
+    currentRequest.threadKey === request.threadKey &&
+    currentThreadKey === request.threadKey
+  );
+}
+
+export function isThreadExperimentConfirmationForThread(
+  state: ThreadExperimentConfirmationState,
+  threadKey: string,
+): boolean {
+  return `${state.environmentId}:${state.threadId}` === threadKey;
+}
+
 export interface ThreadExperimentConfirmationState {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;

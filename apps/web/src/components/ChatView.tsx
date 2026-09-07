@@ -131,9 +131,13 @@ import { type LegendListRef } from "@legendapp/list/react";
 import { ThreadExperimentConfirmationDialog } from "./chat/ThreadExperimentConfirmationDialog";
 import {
   canConfirmThreadExperiment,
+  isCurrentThreadExperimentPreviewRequest,
+  isThreadExperimentConfirmationForThread,
   threadExperimentCommandObjective,
   threadExperimentConfirmationReducer,
+  threadGoalCommandAttachmentCount,
   threadExperimentStartInput,
+  type ThreadExperimentPreviewRequest,
   type ThreadExperimentConfirmationState,
 } from "./chat/threadExperimentConfirmation";
 import {
@@ -1402,6 +1406,8 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, threadId],
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
+  const routeThreadKeyRef = useRef(routeThreadKey);
+  routeThreadKeyRef.current = routeThreadKey;
   const updateProjectScriptSettings = useAtomCommand(serverEnvironment.updateSettings, {
     reportFailure: false,
   });
@@ -1755,10 +1761,12 @@ export default function ChatView(props: ChatViewProps) {
   // Guards /goal metadata writes so a rapid Enter can never interleave a set
   // with a clear.
   const goalMetadataInFlightRef = useRef(false);
-  const experimentPreviewInFlightRef = useRef(false);
+  const nextExperimentPreviewRequestIdRef = useRef(0);
+  const experimentPreviewRequestRef = useRef<ThreadExperimentPreviewRequest | null>(null);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useEffect(() => {
+    experimentPreviewRequestRef.current = null;
     const confirmation = threadExperimentConfirmationStateRef.current;
     if (
       confirmation &&
@@ -1781,6 +1789,11 @@ export default function ChatView(props: ChatViewProps) {
   const confirmThreadExperiment = useCallback(async () => {
     const confirmation = threadExperimentConfirmationStateRef.current;
     if (!canConfirmThreadExperiment(confirmation)) return;
+    if (!isThreadExperimentConfirmationForThread(confirmation, routeThreadKeyRef.current)) {
+      submittedExperimentDraftRef.current = null;
+      dispatchThreadExperimentConfirmation({ type: "cancel" });
+      return;
+    }
     dispatchThreadExperimentConfirmation({ type: "beginConfirm" });
     const result = await startThreadExperiment({
       environmentId: confirmation.environmentId,
@@ -6489,7 +6502,11 @@ export default function ChatView(props: ChatViewProps) {
           experimentObjective !== null
             ? isServerThread && activeServerThread !== null
             : (isServerThread && activeServerThread !== null) || isDraftGoalTarget,
-        attachmentCount: composerImages.length + composerFiles.length,
+        attachmentCount: threadGoalCommandAttachmentCount(
+          goalCommand,
+          composerImages.length,
+          composerFiles.length,
+        ),
         contextCount:
           composerTerminalContexts.length +
           composerElementContexts.length +
@@ -6539,13 +6556,28 @@ export default function ChatView(props: ChatViewProps) {
           );
           return;
         }
-        if (!activeServerThread || experimentPreviewInFlightRef.current) return;
-        experimentPreviewInFlightRef.current = true;
+        if (!activeServerThread) return;
+        const previewRequest = {
+          id: nextExperimentPreviewRequestIdRef.current + 1,
+          threadKey: routeThreadKey,
+        };
+        if (experimentPreviewRequestRef.current?.threadKey === previewRequest.threadKey) return;
+        nextExperimentPreviewRequestIdRef.current = previewRequest.id;
+        experimentPreviewRequestRef.current = previewRequest;
         const result = await previewThreadExperiment({
           environmentId: activeServerThread.environmentId,
           input: { threadId: activeServerThread.id, objective: experimentObjective },
         });
-        experimentPreviewInFlightRef.current = false;
+        if (
+          !isCurrentThreadExperimentPreviewRequest(
+            previewRequest,
+            experimentPreviewRequestRef.current,
+            routeThreadKeyRef.current,
+          )
+        ) {
+          return;
+        }
+        experimentPreviewRequestRef.current = null;
         if (result._tag === "Failure") {
           if (!isAtomCommandInterrupted(result)) {
             const error = squashAtomCommandFailure(result);

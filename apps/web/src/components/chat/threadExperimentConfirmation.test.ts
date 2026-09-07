@@ -10,6 +10,9 @@ import {
 import {
   canConfirmThreadExperiment,
   formatThreadExperimentArgv,
+  isCurrentThreadExperimentPreviewRequest,
+  isThreadExperimentConfirmationForThread,
+  threadGoalCommandAttachmentCount,
   threadExperimentCommandObjective,
   threadExperimentConfirmationReducer,
   threadExperimentStartInput,
@@ -79,6 +82,34 @@ describe("thread experiment confirmation", () => {
         objective: "Reduce startup time",
       }),
     ).toBe("Reduce startup time");
+    expect(threadGoalCommandAttachmentCount({ action: "set", goal: "Ship it" }, 0, 1)).toBe(0);
+    expect(
+      threadGoalCommandAttachmentCount(
+        { action: "experiment", objective: "Reduce startup time" },
+        0,
+        1,
+      ),
+    ).toBe(1);
+  });
+
+  it("rejects a preview response after the route or request generation changes", () => {
+    const request = { id: 4, threadKey: "env-1:thread-1" };
+    expect(isCurrentThreadExperimentPreviewRequest(request, request, "env-1:thread-1")).toBe(true);
+    expect(
+      isCurrentThreadExperimentPreviewRequest(
+        request,
+        { id: 5, threadKey: "env-1:thread-2" },
+        "env-1:thread-2",
+      ),
+    ).toBe(false);
+    expect(isCurrentThreadExperimentPreviewRequest(request, request, "env-1:thread-2")).toBe(false);
+  });
+
+  it("refuses to confirm a preview owned by another route", () => {
+    const state = openState();
+    if (!state) throw new Error("Expected an open confirmation");
+    expect(isThreadExperimentConfirmationForThread(state, "env-1:thread-1")).toBe(true);
+    expect(isThreadExperimentConfirmationForThread(state, "env-1:thread-2")).toBe(false);
   });
 
   it("keeps the preview and objective when a stale confirmation fails", () => {

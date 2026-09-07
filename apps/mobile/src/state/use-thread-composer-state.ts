@@ -88,9 +88,12 @@ import {
 } from "./composer-attachment-uploads";
 import {
   canConfirmThreadExperiment,
+  isCurrentThreadExperimentPreviewRequest,
+  isThreadExperimentConfirmationForThread,
   threadExperimentConfirmationReducer,
   threadExperimentStartInput,
   type ThreadExperimentConfirmationState,
+  type ThreadExperimentPreviewRequest,
 } from "../features/threads/thread-experiment-confirmation";
 
 export function appendReviewCommentToDraft(input: {
@@ -172,6 +175,8 @@ export function useThreadComposerState() {
     readonly threadKey: string;
     readonly draft: ReturnType<typeof getComposerDraftSnapshot>;
   } | null>(null);
+  const nextExperimentPreviewRequestIdRef = useRef(0);
+  const experimentPreviewRequestRef = useRef<ThreadExperimentPreviewRequest | null>(null);
 
   // ── Codex execution goal ── Provider-owned live session state, pulled
   // via the three execution-goal RPCs only; never the thread metadata path
@@ -212,6 +217,8 @@ export function useThreadComposerState() {
   const selectedThreadKey = selectedThreadShell
     ? scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id)
     : null;
+  const selectedThreadKeyRef = useRef(selectedThreadKey);
+  selectedThreadKeyRef.current = selectedThreadKey;
   const selectedThreadQueuedMessages = useMemo(
     () => (selectedThreadKey ? (queuedMessagesByThreadKey[selectedThreadKey] ?? []) : []),
     [queuedMessagesByThreadKey, selectedThreadKey],
@@ -545,10 +552,27 @@ export function useThreadComposerState() {
           Alert.alert("Experiment needs an objective", objectiveError);
           return null;
         }
+        const previewRequest = {
+          id: nextExperimentPreviewRequestIdRef.current + 1,
+          threadKey,
+        };
+        if (experimentPreviewRequestRef.current?.threadKey === threadKey) return null;
+        nextExperimentPreviewRequestIdRef.current = previewRequest.id;
+        experimentPreviewRequestRef.current = previewRequest;
         const result = await previewThreadExperiment({
           environmentId: selectedThreadShell.environmentId,
           input: { threadId: selectedThreadShell.id, objective: goalCommand.objective },
         });
+        if (
+          !isCurrentThreadExperimentPreviewRequest(
+            previewRequest,
+            experimentPreviewRequestRef.current,
+            selectedThreadKeyRef.current,
+          )
+        ) {
+          return null;
+        }
+        experimentPreviewRequestRef.current = null;
         if (result._tag === "Failure") {
           if (!isAtomCommandInterrupted(result)) {
             const error = Cause.squash(result.cause);
@@ -922,6 +946,7 @@ export function useThreadComposerState() {
   );
 
   useEffect(() => {
+    experimentPreviewRequestRef.current = null;
     const confirmation = threadExperimentConfirmationStateRef.current;
     if (confirmation && confirmation.threadKey !== selectedThreadKey) {
       submittedExperimentDraftRef.current = null;
@@ -938,6 +963,11 @@ export function useThreadComposerState() {
   const confirmThreadExperiment = useCallback(async () => {
     const confirmation = threadExperimentConfirmationStateRef.current;
     if (!canConfirmThreadExperiment(confirmation)) return;
+    if (!isThreadExperimentConfirmationForThread(confirmation, selectedThreadKeyRef.current)) {
+      submittedExperimentDraftRef.current = null;
+      dispatchThreadExperimentConfirmation({ type: "cancel" });
+      return;
+    }
     dispatchThreadExperimentConfirmation({ type: "beginConfirm" });
     const result = await startThreadExperiment({
       environmentId: confirmation.environmentId,

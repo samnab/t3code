@@ -9,6 +9,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   canConfirmThreadExperiment,
+  isCurrentThreadExperimentPreviewRequest,
+  isThreadExperimentConfirmationForThread,
   threadExperimentConfirmationReducer,
   threadExperimentStartInput,
 } from "./thread-experiment-confirmation";
@@ -91,5 +93,25 @@ describe("mobile experiment confirmation", () => {
         threadExperimentConfirmationReducer(state, { type: "beginConfirm" }),
       ),
     ).toBe(false);
+  });
+
+  it("rejects a preview response after switching threads", () => {
+    const request = { id: 4, threadKey: "env-1:thread-1" };
+    expect(isCurrentThreadExperimentPreviewRequest(request, request, "env-1:thread-1")).toBe(true);
+    expect(isCurrentThreadExperimentPreviewRequest(request, request, "env-1:thread-2")).toBe(false);
+    expect(
+      isCurrentThreadExperimentPreviewRequest(
+        request,
+        { id: 5, threadKey: "env-1:thread-2" },
+        "env-1:thread-2",
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses to confirm a preview owned by another selected thread", () => {
+    const state = openState();
+    if (!state) throw new Error("Expected an open confirmation");
+    expect(isThreadExperimentConfirmationForThread(state, "env-1:thread-1")).toBe(true);
+    expect(isThreadExperimentConfirmationForThread(state, "env-1:thread-2")).toBe(false);
   });
 });
