@@ -333,6 +333,7 @@ export function applyThreadDetailEvent(
           : {}),
         turnId: event.payload.turnId,
         streaming: event.payload.streaming,
+        ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
         createdAt: event.payload.createdAt,
         updatedAt: event.payload.updatedAt,
       };

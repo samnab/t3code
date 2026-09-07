@@ -436,6 +436,33 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("keeps origin on server-authored messages", () => {
+      const result = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 6,
+        occurredAt: "2026-04-01T06:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.message-sent",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: MessageId.make("msg-1"),
+          role: "user",
+          text: "[T3 subagent result: Fix bug (claude/sonnet, done, run run-1)]\nDone.",
+          origin: "subagent-delivery",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-04-01T06:00:00.000Z",
+          updatedAt: "2026-04-01T06:00:00.000Z",
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.messages[0]?.origin).toBe("subagent-delivery");
+      }
+    });
+
     it("appends text for streaming messages", () => {
       const threadWithMessage: OrchestrationThread = {
         ...baseThread,
