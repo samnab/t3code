@@ -143,3 +143,58 @@ it.effect("binds only explicitly granted MCP capabilities to the credential", ()
     expect(scope?.capabilities.has("preview")).toBe(false);
   }),
 );
+
+it.effect("replaces a thread credential with an experiment-only run binding", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("experiment-thread");
+    const oldCredential = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      capabilities: ["preview", "delegation"],
+    });
+    const experimentCredential = yield* registry.issueExperiment({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("claudeAgent-restricted"),
+      providerSessionId: "provider-session-restricted",
+      runId: "experiment-run-7",
+      generation: 4,
+    });
+
+    expect(experimentCredential.config.endpoint).toBe("http://127.0.0.1:43123/mcp/experiment");
+    expect(
+      yield* registry.resolve(oldCredential.config.authorizationHeader.replace(/^Bearer\s+/, "")),
+    ).toBeUndefined();
+
+    const scope = yield* registry.resolve(
+      experimentCredential.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    );
+    expect(scope).toMatchObject({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("claudeAgent-restricted"),
+      providerSessionId: "provider-session-restricted",
+      experiment: { runId: "experiment-run-7", generation: 4 },
+    });
+    expect(scope).toBeDefined();
+    expect(scope === undefined ? [] : [...scope.capabilities]).toEqual(["experiment"]);
+  }),
+);
+
+it.effect("revokes an experiment credential by its provider session", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issued = yield* registry.issueExperiment({
+      threadId: ThreadId.make("experiment-thread-revoked"),
+      providerInstanceId: ProviderInstanceId.make("pi"),
+      providerSessionId: "experiment-provider-session",
+      runId: "experiment-run-revoked",
+      generation: 1,
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+
+    yield* registry.revokeProviderSession("different-session");
+    expect(yield* registry.resolve(token)).toBeDefined();
+    yield* registry.revokeProviderSession("experiment-provider-session");
+    expect(yield* registry.resolve(token)).toBeUndefined();
+  }),
+);

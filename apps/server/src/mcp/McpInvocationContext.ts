@@ -7,7 +7,14 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "preview" | "delegation";
+import { ExperimentMcpError } from "./ExperimentMcpModel.ts";
+
+export type McpCapability = "preview" | "delegation" | "experiment";
+
+export interface ExperimentMcpBinding {
+  readonly runId: string;
+  readonly generation: number;
+}
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
@@ -15,6 +22,7 @@ export interface McpInvocationScope {
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
   readonly capabilities: ReadonlySet<McpCapability>;
+  readonly experiment?: ExperimentMcpBinding;
   readonly issuedAt: number;
 }
 
@@ -38,3 +46,25 @@ export const requireMcpCapability = Effect.fn("mcp.requireCapability")(function*
   }
   return invocation;
 });
+
+export const requireExperimentMcpInvocation = Effect.fn("mcp.requireExperimentInvocation")(
+  function* () {
+    const invocation = yield* McpInvocationContext;
+    if (
+      invocation.capabilities.size !== 1 ||
+      !invocation.capabilities.has("experiment") ||
+      invocation.experiment === undefined
+    ) {
+      return yield* new ExperimentMcpError({
+        code: "PROVIDER_EXPERIMENT_UNAUTHORIZED",
+        message: "MCP credential is not bound to an experiment run.",
+      });
+    }
+    return {
+      threadId: invocation.threadId,
+      providerInstanceId: invocation.providerInstanceId,
+      providerSessionId: invocation.providerSessionId,
+      runId: invocation.experiment.runId,
+    };
+  },
+);

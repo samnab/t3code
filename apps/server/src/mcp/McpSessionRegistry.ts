@@ -14,7 +14,15 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
-  readonly capabilities?: ReadonlyArray<McpInvocationContext.McpCapability>;
+  readonly capabilities?: ReadonlyArray<Exclude<McpInvocationContext.McpCapability, "experiment">>;
+}
+
+export interface ExperimentMcpCredentialRequest {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly providerSessionId: string;
+  readonly runId: string;
+  readonly generation: number;
 }
 
 export interface McpIssuedCredential {
@@ -23,6 +31,9 @@ export interface McpIssuedCredential {
 
 export interface McpSessionRegistryShape {
   readonly issue: (request: McpCredentialRequest) => Effect.Effect<McpIssuedCredential>;
+  readonly issueExperiment: (
+    request: ExperimentMcpCredentialRequest,
+  ) => Effect.Effect<McpIssuedCredential>;
   readonly resolve: (
     rawToken: string,
   ) => Effect.Effect<McpInvocationContext.McpInvocationScope | undefined>;
@@ -150,6 +161,49 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     },
   );
 
+  const issueExperiment: McpSessionRegistryShape["issueExperiment"] = Effect.fn(
+    "McpSessionRegistry.issueExperiment",
+  )(function* (request) {
+    const issuedAt = yield* currentTimeMillis;
+    const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
+    const tokenHash = yield* hashToken(rawToken);
+    const scope: McpInvocationContext.McpInvocationScope = {
+      environmentId,
+      threadId: ThreadId.make(request.threadId),
+      providerSessionId: request.providerSessionId,
+      providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+      capabilities: new Set(["experiment"]),
+      experiment: {
+        runId: request.runId,
+        generation: request.generation,
+      },
+      issuedAt,
+    };
+    yield* SynchronizedRef.update(state, ({ records }) => {
+      const next = new Map(
+        Array.from(pruneDead(records, issuedAt)).filter(
+          ([, record]) => record.scope.threadId !== scope.threadId,
+        ),
+      );
+      next.set(tokenHash, { tokenHash, scope, lastAliveAt: issuedAt });
+      return { records: next };
+    });
+    return {
+      config: {
+        environmentId,
+        threadId: scope.threadId,
+        providerSessionId: scope.providerSessionId,
+        providerInstanceId: scope.providerInstanceId,
+        endpoint: `${endpoint}/experiment`,
+        authorizationHeader: `Bearer ${rawToken}`,
+        experiment: {
+          runId: request.runId,
+          generation: request.generation,
+        },
+      },
+    };
+  });
+
   const resolve: McpSessionRegistryShape["resolve"] = Effect.fn("McpSessionRegistry.resolve")(
     function* (rawToken) {
       if (rawToken.length === 0) return undefined;
@@ -189,6 +243,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
 
   return McpSessionRegistry.of({
     issue,
+    issueExperiment,
     resolve,
     touch,
     revokeProviderSession: Effect.fn("McpSessionRegistry.revokeProviderSession")(
@@ -232,6 +287,15 @@ export const issueActiveMcpCredential = (
         .pipe(Effect.andThen(activeMcpSessionRegistry.issue(request)))
     : Effect.sync((): McpIssuedCredential | undefined => undefined);
 
+export const issueActiveExperimentMcpCredential = (
+  request: ExperimentMcpCredentialRequest,
+): Effect.Effect<McpIssuedCredential | undefined> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry
+        .revokeThread(request.threadId)
+        .pipe(Effect.andThen(activeMcpSessionRegistry.issueExperiment(request)))
+    : Effect.sync((): McpIssuedCredential | undefined => undefined);
+
 /**
  * Refreshes the liveness of a thread's MCP credential. Called on every provider
  * turn so an active session is never mistaken for an abandoned one.
@@ -241,6 +305,11 @@ export const touchActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
 
 export const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;
+
+export const revokeActiveMcpProviderSession = (providerSessionId: string): Effect.Effect<void> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry.revokeProviderSession(providerSessionId)
+    : Effect.void;
 
 export const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;
