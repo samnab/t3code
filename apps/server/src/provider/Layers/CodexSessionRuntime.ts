@@ -220,6 +220,10 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  readonly experimentRestriction?: {
+    readonly mcpServerName: string;
+    readonly toolNames: ReadonlyArray<string>;
+  };
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -302,7 +306,13 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
-  | CodexSessionRuntimeThreadIdMissingError;
+  | CodexSessionRuntimeThreadIdMissingError
+  | CodexExperimentRestrictionError;
+
+export class CodexExperimentRestrictionError extends Schema.TaggedErrorClass<CodexExperimentRestrictionError>()(
+  "CodexExperimentRestrictionError",
+  { message: Schema.String },
+) {}
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -612,7 +622,18 @@ function buildThreadStartParams(input: {
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
+  readonly experimentRestricted?: boolean;
 }): EffectCodexSchema.V2ThreadStartParams {
+  if (input.experimentRestricted === true) {
+    return {
+      cwd: input.cwd,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      approvalsReviewer: "user",
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    };
+  }
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
     cwd: input.cwd,
@@ -684,6 +705,7 @@ export function buildTurnStartParams(input: {
   readonly interactionMode?: ProviderInteractionMode;
   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
   readonly browserToolsAvailable?: boolean;
+  readonly experimentRestricted?: boolean;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -712,7 +734,10 @@ export function buildTurnStartParams(input: {
     input: turnInput,
     approvalPolicy: config.approvalPolicy,
     approvalsReviewer: config.approvalsReviewer,
-    sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
+    sandboxPolicy:
+      input.experimentRestricted === true
+        ? { type: "readOnly", networkAccess: false }
+        : runtimeModeToTurnSandboxPolicy(input.runtimeMode),
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
@@ -777,6 +802,7 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly experimentRestricted?: boolean;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -784,6 +810,9 @@ export const openCodexThread = (input: {
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    ...(input.experimentRestricted === undefined
+      ? {}
+      : { experimentRestricted: input.experimentRestricted }),
   });
 
   if (resumeThreadId === undefined) {
@@ -2325,6 +2354,28 @@ export const makeCodexSessionRuntime = (
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
 
+      if (options.experimentRestriction !== undefined) {
+        const inventory = yield* client.request("mcpServerStatus/list", {
+          detail: "toolsAndAuthOnly",
+        });
+        const expectedTools = [...options.experimentRestriction.toolNames].toSorted();
+        const actualServers = inventory.data.map((server) => server.name);
+        const actualTools = inventory.data
+          .flatMap((server) => Object.keys(server.tools))
+          .toSorted();
+        if (
+          inventory.nextCursor != null ||
+          actualServers.length !== 1 ||
+          actualServers[0] !== options.experimentRestriction.mcpServerName ||
+          actualTools.length !== expectedTools.length ||
+          actualTools.some((tool, index) => tool !== expectedTools[index])
+        ) {
+          return yield* new CodexExperimentRestrictionError({
+            message: "Codex experiment MCP inventory did not match the restricted allowlist.",
+          });
+        }
+      }
+
       const requestedModel = normalizeCodexModelSlug(options.model);
 
       const opened = yield* openCodexThread({
@@ -2335,6 +2386,7 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        experimentRestricted: options.experimentRestriction !== undefined,
       });
 
       const providerThreadId = opened.thread.id;
@@ -2413,6 +2465,7 @@ export const makeCodexSessionRuntime = (
             // setting, so the prompt describes the tools this turn actually
             // has even if the setting changed after the session started.
             browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+            experimentRestricted: options.experimentRestriction !== undefined,
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
