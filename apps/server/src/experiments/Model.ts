@@ -5,7 +5,7 @@ export const MAX_LEDGER_RECORD_BYTES = 64_000;
 export const CONFIRMATION_TTL_MS = 5 * 60_000;
 
 const NonEmpty = Schema.String.check(Schema.isTrimmed(), Schema.isNonEmpty());
-const BoundedObjective = NonEmpty.check(Schema.isMaxLength(500));
+const BoundedObjective = NonEmpty.check(Schema.isMaxLength(1_024));
 const BoundedHypothesis = NonEmpty.check(Schema.isMaxLength(500));
 const MetricName = NonEmpty.check(Schema.isMaxLength(64), Schema.isPattern(/^[A-Za-z0-9_.-]+$/));
 const Arg = Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(8_192));
@@ -99,6 +99,7 @@ export const ExperimentProfile = Schema.Struct({
   providerInstanceId: NonEmpty,
   providerSessionId: NonEmpty,
   providerDriver: NonEmpty,
+  providerSessionActive: Schema.Boolean,
   config: ExperimentConfig,
   configDigest: Digest,
   baselineMetric: Schema.NullOr(Schema.Finite),
@@ -109,6 +110,7 @@ export const ExperimentProfile = Schema.Struct({
   experimentsRestored: SafeInteger(0, 1_000),
   commandSeconds: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
   createdAt: NonEmpty,
+  deadlineAt: NonEmpty,
   updatedAt: NonEmpty,
   pending: Schema.NullOr(PendingExperiment),
   lastError: Schema.NullOr(Schema.String.check(Schema.isMaxLength(2_000))),

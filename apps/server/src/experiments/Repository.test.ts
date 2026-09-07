@@ -51,40 +51,50 @@ function repo(configPatch: Readonly<Record<string, unknown>> = {}): string {
 }
 
 describe("experiment repository validation", () => {
-  it("accepts the established exact v1 config", () => {
+  it("accepts the established exact v1 config", async () => {
     const cwd = repo();
-    const { config, digest } = readConfig(cwd);
+    const { config, digest } = await readConfig(cwd);
     assert.strictEqual(digest.length, 64);
-    assert.doesNotThrow(() => assertRepository(cwd, config));
-    assert.doesNotThrow(() => assertClean(cwd));
+    await assertRepository(cwd, config);
+    await assertClean(cwd);
   });
 
-  it("rejects unknown config fields and unsafe paths", () => {
+  it("rejects unknown config fields and unsafe paths", async () => {
     const cwd = repo({ surprise: true });
-    assert.throws(() => readConfig(cwd), ExperimentError);
+    await readConfig(cwd).then(
+      () => assert.fail("expected invalid config"),
+      (cause: unknown) => assert.instanceOf(cause, ExperimentError),
+    );
     assert.throws(() => normalizeApprovedPath("../train.py"), ExperimentError);
     assert.throws(() => normalizeApprovedPath(".auto/config.json"), ExperimentError);
   });
 
-  it("rejects symlinks and protected branches", () => {
+  it("rejects symlinks and protected branches", async () => {
     const symlinkRepo = repo({ files: ["linked.py"] });
     symlinkSync("train.py", path.join(symlinkRepo, "linked.py"));
-    assert.throws(
-      () => assertRepository(symlinkRepo, readConfig(symlinkRepo).config),
-      ExperimentError,
-    );
+    await readConfig(symlinkRepo)
+      .then(({ config }) => assertRepository(symlinkRepo, config))
+      .then(
+        () => assert.fail("expected symlink rejection"),
+        (cause: unknown) => assert.instanceOf(cause, ExperimentError),
+      );
 
     const protectedRepo = repo({ branch: "main" });
     execFileSync("git", ["branch", "-m", "main"], { cwd: protectedRepo });
-    assert.throws(
-      () => assertRepository(protectedRepo, readConfig(protectedRepo).config),
-      ExperimentError,
-    );
+    await readConfig(protectedRepo)
+      .then(({ config }) => assertRepository(protectedRepo, config))
+      .then(
+        () => assert.fail("expected protected-branch rejection"),
+        (cause: unknown) => assert.instanceOf(cause, ExperimentError),
+      );
   });
 
-  it("rejects worktree and index dirt outside .auto", () => {
+  it("rejects worktree and index dirt outside .auto", async () => {
     const cwd = repo();
     writeFileSync(path.join(cwd, "train.py"), "print('dirty')\n");
-    assert.throws(() => assertClean(cwd), ExperimentError);
+    await assertClean(cwd).then(
+      () => assert.fail("expected dirty-worktree rejection"),
+      (cause: unknown) => assert.instanceOf(cause, ExperimentError),
+    );
   });
 });

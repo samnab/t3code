@@ -1,21 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  existsSync,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-  writeSync,
-} from "node:fs";
+import { constants, existsSync, lstatSync, realpathSync } from "node:fs";
+import { chmod, lstat, mkdir, open, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -28,7 +14,7 @@ import {
 } from "./Model.ts";
 
 const CONFIG_PATH = ".auto/config.json";
-const GIT_TIMEOUT_MS = 10_000;
+const GIT_TIMEOUT_MS = 120_000;
 const GIT_OUTPUT_CAP = 10_000_000;
 const DEFAULT_PROTECTED_BRANCHES = new Set([
   "main",
@@ -119,26 +105,91 @@ export interface GitResult {
   readonly stderr: string;
 }
 
-export function git(cwd: string, args: ReadonlyArray<string>, allowFailure = false): GitResult {
-  const result = spawnSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    timeout: GIT_TIMEOUT_MS,
-    maxBuffer: GIT_OUTPUT_CAP,
-    windowsHide: true,
-  });
-  if (result.error) fail("unsafe_repository", `git ${args[0] ?? "command"} failed.`, result.error);
-  const code = result.status ?? -1;
-  if (code !== 0 && !allowFailure) {
-    const detail = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim().slice(-2_000);
-    fail("unsafe_repository", `git ${args[0] ?? "command"} failed (${code}): ${detail}`);
+function terminateGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (pid === undefined) return;
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, signal);
+  } catch {
+    // The exact process group launched here already exited.
   }
-  return { code, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-export const currentHead = (cwd: string): string => git(cwd, ["rev-parse", "HEAD"]).stdout.trim();
-export const currentBranch = (cwd: string): string =>
-  git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).stdout.trim();
+function gitFailure(
+  code: ConstructorParameters<typeof ExperimentError>[0]["code"],
+  message: string,
+  cause?: unknown,
+): ExperimentError {
+  return new ExperimentError({ code, message, ...(cause === undefined ? {} : { cause }) });
+}
+
+/** Runs Git without a shell in its own bounded, cancellable process group. */
+export function git(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  allowFailure = false,
+  input?: string,
+): Promise<GitResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", args, {
+      cwd,
+      detached: true,
+      shell: false,
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const stdout: Array<Buffer> = [];
+    const stderr: Array<Buffer> = [];
+    let outputBytes = 0;
+    let timedOut = false;
+    let settled = false;
+    const capture = (target: Array<Buffer>, chunk: Buffer) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes <= GIT_OUTPUT_CAP) target.push(chunk);
+      if (outputBytes > GIT_OUTPUT_CAP) terminateGroup(child.pid, "SIGTERM");
+    };
+    child.stdout?.on("data", (chunk: Buffer) => capture(stdout, chunk));
+    child.stderr?.on("data", (chunk: Buffer) => capture(stderr, chunk));
+    if (input !== undefined) child.stdin?.end(input);
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      terminateGroup(child.pid, "SIGTERM");
+      setTimeout(() => terminateGroup(child.pid, "SIGKILL"), 1_000).unref?.();
+    }, GIT_TIMEOUT_MS);
+    timeout.unref?.();
+    const finish = (code: number | null, cause?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      const result = {
+        code: code ?? -1,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      };
+      if (cause !== undefined) {
+        reject(gitFailure("unsafe_repository", `git ${args[0] ?? "command"} failed.`, cause));
+        return;
+      }
+      if (timedOut || outputBytes > GIT_OUTPUT_CAP || (result.code !== 0 && !allowFailure)) {
+        const detail = `${result.stdout}\n${result.stderr}`.trim().slice(-2_000);
+        reject(
+          gitFailure(
+            "unsafe_repository",
+            `git ${args[0] ?? "command"} failed (${timedOut ? "timeout" : result.code}): ${detail}`,
+          ),
+        );
+        return;
+      }
+      resolve(result);
+    };
+    child.once("error", (cause) => finish(null, cause));
+    child.once("close", (code) => finish(code));
+  });
+}
+
+export const currentHead = async (cwd: string): Promise<string> =>
+  (await git(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+export const currentBranch = async (cwd: string): Promise<string> =>
+  (await git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])).stdout.trim();
 
 function nulPaths(output: string): Array<string> {
   return output
@@ -147,23 +198,22 @@ function nulPaths(output: string): Array<string> {
     .map((entry) => entry.replaceAll("\\", "/"));
 }
 
-export function stagedPaths(cwd: string): Array<string> {
-  return nulPaths(git(cwd, ["diff", "--cached", "--name-only", "-z", "--"]).stdout).sort();
+export async function stagedPaths(cwd: string): Promise<Array<string>> {
+  return nulPaths((await git(cwd, ["diff", "--cached", "--name-only", "-z", "--"])).stdout).sort();
 }
 
-export function changedPaths(cwd: string): Array<string> {
-  const tracked = nulPaths(git(cwd, ["diff", "--name-only", "-z", "HEAD", "--"]).stdout);
-  const untracked = nulPaths(
-    git(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--"]).stdout,
-  );
-  return [...new Set([...tracked, ...untracked])]
+export async function changedPaths(cwd: string): Promise<Array<string>> {
+  const [tracked, untracked] = await Promise.all([
+    git(cwd, ["diff", "--name-only", "-z", "HEAD", "--"]),
+    git(cwd, ["ls-files", "--others", "--exclude-standard", "-z", "--"]),
+  ]);
+  return [...new Set([...nulPaths(tracked.stdout), ...nulPaths(untracked.stdout)])]
     .filter((entry) => entry !== ".auto" && !entry.startsWith(".auto/"))
     .sort();
 }
 
-export function assertClean(cwd: string): void {
-  const staged = stagedPaths(cwd);
-  const changed = changedPaths(cwd);
+export async function assertClean(cwd: string): Promise<void> {
+  const [staged, changed] = await Promise.all([stagedPaths(cwd), changedPaths(cwd)]);
   if (staged.length > 0 || changed.length > 0) {
     fail(
       "external_drift",
@@ -172,22 +222,22 @@ export function assertClean(cwd: string): void {
   }
 }
 
-export function assertRepository(
+export async function assertRepository(
   cwd: string,
   config: ExperimentConfig,
   expectedHead?: string,
-): void {
+): Promise<void> {
   assertRealDirectory(cwd, "Repository root");
   const physicalRoot = realPath(cwd);
-  const topLevel = git(cwd, ["rev-parse", "--show-toplevel"]).stdout.trim();
+  const topLevel = (await git(cwd, ["rev-parse", "--show-toplevel"])).stdout.trim();
   if (!samePath(physicalRoot, realPath(topLevel))) {
     fail("unsafe_repository", `Thread cwd must be the Git repository root (${topLevel}).`);
   }
-  const branch = currentBranch(cwd);
+  const branch = await currentBranch(cwd);
   if (branch !== config.branch) {
     fail(
       "external_drift",
-      `Current branch ${JSON.stringify(branch)} does not match config branch ${JSON.stringify(config.branch)}.`,
+      `Current branch does not match config branch ${JSON.stringify(config.branch)}.`,
     );
   }
   if (
@@ -200,7 +250,7 @@ export function assertRepository(
       `Refusing to experiment on protected branch ${JSON.stringify(branch)}.`,
     );
   }
-  if (expectedHead !== undefined && currentHead(cwd) !== expectedHead) {
+  if (expectedHead !== undefined && (await currentHead(cwd)) !== expectedHead) {
     fail("external_drift", "Git HEAD changed outside the experiment lifecycle.");
   }
   const normalized = config.files.map(normalizeApprovedPath);
@@ -220,22 +270,21 @@ export function assertRepository(
   }
 }
 
-export function readConfig(cwd: string): {
-  readonly config: ExperimentConfig;
-  readonly digest: string;
-} {
+export async function readConfig(
+  cwd: string,
+): Promise<{ readonly config: ExperimentConfig; readonly digest: string }> {
   const auto = path.join(cwd, ".auto");
   assertRealDirectory(auto, ".auto");
   const file = path.join(auto, "config.json");
   if (!existsSync(file)) fail("invalid_config", `Missing ${CONFIG_PATH}.`);
-  const info = lstatSync(file);
+  const info = await lstat(file);
   if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_CONFIG_BYTES) {
     fail(
       "invalid_config",
       `${CONFIG_PATH} must be a regular file no larger than ${MAX_CONFIG_BYTES} bytes.`,
     );
   }
-  const bytes = readFileSync(file);
+  const bytes = await readFile(file);
   try {
     const config = decodeExperimentConfig(JSON.parse(bytes.toString("utf8")));
     return { config, digest: createHash("sha256").update(bytes).digest("hex") };
@@ -244,59 +293,64 @@ export function readConfig(cwd: string): {
   }
 }
 
-export function assertConfigDigest(cwd: string, expectedDigest: string): ExperimentConfig {
-  const current = readConfig(cwd);
-  if (current.digest !== expectedDigest) {
+export async function assertConfigDigest(
+  cwd: string,
+  expectedDigest: string,
+): Promise<ExperimentConfig> {
+  const current = await readConfig(cwd);
+  if (current.digest !== expectedDigest)
     fail("external_drift", `${CONFIG_PATH} changed after confirmation.`);
-  }
   return current.config;
 }
 
-export function fileHash(cwd: string, relativePath: string): string {
+export async function fileHash(cwd: string, relativePath: string): Promise<string> {
   resolveApprovedFile(cwd, relativePath);
-  return git(cwd, ["hash-object", "--", relativePath]).stdout.trim();
+  return (await git(cwd, ["hash-object", "--", relativePath])).stdout.trim();
 }
 
-export function hashContent(cwd: string, content: string): string {
-  const result = spawnSync("git", ["hash-object", "--stdin"], {
-    cwd,
-    input: content,
-    encoding: "utf8",
-    timeout: GIT_TIMEOUT_MS,
-    maxBuffer: GIT_OUTPUT_CAP,
-    windowsHide: true,
-  });
-  if (result.error || result.status !== 0)
-    fail("unsafe_repository", "Could not hash candidate content.", result.error);
-  return result.stdout.trim();
+export async function hashContent(cwd: string, content: string): Promise<string> {
+  return (await git(cwd, ["hash-object", "--stdin"], false, content)).stdout.trim();
 }
 
-export function snapshotFiles(cwd: string, paths: ReadonlyArray<string>): Array<FileSnapshot> {
-  return paths.map((relativePath) => {
-    const absolute = resolveApprovedFile(cwd, relativePath);
-    const info = statSync(absolute);
-    return {
-      path: relativePath,
-      contentBase64: readFileSync(absolute).toString("base64"),
-      mode: info.mode & 0o777,
-      hash: fileHash(cwd, relativePath),
-    };
-  });
+export async function snapshotFiles(
+  cwd: string,
+  paths: ReadonlyArray<string>,
+): Promise<Array<FileSnapshot>> {
+  return Promise.all(
+    paths.map(async (relativePath) => {
+      const absolute = resolveApprovedFile(cwd, relativePath);
+      const [info, content, hash] = await Promise.all([
+        stat(absolute),
+        readFile(absolute),
+        fileHash(cwd, relativePath),
+      ]);
+      return {
+        path: relativePath,
+        contentBase64: content.toString("base64"),
+        mode: info.mode & 0o777,
+        hash,
+      };
+    }),
+  );
 }
 
-export function writeFileAtomically(absolute: string, content: Buffer, mode: number): void {
+export async function writeFileAtomically(
+  absolute: string,
+  content: Buffer,
+  mode: number,
+): Promise<void> {
   const temporary = path.join(
     path.dirname(absolute),
     `.${path.basename(absolute)}.t3-experiment-${process.pid}-${randomUUID()}.tmp`,
   );
-  writeFileSync(temporary, content, { mode, flag: "wx" });
-  renameSync(temporary, absolute);
-  chmodSync(absolute, mode);
+  await writeFile(temporary, content, { mode, flag: "wx" });
+  await rename(temporary, absolute);
+  await chmod(absolute, mode);
 }
 
-export function restoreSnapshot(cwd: string, snapshot: FileSnapshot): void {
+export async function restoreSnapshot(cwd: string, snapshot: FileSnapshot): Promise<void> {
   const absolute = resolveApprovedFile(cwd, snapshot.path);
-  writeFileAtomically(absolute, Buffer.from(snapshot.contentBase64, "base64"), snapshot.mode);
+  await writeFileAtomically(absolute, Buffer.from(snapshot.contentBase64, "base64"), snapshot.mode);
 }
 
 export function setEquals(left: Iterable<string>, right: Iterable<string>): boolean {
@@ -305,16 +359,15 @@ export function setEquals(left: Iterable<string>, right: Iterable<string>): bool
   return a.size === b.size && [...a].every((entry) => b.has(entry));
 }
 
-export function commitCandidate(
+export async function commitCandidate(
   cwd: string,
   files: ReadonlyArray<string>,
   hypothesis: string,
   metricName: string,
   metric: number,
-): string {
-  git(cwd, ["add", "--", ...files]);
-  const staged = stagedPaths(cwd);
-  const changed = changedPaths(cwd);
+): Promise<string> {
+  await git(cwd, ["add", "--", ...files]);
+  const [staged, changed] = await Promise.all([stagedPaths(cwd), changedPaths(cwd)]);
   if (!setEquals(staged, files) || !setEquals(changed, files)) {
     fail(
       "external_drift",
@@ -326,7 +379,7 @@ export function commitCandidate(
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 72);
-  git(cwd, [
+  await git(cwd, [
     "commit",
     "-m",
     `experiment: ${subject || "qualifying improvement"}`,
@@ -336,39 +389,39 @@ export function commitCandidate(
   return currentHead(cwd);
 }
 
-function ensureChildDirectory(parent: string, name: string): string {
+async function ensureChildDirectory(parent: string, name: string): Promise<string> {
   assertRealDirectory(parent, parent);
   const child = path.join(parent, name);
-  if (!existsSync(child)) mkdirSync(child, { mode: 0o700 });
+  if (!existsSync(child)) await mkdir(child, { mode: 0o700 });
   assertRealDirectory(child, child);
   return child;
 }
 
-export function appendLedger(
+export async function appendLedger(
   cwd: string,
   runId: string,
   entry: Readonly<Record<string, unknown>>,
-): void {
+): Promise<void> {
   if (!/^[0-9a-f-]{36}$/i.test(runId)) fail("unsafe_repository", "Experiment run id is invalid.");
   const auto = path.join(cwd, ".auto");
-  const goals = ensureChildDirectory(auto, "goals");
-  const runDirectory = ensureChildDirectory(goals, runId);
+  const goals = await ensureChildDirectory(auto, "goals");
+  const runDirectory = await ensureChildDirectory(goals, runId);
   const ledgerPath = path.join(runDirectory, "ledger.jsonl");
   const record = Buffer.from(`${JSON.stringify(entry)}\n`, "utf8");
   if (record.byteLength > MAX_LEDGER_RECORD_BYTES) {
     fail("persistence_failed", "Experiment ledger record exceeded its server limit.");
   }
   const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
-  const fd = openSync(
+  const handle = await open(
     ledgerPath,
     constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollow,
     0o600,
   );
   try {
-    const info = fstatSync(fd);
+    const info = await handle.stat();
     if (!info.isFile()) fail("unsafe_repository", "Experiment ledger is not a regular file.");
-    writeSync(fd, record);
+    await handle.write(record);
   } finally {
-    closeSync(fd);
+    await handle.close();
   }
 }

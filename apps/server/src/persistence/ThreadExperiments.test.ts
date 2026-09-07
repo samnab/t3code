@@ -22,6 +22,7 @@ const profile = (updatedAt: string): ExperimentProfile => ({
   providerInstanceId: "claude",
   providerSessionId: "session-1",
   providerDriver: "claudeAgent",
+  providerSessionActive: true,
   config: {
     version: 1,
     branch: "experiment/test",
@@ -51,6 +52,7 @@ const profile = (updatedAt: string): ExperimentProfile => ({
   experimentsRestored: 0,
   commandSeconds: 1,
   createdAt: "2026-09-07T00:00:00.000Z",
+  deadlineAt: "2026-09-07T00:10:00.000Z",
   updatedAt,
   pending: null,
   lastError: null,
