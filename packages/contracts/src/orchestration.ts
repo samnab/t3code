@@ -24,6 +24,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
+import { ThreadExperimentSummary } from "./experiment.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -599,6 +600,9 @@ export type ThreadGoalLoopState = typeof ThreadGoalLoopState.Type;
 export const ThreadGoalLoopMode = Schema.Literals(["native", "t3", "unsupported"]);
 export type ThreadGoalLoopMode = typeof ThreadGoalLoopMode.Type;
 
+export const ThreadGoalLoopKind = Schema.Literals(["standard", "experiment"]);
+export type ThreadGoalLoopKind = typeof ThreadGoalLoopKind.Type;
+
 /** Default continuation-turn ceiling for a new goal loop. */
 export const THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS = 10;
 /** Hard ceiling a client may raise {@link ThreadGoalLoop.maxIterations} to. */
@@ -620,6 +624,7 @@ export const resolveThreadGoalLoopMode = (
 
 /** Thread-scoped drive state layered on {@link ThreadGoal}. */
 export const ThreadGoalLoop = Schema.Struct({
+  kind: ThreadGoalLoopKind.pipe(Schema.withDecodingDefault(Effect.succeed("standard"))),
   state: ThreadGoalLoopState,
   mode: ThreadGoalLoopMode,
   /** Continuation turns spent so far. A user-sent turn never counts. */
@@ -627,6 +632,7 @@ export const ThreadGoalLoop = Schema.Struct({
   maxIterations: PositiveInt,
   /** Why the loop is blocked or capped; null once it moves on. */
   reason: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  experiment: Schema.optional(Schema.NullOr(ThreadExperimentSummary)),
   updatedAt: IsoDateTime,
 });
 export type ThreadGoalLoop = typeof ThreadGoalLoop.Type;

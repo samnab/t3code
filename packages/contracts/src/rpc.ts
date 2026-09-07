@@ -238,6 +238,14 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  ThreadExperimentError,
+  ThreadExperimentGetInput,
+  ThreadExperimentPreview,
+  ThreadExperimentPreviewInput,
+  ThreadExperimentStartInput,
+  ThreadExperimentSummary,
+} from "./experiment.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -266,6 +274,9 @@ export const WS_METHODS = {
   providerExecutionGoalGet: "provider.executionGoal.get",
   providerExecutionGoalPause: "provider.executionGoal.pause",
   providerExecutionGoalClear: "provider.executionGoal.clear",
+  threadExperimentPreview: "thread.experiment.preview",
+  threadExperimentStart: "thread.experiment.start",
+  threadExperimentGet: "thread.experiment.get",
   providerAuthStart: "provider.auth.start",
   providerConsumeResetCredit: "provider.consumeResetCredit",
   providerAuthComplete: "provider.auth.complete",
@@ -890,6 +901,29 @@ const WsProviderExecutionGoalClearRpc = Rpc.make(WS_METHODS.providerExecutionGoa
   error: Schema.Union([ProviderExecutionGoalError, EnvironmentAuthorizationError]),
 });
 
+const ThreadExperimentRpcError = Schema.Union([
+  ThreadExperimentError,
+  EnvironmentAuthorizationError,
+]);
+
+export const WsThreadExperimentPreviewRpc = Rpc.make(WS_METHODS.threadExperimentPreview, {
+  payload: ThreadExperimentPreviewInput,
+  success: ThreadExperimentPreview,
+  error: ThreadExperimentRpcError,
+});
+
+export const WsThreadExperimentStartRpc = Rpc.make(WS_METHODS.threadExperimentStart, {
+  payload: ThreadExperimentStartInput,
+  success: ThreadExperimentSummary,
+  error: ThreadExperimentRpcError,
+});
+
+export const WsThreadExperimentGetRpc = Rpc.make(WS_METHODS.threadExperimentGet, {
+  payload: ThreadExperimentGetInput,
+  success: Schema.NullOr(ThreadExperimentSummary),
+  error: ThreadExperimentRpcError,
+});
+
 const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusInput,
   success: VcsStatusStreamEvent,
@@ -1322,6 +1356,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsProviderExecutionGoalGetRpc,
   WsProviderExecutionGoalPauseRpc,
   WsProviderExecutionGoalClearRpc,
+  WsThreadExperimentPreviewRpc,
+  WsThreadExperimentStartRpc,
+  WsThreadExperimentGetRpc,
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,

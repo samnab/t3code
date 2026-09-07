@@ -3,11 +3,13 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   nextThreadGoalEditorEpoch,
+  isThreadGoalLoopActionAvailable,
   resolveThreadGoalCommandBlockReason,
   resolveThreadGoalDisplay,
   threadGoalEditorCanSave,
   threadGoalEditorDraftError,
   threadGoalEditorReducer,
+  threadExperimentObjectiveError,
   type ThreadGoalEditorState,
 } from "./threadGoalEditor.ts";
 
@@ -66,6 +68,57 @@ describe("resolveThreadGoalCommandBlockReason", () => {
     expect(resolveThreadGoalCommandBlockReason({ ...base, supportsThreadGoals: false })).toBe(
       "unsupported",
     );
+  });
+});
+
+describe("thread experiment goal controls", () => {
+  it("rejects obvious empty and oversized objectives locally", () => {
+    expect(threadExperimentObjectiveError(" \n\u200b")).toContain("visible character");
+    expect(threadExperimentObjectiveError("x".repeat(501))).toContain("500");
+    expect(threadExperimentObjectiveError("Tune the résumé 🚀")).toBeNull();
+  });
+
+  it("keeps standard goal-loop actions unchanged", () => {
+    const standardLoop = {
+      kind: "standard",
+      state: "capped",
+      mode: "t3",
+      iterations: 10,
+      maxIterations: 10,
+      updatedAt: "2026-09-07T04:00:00.000Z",
+    } as const;
+    expect(isThreadGoalLoopActionAvailable(standardLoop, "continue")).toBe(true);
+    expect(isThreadGoalLoopActionAvailable(standardLoop, "resume")).toBe(false);
+  });
+
+  it("never resumes or resets an exhausted experiment budget", () => {
+    const exhaustedLoop = {
+      kind: "experiment",
+      state: "capped",
+      mode: "t3",
+      iterations: 10,
+      maxIterations: 10,
+      experiment: {
+        runId: "run-1",
+        configDigest: "a".repeat(64),
+        phase: "exhausted",
+        metric: { name: "score", direction: "maximize", minimumImprovement: 0.1 },
+        experimentsRun: 8,
+        experimentsKept: 2,
+        experimentsRestored: 6,
+        baselineMetric: 1,
+        bestMetric: 2,
+        lastMetric: 1.9,
+        elapsedSeconds: 300,
+        maxExperiments: 8,
+        maxTotalSeconds: 600,
+        lastError: null,
+      },
+      updatedAt: "2026-09-07T04:00:00.000Z",
+    } as const;
+    expect(isThreadGoalLoopActionAvailable(exhaustedLoop, "continue")).toBe(false);
+    expect(isThreadGoalLoopActionAvailable(exhaustedLoop, "resume")).toBe(false);
+    expect(isThreadGoalLoopActionAvailable(exhaustedLoop, "reset")).toBe(false);
   });
 });
 

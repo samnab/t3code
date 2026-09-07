@@ -1,4 +1,10 @@
-import { type EnvironmentId, THREAD_GOAL_MAX_CHARS, type ThreadId } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS,
+  THREAD_GOAL_MAX_CHARS,
+  type ThreadGoalLoop,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { hasVisibleThreadGoalText } from "@t3tools/shared/composerTrigger";
 
 export type ThreadGoalCommandBlockReason =
@@ -151,6 +157,43 @@ export function threadGoalEditorDraftError(draft: string): string | null {
     return `Keep it under ${THREAD_GOAL_MAX_CHARS} characters.`;
   }
   return null;
+}
+
+/** Local feedback only. The server validates the objective again for preview and start. */
+export function threadExperimentObjectiveError(objective: string): string | null {
+  if (!hasVisibleThreadGoalText(objective)) {
+    return "An experiment objective needs at least one visible character.";
+  }
+  if (objective.length > THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS) {
+    return `Keep it under ${THREAD_EXPERIMENT_OBJECTIVE_MAX_CHARS} characters.`;
+  }
+  return null;
+}
+
+export type ThreadGoalLoopAction = "pause" | "resume" | "continue" | "reset";
+
+/** Experiment terminal phases cannot be reopened through the ordinary loop budget controls. */
+export function isThreadGoalLoopActionAvailable(
+  loop: ThreadGoalLoop | null | undefined,
+  action: ThreadGoalLoopAction,
+): boolean {
+  if (!loop) return false;
+  if (loop.kind === "experiment") {
+    const phase = loop.experiment?.phase;
+    if (phase === undefined || phase === "exhausted" || phase === "failed" || phase === "complete") {
+      return false;
+    }
+  }
+  switch (action) {
+    case "pause":
+      return loop.state === "idle" || loop.state === "running";
+    case "resume":
+      return loop.state === "paused" || loop.state === "blocked";
+    case "continue":
+      return loop.state === "capped";
+    case "reset":
+      return loop.state === "completed";
+  }
 }
 
 /** Save is a no-op while saving, unchanged, or locally invalid. */

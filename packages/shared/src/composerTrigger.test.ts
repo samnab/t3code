@@ -44,6 +44,31 @@ describe("parseThreadGoalCommand", () => {
     });
   });
 
+  it("parses an experiment objective with Unicode separators", () => {
+    expect(parseThreadGoalCommand("/goal\u3000experiment\u202fTune the résumé 🚀 ")).toEqual({
+      action: "experiment",
+      objective: "Tune the résumé 🚀",
+    });
+  });
+
+  it("keeps a missing experiment objective explicit for validation", () => {
+    expect(parseThreadGoalCommand("/goal experiment \n\t")).toEqual({
+      action: "experiment",
+      objective: "",
+    });
+  });
+
+  it("keeps ordinary goal parsing unchanged around the reserved word", () => {
+    expect(parseThreadGoalCommand("/goal experimenter")).toEqual({
+      action: "set",
+      goal: "experimenter",
+    });
+    expect(parseThreadGoalCommand("/goal experiment\u200btune it")).toEqual({
+      action: "set",
+      goal: "experiment\u200btune it",
+    });
+  });
+
   it("clears on reserved clear, case-insensitive", () => {
     expect(parseThreadGoalCommand("/goal clear")).toEqual({ action: "clear" });
     expect(parseThreadGoalCommand("/GOAL CLEAR")).toEqual({ action: "clear" });

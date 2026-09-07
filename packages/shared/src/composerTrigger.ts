@@ -118,6 +118,7 @@ export function detectComposerTrigger(
 export type ThreadGoalCommand =
   | { readonly action: "show" }
   | { readonly action: "clear" }
+  | { readonly action: "experiment"; readonly objective: string }
   | { readonly action: "set"; readonly goal: string };
 
 // The /goal delimiter policy, in one place so acceptance and trimming cannot
@@ -134,6 +135,10 @@ const THREAD_GOAL_COMMAND_REGEX = new RegExp(
 );
 const THREAD_GOAL_LEADING_WHITESPACE = new RegExp(`^${THREAD_GOAL_SEPARATOR}+`, "u");
 const THREAD_GOAL_TRAILING_WHITESPACE = new RegExp(`${THREAD_GOAL_SEPARATOR}+$`, "u");
+const THREAD_GOAL_EXPERIMENT_REGEX = new RegExp(
+  `^experiment(?:${THREAD_GOAL_SEPARATOR}+([\\s\\S]*))?$`,
+  "iu",
+);
 
 export function trimThreadGoalWhitespace(text: string): string {
   return text
@@ -153,11 +158,13 @@ export function hasVisibleThreadGoalText(text: string): boolean {
   return !INVISIBLE_THREAD_GOAL_CHARS.test(text);
 }
 
-// `/goal` alone shows the current goal; `/goal clear` clears it (reserved,
-// case-insensitive like other built-ins — a literal goal of "clear" cannot be
-// set through this syntax); any other remainder is the new goal text. This
-// same parser is the shared provider-dispatch guard: web, mobile, and the
-// server decider all recognize the exact same command set.
+// `/goal` alone shows the current goal; `/goal clear` clears it and `/goal
+// experiment <objective>` starts the reviewed experiment flow. Reserved words
+// are case-insensitive like other built-ins. A missing experiment objective is
+// returned explicitly so a client can show validation instead of treating the
+// reserved word as an ordinary goal. Any other remainder is the new goal text.
+// This parser is also the shared provider-dispatch guard, so web, mobile, and
+// the server recognize the same command set.
 export function parseThreadGoalCommand(text: string): ThreadGoalCommand | null {
   const match = THREAD_GOAL_COMMAND_REGEX.exec(trimThreadGoalWhitespace(text));
   if (!match) {
@@ -169,6 +176,13 @@ export function parseThreadGoalCommand(text: string): ThreadGoalCommand | null {
   }
   if (/^clear$/i.test(rest)) {
     return { action: "clear" };
+  }
+  const experiment = THREAD_GOAL_EXPERIMENT_REGEX.exec(rest);
+  if (experiment) {
+    return {
+      action: "experiment",
+      objective: trimThreadGoalWhitespace(experiment[1] ?? ""),
+    };
   }
   return { action: "set", goal: rest };
 }

@@ -264,5 +264,23 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    experimentPreview: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:experiment-preview",
+      tag: WS_METHODS.threadExperimentPreview,
+      scheduler,
+      concurrency,
+    }),
+    experimentStart: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:experiment-start",
+      tag: WS_METHODS.threadExperimentStart,
+      scheduler,
+      concurrency,
+    }),
+    experimentGet: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:experiment-get",
+      tag: WS_METHODS.threadExperimentGet,
+      scheduler,
+      concurrency,
+    }),
   };
 }

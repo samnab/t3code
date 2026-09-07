@@ -44,6 +44,7 @@ import {
   ThreadCreatedPayload,
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
+  ThreadGoalLoop,
   isProviderSendTurnSupportedImageMimeType,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
 } from "./orchestration.ts";
@@ -92,6 +93,22 @@ const decodeGetSubagentTranscriptResult = Schema.decodeUnknownOption(
 );
 const decodeGetSubagentTranscriptError = Schema.decodeUnknownOption(
   OrchestrationGetSubagentTranscriptError,
+);
+
+const decodeThreadGoalLoop = Schema.decodeUnknownEffect(ThreadGoalLoop);
+
+it.effect("defaults old goal loops to the standard kind", () =>
+  Effect.gen(function* () {
+    const loop = yield* decodeThreadGoalLoop({
+      state: "idle",
+      mode: "t3",
+      iterations: 0,
+      maxIterations: 10,
+      updatedAt: "2026-09-07T04:00:00.000Z",
+    });
+    assert.strictEqual(loop.kind, "standard");
+    assert.strictEqual(loop.experiment, undefined);
+  }),
 );
 
 function expectSome<A>(option: Option.Option<A>): A {
