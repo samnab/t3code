@@ -399,6 +399,12 @@ validationLayer("CodexAdapterLive validation", (it) => {
         ],
       });
       NodeAssert.ok(runtimeOptions.appServerArgs?.includes("--strict-config"));
+      NodeAssert.ok(runtimeOptions.appServerArgs?.includes("features.code_mode_host=true"));
+      NodeAssert.ok(runtimeOptions.appServerArgs?.includes("features.code_mode=false"));
+      NodeAssert.equal(
+        runtimeOptions.appServerArgs?.includes("features.code_mode_host=false"),
+        false,
+      );
       NodeAssert.ok(
         runtimeOptions.appServerArgs?.includes(
           "mcp_servers.t3_experiment.url=http://127.0.0.1:4317/mcp/experiment",

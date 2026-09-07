@@ -53,7 +53,7 @@ describe("experiment provider preflight", () => {
     ).toEqual({ supported: true });
   });
 
-  it("builds strict Codex argv with every escape feature disabled", () => {
+  it("enables only the host transport required by CodeModeOnly models", () => {
     const args = buildCodexExperimentAppServerArgs();
     expect(args.slice(0, 4)).toEqual([
       "app-server",
@@ -62,6 +62,12 @@ describe("experiment provider preflight", () => {
       "web_search=disabled",
     ]);
     expect(args.join(" ")).not.toContain("--enable");
+    expect(args).toContain("features.code_mode_host=true");
+    expect(args).not.toContain("features.code_mode_host=false");
+    expect(args).toContain("features.code_mode=false");
+    expect(args.filter((argument) => argument.endsWith("=true"))).toEqual([
+      "features.code_mode_host=true",
+    ]);
     for (const feature of CODEX_EXPERIMENT_DISABLED_FEATURES) {
       expect(args).toContain(`features.${feature}=false`);
     }

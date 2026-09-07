@@ -49,7 +49,6 @@ export const CODEX_EXPERIMENT_DISABLED_FEATURES = [
   "multi_agent",
   "multi_agent_v2",
   "code_mode",
-  "code_mode_host",
   "apps",
   "plugins",
   "hooks",
@@ -66,13 +65,18 @@ export const CODEX_EXPERIMENT_DISABLED_FEATURES = [
   "request_permissions_tool",
 ] as const;
 
-/** Strict app-server argv for a clean CODEX_HOME. User launch args never enter this builder. */
+/**
+ * Strict app-server argv for a clean CODEX_HOME. CodeModeOnly models require the isolated host
+ * transport for nested MCP dispatch; the runtime separately verifies its exact tool inventory.
+ */
 export function buildCodexExperimentAppServerArgs(): ReadonlyArray<string> {
   return [
     "app-server",
     "--strict-config",
     "-c",
     "web_search=disabled",
+    "-c",
+    "features.code_mode_host=true",
     ...CODEX_EXPERIMENT_DISABLED_FEATURES.flatMap((feature) => ["-c", `features.${feature}=false`]),
   ];
 }

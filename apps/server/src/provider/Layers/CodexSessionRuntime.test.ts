@@ -409,30 +409,28 @@ describe("matchesCodexExperimentMcpInventory", () => {
     toolNames: CODEX_EXPERIMENT_TOOL_NAMES,
   };
   const exactTools = {
-    experiment_status: {},
-    experiment_list_files: {},
-    experiment_read_file: {},
-    experiment_apply: {},
-    experiment_evaluate: {},
+    experiment_status: { name: "experiment_status", inputSchema: { type: "object" } },
+    experiment_list_files: { name: "experiment_list_files", inputSchema: { type: "object" } },
+    experiment_read_file: { name: "experiment_read_file", inputSchema: { type: "object" } },
+    experiment_apply: { name: "experiment_apply", inputSchema: { type: "object" } },
+    experiment_evaluate: { name: "experiment_evaluate", inputSchema: { type: "object" } },
   };
+  const exactNativeInventory = {
+    data: [
+      {
+        name: "t3_experiment",
+        authStatus: "bearerToken",
+        resourceTemplates: [],
+        resources: [],
+        serverInfo: null,
+        tools: exactTools,
+      },
+    ],
+    nextCursor: null,
+  } satisfies EffectCodexSchema.V2ListMcpServerStatusResponse;
 
   it("accepts only the exact unpaginated experiment server and tool set", () => {
-    NodeAssert.equal(
-      matchesCodexExperimentMcpInventory(
-        {
-          data: [
-            {
-              name: "t3_experiment",
-              authStatus: "bearerToken",
-              tools: exactTools,
-            },
-          ],
-          nextCursor: null,
-        },
-        restriction,
-      ),
-      true,
-    );
+    NodeAssert.equal(matchesCodexExperimentMcpInventory(exactNativeInventory, restriction), true);
   });
 
   it("rejects extra servers, extra tools, missing tools, and pagination", () => {
