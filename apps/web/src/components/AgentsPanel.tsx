@@ -192,18 +192,11 @@ function AgentOutputRate({ agent, separated }: { agent: RuntimeSubagent; separat
     "Average output tokens per second over the whole agent run, including tools and waiting.";
   return (
     <Tooltip>
-      <TooltipTrigger
-        render={
-          <span
-            ref={textRef}
-            className="tabular-nums"
-            aria-label={`${description} ${label}`}
-            title={description}
-          />
-        }
-      >
-        {separated ? " · " : ""}
-        {label}
+      <TooltipTrigger render={<span aria-label={`${description} ${label}`} />}>
+        {separated ? <span aria-hidden> · </span> : null}
+        <span ref={textRef} className="tabular-nums">
+          {label}
+        </span>
       </TooltipTrigger>
       <TooltipPopup>{description}</TooltipPopup>
     </Tooltip>
