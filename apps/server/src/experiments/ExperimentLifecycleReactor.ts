@@ -59,7 +59,9 @@ export const make = Effect.gen(function* () {
           });
         case "idle":
         case "running":
-          return Effect.void;
+          return event.payload.resumed === true
+            ? experiments.resume(event.payload.threadId)
+            : Effect.void;
       }
     }
     if (

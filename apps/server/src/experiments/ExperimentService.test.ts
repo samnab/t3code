@@ -12,14 +12,24 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  EventId,
+  ThreadId,
+  type OrchestrationEvent,
+  type ThreadGoalLoop,
+} from "@t3tools/contracts";
 import { afterEach, assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Result from "effect/Result";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import {
   ThreadExperimentStore,
   type ThreadExperimentStoreShape,
@@ -30,7 +40,9 @@ import {
   layer as experimentLayer,
   type ExperimentCoordinatorShape,
 } from "./ExperimentService.ts";
+import * as ExperimentLifecycleReactor from "./ExperimentLifecycleReactor.ts";
 import { ExperimentError, type ExperimentProfile, type ExperimentThreadContext } from "./Model.ts";
+import { ServerActivation } from "../serverActivation.ts";
 
 const roots: Array<string> = [];
 
@@ -91,6 +103,7 @@ function testLayer(
     readonly rejectSyncBeforeActivation?: boolean;
     readonly beforeStartProvider?: (count: number) => Promise<void>;
     readonly failHold?: boolean;
+    readonly onStopProvider?: () => void;
   } = {},
 ) {
   const started: Array<string> = [];
@@ -142,6 +155,7 @@ function testLayer(
       Effect.sync(() => {
         stopped.push(input.threadId);
         stoppedWhileArmed.push(rows.get(input.threadId)?.armed);
+        options.onStopProvider?.();
       }),
     activateGoal: () =>
       options.failActivation
@@ -211,6 +225,40 @@ function context(threadId: string, cwd: string): ExperimentThreadContext {
     providerSupported: true,
     idle: true,
     pendingChildRun: false,
+  };
+}
+
+function goalLoopUpdatedEvent(input: {
+  readonly kind: ThreadGoalLoop["kind"];
+  readonly state?: ThreadGoalLoop["state"];
+  readonly resumed?: boolean;
+}): OrchestrationEvent {
+  const threadId = ThreadId.make("thread-1");
+  return {
+    sequence: 1,
+    eventId: EventId.make(`goal-loop-${input.kind}-${input.resumed === true ? "resume" : "sync"}`),
+    aggregateKind: "thread",
+    aggregateId: threadId,
+    occurredAt: "2026-09-07T05:38:30.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.goal-loop-updated",
+    payload: {
+      threadId,
+      loop: {
+        kind: input.kind,
+        state: input.state ?? "idle",
+        mode: "native",
+        iterations: 0,
+        maxIterations: 10,
+        reason: null,
+        experiment: null,
+        updatedAt: "2026-09-07T05:38:30.000Z",
+      },
+      ...(input.resumed === true ? { resumed: true } : {}),
+    },
   };
 }
 
@@ -713,6 +761,71 @@ describe("ExperimentService", () => {
       });
       assert.strictEqual(current.phase, "ready");
     }).pipe(Effect.provide(fixture.layer));
+  });
+
+  it.effect("resumes a paused experiment only for an explicit experiment resume event", () => {
+    const cwd = makeRepo();
+    const contexts = new Map([["thread-1", context("thread-1", cwd)]]);
+    let observeStop = false;
+    let markFinalStop = () => {};
+    const finalStop = new Promise<void>((resolve) => {
+      markFinalStop = resolve;
+    });
+    const fixture = testLayer(contexts, {
+      onStopProvider: () => {
+        if (observeStop) markFinalStop();
+      },
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const activation = yield* Deferred.make<void>();
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        yield* Effect.gen(function* () {
+          const service = yield* ExperimentService;
+          const preview = yield* service.preview({
+            threadId: "thread-1",
+            objective: "Improve score",
+          });
+          yield* service.start({
+            threadId: "thread-1",
+            objective: "Improve score",
+            confirmationId: preview.confirmationId,
+          });
+          yield* service.settle({
+            threadId: "thread-1",
+            terminal: "pause",
+            reason: "Paused in the browser",
+          });
+
+          const lifecycle = yield* ExperimentLifecycleReactor.ExperimentLifecycleReactor;
+          yield* lifecycle.start();
+          yield* Deferred.succeed(activation, undefined);
+          observeStop = true;
+          yield* Queue.offer(events, goalLoopUpdatedEvent({ kind: "experiment", resumed: true }));
+          yield* Queue.offer(events, goalLoopUpdatedEvent({ kind: "experiment" }));
+          yield* Queue.offer(events, goalLoopUpdatedEvent({ kind: "standard", resumed: true }));
+          yield* Queue.offer(events, goalLoopUpdatedEvent({ kind: "experiment", state: "paused" }));
+          yield* Effect.promise(() => finalStop);
+
+          assert.deepEqual(fixture.started, ["thread-1", "thread-1"]);
+          assert.strictEqual(fixture.stopped.length, 2);
+        }).pipe(
+          Effect.provide(
+            ExperimentLifecycleReactor.layer.pipe(
+              Layer.provideMerge(fixture.layer),
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.mock(OrchestrationEngine.OrchestrationEngineService)({
+                    streamDomainEvents: Stream.fromQueue(events),
+                  }),
+                  Layer.succeed(ServerActivation, Deferred.await(activation)),
+                ),
+              ),
+            ),
+          ),
+        );
+      }),
+    );
   });
 
   it.effect("stops a provider that resumes while settlement waits for the thread lock", () => {
