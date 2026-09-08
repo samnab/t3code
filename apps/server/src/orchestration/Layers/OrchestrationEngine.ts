@@ -40,7 +40,7 @@ import {
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
-import { decideOrchestrationCommand } from "../decider.ts";
+import { canStartThreadTurnIfIdle, decideOrchestrationCommand } from "../decider.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -440,6 +440,16 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     // consistent, committed value — reassignment of `commandReadModel` is
     // atomic on the single-threaded event loop.
     latestSequence: Effect.sync(() => commandReadModel.snapshotSequence),
+    getAutomaticTurnState: (threadId) =>
+      Effect.gen(function* () {
+        const thread = commandReadModel.threads.find((candidate) => candidate.id === threadId);
+        return thread === undefined
+          ? null
+          : {
+              runtimeMode: thread.runtimeMode,
+              canStart: canStartThreadTurnIfIdle(thread, yield* nowIso),
+            };
+      }),
   } satisfies OrchestrationEngineShape;
 });
 

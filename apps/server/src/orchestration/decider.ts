@@ -170,6 +170,17 @@ function hasQueuedTurnStartForThread(
   );
 }
 
+/** Mirrors the authoritative `onlyIfIdle` guard for callers that avoid speculative commands. */
+export function canStartThreadTurnIfIdle(thread: OrchestrationThread, now: string): boolean {
+  return !(
+    thread.session?.status === "starting" ||
+    thread.session?.status === "running" ||
+    thread.session?.status === "stopped" ||
+    hasOpenBlockingRequest(thread) ||
+    hasQueuedTurnStartForThread(thread, now)
+  );
+}
+
 function withEventBase(
   input: Pick<OrchestrationCommand, "commandId"> & {
     readonly aggregateKind: OrchestrationEvent["aggregateKind"];
@@ -1203,13 +1214,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       if (command.onlyIfIdle === true) {
-        if (
-          targetThread.session?.status === "starting" ||
-          targetThread.session?.status === "running" ||
-          targetThread.session?.status === "stopped" ||
-          hasOpenBlockingRequest(targetThread) ||
-          hasQueuedTurnStartForThread(targetThread, command.createdAt)
-        ) {
+        if (!canStartThreadTurnIfIdle(targetThread, command.createdAt)) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
             detail: `thread ${command.threadId} is not idle; skipping automatic turn start`,

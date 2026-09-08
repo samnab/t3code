@@ -14,6 +14,7 @@ import type {
   OrchestrationClientOrigin,
   OrchestrationCommand,
   OrchestrationEvent,
+  RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -98,6 +99,11 @@ export interface OrchestrationEngineShape {
    * choosing between an incremental replay and a fresh projected snapshot.
    */
   readonly latestSequence: Effect.Effect<number, never, never>;
+
+  /** Reads the current mode and advisory idle state for an automatic turn. */
+  readonly getAutomaticTurnState: (
+    threadId: ThreadId,
+  ) => Effect.Effect<{ readonly runtimeMode: RuntimeMode; readonly canStart: boolean } | null>;
 }
 
 /**

@@ -49,15 +49,16 @@ export const DelegationToolkit = Toolkit.make(
   }),
   Tool.make("subagent_result", {
     description:
-      "Read a child run's durable status, bounded assistant output, and requestedOptions. The result echoes what was requested; forwarding to a provider is not confirmation that it applied an option. Set waitMs up to 30000 to wait for completion. Terminal results are repeatable across parent credential renewal and server restart. Reading a result does not suppress automatic delivery.",
+      "Read a child run's durable status, bounded assistant output, and requestedOptions. The result echoes what was requested; forwarding to a provider is not confirmation that it applied an option. Set waitMs up to 30000 to wait for completion. Set acknowledge to true to suppress a still-pending automatic notification for a terminal result; it has no effect while the run is active and fails if a durable notification attempt may already be in flight. It cannot retract an already dispatched notification. The default is false, so ordinary reads remain repeatable without changing delivery.",
     parameters: Schema.Struct({
       ...target.fields,
       waitMs: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 30_000 }))),
+      acknowledge: Schema.optional(Schema.Boolean),
     }),
     success: ChildRunResult,
     failure: ChildRunError,
     dependencies,
-  }).annotate(Tool.Readonly, true),
+  }),
   Tool.make("subagent_cancel", {
     description:
       "Request cancellation of a child run owned by this parent session. Collect with subagent_result to confirm the child session has stopped. Repeated cancellation is safe.",
@@ -87,6 +88,7 @@ export const DelegationHandlersLive = DelegationToolkit.toLayer({
         yield* McpInvocationContext,
         input.runId,
         input.waitMs,
+        input.acknowledge,
       );
     }),
   subagent_cancel: (input) =>

@@ -54,6 +54,24 @@ export const NativeChildRun = Schema.Struct({
 });
 export type NativeChildRun = typeof NativeChildRun.Type;
 
+export const NativeChildDeliveryBatch = Schema.Struct({
+  batchId: TrimmedNonEmptyString,
+  parentThreadId: ThreadId,
+  runtimeMode: RuntimeMode,
+  text: TrimmedNonEmptyString,
+  commandId: TrimmedNonEmptyString,
+  messageId: TrimmedNonEmptyString,
+  state: Schema.Literals(["prepared", "delivered", "rejected", "suppressed"]),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type NativeChildDeliveryBatch = typeof NativeChildDeliveryBatch.Type;
+
+export interface NativeChildDeliveryBatchWithRuns {
+  readonly batch: NativeChildDeliveryBatch;
+  readonly runs: ReadonlyArray<NativeChildRun>;
+}
+
 export const NativeChildMessage = Schema.Struct({
   messageId: TrimmedNonEmptyString,
   parentThreadId: ThreadId,
@@ -98,6 +116,22 @@ export interface NativeChildRunRepositoryShape {
   readonly listPendingDelivery: (
     parentThreadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<NativeChildRun>, RepositoryError>;
+  readonly getOpenDeliveryBatch: (
+    parentThreadId: ThreadId,
+  ) => Effect.Effect<NativeChildDeliveryBatchWithRuns | null, RepositoryError>;
+  readonly insertDeliveryBatch: (input: {
+    readonly batch: NativeChildDeliveryBatch;
+    readonly runIds: ReadonlyArray<RuntimeTaskId>;
+  }) => Effect.Effect<boolean, RepositoryError>;
+  readonly markDeliveryBatchDelivered: (input: {
+    readonly batchId: string;
+    readonly updatedAt: string;
+  }) => Effect.Effect<void, RepositoryError>;
+  readonly markDeliveryBatchRejected: (input: {
+    readonly batchId: string;
+    readonly updatedAt: string;
+  }) => Effect.Effect<void, RepositoryError>;
+  readonly acknowledgeTerminal: (runId: RuntimeTaskId) => Effect.Effect<boolean, RepositoryError>;
   readonly markRunning: (input: {
     readonly runId: RuntimeTaskId;
     readonly resumeCursor: unknown | null;

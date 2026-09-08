@@ -28,12 +28,18 @@ import {
 } from "effect";
 
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
+import {
+  isOrchestrationCommandRejection,
+  OrchestrationCommandPreviouslyRejectedError,
+} from "../orchestration/Errors.ts";
 import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
 import {
+  NativeChildDeliveryBatch,
   NativeChildRunRepository,
   NativeChildMessage,
   NativeChildRun,
   NATIVE_CHILD_RESTART_ERROR,
+  type NativeChildDeliveryBatchWithRuns,
 } from "../persistence/Services/NativeChildRuns.ts";
 import type { ProviderAdapterError } from "../provider/Errors.ts";
 import type {
@@ -189,6 +195,9 @@ interface ActiveRun {
 
 const supported = new Set<string>(["codex", "claudeAgent", "pi"]);
 const MAX_OUTPUT = 100_000;
+const MAX_DELIVERY_TEXT = 100_000;
+const MAX_DELIVERY_OUTPUT_PER_RUN = 4_000;
+const MAX_DELIVERY_ERROR = 2_000;
 const MAX_INBOX_MESSAGE_TEXT = 75_000;
 const MAX_PER_PARENT = 4;
 const MAX_RUNNING = 16;
@@ -208,6 +217,72 @@ const NATIVE_CONTROL_CAPABILITIES = {
 const isTerminal = (run: NativeChildRun) =>
   run.status === "completed" || run.status === "failed" || run.status === "cancelled";
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+const isPreviouslyRejected = Schema.is(OrchestrationCommandPreviouslyRejectedError);
+
+function boundedDeliveryPart(text: string, limit: number, label: string): string {
+  if (text.length <= limit) return text;
+  const suffix = `\n[${label} truncated; call subagent_result for the full durable result]`;
+  if (limit <= suffix.length) return suffix.slice(0, limit);
+  return `${text.slice(0, Math.max(0, limit - suffix.length))}${suffix}`;
+}
+
+function buildDeliveryBatchText(runs: ReadonlyArray<NativeChildRun>): {
+  readonly runs: ReadonlyArray<NativeChildRun>;
+  readonly text: string;
+} {
+  const grouped = new Map<RuntimeTaskId, NativeChildRun[]>();
+  for (const run of runs) {
+    const group = grouped.get(run.agentId);
+    if (group === undefined) grouped.set(run.agentId, [run]);
+    else group.push(run);
+  }
+  const prefix = [
+    "[T3 subagent results]",
+    "No user-facing reply is required unless these results contain useful new information or require action.",
+  ];
+  const maximumSummary = `Included ${runs.length} of ${runs.length} pending run${runs.length === 1 ? "" : "s"} from ${grouped.size} agent${grouped.size === 1 ? "" : "s"}. Remaining runs stay pending for a later notification.`;
+  const metadata: string[] = [];
+  const selected: NativeChildRun[] = [];
+  let length = [...prefix, maximumSummary].join("\n").length;
+  for (const [agentId, group] of grouped) {
+    const heading = `Agent ${group[0]?.title ?? agentId} (${agentId})`;
+    let headingAdded = false;
+    for (const run of group) {
+      const runParts = [`- Run ${run.runId}: ${run.status}; ${run.provider}/${run.model}`];
+      if (run.error !== null) {
+        runParts.push(
+          `  Failure: ${boundedDeliveryPart(run.error, MAX_DELIVERY_ERROR, "failure")}`,
+        );
+      }
+      const addition = `${headingAdded ? "" : `${heading}\n`}${runParts.join("\n")}\n`;
+      if (length + addition.length > MAX_DELIVERY_TEXT) break;
+      if (!headingAdded) metadata.push(heading);
+      metadata.push(...runParts);
+      selected.push(run);
+      headingAdded = true;
+      length += addition.length;
+    }
+  }
+  const selectedAgentCount = new Set(selected.map((run) => run.agentId)).size;
+  const summary = `Included ${selected.length} of ${runs.length} pending run${runs.length === 1 ? "" : "s"} from ${selectedAgentCount} agent${selectedAgentCount === 1 ? "" : "s"}.${selected.length < runs.length ? " Remaining runs stay pending for a later notification." : ""}`;
+  let text = [...prefix, summary, ...metadata].join("\n");
+  for (const run of selected) {
+    if (run.output.length === 0) continue;
+    const prefix = `\nOutput excerpt for run ${run.runId}:\n`;
+    const remaining = MAX_DELIVERY_TEXT - text.length - prefix.length;
+    if (remaining <= 100) break;
+    const excerpt = boundedDeliveryPart(
+      run.output,
+      Math.min(MAX_DELIVERY_OUTPUT_PER_RUN, remaining),
+      "output",
+    );
+    text += `${prefix}${excerpt}`;
+    if (run.outputTruncated && text.length + 42 <= MAX_DELIVERY_TEXT) {
+      text += "\n[provider output was already truncated]";
+    }
+  }
+  return { runs: selected, text };
+}
 
 function nativeManagerId(threadId: ThreadId): string {
   return `t3-native:${NodeCrypto.createHash("sha256").update(threadId).digest("hex").slice(0, 32)}`;
@@ -261,6 +336,7 @@ export class ChildRunService extends Context.Service<
       scope: McpInvocationScope,
       runId: string,
       waitMs?: number,
+      acknowledge?: boolean,
     ) => Effect.Effect<ChildRunResult, ChildRunError>;
     cancel: (
       scope: McpInvocationScope,
@@ -306,6 +382,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
   const parentProviderByThread = new Map<ThreadId, ProviderInstanceId>();
   const activeByAgent = new Map<RuntimeTaskId, ActiveRun>();
   const deliveryMutexByAgent = new Map<RuntimeTaskId, Semaphore.Semaphore>();
+  const deliveryMutexByParent = new Map<ThreadId, Semaphore.Semaphore>();
   const deliveryMutexRegistry = yield* Semaphore.make(1);
 
   const persistenceError = (operation: string) => (_cause: unknown) =>
@@ -321,6 +398,20 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
       if (current !== undefined) return current;
       const created = yield* Semaphore.make(1);
       deliveryMutexByAgent.set(agentId, created);
+      return created;
+    }).pipe(deliveryMutexRegistry.withPermits(1));
+  });
+
+  const mutexForParent = Effect.fn("ChildRunService.mutexForParent")(function* (
+    parentThreadId: ThreadId,
+  ) {
+    const existing = deliveryMutexByParent.get(parentThreadId);
+    if (existing !== undefined) return existing;
+    return yield* Effect.gen(function* () {
+      const current = deliveryMutexByParent.get(parentThreadId);
+      if (current !== undefined) return current;
+      const created = yield* Semaphore.make(1);
+      deliveryMutexByParent.set(parentThreadId, created);
       return created;
     }).pipe(deliveryMutexRegistry.withPermits(1));
   });
@@ -487,56 +578,128 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
       .pipe(Effect.mapError(persistenceError("Publishing child activity")));
   });
 
-  const deliveryText = (run: NativeChildRun) => {
-    const body = run.output.length > 0 ? run.output : (run.error ?? "No output was returned.");
-    return `[T3 subagent result: ${run.title} (${run.provider}/${run.model}, ${run.status}, run ${run.runId})]\n${body}`;
-  };
+  const dispatchDeliveryBatchOnce = Effect.fn("ChildRunService.dispatchDeliveryBatchOnce")(
+    function* (delivery: NativeChildDeliveryBatchWithRuns) {
+      const { batch } = delivery;
+      if (stoppedParents.has(batch.parentThreadId)) {
+        yield* repository
+          .markParentDelivered(batch.parentThreadId)
+          .pipe(Effect.mapError(persistenceError("Suppressing delivery after parent stop")));
+        return "suppressed" as const;
+      }
+      const parentState = yield* engine.getAutomaticTurnState(batch.parentThreadId);
+      if (parentState === null) return "uncertain" as const;
+      const dispatchedAt = yield* nowIso;
+      const outcome = yield* startup
+        .enqueueCommand(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(batch.commandId),
+            threadId: batch.parentThreadId,
+            message: {
+              messageId: MessageId.make(batch.messageId),
+              role: "user",
+              text: batch.text,
+              attachments: [],
+              origin: "subagent-delivery",
+            },
+            runtimeMode: parentState.runtimeMode,
+            interactionMode: "default",
+            onlyIfIdle: true,
+            createdAt: dispatchedAt,
+          }),
+        )
+        .pipe(Effect.result);
+      if (outcome._tag === "Success") {
+        yield* repository
+          .markDeliveryBatchDelivered({ batchId: batch.batchId, updatedAt: dispatchedAt })
+          .pipe(Effect.mapError(persistenceError("Recording child result delivery")));
+        return "delivered" as const;
+      }
+      const error = outcome.failure;
+      if (isOrchestrationCommandRejection(error) || isPreviouslyRejected(error)) {
+        yield* repository
+          .markDeliveryBatchRejected({ batchId: batch.batchId, updatedAt: dispatchedAt })
+          .pipe(Effect.mapError(persistenceError("Recording rejected child result delivery")));
+        return "rejected" as const;
+      }
+      return "uncertain" as const;
+    },
+  );
 
-  const deliver = Effect.fn("ChildRunService.deliver")(function* (run: NativeChildRun) {
-    if (run.deliveryState === "delivered") return;
-    if (run.deliveryState === "suppressed" || stoppedParents.has(run.parentThreadId)) {
-      yield* repository
-        .markDelivered(run.runId)
-        .pipe(Effect.mapError(persistenceError("Suppressing delivery after parent stop")));
-      return;
+  const dispatchDeliveryBatch = Effect.fn("ChildRunService.dispatchDeliveryBatch")(function* (
+    delivery: NativeChildDeliveryBatchWithRuns,
+  ) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const outcome = yield* dispatchDeliveryBatchOnce(delivery);
+      if (outcome !== "uncertain") return outcome;
+      yield* Effect.yieldNow;
     }
+    return "uncertain" as const;
+  });
+
+  const deliverPendingForParent = Effect.fn("ChildRunService.deliverPendingForParent")(function* (
+    parentThreadId: ThreadId,
+  ) {
+    const open = yield* repository
+      .getOpenDeliveryBatch(parentThreadId)
+      .pipe(Effect.mapError(persistenceError("Reading prepared child result delivery")));
+    if (open !== null) return yield* dispatchDeliveryBatch(open);
+    if (stoppedParents.has(parentThreadId)) return "suppressed" as const;
+    const pending = yield* repository.listPendingDelivery(parentThreadId).pipe(
+      Effect.map((runs) => runs.filter((run) => run.deliveryState === "pending")),
+      Effect.mapError(persistenceError("Listing pending child results")),
+    );
+    if (pending.length === 0) return "empty" as const;
+    const parentState = yield* engine.getAutomaticTurnState(parentThreadId);
+    if (parentState === null || !parentState.canStart) return "busy" as const;
+    const delivery = buildDeliveryBatchText(pending);
     const createdAt = yield* nowIso;
-    const outcome = yield* startup
-      .enqueueCommand(
-        engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make(
-            `server:native-child-delivery:${run.runId}:${run.deliveryAttempt}`,
-          ),
-          threadId: run.parentThreadId,
-          message: {
-            messageId: MessageId.make(`native-child-delivery:${run.runId}:${run.deliveryAttempt}`),
-            role: "user",
-            text: deliveryText(run),
-            attachments: [],
-            origin: "subagent-delivery",
-          },
-          runtimeMode: run.runtimeMode,
-          interactionMode: "default",
-          onlyIfIdle: true,
-          createdAt,
-        }),
-      )
-      .pipe(Effect.result);
-    yield* (
-      outcome._tag === "Success"
-        ? repository.markDelivered(run.runId)
-        : repository.markDeliveryRetry(run.runId)
-    ).pipe(Effect.mapError(persistenceError("Recording child result delivery")));
+    const batchId = `native-child-batch:${NodeCrypto.randomUUID()}`;
+    const batch = NativeChildDeliveryBatch.make({
+      batchId,
+      parentThreadId,
+      runtimeMode: parentState.runtimeMode,
+      text: delivery.text,
+      commandId: `server:native-child-delivery:${batchId}`,
+      messageId: `native-child-delivery:${batchId}`,
+      state: "prepared",
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const inserted = yield* repository
+      .insertDeliveryBatch({
+        batch,
+        runIds: delivery.runs.map((run) => run.runId),
+      })
+      .pipe(Effect.mapError(persistenceError("Preparing child result delivery")));
+    if (!inserted) return "empty" as const;
+    return yield* dispatchDeliveryBatch({ batch, runs: delivery.runs });
   });
 
   const deliverPending = Effect.fn("ChildRunService.deliverPending")(function* (
     parentThreadId?: ThreadId,
   ) {
-    const pending = yield* repository
-      .listPendingDelivery(parentThreadId)
-      .pipe(Effect.mapError(persistenceError("Listing pending child results")));
-    yield* Effect.forEach(pending, deliver, { concurrency: 1, discard: true });
+    const parents =
+      parentThreadId === undefined
+        ? [
+            ...new Set(
+              (yield* repository.listPendingDelivery().pipe(
+                Effect.map((runs) => runs.filter((run) => run.deliveryState === "pending")),
+                Effect.mapError(persistenceError("Listing pending child results")),
+              )).map((run) => run.parentThreadId),
+            ),
+          ]
+        : [parentThreadId];
+    yield* Effect.forEach(
+      parents,
+      (threadId) =>
+        Effect.gen(function* () {
+          const mutex = yield* mutexForParent(threadId);
+          yield* deliverPendingForParent(threadId).pipe(mutex.withPermits(1));
+        }),
+      { concurrency: "unbounded", discard: true },
+    );
   });
 
   const stopActiveSession = Effect.fn("ChildRunService.stopActiveSession")(function* (
@@ -594,7 +757,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
           .markDelivered(stored.runId)
           .pipe(Effect.mapError(persistenceError("Suppressing delivery after parent stop")));
       } else {
-        yield* deliver(stored);
+        yield* deliverPending(stored.parentThreadId);
       }
     }
   });
@@ -1079,23 +1242,26 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
       return Effect.void;
     }
     return Effect.gen(function* () {
-      stoppedParents.add(threadId);
-      yield* repository.markParentDelivered(threadId).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Failed to suppress pending child delivery after parent stop", {
-            threadId,
-            cause,
-          }),
-        ),
-      );
-      yield* Effect.forEach(
-        candidates,
-        (candidate) =>
-          Effect.sync(() => {
-            candidate.suppressDelivery = true;
-          }).pipe(Effect.andThen(Deferred.succeed(candidate.cancel, undefined))),
-        { discard: true },
-      );
+      const mutex = yield* mutexForParent(threadId);
+      yield* Effect.gen(function* () {
+        stoppedParents.add(threadId);
+        yield* repository.markParentDelivered(threadId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to suppress pending child delivery after parent stop", {
+              threadId,
+              cause,
+            }),
+          ),
+        );
+        yield* Effect.forEach(
+          candidates,
+          (candidate) =>
+            Effect.sync(() => {
+              candidate.suppressDelivery = true;
+            }).pipe(Effect.andThen(Deferred.succeed(candidate.cancel, undefined))),
+          { discard: true },
+        );
+      }).pipe(mutex.withPermits(1));
     });
   };
 
@@ -1482,12 +1648,34 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
         hasMore: pending.length > messages.length,
       };
     }),
-    result: Effect.fn("ChildRunService.result")(function* (scope, runId, waitMs = 0) {
+    result: Effect.fn("ChildRunService.result")(function* (
+      scope,
+      runId,
+      waitMs = 0,
+      acknowledge = false,
+    ) {
       let run = yield* readOwned(scope, runId);
       const active = activeByRun.get(run.runId);
       if (active !== undefined && waitMs > 0) {
         yield* Deferred.await(active.done).pipe(Effect.timeoutOption(Math.min(waitMs, 30_000)));
         run = yield* readOwned(scope, runId);
+      }
+      if (acknowledge && isTerminal(run)) {
+        const mutex = yield* mutexForParent(run.parentThreadId);
+        yield* Effect.gen(function* () {
+          const open = yield* repository
+            .getOpenDeliveryBatch(run.parentThreadId)
+            .pipe(Effect.mapError(persistenceError("Reading prepared child result delivery")));
+          if (open?.runs.some((member) => member.runId === run.runId)) {
+            return yield* new ChildRunError({
+              message:
+                "Automatic child result delivery may already be in flight; acknowledgement was not recorded.",
+            });
+          }
+          yield* repository
+            .acknowledgeTerminal(run.runId)
+            .pipe(Effect.mapError(persistenceError("Acknowledging the child result")));
+        }).pipe(mutex.withPermits(1));
       }
       return toResult(run);
     }),

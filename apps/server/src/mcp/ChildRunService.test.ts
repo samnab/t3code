@@ -1,5 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import {
+  CheckpointRef,
   EnvironmentId,
   EventId,
   ProviderDriverKind,
@@ -29,10 +30,15 @@ import {
   Scope,
   Stream,
 } from "effect";
+import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/unstable/ai";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
+import {
+  OrchestrationCommandInvariantError,
+  OrchestrationListenerCallbackError,
+} from "../orchestration/Errors.ts";
 import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import {
   NativeChildRun,
   NativeChildRunRepository,
@@ -67,6 +73,12 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   blockSteers = false,
   childOptionDescriptors?: ReadonlyArray<ProviderOptionDescriptor>,
   secondChildDriver?: string,
+  deliveryControl?: {
+    idle: boolean;
+    outcomes?: Array<"success" | "accepted" | "busy" | "uncertain" | "uncertain-after-accept">;
+    acceptedCommandIds?: Set<string>;
+    attempts?: OrchestrationCommand[];
+  },
 ) {
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const domainEvents = yield* PubSub.unbounded<OrchestrationEvent>();
@@ -270,30 +282,78 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   const runtimeServices = Layer.mergeAll(
     Layer.mock(ProviderService)({ streamEvents: Stream.fromPubSub(events) }),
     Layer.mock(OrchestrationEngineService)({
+      getAutomaticTurnState: () =>
+        Effect.sync(() => ({
+          runtimeMode: parentRuntimeMode,
+          canStart: deliveryControl?.idle !== false,
+        })),
       dispatch: (command) =>
-        Effect.suspend(() => {
-          if (shouldFailActivity && command.type === "thread.activity.append") {
-            shouldFailActivity = false;
-            return Effect.fail(
-              new OrchestrationCommandInvariantError({
-                commandType: command.type,
-                detail: "simulated activity rejection",
-              }),
-            );
-          }
-          return Effect.gen(function* () {
-            if (
-              pauseTerminalActivity &&
-              command.type === "thread.activity.append" &&
-              command.activity.kind === "task.completed"
-            ) {
-              yield* Deferred.succeed(terminalActivityReached, undefined);
-              yield* Deferred.await(releaseTerminalActivity);
+        Effect.suspend(
+          (): Effect.Effect<
+            { readonly sequence: number },
+            OrchestrationCommandInvariantError | OrchestrationListenerCallbackError
+          > => {
+            if (shouldFailActivity && command.type === "thread.activity.append") {
+              shouldFailActivity = false;
+              return Effect.fail(
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: "simulated activity rejection",
+                }),
+              );
             }
-            commands.push(command);
-            return { sequence: commands.length };
-          });
-        }),
+            if (command.type === "thread.turn.start") {
+              deliveryControl?.attempts?.push(command);
+              if (deliveryControl?.acceptedCommandIds?.has(command.commandId)) {
+                return Effect.succeed({ sequence: commands.length });
+              }
+              const outcome = deliveryControl?.outcomes?.shift() ?? "success";
+              if (outcome === "busy") {
+                return Effect.fail(
+                  new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail: "simulated idle-check race",
+                  }),
+                );
+              }
+              if (outcome === "accepted") {
+                commands.push(command);
+                deliveryControl?.acceptedCommandIds?.add(command.commandId);
+                return Effect.succeed({ sequence: commands.length });
+              }
+              if (outcome === "uncertain-after-accept") {
+                commands.push(command);
+                deliveryControl?.acceptedCommandIds?.add(command.commandId);
+                return Effect.fail(
+                  new OrchestrationListenerCallbackError({
+                    listener: "domain-event",
+                    detail: "simulated uncertain accepted dispatch",
+                  }),
+                );
+              }
+              if (outcome === "uncertain") {
+                return Effect.fail(
+                  new OrchestrationListenerCallbackError({
+                    listener: "domain-event",
+                    detail: "simulated uncertain dispatch",
+                  }),
+                );
+              }
+            }
+            return Effect.gen(function* () {
+              if (
+                pauseTerminalActivity &&
+                command.type === "thread.activity.append" &&
+                command.activity.kind === "task.completed"
+              ) {
+                yield* Deferred.succeed(terminalActivityReached, undefined);
+                yield* Deferred.await(releaseTerminalActivity);
+              }
+              commands.push(command);
+              return { sequence: commands.length };
+            });
+          },
+        ),
       subscribeDomainEvents: Effect.succeed(Stream.fromPubSub(domainEvents)),
     }),
     Layer.mock(ServerRuntimeStartup)({
@@ -387,6 +447,415 @@ const messagingScope = (
     issuedAt: 0,
   };
 };
+
+const seedTerminalRun = Effect.fn("seedTerminalRun")(function* (
+  repository: NativeChildRunRepository["Service"],
+  input: {
+    readonly runId: string;
+    readonly agentId: string;
+    readonly status: "completed" | "failed" | "cancelled";
+    readonly output?: string;
+    readonly error?: string;
+    readonly createdAt?: string;
+  },
+) {
+  const runId = RuntimeTaskId.make(input.runId);
+  const childThreadId = ThreadId.make(`child-${input.runId}`);
+  const createdAt = input.createdAt ?? now;
+  const runNumber = yield* repository.reserveRunNumber({
+    runId,
+    childThreadId,
+    allocatedAt: createdAt,
+  });
+  yield* repository.insert(
+    NativeChildRun.make({
+      runId,
+      agentId: RuntimeTaskId.make(input.agentId),
+      runNumber,
+      parentRunId: null,
+      parentThreadId: parentId,
+      childThreadId,
+      providerInstanceId: ProviderInstanceId.make("child-provider"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      model: "native-model",
+      title: `Agent ${input.agentId}`,
+      runtimeMode: "full-access",
+      cwd: "/workspace",
+      resumeCursor: null,
+      generation: 1,
+      status: input.status,
+      output: input.output ?? "",
+      outputTruncated: false,
+      error: input.error ?? null,
+      deliveryState: "pending",
+      deliveryAttempt: 0,
+      createdAt,
+      updatedAt: createdAt,
+    }),
+  );
+});
+
+const publishParentTurnDiff = (events: PubSub.PubSub<OrchestrationEvent>, suffix: string) =>
+  PubSub.publish(events, {
+    sequence: 1,
+    eventId: EventId.make(`parent-turn-diff-${suffix}`),
+    aggregateKind: "thread" as const,
+    aggregateId: parentId,
+    occurredAt: now,
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.turn-diff-completed" as const,
+    payload: {
+      threadId: parentId,
+      turnId: TurnId.make(`parent-turn-${suffix}`),
+      checkpointTurnCount: 1,
+      checkpointRef: CheckpointRef.make(`refs/t3/checkpoints/parent/${suffix}`),
+      status: "ready" as const,
+      files: [],
+      assistantMessageId: null,
+      completedAt: now,
+    },
+  });
+
+const makeDeliveryHarness = (
+  repository: NativeChildRunRepository["Service"],
+  deliveryControl: {
+    idle: boolean;
+    outcomes?: Array<"success" | "accepted" | "busy" | "uncertain" | "uncertain-after-accept">;
+    acceptedCommandIds?: Set<string>;
+    attempts?: OrchestrationCommand[];
+  },
+) =>
+  makeHarness(
+    "codex",
+    "claudeAgent",
+    "full-access",
+    false,
+    false,
+    Layer.succeed(NativeChildRunRepository, repository),
+    false,
+    false,
+    undefined,
+    undefined,
+    deliveryControl,
+  );
+
+it.effect("batches every pending child completion into one parent turn", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const repository = Context.get(repositoryContext, NativeChildRunRepository);
+      for (let index = 0; index < 42; index++) {
+        yield* seedTerminalRun(repository, {
+          runId: `pending-run-${index}`,
+          agentId: `agent-${index % 3}`,
+          status: index === 7 ? "failed" : "completed",
+          output: `output-${index}-${"x".repeat(100_000)}`,
+          ...(index === 7 ? { error: "failed-seven" } : {}),
+          createdAt: `2026-09-06T00:00:${String(index).padStart(2, "0")}.000Z`,
+        });
+      }
+      const h = yield* makeHarness(
+        "codex",
+        "claudeAgent",
+        "full-access",
+        false,
+        false,
+        Layer.succeed(NativeChildRunRepository, repository),
+      );
+      yield* Effect.gen(function* () {
+        yield* ChildRunService;
+        yield* Effect.forEach([1, 2], () => Effect.yieldNow, { discard: true });
+        const deliveries = h.commands.filter((command) => command.type === "thread.turn.start");
+        expect(deliveries).toHaveLength(1);
+        const delivery = deliveries[0];
+        if (delivery?.type !== "thread.turn.start") throw new Error("missing delivery");
+        expect(delivery.message.text.length).toBeLessThanOrEqual(100_000);
+        for (let index = 0; index < 42; index++) {
+          expect(delivery.message.text).toContain(`pending-run-${index}`);
+        }
+        expect(delivery.message.text).toContain("failed-seven");
+        expect(delivery.message.text.match(/^Agent Agent agent-/gm) ?? []).toHaveLength(3);
+      }).pipe(Effect.provide(h.services));
+    }),
+  ),
+);
+
+it.effect(
+  "acknowledges only terminal pending results while ordinary and running reads stay live",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const repositoryScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+        const repositoryContext = yield* Layer.buildWithScope(
+          NativeChildRunRepositoryAuto,
+          repositoryScope,
+        );
+        const repository = Context.get(repositoryContext, NativeChildRunRepository);
+        yield* seedTerminalRun(repository, {
+          runId: "read-only-terminal",
+          agentId: "read-only-agent",
+          status: "completed",
+          output: "keep notification",
+        });
+        yield* seedTerminalRun(repository, {
+          runId: "acknowledged-terminal",
+          agentId: "acknowledged-agent",
+          status: "completed",
+          output: "suppress notification",
+        });
+        const deliveryControl = { idle: false };
+        const h = yield* makeDeliveryHarness(repository, deliveryControl);
+        yield* Effect.gen(function* () {
+          const service = yield* ChildRunService;
+          yield* service.result(h.scope, "read-only-terminal");
+          yield* service.result(h.scope, "acknowledged-terminal", 0, true);
+          expect(
+            (yield* repository.get(RuntimeTaskId.make("read-only-terminal")))?.deliveryState,
+          ).toBe("pending");
+          expect(
+            (yield* repository.get(RuntimeTaskId.make("acknowledged-terminal")))?.deliveryState,
+          ).toBe("suppressed");
+
+          const running = yield* service.spawn(h.scope, h.input);
+          const childThreadId = yield* Deferred.await(h.sent);
+          expect((yield* service.result(h.scope, running.runId, 0, true)).status).toBe("running");
+          yield* PubSub.publish(h.events, {
+            type: "turn.completed",
+            eventId: EventId.make("ack-running-completed"),
+            provider: ProviderDriverKind.make("claudeAgent"),
+            threadId: childThreadId,
+            turnId: h.sentTurns[0],
+            createdAt: now,
+            payload: { state: "completed" },
+          });
+          expect((yield* service.result(h.scope, running.runId, 30_000)).status).toBe("completed");
+
+          deliveryControl.idle = true;
+          yield* publishParentTurnDiff(h.domainEvents, "ack-semantics");
+          yield* Effect.yieldNow;
+          const deliveries = h.commands.filter((command) => command.type === "thread.turn.start");
+          expect(deliveries).toHaveLength(1);
+          const delivery = deliveries[0];
+          if (delivery?.type !== "thread.turn.start") throw new Error("missing delivery");
+          expect(delivery.message.text).toContain("read-only-terminal");
+          expect(delivery.message.text).toContain(running.runId);
+          expect(delivery.message.text).not.toContain("acknowledged-terminal");
+        }).pipe(Effect.provide(h.services));
+      }),
+    ),
+);
+
+it.effect("lets acknowledgement suppress a result after an idle-check dispatch race", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const repository = Context.get(repositoryContext, NativeChildRunRepository);
+      yield* seedTerminalRun(repository, {
+        runId: "busy-race-run",
+        agentId: "busy-race-agent",
+        status: "failed",
+        error: "race failure",
+      });
+      const deliveryControl = {
+        idle: true,
+        outcomes: ["busy" as const],
+        attempts: [] as OrchestrationCommand[],
+      };
+      const h = yield* makeDeliveryHarness(repository, deliveryControl);
+      yield* Effect.gen(function* () {
+        const service = yield* ChildRunService;
+        expect(deliveryControl.attempts).toHaveLength(1);
+        expect((yield* repository.get(RuntimeTaskId.make("busy-race-run")))?.deliveryAttempt).toBe(
+          1,
+        );
+        yield* service.result(h.scope, "busy-race-run", 0, true);
+        expect((yield* repository.get(RuntimeTaskId.make("busy-race-run")))?.deliveryState).toBe(
+          "suppressed",
+        );
+        yield* publishParentTurnDiff(h.domainEvents, "busy-race");
+        yield* Effect.yieldNow;
+        expect(deliveryControl.attempts).toHaveLength(1);
+      }).pipe(Effect.provide(h.services));
+    }),
+  ),
+);
+
+it.effect("reuses durable batch identities across uncertain dispatch and service restart", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const repository = Context.get(repositoryContext, NativeChildRunRepository);
+      yield* seedTerminalRun(repository, {
+        runId: "restart-delivery-run",
+        agentId: "restart-delivery-agent",
+        status: "completed",
+        output: "restart result",
+      });
+      const attempts: OrchestrationCommand[] = [];
+      const firstControl = {
+        idle: true,
+        outcomes: ["uncertain" as const, "uncertain" as const, "uncertain" as const],
+        attempts,
+      };
+      const firstHarness = yield* makeDeliveryHarness(repository, firstControl);
+      const firstScope = yield* Scope.make();
+      yield* Layer.buildWithScope(firstHarness.services, firstScope);
+      yield* Effect.forEach([1, 2, 3, 4], () => Effect.yieldNow, { discard: true });
+      expect(attempts).toHaveLength(3);
+      const prepared = yield* repository.getOpenDeliveryBatch(parentId);
+      expect(prepared).not.toBeNull();
+      yield* Scope.close(firstScope, Exit.void);
+      yield* TestClock.adjust("1 second");
+
+      const secondControl = { idle: true, attempts };
+      const secondHarness = yield* makeDeliveryHarness(repository, secondControl);
+      secondHarness.setParentRuntimeMode("approval-required");
+      const secondScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(secondScope, Exit.void));
+      yield* Layer.buildWithScope(secondHarness.services, secondScope);
+      yield* Effect.forEach([1, 2], () => Effect.yieldNow, { discard: true });
+      expect(attempts).toHaveLength(4);
+      const deliveryAttempts = attempts.filter(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+          command.type === "thread.turn.start",
+      );
+      expect(new Set(deliveryAttempts.map((command) => command.commandId)).size).toBe(1);
+      expect(new Set(deliveryAttempts.map((command) => command.message.messageId)).size).toBe(1);
+      expect(new Set(deliveryAttempts.map((command) => command.message.text)).size).toBe(1);
+      expect(deliveryAttempts[3]?.runtimeMode).toBe("approval-required");
+      expect(deliveryAttempts[3]?.createdAt).not.toBe(deliveryAttempts[0]?.createdAt);
+      expect(
+        (yield* repository.get(RuntimeTaskId.make("restart-delivery-run")))?.deliveryState,
+      ).toBe("delivered");
+    }),
+  ),
+);
+
+it.effect("reconciles an accepted uncertain dispatch without creating a duplicate turn", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const repository = Context.get(repositoryContext, NativeChildRunRepository);
+      yield* seedTerminalRun(repository, {
+        runId: "accepted-uncertain-run",
+        agentId: "accepted-uncertain-agent",
+        status: "completed",
+      });
+      const attempts: OrchestrationCommand[] = [];
+      const deliveryControl = {
+        idle: true,
+        outcomes: ["uncertain-after-accept" as const],
+        attempts,
+        acceptedCommandIds: new Set<string>(),
+      };
+      const h = yield* makeDeliveryHarness(repository, deliveryControl);
+      yield* Effect.gen(function* () {
+        yield* ChildRunService;
+        yield* Effect.forEach([1, 2], () => Effect.yieldNow, { discard: true });
+        expect(attempts).toHaveLength(2);
+        expect(attempts[0]?.commandId).toBe(attempts[1]?.commandId);
+        expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
+          1,
+        );
+        expect(
+          (yield* repository.get(RuntimeTaskId.make("accepted-uncertain-run")))?.deliveryState,
+        ).toBe("delivered");
+      }).pipe(Effect.provide(h.services));
+    }),
+  ),
+);
+
+it.effect("recovers an accepted delivery when recording completion fails", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const baseRepository = Context.get(repositoryContext, NativeChildRunRepository);
+      yield* seedTerminalRun(baseRepository, {
+        runId: "accepted-recording-failure",
+        agentId: "accepted-recording-agent",
+        status: "completed",
+      });
+      let failRecording = true;
+      const failingRepository = NativeChildRunRepository.of({
+        ...baseRepository,
+        markDeliveryBatchDelivered: (input) => {
+          if (!failRecording) return baseRepository.markDeliveryBatchDelivered(input);
+          failRecording = false;
+          return Effect.fail(
+            new PersistenceSqlError({
+              operation: "test.markDeliveryBatchDelivered",
+              detail: "simulated recording failure",
+            }),
+          );
+        },
+      });
+      const attempts: OrchestrationCommand[] = [];
+      const acceptedCommandIds = new Set<string>();
+      const firstHarness = yield* makeDeliveryHarness(failingRepository, {
+        idle: true,
+        outcomes: ["accepted"],
+        attempts,
+        acceptedCommandIds,
+      });
+      const firstScope = yield* Scope.make();
+      yield* Layer.buildWithScope(firstHarness.services, firstScope);
+      yield* Effect.forEach([1, 2], () => Effect.yieldNow, { discard: true });
+      expect((yield* baseRepository.getOpenDeliveryBatch(parentId))?.batch.state).toBe("prepared");
+      yield* Scope.close(firstScope, Exit.void);
+
+      const secondHarness = yield* makeDeliveryHarness(baseRepository, {
+        idle: true,
+        attempts,
+        acceptedCommandIds,
+      });
+      const secondScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(secondScope, Exit.void));
+      yield* Layer.buildWithScope(secondHarness.services, secondScope);
+      yield* Effect.forEach([1, 2], () => Effect.yieldNow, { discard: true });
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]?.commandId).toBe(attempts[1]?.commandId);
+      expect(
+        (yield* baseRepository.get(RuntimeTaskId.make("accepted-recording-failure")))
+          ?.deliveryState,
+      ).toBe("delivered");
+      expect(
+        firstHarness.commands.filter((command) => command.type === "thread.turn.start"),
+      ).toHaveLength(1);
+      expect(
+        secondHarness.commands.filter((command) => command.type === "thread.turn.start"),
+      ).toHaveLength(0);
+    }),
+  ),
+);
 
 for (const [parentDriver, childDriver] of [
   ["codex", "claudeAgent"],
@@ -664,7 +1133,7 @@ it.effect("exposes native delegation through MCP with invocation-bound result co
       const run = yield* decodeChildRunResult(spawned.structuredContent);
       const collected = yield* server.callTool({
         name: "subagent_result",
-        arguments: { runId: run.runId, waitMs: 30_000 },
+        arguments: { runId: run.runId, waitMs: 30_000, acknowledge: true },
       });
       const result = yield* decodeChildRunResult(collected.structuredContent);
       expect(result.status).toBe("completed");

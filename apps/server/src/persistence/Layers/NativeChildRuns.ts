@@ -8,6 +8,7 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 import {
+  NativeChildDeliveryBatch,
   NativeChildMessage,
   NativeChildRun,
   NATIVE_CHILD_RESTART_ERROR,
@@ -23,6 +24,7 @@ const NativeChildRunDbRow = Schema.Struct({
 });
 
 const NativeChildMessageDbRow = NativeChildMessage;
+const NativeChildDeliveryBatchDbRow = NativeChildDeliveryBatch;
 
 const UpdateRunning = Schema.Struct({
   runId: RuntimeTaskId,
@@ -69,6 +71,8 @@ const MarkMessageNotifiedInput = Schema.Struct({
 });
 const MessageIdInput = Schema.Struct({ parentThreadId: ThreadId, messageId: Schema.String });
 const MessageIdRow = Schema.Struct({ messageId: Schema.String });
+const BatchIdInput = Schema.Struct({ batchId: Schema.String });
+const BatchCountRow = Schema.Struct({ count: Schema.Number });
 
 function toRun(row: typeof NativeChildRunDbRow.Type): NativeChildRun {
   const { requestedOptions, ...rest } = row;
@@ -317,6 +321,55 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
     `,
   });
 
+  const batchColumns = sql`
+    batch_id AS "batchId", parent_thread_id AS "parentThreadId",
+    runtime_mode AS "runtimeMode", text, command_id AS "commandId",
+    message_id AS "messageId", state, created_at AS "createdAt", updated_at AS "updatedAt"
+  `;
+  const getOpenDeliveryBatchRow = SqlSchema.findOneOption({
+    Request: Schema.Struct({ parentThreadId: ThreadId }),
+    Result: NativeChildDeliveryBatchDbRow,
+    execute: ({ parentThreadId }) => sql`
+      SELECT ${batchColumns} FROM native_child_delivery_batches
+      WHERE parent_thread_id = ${parentThreadId} AND state = 'prepared'
+    `,
+  });
+  const listDeliveryBatchRunRows = SqlSchema.findAll({
+    Request: BatchIdInput,
+    Result: NativeChildRunDbRow,
+    execute: ({ batchId }) => sql`
+      SELECT ${selectColumns} FROM native_child_runs
+      WHERE run_id IN (
+        SELECT run_id FROM native_child_delivery_batch_runs WHERE batch_id = ${batchId}
+      )
+      ORDER BY updated_at ASC, run_id ASC
+    `,
+  });
+  const deliveryBatchCountRow = SqlSchema.findOne({
+    Request: BatchIdInput,
+    Result: BatchCountRow,
+    execute: ({ batchId }) => sql`
+      SELECT COUNT(*) AS count FROM native_child_delivery_batch_runs
+      WHERE batch_id = ${batchId}
+    `,
+  });
+  const acknowledgeTerminalRow = SqlSchema.findOneOption({
+    Request: RunIdInput,
+    Result: RunIdInput,
+    execute: ({ runId }) => sql`
+      UPDATE native_child_runs SET delivery_state = 'suppressed'
+      WHERE run_id = ${runId}
+        AND status IN ('completed', 'failed', 'cancelled')
+        AND delivery_state = 'pending'
+        AND NOT EXISTS (
+          SELECT 1 FROM native_child_delivery_batch_runs AS member
+          JOIN native_child_delivery_batches AS batch ON batch.batch_id = member.batch_id
+          WHERE member.run_id = ${runId} AND batch.state = 'prepared'
+        )
+      RETURNING run_id AS "runId"
+    `,
+  });
+
   const mapped = <A, E>(operation: string, effect: Effect.Effect<A, E>) =>
     effect.pipe(Effect.mapError(mapRepositoryError(operation)));
 
@@ -340,6 +393,90 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
       ? { status: "duplicate", message: existing.value }
       : { status: "conflict" };
   });
+
+  const getOpenDeliveryBatch: NativeChildRunRepositoryShape["getOpenDeliveryBatch"] = Effect.fn(
+    "NativeChildRunRepository.getOpenDeliveryBatch",
+  )(function* (parentThreadId) {
+    const batch = yield* mapped(
+      "NativeChildRunRepository.getOpenDeliveryBatch",
+      getOpenDeliveryBatchRow({ parentThreadId }),
+    );
+    if (Option.isNone(batch)) return null;
+    const runs = yield* mapped(
+      "NativeChildRunRepository.listDeliveryBatchRuns",
+      listDeliveryBatchRunRows({ batchId: batch.value.batchId }),
+    );
+    return { batch: batch.value, runs: runs.map(toRun) };
+  });
+
+  const insertDeliveryBatch: NativeChildRunRepositoryShape["insertDeliveryBatch"] = Effect.fn(
+    "NativeChildRunRepository.insertDeliveryBatch",
+  )(function* ({ batch, runIds }) {
+    return yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* sql`
+            INSERT INTO native_child_delivery_batches (
+              batch_id, parent_thread_id, runtime_mode, text, command_id, message_id,
+              state, created_at, updated_at
+            ) VALUES (
+              ${batch.batchId}, ${batch.parentThreadId}, ${batch.runtimeMode}, ${batch.text},
+              ${batch.commandId}, ${batch.messageId}, ${batch.state}, ${batch.createdAt},
+              ${batch.updatedAt}
+            )
+          `;
+          yield* Effect.forEach(
+            runIds,
+            (runId) => sql`
+              INSERT INTO native_child_delivery_batch_runs (batch_id, run_id)
+              SELECT ${batch.batchId}, run_id FROM native_child_runs
+              WHERE run_id = ${runId} AND parent_thread_id = ${batch.parentThreadId}
+                AND status IN ('completed', 'failed', 'cancelled')
+                AND delivery_state = 'pending'
+            `,
+            { concurrency: 1, discard: true },
+          );
+          const membership = yield* deliveryBatchCountRow({ batchId: batch.batchId });
+          if (membership.count === runIds.length && runIds.length > 0) return true;
+          yield* sql`
+            DELETE FROM native_child_delivery_batch_runs WHERE batch_id = ${batch.batchId}
+          `;
+          yield* sql`DELETE FROM native_child_delivery_batches WHERE batch_id = ${batch.batchId}`;
+          return false;
+        }),
+      )
+      .pipe(Effect.mapError(mapRepositoryError("NativeChildRunRepository.insertDeliveryBatch")));
+  });
+
+  const settleDeliveryBatch = (
+    input: { readonly batchId: string; readonly updatedAt: string },
+    state: "delivered" | "rejected",
+  ) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* sql`
+            UPDATE native_child_runs SET
+              delivery_state = ${state === "delivered" ? "delivered" : "pending"},
+              delivery_attempt = delivery_attempt + ${state === "rejected" ? 1 : 0}
+            WHERE run_id IN (
+              SELECT member.run_id FROM native_child_delivery_batch_runs AS member
+              JOIN native_child_delivery_batches AS batch ON batch.batch_id = member.batch_id
+              WHERE member.batch_id = ${input.batchId} AND batch.state = 'prepared'
+            ) AND delivery_state = 'pending'
+          `;
+          yield* sql`
+            UPDATE native_child_delivery_batches SET state = ${state}, updated_at = ${input.updatedAt}
+            WHERE batch_id = ${input.batchId} AND state = 'prepared'
+          `;
+        }),
+      )
+      .pipe(Effect.mapError(mapRepositoryError("NativeChildRunRepository.settleDeliveryBatch")));
+
+  const acknowledgeTerminal: NativeChildRunRepositoryShape["acknowledgeTerminal"] = (runId) =>
+    mapped("NativeChildRunRepository.acknowledgeTerminal", acknowledgeTerminalRow({ runId })).pipe(
+      Effect.map(Option.isSome),
+    );
 
   return {
     reserveRunNumber: (input) =>
@@ -374,15 +511,27 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
         "NativeChildRunRepository.listPendingDelivery",
         listPendingRows({ parentThreadId: parentThreadId ?? null }),
       ).pipe(Effect.map((rows) => rows.map(toRun))),
+    getOpenDeliveryBatch,
+    insertDeliveryBatch,
+    markDeliveryBatchDelivered: (input) => settleDeliveryBatch(input, "delivered"),
+    markDeliveryBatchRejected: (input) => settleDeliveryBatch(input, "rejected"),
+    acknowledgeTerminal,
     markRunning: (input) => mapped("NativeChildRunRepository.markRunning", runningRow(input)),
     markTerminal: (input) => mapped("NativeChildRunRepository.markTerminal", terminalRow(input)),
     markDelivered: (runId) =>
       mapped("NativeChildRunRepository.markDelivered", deliveredRow({ runId })),
     markParentDelivered: (parentThreadId) =>
-      mapped(
-        "NativeChildRunRepository.markParentDelivered",
-        parentDeliveredRows({ parentThreadId }),
-      ),
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`
+              UPDATE native_child_delivery_batches SET state = 'suppressed'
+              WHERE parent_thread_id = ${parentThreadId} AND state = 'prepared'
+            `;
+            yield* parentDeliveredRows({ parentThreadId });
+          }),
+        )
+        .pipe(Effect.mapError(mapRepositoryError("NativeChildRunRepository.markParentDelivered"))),
     markDeliveryRetry: (runId) =>
       mapped("NativeChildRunRepository.markDeliveryRetry", retryRow({ runId })),
     reconcileRestart: (interruptedAt) =>
@@ -411,6 +560,10 @@ export const NativeChildRunRepositoryLive = Layer.effect(
 
 const makeMemoryRepository = Effect.sync(() => {
   const rows = new Map<RuntimeTaskId, NativeChildRun>();
+  const deliveryBatches = new Map<
+    string,
+    { batch: NativeChildDeliveryBatch; runIds: ReadonlyArray<RuntimeTaskId> }
+  >();
   const messages = new Map<string, NativeChildMessage>();
   const messageKey = (parentThreadId: ThreadId, messageId: string) =>
     `${parentThreadId}\u0000${messageId}`;
@@ -478,6 +631,93 @@ const makeMemoryRepository = Effect.sync(() => {
             run.deliveryState !== "delivered",
         ),
       ),
+    getOpenDeliveryBatch: (parentThreadId) =>
+      Effect.sync(() => {
+        const stored = [...deliveryBatches.values()].find(
+          ({ batch }) => batch.parentThreadId === parentThreadId && batch.state === "prepared",
+        );
+        return stored === undefined
+          ? null
+          : {
+              batch: stored.batch,
+              runs: stored.runIds.flatMap((runId) => {
+                const run = rows.get(runId);
+                return run === undefined ? [] : [run];
+              }),
+            };
+      }),
+    insertDeliveryBatch: ({ batch, runIds }) =>
+      Effect.sync(() => {
+        if (
+          runIds.length === 0 ||
+          [...deliveryBatches.values()].some(
+            (stored) =>
+              stored.batch.parentThreadId === batch.parentThreadId &&
+              stored.batch.state === "prepared",
+          ) ||
+          runIds.some((runId) => {
+            const run = rows.get(runId);
+            return (
+              run === undefined ||
+              run.parentThreadId !== batch.parentThreadId ||
+              (run.status !== "completed" &&
+                run.status !== "failed" &&
+                run.status !== "cancelled") ||
+              run.deliveryState !== "pending"
+            );
+          })
+        ) {
+          return false;
+        }
+        deliveryBatches.set(batch.batchId, { batch, runIds: [...runIds] });
+        return true;
+      }),
+    markDeliveryBatchDelivered: ({ batchId, updatedAt }) =>
+      Effect.sync(() => {
+        const stored = deliveryBatches.get(batchId);
+        if (stored === undefined || stored.batch.state !== "prepared") return;
+        deliveryBatches.set(batchId, {
+          ...stored,
+          batch: { ...stored.batch, state: "delivered", updatedAt },
+        });
+        for (const runId of stored.runIds) {
+          const run = rows.get(runId);
+          if (run?.deliveryState === "pending") {
+            rows.set(runId, { ...run, deliveryState: "delivered" });
+          }
+        }
+      }),
+    markDeliveryBatchRejected: ({ batchId, updatedAt }) =>
+      Effect.sync(() => {
+        const stored = deliveryBatches.get(batchId);
+        if (stored === undefined || stored.batch.state !== "prepared") return;
+        deliveryBatches.set(batchId, {
+          ...stored,
+          batch: { ...stored.batch, state: "rejected", updatedAt },
+        });
+        for (const runId of stored.runIds) {
+          const run = rows.get(runId);
+          if (run?.deliveryState === "pending") {
+            rows.set(runId, { ...run, deliveryAttempt: run.deliveryAttempt + 1 });
+          }
+        }
+      }),
+    acknowledgeTerminal: (runId) =>
+      Effect.sync(() => {
+        const run = rows.get(runId);
+        if (
+          run === undefined ||
+          (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled") ||
+          run.deliveryState !== "pending" ||
+          [...deliveryBatches.values()].some(
+            (stored) => stored.batch.state === "prepared" && stored.runIds.includes(runId),
+          )
+        ) {
+          return false;
+        }
+        rows.set(runId, { ...run, deliveryState: "suppressed" });
+        return true;
+      }),
     markRunning: (input) =>
       update(input.runId, (run) => ({
         ...run,
@@ -502,6 +742,14 @@ const makeMemoryRepository = Effect.sync(() => {
     markDelivered: (runId) => update(runId, (run) => ({ ...run, deliveryState: "delivered" })),
     markParentDelivered: (parentThreadId) =>
       Effect.sync(() => {
+        for (const [batchId, stored] of deliveryBatches) {
+          if (stored.batch.parentThreadId === parentThreadId && stored.batch.state === "prepared") {
+            deliveryBatches.set(batchId, {
+              ...stored,
+              batch: { ...stored.batch, state: "suppressed" },
+            });
+          }
+        }
         for (const [runId, run] of rows) {
           if (run.parentThreadId !== parentThreadId) continue;
           rows.set(runId, {

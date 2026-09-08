@@ -229,6 +229,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           streamDomainEvents: Stream.empty,
           subscribeDomainEvents: Effect.succeed(Stream.empty),
           latestSequence: Effect.succeed(0),
+          getAutomaticTurnState: () => Effect.succeed(null),
         });
         const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
           upsert: (binding) => Effect.sync(() => void bindings.push(binding)),
@@ -334,6 +335,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           streamDomainEvents: Stream.empty,
           subscribeDomainEvents: Effect.succeed(Stream.empty),
           latestSequence: Effect.succeed(0),
+          getAutomaticTurnState: () => Effect.succeed(null),
         });
         const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
           upsert: () => Effect.die("must not bind a scanner skip"),
@@ -399,6 +401,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           streamDomainEvents: Stream.empty,
           subscribeDomainEvents: Effect.succeed(Stream.empty),
           latestSequence: Effect.succeed(0),
+          getAutomaticTurnState: () => Effect.succeed(null),
         });
         const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
           upsert: (binding) => {
@@ -470,6 +473,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           streamDomainEvents: Stream.empty,
           subscribeDomainEvents: Effect.succeed(Stream.empty),
           latestSequence: Effect.succeed(0),
+          getAutomaticTurnState: () => Effect.succeed(null),
         });
 
         const result = yield* runImport({
@@ -508,6 +512,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           streamDomainEvents: Stream.empty,
           subscribeDomainEvents: Effect.succeed(Stream.empty),
           latestSequence: Effect.succeed(0),
+          getAutomaticTurnState: () => Effect.succeed(null),
         });
         const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
           upsert: () => Effect.die("must not bind malformed or wrong-project sessions"),

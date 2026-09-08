@@ -123,7 +123,7 @@ it.layer(testLayer)("native child persistence", (it) => {
   it.effect("preserves explicit parent-stop delivery suppression across restart", () =>
     Effect.gen(function* () {
       const repository = yield* NativeChildRunRepository;
-      yield* runMigrations({ toMigrationInclusive: 59 });
+      yield* runMigrations({ toMigrationInclusive: 60 });
       const runId = RuntimeTaskId.make("native-suppressed-active");
       const parentThreadId = ThreadId.make("parent-suppressed-active");
       const childThreadId = ThreadId.make("child-suppressed-active");

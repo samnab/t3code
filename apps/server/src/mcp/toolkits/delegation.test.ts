@@ -16,3 +16,13 @@ it("every delegation tool has an object-typed inputSchema", () => {
     expect(jsonSchema.type, `${tool.name} inputSchema`).toBe("object");
   }
 });
+
+it("keeps acknowledgement optional on subagent_result", () => {
+  const schema = Tool.getJsonSchemaFromSchema(
+    DelegationToolkit.tools.subagent_result.parametersSchema,
+  );
+  expect(schema.properties?.acknowledge).toMatchObject({
+    anyOf: expect.arrayContaining([expect.objectContaining({ type: "boolean" })]),
+  });
+  expect(schema.required).not.toContain("acknowledge");
+});

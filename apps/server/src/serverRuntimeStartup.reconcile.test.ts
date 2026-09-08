@@ -109,6 +109,7 @@ const runReconciliation = (input: {
       streamDomainEvents: Stream.empty,
       subscribeDomainEvents: Effect.succeed(Stream.empty),
       latestSequence: Effect.succeed(0),
+      getAutomaticTurnState: () => Effect.succeed(null),
     }),
     Effect.provide(
       Layer.mergeAll(
@@ -707,6 +708,7 @@ it.effect("does not fail startup when the live provider session inventory cannot
       streamDomainEvents: Stream.empty,
       subscribeDomainEvents: Effect.succeed(Stream.empty),
       latestSequence: Effect.succeed(0),
+      getAutomaticTurnState: () => Effect.succeed(null),
     }),
     Effect.provide(Layer.mergeAll(NodeServices.layer, ServerSettings.layerTest())),
     Effect.tap(() => Effect.sync(() => assert.equal(queried, false))),

@@ -452,6 +452,7 @@ describe("ProviderCommandReactor", () => {
           },
           subscribeDomainEvents: engine.subscribeDomainEvents,
           latestSequence: engine.latestSequence,
+          getAutomaticTurnState: engine.getAutomaticTurnState,
         } satisfies OrchestrationEngineService["Service"];
       }),
     ).pipe(Layer.provide(orchestrationLayer));
