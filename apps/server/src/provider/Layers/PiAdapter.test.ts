@@ -16,6 +16,7 @@ import {
   ApprovalRequestId,
   PiSettings,
   ProviderDriverKind,
+  ProviderInstanceId,
   RuntimeTaskId,
   type ProviderRuntimeEvent,
   ThreadId,
@@ -219,6 +220,51 @@ describe("PiAdapter", () => {
       yield* waitForFile(fixture.logPath);
       const launches = readLogLines(fixture).filter((line) => line.type === "launch");
       expect(launches.at(-1)?.t3VoiceNotifications).toBe("1");
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("applies thinking selections before a prompt, including same-model changes", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeTestAdapter(
+        decodePiSettings({ enabled: true, binaryPath: fixture.binaryPath }),
+      );
+      const collector = yield* collectEvents(adapter.streamEvents);
+      const selection = {
+        instanceId: ProviderInstanceId.make("pi"),
+        model: "zai/glm-5",
+        options: [{ id: "thinking", value: "medium" as const }],
+      };
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: PROVIDER,
+        runtimeMode: "full-access",
+        modelSelection: selection,
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "use low thinking",
+        modelSelection: {
+          ...selection,
+          options: [{ id: "thinking", value: "low" as const }],
+        },
+      });
+      yield* collector.waitFor(
+        (event) => event.type === "turn.completed" && payloadOf(event).state === "completed",
+      );
+
+      const records = readLogLines(fixture);
+      const thinking = records.filter((record) => record.type === "set_thinking_level");
+      expect(thinking.map((record) => record.level)).toEqual(["medium", "low"]);
+      const lowIndex = records.findIndex(
+        (record) => record.type === "set_thinking_level" && record.level === "low",
+      );
+      const promptIndex = records.findIndex(
+        (record) => record.type === "prompt" && record.message === "use low thinking",
+      );
+      expect(lowIndex).toBeGreaterThan(-1);
+      expect(promptIndex).toBeGreaterThan(lowIndex);
       yield* adapter.stopSession(THREAD_ID);
     }).pipe(provideTestEnv),
   );

@@ -5,6 +5,8 @@ import {
   MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderOptionDescriptor,
+  ProviderOptionSelections,
   RuntimeTaskId,
   SubagentControlError,
   ThreadId,
@@ -38,6 +40,7 @@ import type {
   ProviderSubagentControlPlaneShape,
 } from "../provider/Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
+import { ProviderInstanceRegistry } from "../provider/Services/ProviderInstanceRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
@@ -49,6 +52,7 @@ export class ChildRunError extends Schema.TaggedErrorClass<ChildRunError>()("Chi
 export const ChildRunSpawnInput = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   model: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  options: Schema.optionalKey(ProviderOptionSelections),
   prompt: TrimmedNonEmptyString.check(Schema.isMaxLength(100_000)),
   title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
 });
@@ -66,6 +70,7 @@ export const ChildRunResult = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
   title: Schema.String,
+  requestedOptions: Schema.optional(ProviderOptionSelections),
   status: Schema.Literals(["starting", "running", "completed", "failed", "cancelled"]),
   output: Schema.String,
   outputTruncated: Schema.Boolean,
@@ -83,6 +88,12 @@ export const ChildRunCapabilities = Schema.Struct({
       displayName: Schema.optional(Schema.String),
       available: Schema.Boolean,
       reason: Schema.optional(Schema.String),
+      models: Schema.Array(
+        Schema.Struct({
+          model: TrimmedNonEmptyString,
+          optionDescriptors: Schema.Array(ProviderOptionDescriptor),
+        }),
+      ),
     }),
   ),
   maxConcurrentPerParent: Schema.Number,
@@ -150,6 +161,7 @@ function toResult(run: NativeChildRun): ChildRunResult {
     providerInstanceId: run.providerInstanceId,
     model: run.model,
     title: run.title,
+    ...(run.requestedOptions === undefined ? {} : { requestedOptions: run.requestedOptions }),
     status: run.status,
     output: run.output,
     outputTruncated: run.outputTruncated,
@@ -202,6 +214,7 @@ export class ChildRunService extends Context.Service<
 const make = Effect.gen(function* () {
   const registry = yield* ProviderAdapterRegistry;
   const providers = yield* ProviderService;
+  const providerInstances = yield* ProviderInstanceRegistry;
   const repository = yield* NativeChildRunRepository;
   const engine = yield* OrchestrationEngineService;
   const startup = yield* ServerRuntimeStartup;
@@ -214,6 +227,60 @@ const make = Effect.gen(function* () {
 
   const persistenceError = (operation: string) => (_cause: unknown) =>
     new ChildRunError({ message: `${operation} failed.` });
+
+  const validateOptions = Effect.fn("ChildRunService.validateOptions")(function* (
+    providerInstanceId: ProviderInstanceId,
+    model: string,
+    options: ProviderOptionSelections | undefined,
+  ) {
+    if (options === undefined || options.length === 0) return;
+    const instance = yield* providerInstances.getInstance(providerInstanceId);
+    const snapshot = instance === undefined ? undefined : yield* instance.snapshot.getSnapshot;
+    const modelInfo = snapshot?.models.find((candidate) => candidate.slug === model);
+    if (modelInfo === undefined) {
+      return yield* new ChildRunError({
+        message: `Model '${model}' is not advertised by provider instance '${providerInstanceId}'.`,
+      });
+    }
+    const descriptors = modelInfo.capabilities?.optionDescriptors ?? [];
+    const seen = new Set<string>();
+    for (const selection of options) {
+      if (seen.has(selection.id)) {
+        return yield* new ChildRunError({
+          message: `Option '${selection.id}' was provided more than once for model '${model}'.`,
+        });
+      }
+      seen.add(selection.id);
+      const descriptor = descriptors.find((candidate) => candidate.id === selection.id);
+      if (descriptor === undefined) {
+        return yield* new ChildRunError({
+          message: `Unsupported option '${selection.id}' for model '${model}'. Supported options: ${descriptors.map((candidate) => candidate.id).join(", ") || "none"}.`,
+        });
+      }
+      if (descriptor.type === "select") {
+        if (typeof selection.value !== "string") {
+          return yield* new ChildRunError({
+            message: `Option '${selection.id}' for model '${model}' requires one of: ${descriptor.options.map((candidate) => candidate.id).join(", ") || "none"}.`,
+          });
+        }
+        if (!descriptor.options.some((candidate) => candidate.id === selection.value)) {
+          return yield* new ChildRunError({
+            message: `Unsupported value '${selection.value}' for option '${selection.id}' on model '${model}'. Supported values: ${descriptor.options.map((candidate) => candidate.id).join(", ") || "none"}.`,
+          });
+        }
+      } else if (typeof selection.value !== "boolean") {
+        return yield* new ChildRunError({
+          message: `Option '${selection.id}' for model '${model}' requires a boolean value.`,
+        });
+      }
+    }
+  });
+
+  const modelSelectionForRun = (run: NativeChildRun) => ({
+    instanceId: run.providerInstanceId,
+    model: run.model,
+    ...(run.requestedOptions === undefined ? {} : { options: run.requestedOptions }),
+  });
 
   const parent = Effect.fn("ChildRunService.parent")(function* (scope: McpInvocationScope) {
     if (!scope.capabilities.has("delegation")) {
@@ -479,7 +546,7 @@ const make = Effect.gen(function* () {
         title: run.title,
         runtimeMode: run.runtimeMode,
         voiceNotifications: false,
-        modelSelection: { instanceId: run.providerInstanceId, model: run.model },
+        modelSelection: modelSelectionForRun(run),
         ...(run.resumeCursor === null ? {} : { resumeCursor: run.resumeCursor }),
       });
       active.sessionStarted = true;
@@ -487,7 +554,7 @@ const make = Effect.gen(function* () {
       const turn = yield* adapter.sendTurn({
         threadId: run.childThreadId,
         input: prompt,
-        modelSelection: { instanceId: run.providerInstanceId, model: run.model },
+        modelSelection: modelSelectionForRun(run),
       });
       active.expectedTurnId = turn.turnId;
       active.resumeCursor = turn.resumeCursor ?? active.resumeCursor;
@@ -551,10 +618,7 @@ const make = Effect.gen(function* () {
         .sendTurn({
           threadId: active.run.childThreadId,
           input: prompt,
-          modelSelection: {
-            instanceId: active.run.providerInstanceId,
-            model: active.run.model,
-          },
+          modelSelection: modelSelectionForRun(active.run),
         })
         .pipe(Effect.mapError(() => new ChildRunError({ message: "Child steering failed." })));
       yield* releaseSteering(turn.turnId);
@@ -596,6 +660,7 @@ const make = Effect.gen(function* () {
           message: availability.reason ?? "Provider instance is disabled.",
         });
       }
+      yield* validateOptions(input.providerInstanceId, input.model, input.options);
       const existing = yield* repository
         .listActive()
         .pipe(Effect.mapError(persistenceError("Checking child concurrency")));
@@ -628,6 +693,7 @@ const make = Effect.gen(function* () {
         provider: info.driverKind,
         model: input.model,
         title: input.title,
+        ...(input.options === undefined ? {} : { requestedOptions: input.options }),
         runtimeMode: session.runtimeMode,
         cwd: session.cwd,
         resumeCursor,
@@ -941,11 +1007,18 @@ const make = Effect.gen(function* () {
           continue;
         }
         const availability = providerAvailability(info.value.driverKind, session.runtimeMode);
+        const instance = yield* providerInstances.getInstance(id);
+        const snapshot = instance === undefined ? undefined : yield* instance.snapshot.getSnapshot;
         targetProviders.push({
           providerInstanceId: id,
           driver: info.value.driverKind,
           ...(info.value.displayName === undefined ? {} : { displayName: info.value.displayName }),
           ...availability,
+          models:
+            snapshot?.models.map((model) => ({
+              model: model.slug,
+              optionDescriptors: model.capabilities?.optionDescriptors ?? [],
+            })) ?? [],
         });
       }
       const available =
@@ -986,6 +1059,7 @@ const make = Effect.gen(function* () {
           providerInstanceId: run.providerInstanceId,
           model: run.model,
           title: run.title,
+          ...(run.requestedOptions === undefined ? {} : { options: run.requestedOptions }),
           prompt: input.prompt,
         },
         run.runId,
