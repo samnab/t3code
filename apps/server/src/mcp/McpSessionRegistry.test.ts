@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, RuntimeTaskId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/unstable/http";
 
@@ -141,6 +141,32 @@ it.effect("binds only explicitly granted MCP capabilities to the credential", ()
     );
     expect(scope?.capabilities.has("delegation")).toBe(true);
     expect(scope?.capabilities.has("preview")).toBe(false);
+  }),
+);
+
+it.effect("issues a child-only messaging credential with a stable team binding", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("child-thread");
+    const agentId = RuntimeTaskId.make("native-agent-1");
+    const parentThreadId = ThreadId.make("parent-thread");
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("claude"),
+      capabilities: ["messaging"],
+      agentMessaging: { agentId, parentThreadId },
+    });
+
+    expect(issued.config.endpoint).toBe("http://127.0.0.1:43123/mcp/agent");
+    const scope = yield* registry.resolve(
+      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    );
+    expect(scope).toMatchObject({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("claude"),
+      agentMessaging: { agentId, parentThreadId },
+    });
+    expect(scope === undefined ? [] : [...scope.capabilities]).toEqual(["messaging"]);
   }),
 );
 

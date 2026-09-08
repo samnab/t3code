@@ -1,4 +1,4 @@
-import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { ProviderInstanceId, RuntimeTaskId, ThreadId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -15,6 +15,10 @@ export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
   readonly capabilities?: ReadonlyArray<Exclude<McpInvocationContext.McpCapability, "experiment">>;
+  readonly agentMessaging?: {
+    readonly agentId: RuntimeTaskId;
+    readonly parentThreadId: ThreadId;
+  };
 }
 
 export interface ExperimentMcpCredentialRequest {
@@ -141,6 +145,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
         capabilities: new Set(request.capabilities ?? ["preview"]),
+        ...(request.agentMessaging === undefined ? {} : { agentMessaging: request.agentMessaging }),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {
@@ -154,7 +159,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           threadId: scope.threadId,
           providerSessionId,
           providerInstanceId: scope.providerInstanceId,
-          endpoint,
+          endpoint: request.agentMessaging === undefined ? endpoint : `${endpoint}/agent`,
           authorizationHeader: `Bearer ${rawToken}`,
         },
       };

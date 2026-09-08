@@ -28,6 +28,7 @@ export const NATIVE_CHILD_RESTART_ERROR = "T3 Code restarted before the child tu
 
 export const NativeChildRun = Schema.Struct({
   runId: RuntimeTaskId,
+  agentId: RuntimeTaskId,
   runNumber: PositiveInt,
   parentRunId: Schema.NullOr(RuntimeTaskId),
   parentThreadId: ThreadId,
@@ -51,6 +52,26 @@ export const NativeChildRun = Schema.Struct({
 });
 export type NativeChildRun = typeof NativeChildRun.Type;
 
+export const NativeChildMessage = Schema.Struct({
+  messageId: TrimmedNonEmptyString,
+  parentThreadId: ThreadId,
+  senderAgentId: RuntimeTaskId,
+  recipientAgentId: RuntimeTaskId,
+  body: TrimmedNonEmptyString,
+  deliveryState: Schema.Literals(["queued", "notified"]),
+  deliveryRunId: Schema.NullOr(RuntimeTaskId),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  acknowledgedAt: Schema.NullOr(IsoDateTime),
+});
+export type NativeChildMessage = typeof NativeChildMessage.Type;
+
+export type NativeChildMessageInsertResult =
+  | { readonly status: "inserted"; readonly message: NativeChildMessage }
+  | { readonly status: "duplicate"; readonly message: NativeChildMessage }
+  | { readonly status: "conflict" }
+  | { readonly status: "inbox-full" };
+
 type RepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export interface NativeChildRunRepositoryShape {
@@ -61,6 +82,16 @@ export interface NativeChildRunRepositoryShape {
   }) => Effect.Effect<number, RepositoryError>;
   readonly insert: (run: NativeChildRun) => Effect.Effect<void, RepositoryError>;
   readonly get: (runId: RuntimeTaskId) => Effect.Effect<NativeChildRun | null, RepositoryError>;
+  readonly getByChildThread: (
+    childThreadId: ThreadId,
+  ) => Effect.Effect<NativeChildRun | null, RepositoryError>;
+  readonly getLatestByAgent: (
+    agentId: RuntimeTaskId,
+  ) => Effect.Effect<NativeChildRun | null, RepositoryError>;
+  readonly listLatestByParent: (
+    parentThreadId: ThreadId,
+    limit: number,
+  ) => Effect.Effect<ReadonlyArray<NativeChildRun>, RepositoryError>;
   readonly listActive: () => Effect.Effect<ReadonlyArray<NativeChildRun>, RepositoryError>;
   readonly listPendingDelivery: (
     parentThreadId?: ThreadId,
@@ -85,6 +116,25 @@ export interface NativeChildRunRepositoryShape {
   readonly reconcileRestart: (
     interruptedAt: string,
   ) => Effect.Effect<ReadonlyArray<NativeChildRun>, RepositoryError>;
+  readonly insertMessage: (
+    message: NativeChildMessage,
+  ) => Effect.Effect<NativeChildMessageInsertResult, RepositoryError>;
+  readonly listPendingMessages: (
+    recipientAgentId: RuntimeTaskId,
+    limit: number,
+  ) => Effect.Effect<ReadonlyArray<NativeChildMessage>, RepositoryError>;
+  readonly acknowledgeMessage: (input: {
+    readonly parentThreadId: ThreadId;
+    readonly recipientAgentId: RuntimeTaskId;
+    readonly messageId: string;
+    readonly acknowledgedAt: string;
+  }) => Effect.Effect<boolean, RepositoryError>;
+  readonly markMessageNotified: (input: {
+    readonly parentThreadId: ThreadId;
+    readonly messageId: string;
+    readonly deliveryRunId: RuntimeTaskId;
+    readonly updatedAt: string;
+  }) => Effect.Effect<void, RepositoryError>;
 }
 
 export class NativeChildRunRepository extends Context.Service<

@@ -54,6 +54,7 @@ it.layer(testLayer)("native child persistence", (it) => {
         SELECT text FROM subagent_transcript_items WHERE run_id = 'legacy-run'
       `;
       expect(legacy).toEqual([{ text: "preserved" }]);
+      yield* runMigrations({ toMigrationInclusive: 59 });
 
       const runId = RuntimeTaskId.make("native-durable");
       const childThreadId = ThreadId.make("child-durable");
@@ -64,6 +65,7 @@ it.layer(testLayer)("native child persistence", (it) => {
       });
       const run = NativeChildRun.make({
         runId,
+        agentId: runId,
         runNumber,
         parentRunId: null,
         parentThreadId: ThreadId.make("parent-durable"),
@@ -120,6 +122,7 @@ it.layer(testLayer)("native child persistence", (it) => {
     Effect.gen(function* () {
       const repository = yield* NativeChildRunRepository;
       yield* runMigrations({ toMigrationInclusive: 51 });
+      yield* runMigrations({ toMigrationInclusive: 59 });
       const runId = RuntimeTaskId.make("native-suppressed-active");
       const parentThreadId = ThreadId.make("parent-suppressed-active");
       const childThreadId = ThreadId.make("child-suppressed-active");
@@ -132,6 +135,7 @@ it.layer(testLayer)("native child persistence", (it) => {
       yield* repository.insert(
         NativeChildRun.make({
           runId,
+          agentId: runId,
           runNumber,
           parentRunId: null,
           parentThreadId,

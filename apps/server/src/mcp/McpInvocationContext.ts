@@ -2,6 +2,7 @@ import {
   type EnvironmentId,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
+  type RuntimeTaskId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -9,7 +10,12 @@ import * as Effect from "effect/Effect";
 
 import { ExperimentMcpError, type ExperimentMcpIdentity } from "./ExperimentMcpModel.ts";
 
-export type McpCapability = "preview" | "delegation" | "experiment";
+export type McpCapability = "preview" | "delegation" | "experiment" | "messaging";
+
+export interface AgentMessagingMcpBinding {
+  readonly agentId: RuntimeTaskId;
+  readonly parentThreadId: ThreadId;
+}
 
 export interface ExperimentMcpBinding {
   readonly runId: string;
@@ -23,6 +29,7 @@ export interface McpInvocationScope {
   readonly providerInstanceId: ProviderInstanceId;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly experiment?: ExperimentMcpBinding;
+  readonly agentMessaging?: AgentMessagingMcpBinding;
   readonly issuedAt: number;
 }
 

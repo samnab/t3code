@@ -33,7 +33,7 @@ export const DelegationToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("subagent_spawn", {
     description:
-      "Start one child turn using a configured provider instance and native model identifier. The child inherits the parent's working directory and runtime mode, receives only your prompt, and has no T3 delegation tools. Returns immediately. Interactive requests fail explicitly. Codex, Claude and Pi each run through their own native adapter.",
+      "Start one child turn using a configured provider instance and native model identifier. The child inherits the parent's working directory and runtime mode and receives only sibling-messaging T3 tools. The result includes its stable agentId for teammate addressing. Returns immediately. Interactive requests fail explicitly. Codex, Claude and Pi each run through their own native adapter.",
     parameters: ChildRunSpawnInput,
     success: ChildRunResult,
     failure: ChildRunError,

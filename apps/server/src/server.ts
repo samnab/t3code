@@ -55,6 +55,7 @@ import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
+import * as AgentMessagingMcpHttpServer from "./mcp/AgentMessagingMcpHttpServer.ts";
 import * as ExperimentMcpHttpServer from "./mcp/ExperimentMcpHttpServer.ts";
 import * as ExperimentMcpServiceLive from "./mcp/ExperimentMcpServiceLive.ts";
 import * as ChildRunService from "./mcp/ChildRunService.ts";
@@ -570,6 +571,7 @@ const commandReadinessLayer = HttpRouter.middleware(
 
 const McpRoutesLayerLive = Layer.mergeAll(
   McpHttpServer.layer,
+  AgentMessagingMcpHttpServer.layer,
   ExperimentMcpHttpServer.layer.pipe(Layer.provide(ExperimentMcpServiceLive.layer)),
 ).pipe(Layer.provide(McpSessionRegistry.layer));
 

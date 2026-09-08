@@ -38,13 +38,19 @@ import type { ProviderAdapterShape } from "../provider/Services/ProviderAdapter.
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
-import { ChildRunResult, ChildRunService, layer, layerWithRepository } from "./ChildRunService.ts";
+import {
+  ChildRunResult,
+  ChildRunService,
+  layerWithRepositoryAndMcpHooks,
+} from "./ChildRunService.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
+import type { McpCredentialRequest } from "./McpSessionRegistry.ts";
 import { DelegationToolkitRegistrationLive } from "./McpHttpServer.ts";
-import { readMcpProviderSession } from "./McpProviderSession.ts";
+import { clearMcpProviderSession, readMcpProviderSession } from "./McpProviderSession.ts";
 
 const now = "2026-09-06T00:00:00.000Z";
 const parentId = ThreadId.make("parent");
+const otherParentId = ThreadId.make("other-parent");
 const decodeChildRunResult = Schema.decodeUnknownEffect(ChildRunResult);
 const makeHarness = Effect.fn("makeHarness")(function* (
   parentDriver = "codex",
@@ -55,6 +61,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   repositoryLayer?: Layer.Layer<NativeChildRunRepository>,
   pauseTerminalActivity = false,
   blockSteers = false,
+  secondChildDriver?: string,
 ) {
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const domainEvents = yield* PubSub.unbounded<OrchestrationEvent>();
@@ -70,9 +77,13 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   const sentPrompts: string[] = [];
   const sentTurns: TurnId[] = [];
   const commands: OrchestrationCommand[] = [];
+  const credentialRequests: McpCredentialRequest[] = [];
+  const touchedCredentials: ThreadId[] = [];
+  const revokedCredentials: ThreadId[] = [];
   let shouldFailActivity = failFirstActivity;
   const parentInstance = ProviderInstanceId.make("parent-provider");
   const childInstance = ProviderInstanceId.make("child-provider");
+  const secondChildInstance = ProviderInstanceId.make("second-child-provider");
   const scope: McpInvocationScope = {
     environmentId: EnvironmentId.make("environment"),
     threadId: parentId,
@@ -91,13 +102,14 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     createdAt: now,
     updatedAt: now,
   };
+  let parentRuntimeMode = mode;
   const adapter: ProviderAdapterShape<never> = {
     provider: ProviderDriverKind.make(childDriver),
     capabilities: { sessionModelSwitch: "in-session" },
     startSession: (input) =>
       Effect.sync(() => {
         starts.push(input);
-        expect(readMcpProviderSession(input.threadId)).toBeUndefined();
+        expect(readMcpProviderSession(input.threadId)?.endpoint).toBe("http://127.0.0.1/mcp/agent");
         return {
           ...parentSession,
           provider: ProviderDriverKind.make(childDriver),
@@ -150,20 +162,33 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     respondToRequest: () => Effect.void,
     respondToUserInput: () => Effect.void,
     stopAll: () => Effect.void,
-    listSessions: () => Effect.succeed([parentSession]),
+    listSessions: () =>
+      Effect.succeed([
+        { ...parentSession, runtimeMode: parentRuntimeMode },
+        { ...parentSession, threadId: otherParentId, runtimeMode: parentRuntimeMode },
+      ]),
     hasSession: () => Effect.succeed(true),
     readThread: (threadId) => Effect.succeed({ threadId, turns: [] }),
     rollbackThread: (threadId) => Effect.succeed({ threadId, turns: [] }),
     streamEvents: Stream.die("ChildRunService must consume ProviderService's canonical stream"),
   };
+  const secondAdapter: ProviderAdapterShape<never> = {
+    ...adapter,
+    provider: ProviderDriverKind.make(secondChildDriver ?? childDriver),
+  };
   const changes = yield* PubSub.unbounded<void>();
   const registry = ProviderAdapterRegistry.of({
-    getByInstance: () => Effect.succeed(adapter),
+    getByInstance: (instanceId) =>
+      Effect.succeed(instanceId === secondChildInstance ? secondAdapter : adapter),
     getInstanceInfo: (instanceId) =>
       Effect.succeed({
         instanceId,
         driverKind: ProviderDriverKind.make(
-          instanceId === childInstance ? childDriver : parentDriver,
+          instanceId === childInstance
+            ? childDriver
+            : instanceId === secondChildInstance
+              ? (secondChildDriver ?? childDriver)
+              : parentDriver,
         ),
         displayName: undefined,
         enabled: true,
@@ -172,7 +197,10 @@ const makeHarness = Effect.fn("makeHarness")(function* (
           continuationKey: "test",
         },
       }),
-    listInstances: () => Effect.succeed([childInstance]),
+    listInstances: () =>
+      Effect.succeed(
+        secondChildDriver === undefined ? [childInstance] : [childInstance, secondChildInstance],
+      ),
     subscribeChanges: PubSub.subscribe(changes),
   });
   const runtimeServices = Layer.mergeAll(
@@ -209,12 +237,46 @@ const makeHarness = Effect.fn("makeHarness")(function* (
       enqueueCommand: (effect) => effect,
     }),
   );
+  const mcpHooks = {
+    issue: (request: McpCredentialRequest) =>
+      Effect.sync(() => {
+        credentialRequests.push(request);
+        return {
+          config: {
+            environmentId: scope.environmentId,
+            threadId: request.threadId,
+            providerSessionId: `mcp-${request.threadId}`,
+            providerInstanceId: request.providerInstanceId,
+            endpoint: "http://127.0.0.1/mcp/agent",
+            authorizationHeader: "Bearer test-child-token",
+          },
+        };
+      }),
+    touch: (threadId: ThreadId) =>
+      Effect.sync(() => {
+        touchedCredentials.push(threadId);
+      }),
+    revoke: (threadId: ThreadId) =>
+      Effect.sync(() => {
+        revokedCredentials.push(threadId);
+        clearMcpProviderSession(threadId);
+      }),
+  };
+  const childLayer = layerWithRepositoryAndMcpHooks(mcpHooks).pipe(
+    Layer.provide(repositoryLayer ?? NativeChildRunRepositoryAuto),
+  );
   return {
     scope,
     starts,
     stopped,
     sentPrompts,
     sentTurns,
+    credentialRequests,
+    touchedCredentials,
+    revokedCredentials,
+    setParentRuntimeMode: (runtimeMode: RuntimeMode) => {
+      parentRuntimeMode = runtimeMode;
+    },
     commands,
     sent,
     events,
@@ -231,15 +293,34 @@ const makeHarness = Effect.fn("makeHarness")(function* (
       title: "Investigate",
       prompt: "Do the task",
     },
-    services: (repositoryLayer === undefined
-      ? layer
-      : layerWithRepository.pipe(Layer.provide(repositoryLayer))
-    ).pipe(
+    secondInput: {
+      providerInstanceId: secondChildInstance,
+      model: "second-native-model",
+      title: "Coordinate",
+      prompt: "Wait for a teammate",
+    },
+    services: childLayer.pipe(
       Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
       Layer.provide(runtimeServices),
     ),
   };
 });
+
+const messagingScope = (
+  parentScope: McpInvocationScope,
+  request: McpCredentialRequest,
+): McpInvocationScope => {
+  if (request.agentMessaging === undefined) throw new Error("missing agent messaging binding");
+  return {
+    environmentId: parentScope.environmentId,
+    threadId: request.threadId,
+    providerSessionId: `mcp-${request.threadId}`,
+    providerInstanceId: request.providerInstanceId,
+    capabilities: new Set(["messaging"]),
+    agentMessaging: request.agentMessaging,
+    issuedAt: 0,
+  };
+};
 
 for (const [parentDriver, childDriver] of [
   ["codex", "claudeAgent"],
@@ -270,6 +351,15 @@ for (const [parentDriver, childDriver] of [
             model: "native-model",
           });
           expect(h.stopped).toEqual([h.starts[0]?.threadId]);
+          expect(h.credentialRequests).toEqual([
+            {
+              threadId: h.starts[0]?.threadId,
+              providerInstanceId: h.input.providerInstanceId,
+              capabilities: ["messaging"],
+              agentMessaging: { agentId: run.agentId, parentThreadId: parentId },
+            },
+          ]);
+          expect(h.revokedCredentials).toEqual([h.starts[0]?.threadId]);
           const deliveryCommands = h.commands.filter(
             (command) => command.type === "thread.turn.start",
           );
@@ -465,7 +555,9 @@ it.effect("steers active children and resumes terminal children as linked follow
       const service = yield* ChildRunService;
       const run = yield* service.spawn(activeHarness.scope, activeHarness.input);
       yield* service.send(activeHarness.scope, { runId: run.runId, prompt: "Narrow the scope" });
-      expect(activeHarness.sentPrompts).toEqual(["Do the task", "Narrow the scope"]);
+      expect(activeHarness.sentPrompts[0]).toContain("Do the task");
+      expect(activeHarness.sentPrompts[0]).toContain("Your stable agent ID is");
+      expect(activeHarness.sentPrompts[1]).toBe("Narrow the scope");
       yield* service.cancel(activeHarness.scope, run.runId);
       yield* service.result(activeHarness.scope, run.runId, 30_000);
     }).pipe(Effect.provide(activeHarness.services));
@@ -482,12 +574,245 @@ it.effect("steers active children and resumes terminal children as linked follow
         prompt: "Check one more thing",
       });
       expect(followup.runId).not.toBe(first.runId);
+      expect(followup.agentId).toBe(first.agentId);
       expect(followup.generation).toBe(2);
       expect(followupHarness.starts[1]?.resumeCursor).toEqual({ session: "native-session" });
       expect((yield* service.result(followupHarness.scope, followup.runId, 30_000)).status).toBe(
         "completed",
       );
     }).pipe(Effect.provide(followupHarness.services));
+  }),
+);
+
+it.effect("delivers and explicitly acknowledges a durable cross-provider sibling message", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      false,
+      false,
+      undefined,
+      false,
+      false,
+      "codex",
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const sender = yield* service.spawn(h.scope, h.input);
+      const recipient = yield* service.spawn(h.scope, h.secondInput);
+      const senderRequest = h.credentialRequests.find(
+        (request) => request.agentMessaging?.agentId === sender.agentId,
+      );
+      const recipientRequest = h.credentialRequests.find(
+        (request) => request.agentMessaging?.agentId === recipient.agentId,
+      );
+      expect(senderRequest).toBeDefined();
+      expect(recipientRequest).toBeDefined();
+
+      const sent = yield* service.agentSend(messagingScope(h.scope, senderRequest!), {
+        messageId: "cross-provider-1",
+        targetAgentId: recipient.agentId,
+        message: "Share the parser finding",
+      });
+      expect(sent).toMatchObject({
+        messageId: "cross-provider-1",
+        senderAgentId: sender.agentId,
+        targetAgentId: recipient.agentId,
+        status: "notified",
+        deliveryRunId: recipient.runId,
+      });
+      expect(h.sentPrompts.at(-1)).toContain(
+        `[T3 agent message cross-provider-1 from Investigate (${sender.agentId})]`,
+      );
+      expect(h.sentPrompts.at(-1)).toContain("Share the parser finding");
+      const promptCount = h.sentPrompts.length;
+      expect(
+        yield* service.agentSend(messagingScope(h.scope, senderRequest!), {
+          messageId: "cross-provider-1",
+          targetAgentId: recipient.agentId,
+          message: "Share the parser finding",
+        }),
+      ).toEqual(sent);
+      expect(h.sentPrompts).toHaveLength(promptCount);
+
+      const recipientScope = messagingScope(h.scope, recipientRequest!);
+      const inbox = yield* service.agentInbox(recipientScope, {});
+      expect(inbox.peers).toContainEqual(
+        expect.objectContaining({ agentId: sender.agentId, title: "Investigate" }),
+      );
+      expect(inbox.messages).toEqual([
+        expect.objectContaining({
+          messageId: "cross-provider-1",
+          senderAgentId: sender.agentId,
+          senderTitle: "Investigate",
+          message: "Share the parser finding",
+        }),
+      ]);
+      const acknowledged = yield* service.agentInbox(recipientScope, {
+        acknowledgeMessageIds: ["cross-provider-1"],
+      });
+      expect(acknowledged.acknowledgedMessageIds).toEqual(["cross-provider-1"]);
+      expect(acknowledged.messages).toEqual([]);
+
+      for (let index = 0; index < 4; index += 1) {
+        yield* service.agentSend(messagingScope(h.scope, senderRequest!), {
+          messageId: `large-message-${index}`,
+          targetAgentId: recipient.agentId,
+          message: String(index).repeat(20_000),
+        });
+      }
+      const bounded = yield* service.agentInbox(recipientScope, {});
+      expect(bounded.messages).toHaveLength(3);
+      expect(bounded.messages.every(({ message }) => message.length === 20_000)).toBe(true);
+      expect(bounded.hasMore).toBe(true);
+
+      yield* service.cancel(h.scope, sender.runId);
+      yield* service.cancel(h.scope, recipient.runId);
+      yield* service.result(h.scope, sender.runId, 30_000);
+      yield* service.result(h.scope, recipient.runId, 30_000);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("denies cross-team targets and never restarts a cancelled recipient", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      false,
+      false,
+      undefined,
+      false,
+      false,
+      "codex",
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const sender = yield* service.spawn(h.scope, h.input);
+      const otherScope = { ...h.scope, threadId: otherParentId, providerSessionId: "other-parent" };
+      const otherTeam = yield* service.spawn(otherScope, h.secondInput);
+      const senderRequest = h.credentialRequests.find(
+        (request) => request.agentMessaging?.agentId === sender.agentId,
+      );
+      expect(senderRequest).toBeDefined();
+      const senderScope = messagingScope(h.scope, senderRequest!);
+      const crossTeam = yield* service
+        .agentSend(senderScope, {
+          messageId: "cross-team",
+          targetAgentId: otherTeam.agentId,
+          message: "This must be rejected",
+        })
+        .pipe(Effect.result);
+      expect(crossTeam._tag).toBe("Failure");
+      if (crossTeam._tag === "Failure") {
+        expect(crossTeam.failure.message).toContain("Unknown target agent in this team");
+      }
+
+      const cancelled = yield* service.spawn(h.scope, h.secondInput);
+      yield* service.cancel(h.scope, cancelled.runId);
+      expect((yield* service.result(h.scope, cancelled.runId, 30_000)).status).toBe("cancelled");
+      const startCount = h.starts.length;
+      const cancelledSend = yield* service
+        .agentSend(senderScope, {
+          messageId: "cancelled-target",
+          targetAgentId: cancelled.agentId,
+          message: "Do not resurrect",
+        })
+        .pipe(Effect.result);
+      expect(cancelledSend._tag).toBe("Failure");
+      expect(h.starts).toHaveLength(startCount);
+
+      yield* service.cancel(h.scope, sender.runId);
+      yield* service.cancel(otherScope, otherTeam.runId);
+      yield* service.result(h.scope, sender.runId, 30_000);
+      yield* service.result(otherScope, otherTeam.runId, 30_000);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("serializes simultaneous peer sends across a recipient completion boundary", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      false,
+      false,
+      undefined,
+      false,
+      false,
+      "codex",
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const firstSender = yield* service.spawn(h.scope, h.input);
+      const secondSender = yield* service.spawn(h.scope, {
+        ...h.input,
+        title: "Second sender",
+      });
+      const recipient = yield* service.spawn(h.scope, h.secondInput);
+      const recipientRequest = h.credentialRequests.find(
+        (request) => request.agentMessaging?.agentId === recipient.agentId,
+      );
+      expect(recipientRequest).toBeDefined();
+      yield* PubSub.publish(h.events, {
+        type: "turn.completed",
+        eventId: EventId.make("recipient-completed-at-send"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: recipientRequest!.threadId,
+        turnId: h.sentTurns[2],
+        createdAt: now,
+        payload: { state: "completed" },
+      });
+      h.setParentRuntimeMode("approval-required");
+
+      const firstScope = messagingScope(
+        h.scope,
+        h.credentialRequests.find(
+          (request) => request.agentMessaging?.agentId === firstSender.agentId,
+        )!,
+      );
+      const secondScope = messagingScope(
+        h.scope,
+        h.credentialRequests.find(
+          (request) => request.agentMessaging?.agentId === secondSender.agentId,
+        )!,
+      );
+      const [first, second] = yield* Effect.all(
+        [
+          service.agentSend(firstScope, {
+            messageId: "completion-race-1",
+            targetAgentId: recipient.agentId,
+            message: "First",
+          }),
+          service.agentSend(secondScope, {
+            messageId: "completion-race-2",
+            targetAgentId: recipient.agentId,
+            message: "Second",
+          }),
+        ],
+        { concurrency: "unbounded" },
+      );
+      expect(first.deliveryRunId).toBe(second.deliveryRunId);
+      const recipientCredentials = h.credentialRequests.filter(
+        (request) => request.agentMessaging?.agentId === recipient.agentId,
+      );
+      expect(recipientCredentials).toHaveLength(2);
+      expect(h.starts.at(-1)?.runtimeMode).toBe("approval-required");
+      const resumedScope = messagingScope(h.scope, recipientCredentials[1]!);
+      expect(
+        (yield* service.agentInbox(resumedScope, {})).messages.map(({ messageId }) => messageId),
+      ).toEqual(["completion-race-1", "completion-race-2"]);
+
+      yield* service.cancel(h.scope, firstSender.runId);
+      yield* service.cancel(h.scope, secondSender.runId);
+      yield* service.cancel(h.scope, first.deliveryRunId);
+      yield* service.result(h.scope, firstSender.runId, 30_000);
+      yield* service.result(h.scope, secondSender.runId, 30_000);
+      yield* service.result(h.scope, first.deliveryRunId, 30_000);
+    }).pipe(Effect.provide(h.services));
   }),
 );
 
@@ -607,7 +932,8 @@ it.effect("exposes active native children through the shared Agents control plan
         runId: run.runId,
         text: "Steer from Agents",
       });
-      expect(h.sentPrompts).toEqual(["Do the task", "Steer from Agents"]);
+      expect(h.sentPrompts[0]).toContain("Do the task");
+      expect(h.sentPrompts[1]).toBe("Steer from Agents");
       yield* service.controlPlane.cancel({ managerId: status!.managerId!, runId: run.runId });
       expect((yield* service.result(h.scope, run.runId, 30_000)).status).toBe("cancelled");
       expect(h.stopped).toEqual([childThreadId]);
@@ -801,6 +1127,7 @@ it.effect("repairs missing start and terminal projection activities before resta
       yield* repository.insert(
         NativeChildRun.make({
           runId,
+          agentId: runId,
           runNumber,
           parentRunId: null,
           parentThreadId: parentId,

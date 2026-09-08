@@ -29,6 +29,7 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
 import {
   NativeChildRunRepository,
+  NativeChildMessage,
   NativeChildRun,
   NATIVE_CHILD_RESTART_ERROR,
 } from "../persistence/Services/NativeChildRuns.ts";
@@ -41,6 +42,8 @@ import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterReg
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import * as McpProviderSession from "./McpProviderSession.ts";
+import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 
 export class ChildRunError extends Schema.TaggedErrorClass<ChildRunError>()("ChildRunError", {
   message: Schema.String,
@@ -62,6 +65,7 @@ export type ChildRunSendInput = typeof ChildRunSendInput.Type;
 
 export const ChildRunResult = Schema.Struct({
   runId: RuntimeTaskId,
+  agentId: RuntimeTaskId,
   generation: Schema.Int,
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
@@ -72,6 +76,58 @@ export const ChildRunResult = Schema.Struct({
   error: Schema.optional(Schema.String),
 });
 export type ChildRunResult = typeof ChildRunResult.Type;
+
+export const AgentSendInput = Schema.Struct({
+  messageId: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  targetAgentId: RuntimeTaskId,
+  message: TrimmedNonEmptyString.check(Schema.isMaxLength(20_000)),
+});
+export type AgentSendInput = typeof AgentSendInput.Type;
+
+export const AgentSendResult = Schema.Struct({
+  messageId: Schema.String,
+  senderAgentId: RuntimeTaskId,
+  targetAgentId: RuntimeTaskId,
+  status: Schema.Literals(["queued", "notified"]),
+  deliveryRunId: RuntimeTaskId,
+});
+export type AgentSendResult = typeof AgentSendResult.Type;
+
+export const AgentInboxInput = Schema.Struct({
+  acknowledgeMessageIds: Schema.optional(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(100))).check(
+      Schema.isMaxLength(50),
+    ),
+  ),
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 }))),
+});
+export type AgentInboxInput = typeof AgentInboxInput.Type;
+
+export const AgentInboxResult = Schema.Struct({
+  agentId: RuntimeTaskId,
+  peers: Schema.Array(
+    Schema.Struct({
+      agentId: RuntimeTaskId,
+      title: Schema.String,
+      providerInstanceId: ProviderInstanceId,
+      model: Schema.String,
+      status: Schema.Literals(["starting", "running", "completed", "failed", "cancelled"]),
+    }),
+  ),
+  peersTruncated: Schema.Boolean,
+  messages: Schema.Array(
+    Schema.Struct({
+      messageId: Schema.String,
+      senderAgentId: RuntimeTaskId,
+      senderTitle: Schema.String,
+      message: Schema.String,
+      createdAt: Schema.String,
+    }),
+  ),
+  acknowledgedMessageIds: Schema.Array(Schema.String),
+  hasMore: Schema.Boolean,
+});
+export type AgentInboxResult = typeof AgentInboxResult.Type;
 
 export const ChildRunCapabilities = Schema.Struct({
   available: Schema.Boolean,
@@ -95,6 +151,7 @@ interface ActiveRun {
   readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
   readonly parentProviderInstanceId: ProviderInstanceId;
   readonly done: Deferred.Deferred<void>;
+  readonly ready: Deferred.Deferred<void>;
   readonly cancel: Deferred.Deferred<void>;
   readonly terminal: Deferred.Deferred<{
     readonly status: "completed" | "failed" | "cancelled";
@@ -108,6 +165,7 @@ interface ActiveRun {
   sessionStopped: boolean;
   expectedTurnId: TurnId | null;
   readonly steerMutex: Semaphore.Semaphore;
+  credentialIssued: boolean;
   pendingSteers: number;
   pendingCompletions: Array<{
     readonly turnId: TurnId | null;
@@ -120,6 +178,7 @@ interface ActiveRun {
 
 const supported = new Set<string>(["codex", "claudeAgent", "pi"]);
 const MAX_OUTPUT = 100_000;
+const MAX_INBOX_MESSAGE_TEXT = 75_000;
 const MAX_PER_PARENT = 4;
 const MAX_RUNNING = 16;
 const decodeRuntimeTaskId = Schema.decodeUnknownEffect(RuntimeTaskId);
@@ -146,6 +205,7 @@ function nativeManagerId(threadId: ThreadId): string {
 function toResult(run: NativeChildRun): ChildRunResult {
   return {
     runId: run.runId,
+    agentId: run.agentId,
     generation: run.generation,
     providerInstanceId: run.providerInstanceId,
     model: run.model,
@@ -194,12 +254,32 @@ export class ChildRunService extends Context.Service<
       scope: McpInvocationScope,
       runId: string,
     ) => Effect.Effect<ChildRunResult, ChildRunError>;
+    agentSend: (
+      scope: McpInvocationScope,
+      input: AgentSendInput,
+    ) => Effect.Effect<AgentSendResult, ChildRunError>;
+    agentInbox: (
+      scope: McpInvocationScope,
+      input: AgentInboxInput,
+    ) => Effect.Effect<AgentInboxResult, ChildRunError>;
     readonly controlPlane: ProviderSubagentControlPlaneShape<never>;
   }
 >()("t3/mcp/ChildRunService") {}
 
-/** Runs native children without granting them T3 MCP credentials. */
-const make = Effect.gen(function* () {
+export interface ChildRunMcpHooks {
+  readonly issue: typeof McpSessionRegistry.issueActiveMcpCredential;
+  readonly touch: typeof McpSessionRegistry.touchActiveMcpThread;
+  readonly revoke: typeof McpSessionRegistry.revokeActiveMcpThread;
+}
+
+const liveMcpHooks: ChildRunMcpHooks = {
+  issue: McpSessionRegistry.issueActiveMcpCredential,
+  touch: McpSessionRegistry.touchActiveMcpThread,
+  revoke: McpSessionRegistry.revokeActiveMcpThread,
+};
+
+/** Runs T3-native child agents and gives each child only sibling-messaging MCP access. */
+const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: ChildRunMcpHooks) {
   const registry = yield* ProviderAdapterRegistry;
   const providers = yield* ProviderService;
   const repository = yield* NativeChildRunRepository;
@@ -211,6 +291,8 @@ const make = Effect.gen(function* () {
   const activeByThread = new Map<ThreadId, ActiveRun>();
   const stoppedParents = new Set<ThreadId>();
   const parentProviderByThread = new Map<ThreadId, ProviderInstanceId>();
+  const activeByAgent = new Map<RuntimeTaskId, ActiveRun>();
+  const deliveryMutexByAgent = new Map<RuntimeTaskId, Semaphore.Semaphore>();
 
   const persistenceError = (operation: string) => (_cause: unknown) =>
     new ChildRunError({ message: `${operation} failed.` });
@@ -414,8 +496,8 @@ const make = Effect.gen(function* () {
         updatedAt,
       })
       .pipe(Effect.mapError(persistenceError("Persisting child completion")));
-    activeByRun.delete(active.run.runId);
-    activeByThread.delete(active.run.childThreadId);
+    yield* clearChildCredential(active);
+    yield* clearActive(active);
     const stored = yield* repository
       .get(active.run.runId)
       .pipe(Effect.mapError(persistenceError("Reading child completion")));
@@ -445,6 +527,7 @@ const make = Effect.gen(function* () {
       adapter,
       parentProviderInstanceId,
       done: yield* Deferred.make<void>(),
+      ready: yield* Deferred.make<void>(),
       cancel: yield* Deferred.make<void>(),
       terminal: yield* Deferred.make<{
         readonly status: "completed" | "failed" | "cancelled";
@@ -458,12 +541,41 @@ const make = Effect.gen(function* () {
       sessionStopped: false,
       expectedTurnId: null,
       steerMutex: yield* Semaphore.make(1),
+      credentialIssued: false,
       pendingSteers: 0,
       pendingCompletions: [],
     };
     activeByRun.set(run.runId, active);
     activeByThread.set(run.childThreadId, active);
+    activeByAgent.set(run.agentId, active);
+    if (!deliveryMutexByAgent.has(run.agentId)) {
+      deliveryMutexByAgent.set(run.agentId, yield* Semaphore.make(1));
+    }
     return active;
+  });
+
+  const clearActive = (active: ActiveRun) =>
+    Effect.sync(() => {
+      activeByRun.delete(active.run.runId);
+      activeByThread.delete(active.run.childThreadId);
+      if (activeByAgent.get(active.run.agentId) === active)
+        activeByAgent.delete(active.run.agentId);
+    });
+
+  const clearChildCredential = Effect.fn("ChildRunService.clearChildCredential")(function* (
+    active: ActiveRun,
+  ) {
+    if (!active.credentialIssued) return;
+    active.credentialIssued = false;
+    yield* mcpHooks.revoke(active.run.childThreadId).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Child MCP credential cleanup failed", {
+          childThreadId: active.run.childThreadId,
+          cause,
+        }),
+      ),
+    );
+    yield* Effect.sync(() => McpProviderSession.clearMcpProviderSession(active.run.childThreadId));
   });
 
   const execute = Effect.fn("ChildRunService.execute")(function* (
@@ -472,6 +584,17 @@ const make = Effect.gen(function* () {
   ) {
     const { run, adapter } = active;
     const work = Effect.gen(function* () {
+      const credential = yield* mcpHooks.issue({
+        threadId: run.childThreadId,
+        providerInstanceId: run.providerInstanceId,
+        capabilities: ["messaging"],
+        agentMessaging: { agentId: run.agentId, parentThreadId: run.parentThreadId },
+      });
+      if (credential === undefined) {
+        return yield* new ChildRunError({ message: "The child messaging server is not ready." });
+      }
+      active.credentialIssued = true;
+      yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));
       const session = yield* adapter.startSession({
         threadId: run.childThreadId,
         providerInstanceId: run.providerInstanceId,
@@ -484,9 +607,10 @@ const make = Effect.gen(function* () {
       });
       active.sessionStarted = true;
       active.resumeCursor = session.resumeCursor ?? active.resumeCursor;
+      yield* mcpHooks.touch(run.childThreadId);
       const turn = yield* adapter.sendTurn({
         threadId: run.childThreadId,
-        input: prompt,
+        input: `${prompt}\n\n[T3 agent messaging]\nYour stable agent ID is ${run.agentId}. Teammates in this parent thread can send messages with agent_send. Use agent_inbox to list teammate addresses, read pending messages, and explicitly acknowledge processed message IDs.`,
         modelSelection: { instanceId: run.providerInstanceId, model: run.model },
       });
       active.expectedTurnId = turn.turnId;
@@ -498,6 +622,7 @@ const make = Effect.gen(function* () {
           updatedAt: yield* nowIso,
         })
         .pipe(Effect.mapError(persistenceError("Persisting child session identity")));
+      yield* Deferred.succeed(active.ready, undefined);
       return yield* Deferred.await(active.terminal);
     });
 
@@ -516,8 +641,8 @@ const make = Effect.gen(function* () {
       Effect.ensuring(
         Effect.gen(function* () {
           yield* stopActiveSession(active);
-          activeByRun.delete(run.runId);
-          activeByThread.delete(run.childThreadId);
+          yield* clearChildCredential(active);
+          yield* clearActive(active);
           yield* Deferred.succeed(active.done, undefined);
         }),
       ),
@@ -557,6 +682,7 @@ const make = Effect.gen(function* () {
           },
         })
         .pipe(Effect.mapError(() => new ChildRunError({ message: "Child steering failed." })));
+      yield* mcpHooks.touch(active.run.childThreadId);
       yield* releaseSteering(turn.turnId);
       released = true;
       active.resumeCursor = turn.resumeCursor ?? active.resumeCursor;
@@ -576,17 +702,16 @@ const make = Effect.gen(function* () {
   const start = Effect.fn("ChildRunService.start")(
     function* (
       scope: McpInvocationScope,
-      session: ProviderSession,
+      session: Pick<ProviderSession, "cwd" | "runtimeMode">,
       input: ChildRunSpawnInput,
       parentRunId: RuntimeTaskId | null,
       resumeCursor: unknown | null,
       generation: number,
+      agentId: RuntimeTaskId | null,
     ) {
       if (session.cwd === undefined) {
         return yield* new ChildRunError({ message: "Parent session has no working directory." });
       }
-      parentProviderByThread.set(scope.threadId, scope.providerInstanceId);
-      stoppedParents.delete(scope.threadId);
       const info = yield* registry
         .getInstanceInfo(input.providerInstanceId)
         .pipe(Effect.mapError(() => new ChildRunError({ message: "Unknown provider instance." })));
@@ -620,6 +745,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(persistenceError("Reserving the child inventory row")));
       const run = NativeChildRun.make({
         runId,
+        agentId: agentId ?? RuntimeTaskId.make(`native-agent-${id}`),
         runNumber,
         parentRunId,
         parentThreadId: scope.threadId,
@@ -658,10 +784,7 @@ const make = Effect.gen(function* () {
             Effect.andThen(repository.markDelivered(run.runId)),
             Effect.mapError(persistenceError("Cancelling child startup after parent stop")),
             Effect.ensuring(
-              Effect.sync(() => {
-                activeByRun.delete(run.runId);
-                activeByThread.delete(run.childThreadId);
-              }).pipe(Effect.andThen(Deferred.succeed(active.done, undefined))),
+              clearActive(active).pipe(Effect.andThen(Deferred.succeed(active.done, undefined))),
             ),
           );
         return yield* new ChildRunError({ message: "Parent session is no longer active." });
@@ -682,10 +805,7 @@ const make = Effect.gen(function* () {
               Effect.andThen(repository.markDelivered(run.runId)),
               Effect.mapError(persistenceError("Rolling back child startup")),
               Effect.ensuring(
-                Effect.sync(() => {
-                  activeByRun.delete(run.runId);
-                  activeByThread.delete(run.childThreadId);
-                }).pipe(Effect.andThen(Deferred.succeed(active.done, undefined))),
+                clearActive(active).pipe(Effect.andThen(Deferred.succeed(active.done, undefined))),
               ),
               Effect.andThen(Effect.fail(cause)),
             ),
@@ -695,12 +815,7 @@ const make = Effect.gen(function* () {
         Effect.onError((cause) =>
           Effect.logError("Native child execution failed", { runId: run.runId, cause }),
         ),
-        Effect.ensuring(
-          Effect.sync(() => {
-            activeByRun.delete(run.runId);
-            activeByThread.delete(run.childThreadId);
-          }),
-        ),
+        Effect.ensuring(clearActive(active)),
         Effect.interruptible,
         Effect.forkIn(serviceScope, { startImmediately: true }),
       );
@@ -709,6 +824,143 @@ const make = Effect.gen(function* () {
     spawnMutex.withPermits(1),
     Effect.uninterruptible,
   );
+
+  const requireMessagingAgent = Effect.fn("ChildRunService.requireMessagingAgent")(function* (
+    scope: McpInvocationScope,
+  ) {
+    const binding = scope.agentMessaging;
+    if (
+      scope.capabilities.size !== 1 ||
+      !scope.capabilities.has("messaging") ||
+      binding === undefined
+    ) {
+      return yield* new ChildRunError({
+        message: "This MCP credential has no native child messaging capability.",
+      });
+    }
+    const run = yield* repository
+      .getByChildThread(scope.threadId)
+      .pipe(Effect.mapError(persistenceError("Reading the sending child")));
+    if (
+      run === null ||
+      run.agentId !== binding.agentId ||
+      run.parentThreadId !== binding.parentThreadId ||
+      (run.status !== "starting" && run.status !== "running") ||
+      stoppedParents.has(run.parentThreadId)
+    ) {
+      return yield* new ChildRunError({ message: "This child messaging session is inactive." });
+    }
+    return run;
+  });
+
+  const messagePrompt = (sender: NativeChildRun, message: NativeChildMessage) =>
+    `[T3 agent message ${message.messageId} from ${sender.title} (${sender.agentId})]\n${message.body}\n\nRead pending messages and acknowledge this message after processing it with agent_inbox.`;
+
+  const notifyRecipient = Effect.fn("ChildRunService.notifyRecipient")(function* (
+    scope: McpInvocationScope,
+    sender: NativeChildRun,
+    persisted: NativeChildMessage,
+  ) {
+    if (persisted.deliveryState === "notified" && persisted.deliveryRunId !== null) {
+      return persisted;
+    }
+    let target = yield* repository
+      .getLatestByAgent(persisted.recipientAgentId)
+      .pipe(Effect.mapError(persistenceError("Reading the target child")));
+    if (target === null || target.parentThreadId !== sender.parentThreadId) {
+      return yield* new ChildRunError({ message: "Unknown target agent in this team." });
+    }
+    if (stoppedParents.has(target.parentThreadId)) {
+      return yield* new ChildRunError({ message: "The parent session has stopped." });
+    }
+
+    let active = activeByAgent.get(target.agentId);
+    if (active !== undefined && !active.sessionStopped) {
+      const state = yield* Effect.raceFirst(
+        Deferred.await(active.ready).pipe(Effect.as("ready" as const)),
+        Deferred.await(active.done).pipe(Effect.as("done" as const)),
+      );
+      const terminalDone = yield* Deferred.isDone(active.terminal);
+      if (
+        state === "ready" &&
+        !active.sessionStopped &&
+        activeByAgent.get(target.agentId) === active &&
+        !terminalDone
+      ) {
+        yield* steerActive(active, messagePrompt(sender, persisted));
+        const updatedAt = yield* nowIso;
+        yield* repository
+          .markMessageNotified({
+            parentThreadId: persisted.parentThreadId,
+            messageId: persisted.messageId,
+            deliveryRunId: active.run.runId,
+            updatedAt,
+          })
+          .pipe(Effect.mapError(persistenceError("Recording the child message notice")));
+        return {
+          ...persisted,
+          deliveryState: "notified" as const,
+          deliveryRunId: active.run.runId,
+        };
+      }
+      if (terminalDone || active.sessionStopped || state === "done") {
+        yield* Deferred.await(active.done);
+      }
+      target = yield* repository
+        .getLatestByAgent(persisted.recipientAgentId)
+        .pipe(Effect.mapError(persistenceError("Refreshing the target child")));
+      active = target === null ? undefined : activeByAgent.get(target.agentId);
+    }
+
+    if (target === null || target.parentThreadId !== sender.parentThreadId) {
+      return yield* new ChildRunError({ message: "Unknown target agent in this team." });
+    }
+    if (active !== undefined || target.status === "starting" || target.status === "running") {
+      return yield* new ChildRunError({ message: "The target child is unavailable." });
+    }
+    if (target.status !== "completed") {
+      return yield* new ChildRunError({
+        message: "Cancelled or failed child agents cannot be restarted by a peer.",
+      });
+    }
+    const parentProviderInstanceId = parentProviderByThread.get(target.parentThreadId);
+    if (parentProviderInstanceId === undefined) {
+      return yield* new ChildRunError({ message: "The parent session is no longer active." });
+    }
+    const parentScope: McpInvocationScope = {
+      environmentId: scope.environmentId,
+      threadId: target.parentThreadId,
+      providerSessionId: scope.providerSessionId,
+      providerInstanceId: parentProviderInstanceId,
+      capabilities: new Set(["delegation"]),
+      issuedAt: scope.issuedAt,
+    };
+    const liveParent = yield* parent(parentScope);
+    const resumed = yield* start(
+      parentScope,
+      liveParent,
+      {
+        providerInstanceId: target.providerInstanceId,
+        model: target.model,
+        title: target.title,
+        prompt: messagePrompt(sender, persisted),
+      },
+      target.runId,
+      target.resumeCursor,
+      target.generation + 1,
+      target.agentId,
+    );
+    const updatedAt = yield* nowIso;
+    yield* repository
+      .markMessageNotified({
+        parentThreadId: persisted.parentThreadId,
+        messageId: persisted.messageId,
+        deliveryRunId: resumed.runId,
+        updatedAt,
+      })
+      .pipe(Effect.mapError(persistenceError("Recording the resumed child message notice")));
+    return { ...persisted, deliveryState: "notified" as const, deliveryRunId: resumed.runId };
+  });
 
   const completeChildTurn = (
     child: ActiveRun,
@@ -967,31 +1219,186 @@ const make = Effect.gen(function* () {
       };
     }),
     spawn: Effect.fn("ChildRunService.spawn")(function* (scope, input) {
-      return yield* start(scope, yield* parent(scope), input, null, null, 1);
+      const session = yield* parent(scope);
+      parentProviderByThread.set(scope.threadId, scope.providerInstanceId);
+      stoppedParents.delete(scope.threadId);
+      return yield* start(scope, session, input, null, null, 1, null);
     }),
     send: Effect.fn("ChildRunService.send")(function* (scope, input) {
       const run = yield* readOwned(scope, input.runId);
+      parentProviderByThread.set(scope.threadId, scope.providerInstanceId);
+      stoppedParents.delete(scope.threadId);
       const active = activeByRun.get(run.runId);
       if (active !== undefined && !isTerminal(run)) {
         yield* steerActive(active, input.prompt);
         return toResult({ ...run, status: "running" });
       }
       if (!isTerminal(run)) {
+        return yield* new ChildRunError({
+          message: "Child run is not available in this process.",
+        });
+      }
+      const targetMutex = deliveryMutexByAgent.get(run.agentId);
+      if (targetMutex === undefined) {
         return yield* new ChildRunError({ message: "Child run is not available in this process." });
       }
-      return yield* start(
-        scope,
-        yield* parent(scope),
-        {
-          providerInstanceId: run.providerInstanceId,
-          model: run.model,
-          title: run.title,
-          prompt: input.prompt,
-        },
-        run.runId,
-        run.resumeCursor,
-        run.generation + 1,
+      return yield* Effect.gen(function* () {
+        const latest = yield* repository
+          .getLatestByAgent(run.agentId)
+          .pipe(Effect.mapError(persistenceError("Reading the latest child generation")));
+        if (latest === null || latest.parentThreadId !== scope.threadId) {
+          return yield* new ChildRunError({ message: "Unknown child run for this thread." });
+        }
+        const latestActive = activeByAgent.get(latest.agentId);
+        if (latestActive !== undefined && !latestActive.sessionStopped) {
+          yield* steerActive(latestActive, input.prompt);
+          return toResult({ ...latest, status: "running" });
+        }
+        if (!isTerminal(latest)) {
+          return yield* new ChildRunError({
+            message: "Child run is not available in this process.",
+          });
+        }
+        return yield* start(
+          scope,
+          yield* parent(scope),
+          {
+            providerInstanceId: latest.providerInstanceId,
+            model: latest.model,
+            title: latest.title,
+            prompt: input.prompt,
+          },
+          latest.runId,
+          latest.resumeCursor,
+          latest.generation + 1,
+          latest.agentId,
+        );
+      }).pipe(targetMutex.withPermits(1));
+    }),
+    agentSend: Effect.fn("ChildRunService.agentSend")(function* (scope, input) {
+      const sender = yield* requireMessagingAgent(scope);
+      if (input.targetAgentId === sender.agentId) {
+        return yield* new ChildRunError({
+          message: "Send messages to a teammate, not yourself.",
+        });
+      }
+      const target = yield* repository
+        .getLatestByAgent(input.targetAgentId)
+        .pipe(Effect.mapError(persistenceError("Reading the target child")));
+      if (target === null || target.parentThreadId !== sender.parentThreadId) {
+        return yield* new ChildRunError({ message: "Unknown target agent in this team." });
+      }
+      if (target.status === "failed" || target.status === "cancelled") {
+        return yield* new ChildRunError({
+          message: "Cancelled or failed child agents cannot be restarted by a peer.",
+        });
+      }
+      const createdAt = yield* nowIso;
+      const inserted = yield* repository
+        .insertMessage(
+          NativeChildMessage.make({
+            messageId: input.messageId,
+            parentThreadId: sender.parentThreadId,
+            senderAgentId: sender.agentId,
+            recipientAgentId: target.agentId,
+            body: input.message,
+            deliveryState: "queued",
+            deliveryRunId: null,
+            createdAt,
+            updatedAt: createdAt,
+            acknowledgedAt: null,
+          }),
+        )
+        .pipe(Effect.mapError(persistenceError("Persisting the child message")));
+      if (inserted.status === "conflict") {
+        return yield* new ChildRunError({
+          message: "This messageId was already used for different content.",
+        });
+      }
+      if (inserted.status === "inbox-full") {
+        return yield* new ChildRunError({
+          message: "The target inbox has 100 pending messages. Wait for acknowledgements.",
+        });
+      }
+      const targetMutex = deliveryMutexByAgent.get(target.agentId);
+      if (targetMutex === undefined) {
+        return yield* new ChildRunError({ message: "The target child is unavailable." });
+      }
+      const message = yield* notifyRecipient(scope, sender, inserted.message).pipe(
+        targetMutex.withPermits(1),
       );
+      if (message.deliveryRunId === null) {
+        return yield* new ChildRunError({
+          message: "The child message notice was not recorded.",
+        });
+      }
+      return {
+        messageId: message.messageId,
+        senderAgentId: sender.agentId,
+        targetAgentId: target.agentId,
+        status: message.deliveryState,
+        deliveryRunId: message.deliveryRunId,
+      };
+    }),
+    agentInbox: Effect.fn("ChildRunService.agentInbox")(function* (scope, input) {
+      const agent = yield* requireMessagingAgent(scope);
+      const acknowledgedMessageIds: string[] = [];
+      for (const messageId of new Set(input.acknowledgeMessageIds ?? [])) {
+        const acknowledged = yield* repository
+          .acknowledgeMessage({
+            parentThreadId: agent.parentThreadId,
+            recipientAgentId: agent.agentId,
+            messageId,
+            acknowledgedAt: yield* nowIso,
+          })
+          .pipe(Effect.mapError(persistenceError("Acknowledging the child message")));
+        if (acknowledged) acknowledgedMessageIds.push(messageId);
+      }
+      const limit = input.limit ?? 50;
+      const pending = yield* repository
+        .listPendingMessages(agent.agentId, limit + 1)
+        .pipe(Effect.mapError(persistenceError("Reading the child inbox")));
+      const team = yield* repository
+        .listLatestByParent(agent.parentThreadId, 52)
+        .pipe(Effect.mapError(persistenceError("Listing child teammates")));
+      const titles = new Map(team.map((peer) => [peer.agentId, peer.title] as const));
+      const messages: Array<AgentInboxResult["messages"][number]> = [];
+      let messageTextLength = 0;
+      for (const message of pending.slice(0, limit)) {
+        const senderTitle = titles.get(message.senderAgentId) ?? "Unknown teammate";
+        const entryLength =
+          message.messageId.length +
+          message.senderAgentId.length +
+          senderTitle.length +
+          message.body.length +
+          message.createdAt.length;
+        if (messageTextLength + entryLength > MAX_INBOX_MESSAGE_TEXT) break;
+        messageTextLength += entryLength;
+        messages.push({
+          messageId: message.messageId,
+          senderAgentId: message.senderAgentId,
+          senderTitle,
+          message: message.body,
+          createdAt: message.createdAt,
+        });
+      }
+      return {
+        agentId: agent.agentId,
+        peers: team
+          .filter((peer) => peer.agentId !== agent.agentId)
+          .slice(0, 50)
+          .map((peer) => ({
+            agentId: peer.agentId,
+            title: peer.title,
+            providerInstanceId: peer.providerInstanceId,
+            model: peer.model,
+            status: peer.status,
+          })),
+        peersTruncated: team.filter((peer) => peer.agentId !== agent.agentId).length > 50,
+        messages,
+        acknowledgedMessageIds,
+        hasMore: pending.length > messages.length,
+      };
     }),
     result: Effect.fn("ChildRunService.result")(function* (scope, runId, waitMs = 0) {
       let run = yield* readOwned(scope, runId);
@@ -1011,6 +1418,9 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layerWithRepository = Layer.effect(ChildRunService, make);
+export const layerWithRepositoryAndMcpHooks = (mcpHooks: ChildRunMcpHooks) =>
+  Layer.effect(ChildRunService, makeWithOptions(mcpHooks));
+
+export const layerWithRepository = Layer.effect(ChildRunService, makeWithOptions(liveMcpHooks));
 
 export const layer = layerWithRepository.pipe(Layer.provide(NativeChildRunRepositoryAuto));
