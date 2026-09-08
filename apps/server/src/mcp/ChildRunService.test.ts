@@ -4,7 +4,9 @@ import {
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderOptionDescriptor,
   RuntimeTaskId,
+  type ServerProvider,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
@@ -12,6 +14,7 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderSessionStartInput,
+  type ProviderSendTurnInput,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import {
@@ -36,6 +39,7 @@ import {
 } from "../persistence/Services/NativeChildRuns.ts";
 import type { ProviderAdapterShape } from "../provider/Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
+import { ProviderInstanceRegistry } from "../provider/Services/ProviderInstanceRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import {
@@ -61,6 +65,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   repositoryLayer?: Layer.Layer<NativeChildRunRepository>,
   pauseTerminalActivity = false,
   blockSteers = false,
+  childOptionDescriptors?: ReadonlyArray<ProviderOptionDescriptor>,
   secondChildDriver?: string,
 ) {
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -75,6 +80,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   const starts: Array<ProviderSessionStartInput> = [];
   const stopped: Array<ThreadId> = [];
   const sentPrompts: string[] = [];
+  const sentSelections: Array<ProviderSendTurnInput["modelSelection"]> = [];
   const sentTurns: TurnId[] = [];
   const commands: OrchestrationCommand[] = [];
   const credentialRequests: McpCredentialRequest[] = [];
@@ -123,6 +129,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
         const turnId = TurnId.make(`child-turn-${turnNumber}`);
         sentTurns.push(turnId);
         sentPrompts.push(input.input ?? "");
+        sentSelections.push(input.modelSelection);
         yield* Deferred.succeed(sent, input.threadId);
         if (blockSteers && turnNumber === 2) {
           yield* Deferred.succeed(firstSteerStarted, undefined);
@@ -203,6 +210,63 @@ const makeHarness = Effect.fn("makeHarness")(function* (
       ),
     subscribeChanges: PubSub.subscribe(changes),
   });
+  const childProvider =
+    childOptionDescriptors === undefined
+      ? undefined
+      : {
+          instanceId: childInstance,
+          driverKind: ProviderDriverKind.make(childDriver),
+          continuationIdentity: {
+            driverKind: ProviderDriverKind.make(childDriver),
+            continuationKey: "test",
+          },
+          displayName: undefined,
+          enabled: true,
+          snapshot: {
+            resolveMaintenance: () => Effect.die("unused"),
+            getSnapshot: Effect.succeed({
+              instanceId: childInstance,
+              driver: ProviderDriverKind.make(childDriver),
+              enabled: true,
+              installed: true,
+              version: null,
+              status: "ready",
+              auth: { status: "authenticated" },
+              checkedAt: now,
+              models: [
+                {
+                  slug: "native-model",
+                  name: "Native model",
+                  isCustom: false,
+                  capabilities:
+                    childOptionDescriptors.length === 0
+                      ? null
+                      : { optionDescriptors: childOptionDescriptors },
+                },
+              ],
+              slashCommands: [],
+              skills: [],
+            } satisfies ServerProvider),
+            refresh: Effect.die("unused"),
+            streamChanges: Stream.empty,
+            applyUsageLimits: () => Effect.void,
+          },
+          adapter,
+          textGeneration: {
+            generateCommitMessage: () => Effect.die("unused"),
+            generatePrContent: () => Effect.die("unused"),
+            generateBranchName: () => Effect.die("unused"),
+            generateThreadTitle: () => Effect.die("unused"),
+          },
+        };
+  const providerInstanceRegistry = {
+    getInstance: (instanceId: ProviderInstanceId) =>
+      Effect.succeed(instanceId === childInstance ? childProvider : undefined),
+    listInstances: Effect.succeed(childProvider === undefined ? [] : [childProvider]),
+    listUnavailable: Effect.succeed([]),
+    streamChanges: Stream.empty,
+    subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+  };
   const runtimeServices = Layer.mergeAll(
     Layer.mock(ProviderService)({ streamEvents: Stream.fromPubSub(events) }),
     Layer.mock(OrchestrationEngineService)({
@@ -236,6 +300,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
       awaitCommandReady: Effect.void,
       enqueueCommand: (effect) => effect,
     }),
+    Layer.succeed(ProviderInstanceRegistry, providerInstanceRegistry),
   );
   const mcpHooks = {
     issue: (request: McpCredentialRequest) =>
@@ -270,6 +335,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     starts,
     stopped,
     sentPrompts,
+    sentSelections,
     sentTurns,
     credentialRequests,
     touchedCredentials,
@@ -389,6 +455,148 @@ it.effect("denies other parents and callers without delegation capability", () =
         (yield* service.result({ ...h.scope, providerSessionId: "replacement-session" }, run.runId))
           .runId,
       ).toBe(run.runId);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("validates, reports, and preserves fixed child model options", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      true,
+      false,
+      undefined,
+      false,
+      false,
+      [
+        {
+          id: "thinking",
+          label: "Thinking",
+          type: "select",
+          options: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+          ],
+        },
+      ],
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const input = {
+        ...h.input,
+        options: [{ id: "thinking", value: "medium" }],
+      };
+      const capabilities = yield* service.capabilities(h.scope);
+      expect(capabilities.providers[0]?.models).toEqual([
+        {
+          model: "native-model",
+          optionDescriptors: [
+            {
+              id: "thinking",
+              label: "Thinking",
+              type: "select",
+              options: [
+                { id: "low", label: "Low" },
+                { id: "medium", label: "Medium" },
+              ],
+            },
+          ],
+        },
+      ]);
+      const run = yield* service.spawn(h.scope, input);
+      expect(h.starts[0]?.modelSelection).toEqual({
+        instanceId: h.input.providerInstanceId,
+        model: h.input.model,
+        options: input.options,
+      });
+      expect(h.sentSelections[0]).toEqual(h.starts[0]?.modelSelection);
+      const result = yield* service.result(h.scope, run.runId, 30_000);
+      expect(result.requestedOptions).toEqual(input.options);
+
+      const followup = yield* service.send(h.scope, {
+        runId: run.runId,
+        prompt: "Keep the same reasoning level",
+      });
+      expect(h.starts[1]?.modelSelection).toEqual(h.starts[0]?.modelSelection);
+      expect(h.sentSelections[1]).toEqual(h.starts[0]?.modelSelection);
+      expect((yield* service.result(h.scope, followup.runId, 30_000)).requestedOptions).toEqual(
+        input.options,
+      );
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("rejects unknown, unsupported, and duplicate child options before launch", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      true,
+      false,
+      undefined,
+      false,
+      false,
+      [
+        {
+          id: "thinking",
+          label: "Thinking",
+          type: "select",
+          options: [{ id: "low", label: "Low" }],
+        },
+      ],
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      for (const options of [
+        [{ id: "missing", value: "low" }],
+        [{ id: "thinking", value: "high" }],
+        [
+          { id: "thinking", value: "low" },
+          { id: "thinking", value: "low" },
+        ],
+      ]) {
+        const outcome = yield* service.spawn(h.scope, { ...h.input, options }).pipe(Effect.result);
+        expect(outcome._tag).toBe("Failure");
+      }
+      expect(h.starts).toHaveLength(0);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("forwards fixed options while steering an active child", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      false,
+      false,
+      undefined,
+      false,
+      false,
+      [
+        {
+          id: "effort",
+          label: "Effort",
+          type: "select",
+          options: [{ id: "high", label: "High" }],
+        },
+      ],
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const run = yield* service.spawn(h.scope, {
+        ...h.input,
+        options: [{ id: "effort", value: "high" }],
+      });
+      yield* Deferred.await(h.sent);
+      yield* service.send(h.scope, { runId: run.runId, prompt: "Continue" });
+      expect(h.sentSelections[1]).toEqual(h.sentSelections[0]);
+      yield* service.cancel(h.scope, run.runId);
+      expect((yield* service.result(h.scope, run.runId, 30_000)).status).toBe("cancelled");
     }).pipe(Effect.provide(h.services));
   }),
 );
@@ -595,6 +803,7 @@ it.effect("delivers and explicitly acknowledges a durable cross-provider sibling
       undefined,
       false,
       false,
+      undefined,
       "codex",
     );
     yield* Effect.gen(function* () {
@@ -686,6 +895,7 @@ it.effect("denies cross-team targets and never restarts a cancelled recipient", 
       undefined,
       false,
       false,
+      undefined,
       "codex",
     );
     yield* Effect.gen(function* () {
@@ -743,16 +953,28 @@ it.effect("serializes simultaneous peer sends across a recipient completion boun
       undefined,
       false,
       false,
+      [
+        {
+          id: "effort",
+          label: "Effort",
+          type: "select",
+          options: [{ id: "high", label: "High" }],
+        },
+      ],
       "codex",
     );
     yield* Effect.gen(function* () {
       const service = yield* ChildRunService;
-      const firstSender = yield* service.spawn(h.scope, h.input);
+      const firstSender = yield* service.spawn(h.scope, h.secondInput);
       const secondSender = yield* service.spawn(h.scope, {
-        ...h.input,
+        ...h.secondInput,
         title: "Second sender",
       });
-      const recipient = yield* service.spawn(h.scope, h.secondInput);
+      const recipientOptions = [{ id: "effort", value: "high" }];
+      const recipient = yield* service.spawn(h.scope, {
+        ...h.input,
+        options: recipientOptions,
+      });
       const recipientRequest = h.credentialRequests.find(
         (request) => request.agentMessaging?.agentId === recipient.agentId,
       );
@@ -760,7 +982,7 @@ it.effect("serializes simultaneous peer sends across a recipient completion boun
       yield* PubSub.publish(h.events, {
         type: "turn.completed",
         eventId: EventId.make("recipient-completed-at-send"),
-        provider: ProviderDriverKind.make("codex"),
+        provider: ProviderDriverKind.make("claudeAgent"),
         threadId: recipientRequest!.threadId,
         turnId: h.sentTurns[2],
         createdAt: now,
@@ -801,6 +1023,14 @@ it.effect("serializes simultaneous peer sends across a recipient completion boun
       );
       expect(recipientCredentials).toHaveLength(2);
       expect(h.starts.at(-1)?.runtimeMode).toBe("approval-required");
+      expect(h.starts.at(-1)?.modelSelection).toEqual({
+        instanceId: h.input.providerInstanceId,
+        model: h.input.model,
+        options: recipientOptions,
+      });
+      expect((yield* service.result(h.scope, first.deliveryRunId)).requestedOptions).toEqual(
+        recipientOptions,
+      );
       const resumedScope = messagingScope(h.scope, recipientCredentials[1]!);
       expect(
         (yield* service.agentInbox(resumedScope, {})).messages.map(({ messageId }) => messageId),
@@ -1106,7 +1336,7 @@ it.effect("stops started child sessions and releases result waiters when the ser
   }),
 );
 
-it.effect("repairs missing start and terminal projection activities before restart delivery", () =>
+it.effect("preserves options for a repository-backed restart follow-up", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const repositoryScope = yield* Scope.make();
@@ -1136,6 +1366,7 @@ it.effect("repairs missing start and terminal projection activities before resta
           provider: ProviderDriverKind.make("claudeAgent"),
           model: "native-model",
           title: "Recovered child",
+          requestedOptions: [{ id: "effort", value: "high" }],
           runtimeMode: "full-access",
           cwd: "/workspace",
           resumeCursor: { session: "recovered" },
@@ -1157,9 +1388,19 @@ it.effect("repairs missing start and terminal projection activities before resta
         false,
         false,
         Layer.succeed(NativeChildRunRepository, repository),
+        false,
+        false,
+        [
+          {
+            id: "effort",
+            label: "Effort",
+            type: "select",
+            options: [{ id: "high", label: "High" }],
+          },
+        ],
       );
       yield* Effect.gen(function* () {
-        yield* ChildRunService;
+        const service = yield* ChildRunService;
         const activities = h.commands.filter(
           (command) => command.type === "thread.activity.append",
         );
@@ -1170,6 +1411,19 @@ it.effect("repairs missing start and terminal projection activities before resta
         expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
           1,
         );
+        const followup = yield* service.send(h.scope, {
+          runId,
+          prompt: "Continue from the recovered session",
+        });
+        yield* Deferred.await(h.sent);
+        expect(followup.requestedOptions).toEqual([{ id: "effort", value: "high" }]);
+        expect(h.starts[0]?.modelSelection).toEqual({
+          instanceId: ProviderInstanceId.make("child-provider"),
+          model: "native-model",
+          options: [{ id: "effort", value: "high" }],
+        });
+        yield* service.cancel(h.scope, followup.runId);
+        yield* service.result(h.scope, followup.runId, 30_000);
       }).pipe(Effect.provide(h.services));
     }),
   ),

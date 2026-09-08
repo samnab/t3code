@@ -59,6 +59,7 @@ import {
   TrimmedNonEmptyString,
   TurnId,
 } from "@t3tools/contracts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -2118,6 +2119,19 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
               model = selectionModel;
             }
           }
+          const thinkingLevel = getModelSelectionStringOptionValue(
+            input.modelSelection,
+            "thinking",
+          );
+          if (thinkingLevel !== undefined) {
+            yield* connection
+              .request({ type: "set_thinking_level", level: thinkingLevel })
+              .pipe(
+                Effect.mapError((cause) =>
+                  adapterError(input.threadId, "set_thinking_level", cause),
+                ),
+              );
+          }
           const [now, processEpoch] = yield* Effect.all([nowIso, nextUuid]);
           const session: ProviderSession = {
             provider: PROVIDER,
@@ -2230,16 +2244,26 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const applyModelSelection = (ctx: PiSessionContext, modelSelection: ModelSelection) =>
       Effect.gen(function* () {
         const selectionModel = String(modelSelection.model);
-        if (selectionModel === ctx.session.model) return;
-        // `modelSelection.model` may carry an arbitrary slug (for example a
-        // model picked for another driver on this thread); an unusable one is
-        // ignored and Pi stays on its configured default model.
-        const parsed = selectionModel === "default" ? null : parsePiModelSlug(selectionModel);
-        if (parsed === null) return;
-        yield* ctx.connection
-          .request({ type: "set_model", provider: parsed.provider, modelId: parsed.modelId })
-          .pipe(Effect.mapError((cause) => adapterError(ctx.threadId, "set_model", cause)));
-        yield* updateSession(ctx, { model: selectionModel });
+        if (selectionModel !== ctx.session.model) {
+          // `modelSelection.model` may carry an arbitrary slug (for example a
+          // model picked for another driver on this thread); an unusable one is
+          // ignored and Pi stays on its configured default model.
+          const parsed = selectionModel === "default" ? null : parsePiModelSlug(selectionModel);
+          if (parsed !== null) {
+            yield* ctx.connection
+              .request({ type: "set_model", provider: parsed.provider, modelId: parsed.modelId })
+              .pipe(Effect.mapError((cause) => adapterError(ctx.threadId, "set_model", cause)));
+            yield* updateSession(ctx, { model: selectionModel });
+          }
+        }
+        const thinkingLevel = getModelSelectionStringOptionValue(modelSelection, "thinking");
+        if (thinkingLevel !== undefined) {
+          yield* ctx.connection
+            .request({ type: "set_thinking_level", level: thinkingLevel })
+            .pipe(
+              Effect.mapError((cause) => adapterError(ctx.threadId, "set_thinking_level", cause)),
+            );
+        }
       });
 
     const sendTurn = (input: ProviderSendTurnInput) =>

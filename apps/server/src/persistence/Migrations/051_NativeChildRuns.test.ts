@@ -49,7 +49,7 @@ it.layer(testLayer)("native child persistence", (it) => {
           run_id, transcript_sequence, kind, text, truncated, upstream_truncated, stored_at
         ) VALUES ('legacy-run', 1, 'assistant', 'preserved', 0, 0, '2026-09-06T00:00:00.000Z')
       `;
-      yield* runMigrations({ toMigrationInclusive: 51 });
+      yield* runMigrations({ toMigrationInclusive: 58 });
       const legacy = yield* sql<{ readonly text: string }>`
         SELECT text FROM subagent_transcript_items WHERE run_id = 'legacy-run'
       `;
@@ -74,6 +74,7 @@ it.layer(testLayer)("native child persistence", (it) => {
         provider: ProviderDriverKind.make("claudeAgent"),
         model: "claude-sonnet",
         title: "Durable child",
+        requestedOptions: [{ id: "effort", value: "high" }],
         runtimeMode: "full-access",
         cwd: "/workspace",
         resumeCursor: { sessionId: "native-session" },
@@ -109,6 +110,7 @@ it.layer(testLayer)("native child persistence", (it) => {
       expect(interrupted[0]).toMatchObject({
         status: "failed",
         resumeCursor: { sessionId: "native-session" },
+        requestedOptions: [{ id: "effort", value: "high" }],
         deliveryState: "pending",
       });
       const inventory = yield* sql<{ readonly runtimeFamily: string }>`
@@ -121,7 +123,6 @@ it.layer(testLayer)("native child persistence", (it) => {
   it.effect("preserves explicit parent-stop delivery suppression across restart", () =>
     Effect.gen(function* () {
       const repository = yield* NativeChildRunRepository;
-      yield* runMigrations({ toMigrationInclusive: 51 });
       yield* runMigrations({ toMigrationInclusive: 59 });
       const runId = RuntimeTaskId.make("native-suppressed-active");
       const parentThreadId = ThreadId.make("parent-suppressed-active");
@@ -167,6 +168,7 @@ it.layer(testLayer)("native child persistence", (it) => {
         status: "failed",
         deliveryState: "suppressed",
       });
+      expect((yield* repository.get(runId))?.requestedOptions).toBeUndefined();
       expect(yield* repository.listPendingDelivery(parentThreadId)).toHaveLength(1);
     }),
   );

@@ -1,4 +1,4 @@
-import { RuntimeTaskId, ThreadId } from "@t3tools/contracts";
+import { ProviderOptionSelections, RuntimeTaskId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -17,6 +17,7 @@ import {
 
 const NativeChildRunDbRow = Schema.Struct({
   ...NativeChildRun.fields,
+  requestedOptions: Schema.NullOr(Schema.fromJsonString(ProviderOptionSelections)),
   resumeCursor: Schema.NullOr(Schema.fromJsonString(Schema.Unknown)),
   outputTruncated: Schema.Number,
 });
@@ -70,7 +71,12 @@ const MessageIdInput = Schema.Struct({ parentThreadId: ThreadId, messageId: Sche
 const MessageIdRow = Schema.Struct({ messageId: Schema.String });
 
 function toRun(row: typeof NativeChildRunDbRow.Type): NativeChildRun {
-  return NativeChildRun.make({ ...row, outputTruncated: row.outputTruncated === 1 });
+  const { requestedOptions, ...rest } = row;
+  return NativeChildRun.make({
+    ...rest,
+    ...(requestedOptions === null ? {} : { requestedOptions }),
+    outputTruncated: row.outputTruncated === 1,
+  });
 }
 
 function mapRepositoryError(operation: string) {
@@ -101,12 +107,13 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
       INSERT INTO native_child_runs (
         run_id, agent_id, run_number, parent_run_id, parent_thread_id, child_thread_id,
         provider_instance_id, provider, model, title, runtime_mode, cwd,
-        resume_cursor_json, generation, status, output, output_truncated,
+        requested_options_json, resume_cursor_json, generation, status, output, output_truncated,
         error, delivery_state, delivery_attempt, created_at, updated_at
       ) VALUES (
         ${run.runId}, ${run.agentId}, ${run.runNumber}, ${run.parentRunId}, ${run.parentThreadId}, ${run.childThreadId},
         ${run.providerInstanceId}, ${run.provider}, ${run.model}, ${run.title},
-        ${run.runtimeMode}, ${run.cwd}, ${run.resumeCursor === null ? null : JSON.stringify(run.resumeCursor)},
+        ${run.runtimeMode}, ${run.cwd}, ${run.requestedOptions === undefined ? null : JSON.stringify(run.requestedOptions)},
+        ${run.resumeCursor === null ? null : JSON.stringify(run.resumeCursor)},
         ${run.generation}, ${run.status}, ${run.output}, ${run.outputTruncated ? 1 : 0},
         ${run.error}, ${run.deliveryState}, ${run.deliveryAttempt}, ${run.createdAt}, ${run.updatedAt}
       )
@@ -117,7 +124,8 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
     run_id AS "runId", agent_id AS "agentId", run_number AS "runNumber", parent_run_id AS "parentRunId",
     parent_thread_id AS "parentThreadId", child_thread_id AS "childThreadId",
     provider_instance_id AS "providerInstanceId", provider, model, title,
-    runtime_mode AS "runtimeMode", cwd, resume_cursor_json AS "resumeCursor",
+    requested_options_json AS "requestedOptions", runtime_mode AS "runtimeMode", cwd,
+    resume_cursor_json AS "resumeCursor",
     generation, status, output, output_truncated AS "outputTruncated", error,
     delivery_state AS "deliveryState", delivery_attempt AS "deliveryAttempt",
     created_at AS "createdAt", updated_at AS "updatedAt"

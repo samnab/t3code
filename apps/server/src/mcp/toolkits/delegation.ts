@@ -18,7 +18,7 @@ const target = Schema.Struct({
 export const DelegationToolkit = Toolkit.make(
   Tool.make("subagent_capabilities", {
     description:
-      "List configured native child providers and delegation limits. Codex, Claude and Pi children use their own provider adapters. Each target truthfully reports whether it can enforce the parent's runtime mode. Results and native resume identities survive server restarts, and terminal results are delivered automatically when the parent is idle.",
+      "List configured native child providers, their exact model identifiers, and each model's supported options. Codex, Claude and Pi children use their own provider adapters. Each target truthfully reports whether it can enforce the parent's runtime mode. Results and native resume identities survive server restarts, and terminal results are delivered automatically when the parent is idle.",
     // `Schema.Struct({})` encodes to `{"anyOf":[{"type":"object"},{"type":"array"}]}`,
     // not `{"type":"object"}`. Claude's MCP client rejects a tool whose
     // top-level inputSchema isn't a plain object schema and silently drops
@@ -33,7 +33,7 @@ export const DelegationToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("subagent_spawn", {
     description:
-      "Start one child turn using a configured provider instance and native model identifier. The child inherits the parent's working directory and runtime mode and receives only sibling-messaging T3 tools. The result includes its stable agentId for teammate addressing. Returns immediately. Interactive requests fail explicitly. Codex, Claude and Pi each run through their own native adapter.",
+      "Start one child turn using a configured provider instance and native model identifier. Pass optional options as `{id, value}` entries from subagent_capabilities; unknown or unsupported options fail before launch. The child inherits the parent's working directory and runtime mode and receives only sibling-messaging T3 tools. The result includes its stable agentId for teammate addressing. Options stay fixed across steering, restart recovery, and terminal follow-ups. Returns immediately. Interactive requests fail explicitly. Codex, Claude and Pi each run through their own native adapter.",
     parameters: ChildRunSpawnInput,
     success: ChildRunResult,
     failure: ChildRunError,
@@ -41,7 +41,7 @@ export const DelegationToolkit = Toolkit.make(
   }),
   Tool.make("subagent_send", {
     description:
-      "Send another instruction to a child. An active child is steered through its native adapter. A terminal child starts a follow-up from its durable native resume identity and returns a new run id linked to the prior run.",
+      "Send another instruction to a child. An active child is steered through its native adapter with the run's fixed model options. A terminal child starts a follow-up from its durable native resume identity with those same options and returns a new run id linked to the prior run.",
     parameters: ChildRunSendInput,
     success: ChildRunResult,
     failure: ChildRunError,
@@ -49,7 +49,7 @@ export const DelegationToolkit = Toolkit.make(
   }),
   Tool.make("subagent_result", {
     description:
-      "Read a child run's durable status and bounded assistant output. Set waitMs up to 30000 to wait for completion. Terminal results are repeatable across parent credential renewal and server restart. Reading a result does not suppress automatic delivery.",
+      "Read a child run's durable status, bounded assistant output, and requestedOptions. The result echoes what was requested; forwarding to a provider is not confirmation that it applied an option. Set waitMs up to 30000 to wait for completion. Terminal results are repeatable across parent credential renewal and server restart. Reading a result does not suppress automatic delivery.",
     parameters: Schema.Struct({
       ...target.fields,
       waitMs: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 30_000 }))),

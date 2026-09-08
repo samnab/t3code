@@ -488,6 +488,9 @@ const handle = (req) => {
     case "set_model":
       respond(req.id, {});
       return;
+    case "set_thinking_level":
+      respond(req.id, {});
+      return;
     case "abort":
       isStreaming = false;
       send({ type: "agent_settled", aborted: true });
