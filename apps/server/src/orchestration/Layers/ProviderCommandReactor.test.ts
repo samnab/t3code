@@ -949,6 +949,33 @@ describe("ProviderCommandReactor", () => {
         }),
       }),
     );
+    const persistedOrder = await runtime!.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql<{
+          readonly eventType: string;
+          readonly activityKind: string | null;
+        }>`
+          SELECT
+            event_type AS "eventType",
+            json_extract(payload_json, '$.activity.kind') AS "activityKind"
+          FROM orchestration_events
+          WHERE stream_id = ${threadId}
+            AND event_type IN ('thread.activity-appended', 'thread.session-set')
+          ORDER BY sequence
+        `;
+      }),
+    );
+    const attachmentSequence = persistedOrder.findIndex(
+      (event) =>
+        event.eventType === "thread.activity-appended" &&
+        event.activityKind === "optimizer_attached",
+    );
+    const sessionSequence = persistedOrder.findLastIndex(
+      (event) => event.eventType === "thread.session-set",
+    );
+    expect(attachmentSequence).toBeGreaterThanOrEqual(0);
+    expect(sessionSequence).toBeGreaterThan(attachmentSequence);
 
     const terminalStatus = {
       projectId: ProjectId.make("project-1"),

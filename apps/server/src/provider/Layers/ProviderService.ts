@@ -43,6 +43,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -83,6 +84,7 @@ import * as ProjectionSnapshotQuery from "../../orchestration/Services/Projectio
 import { preflightExperimentProvider } from "../ExperimentProviderSupport.ts";
 import { CbmIndexService } from "../../optimizer/CbmIndexService.ts";
 import { OptimizerProbeService } from "../../optimizer/OptimizerProbeService.ts";
+import { detectHeadroomRouting } from "../../optimizer/HeadroomRouting.ts";
 import { isSupportedRtkVersion } from "../../optimizer/RtkRewrite.ts";
 import {
   clearAllSessionOptimizerAttachments,
@@ -379,6 +381,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const issueExperimentMcpCredential =
     options?.issueExperimentMcpCredential ?? McpSessionRegistry.issueActiveExperimentMcpCredential;
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const experimentSessions = new Map<ThreadId, ExperimentIdentity>();
@@ -822,6 +825,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     function* (input: {
       readonly threadId: ThreadId;
       readonly provider: ProviderDriverKind;
+      readonly providerInstanceId: ProviderInstanceId;
       readonly cwd: string | undefined;
     }) {
       yield* Effect.sync(() => clearSessionOptimizerAttachments(input.threadId));
@@ -846,6 +850,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ? yield* optimizerProbe.value.getStatus({ refresh: true })
           : { optimizers: [], savings: [], savingsHistory: [], cbmIndexes: [] };
       const rtkStatus = snapshot.optimizers.find((status) => status.id === "rtk");
+      const headroomStatus = snapshot.optimizers.find((status) => status.id === "headroom");
       const cbmStatus = snapshot.optimizers.find((status) => status.id === "cbm");
       const provider = String(input.provider);
       const rtkAttached =
@@ -853,6 +858,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         rtkStatus?.installed === true &&
         isSupportedRtkVersion(rtkStatus.version) &&
         (provider === "claudeAgent" || provider === "codex");
+      const headroomAttached =
+        projectSettings.headroom &&
+        headroomStatus?.installed === true &&
+        headroomStatus.running === true &&
+        (provider === "claudeAgent" || provider === "codex") &&
+        (yield* detectHeadroomRouting({
+          provider: input.provider,
+          providerInstanceId: input.providerInstanceId,
+          settings,
+          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        ));
       const cbmAttached =
         projectSettings.cbm &&
         cbmStatus?.installed === true &&
@@ -860,9 +879,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ["claudeAgent", "codex", "cursor", "grok", "antigravity", "opencode"].includes(provider);
       const attached: OptimizerId[] = [
         ...(rtkAttached ? (["rtk"] satisfies OptimizerId[]) : []),
+        ...(headroomAttached ? (["headroom"] satisfies OptimizerId[]) : []),
         ...(cbmAttached ? (["cbm"] satisfies OptimizerId[]) : []),
       ];
-      const ready: OptimizerId[] = rtkAttached ? ["rtk"] : [];
+      const ready: OptimizerId[] = [
+        ...(rtkAttached ? (["rtk"] satisfies OptimizerId[]) : []),
+        ...(headroomAttached ? (["headroom"] satisfies OptimizerId[]) : []),
+      ];
 
       yield* Effect.sync(() =>
         setSessionOptimizerAttachments(input.threadId, {
@@ -1210,6 +1233,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       yield* prepareOptimizerAttachments({
         threadId: input.binding.threadId,
         provider: adapter.provider,
+        providerInstanceId: bindingInstanceId,
         cwd: persistedCwd,
       });
       const resumed = yield* adapter
@@ -1471,6 +1495,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* prepareOptimizerAttachments({
           threadId,
           provider: adapter.provider,
+          providerInstanceId: resolvedInstanceId,
           cwd: effectiveCwd,
         });
         const session = yield* adapter

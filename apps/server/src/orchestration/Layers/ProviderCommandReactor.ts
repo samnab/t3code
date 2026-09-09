@@ -826,6 +826,8 @@ const make = Effect.gen(function* () {
             detail: `Provider session '${session.threadId}' started without a provider instance id.`,
           });
         }
+        const descriptor = readSessionOptimizerAttachments(threadId);
+        yield* appendOptimizerAttachedActivity({ threadId, session, descriptor });
         yield* setThreadSession({
           threadId,
           session: {
@@ -844,8 +846,6 @@ const make = Effect.gen(function* () {
           },
           createdAt,
         });
-        const descriptor = readSessionOptimizerAttachments(threadId);
-        yield* appendOptimizerAttachedActivity({ threadId, session, descriptor });
         if (descriptor?.cbmIndexCompletion !== undefined) {
           yield* descriptor.cbmIndexCompletion.pipe(
             Effect.flatMap((cbmIndex) => {

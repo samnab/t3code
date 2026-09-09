@@ -4739,12 +4739,28 @@ describe("agent browser access", () => {
     optimizerRuntime?: {
       readonly rtkVersion?: string;
       readonly dropCbmDuringStart?: boolean;
+      readonly headroomRoute?: "config" | "environment" | "unmatched";
+      readonly headroomRunning?: boolean;
     },
   ) =>
     Effect.gen(function* () {
       const issued: Array<{ threadId: ThreadId; capabilities: ReadonlyArray<string> | undefined }> =
         [];
       const probeRefreshes: Array<boolean | undefined> = [];
+      const headroomHome = fixtureCwd(`headroom-${threadId}`);
+      if (
+        optimizerRuntime?.headroomRoute === "config" ||
+        optimizerRuntime?.headroomRoute === "unmatched"
+      ) {
+        NodeFS.writeFileSync(
+          NodePath.join(headroomHome, "config.toml"),
+          [
+            'model_provider = "headroom"',
+            "[model_providers.headroom]",
+            `base_url = "http://127.0.0.1:${optimizerRuntime.headroomRoute === "config" ? "6767" : "7777"}/v1"`,
+          ].join("\n"),
+        );
+      }
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -4788,7 +4804,7 @@ describe("agent browser access", () => {
                     id: "headroom",
                     installed: true,
                     version: "1.0.0",
-                    running: true,
+                    running: optimizerRuntime?.headroomRunning ?? true,
                     mode: "detected-proxy",
                     checkedAt: "2026-01-01T00:00:00.000Z",
                   },
@@ -4885,6 +4901,26 @@ describe("agent browser access", () => {
               projectOverride === undefined ? {} : { [projectId]: projectOverride },
             projectOptimizerOverrides:
               optimizerOverride === undefined ? {} : { [projectId]: optimizerOverride },
+            ...(optimizerRuntime?.headroomRoute === undefined
+              ? {}
+              : {
+                  providerInstances: {
+                    [codexInstanceId]: {
+                      driver: CODEX_DRIVER,
+                      ...(optimizerRuntime.headroomRoute === "environment"
+                        ? {
+                            environment: [
+                              {
+                                name: "OPENAI_BASE_URL",
+                                value: "http://127.0.0.1:6767/v1",
+                                sensitive: false,
+                              },
+                            ],
+                          }
+                        : { config: { homePath: headroomHome } }),
+                    },
+                  },
+                }),
           }),
         ),
         Layer.provide(serverConfigTestLayer),
@@ -4981,11 +5017,12 @@ describe("agent browser access", () => {
           headroom: true,
           cbm: true,
         },
+        { headroomRoute: "config" },
       );
 
       assert.deepEqual(attachment?.configured, ["rtk", "headroom", "cbm"]);
-      assert.deepEqual(attachment?.attached, ["rtk", "cbm"]);
-      assert.deepEqual(attachment?.ready, ["rtk"]);
+      assert.deepEqual(attachment?.attached, ["rtk", "headroom", "cbm"]);
+      assert.deepEqual(attachment?.ready, ["rtk", "headroom"]);
       assert.equal(typeof attachment?.cwd, "string");
       if (attachment === undefined) return;
       assert.deepEqual(attachment.cbm?.env, { CBM_ALLOWED_ROOT: attachment.cwd });
@@ -5009,6 +5046,38 @@ describe("agent browser access", () => {
       assert.deepEqual(attachment?.attached, []);
       assert.deepEqual(attachment?.ready, []);
       assert.equal(attachment?.rtk, undefined);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not label an unmatched Headroom route as attached", () =>
+    Effect.gen(function* () {
+      const { attachment } = yield* startSessionWith(
+        false,
+        asThreadId("thread-headroom-unmatched"),
+        undefined,
+        { rtk: false, headroom: true, cbm: false },
+        { headroomRoute: "unmatched" },
+      );
+
+      assert.deepEqual(attachment?.configured, ["headroom"]);
+      assert.deepEqual(attachment?.attached, []);
+      assert.deepEqual(attachment?.ready, []);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not label a matching route while the Headroom proxy is stopped", () =>
+    Effect.gen(function* () {
+      const { attachment } = yield* startSessionWith(
+        false,
+        asThreadId("thread-headroom-stopped"),
+        undefined,
+        { rtk: false, headroom: true, cbm: false },
+        { headroomRoute: "environment", headroomRunning: false },
+      );
+
+      assert.deepEqual(attachment?.configured, ["headroom"]);
+      assert.deepEqual(attachment?.attached, []);
+      assert.deepEqual(attachment?.ready, []);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
