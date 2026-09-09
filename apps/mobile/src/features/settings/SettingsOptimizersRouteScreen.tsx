@@ -1,4 +1,4 @@
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { DEFAULT_HEADROOM_PROXY_URL, EnvironmentId, ProjectId } from "@t3tools/contracts";
 import type {
   OptimizerId,
   OptimizerSavingsInterval,
@@ -6,11 +6,15 @@ import type {
   OptimizerStatusSnapshot,
 } from "@t3tools/contracts";
 import { useNavigation } from "@react-navigation/native";
-import { useMemo, useState, type ComponentProps } from "react";
+import { useCallback, useMemo, useRef, useState, type ComponentProps } from "react";
 import { ActivityIndicator, Linking, Platform, Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AppText as Text } from "../../components/AppText";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { ControlPillMenu } from "../../components/ControlPill";
@@ -376,15 +380,139 @@ function ProviderCompatibilityRows() {
   );
 }
 
+function HeadroomProxySettings({
+  environmentId,
+  environmentLabel,
+  connected,
+  proxyUrl,
+  onSaved,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly environmentLabel: string;
+  readonly connected: boolean;
+  readonly proxyUrl: string;
+  readonly onSaved: () => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const saveInFlight = useRef(false);
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "Headroom proxy URL update",
+    reportFailure: false,
+  });
+
+  const save = useCallback(
+    async (value: string) => {
+      if (saveInFlight.current || !connected) return;
+      const next = value.trim();
+      if (next === proxyUrl) {
+        setDraft(null);
+        setError(null);
+        return;
+      }
+
+      saveInFlight.current = true;
+      setSaving(true);
+      setError(null);
+      try {
+        const result = await updateSettings({
+          environmentId,
+          input: { patch: { headroomProxyUrl: next } },
+        });
+        if (result._tag === "Success") {
+          setDraft(null);
+          onSaved();
+        } else if (!isAtomCommandInterrupted(result)) {
+          const failure = squashAtomCommandFailure(result);
+          setError(
+            failure instanceof Error ? failure.message : "Headroom proxy URL could not be saved.",
+          );
+        }
+      } catch (failure) {
+        setError(
+          failure instanceof Error ? failure.message : "Headroom proxy URL could not be saved.",
+        );
+      } finally {
+        saveInFlight.current = false;
+        setSaving(false);
+      }
+    },
+    [connected, environmentId, onSaved, proxyUrl, updateSettings],
+  );
+
+  const commit = useCallback(() => {
+    if (draft !== null) void save(draft);
+  }, [draft, save]);
+
+  const reset = useCallback(() => {
+    setDraft(DEFAULT_HEADROOM_PROXY_URL);
+    void save(DEFAULT_HEADROOM_PROXY_URL);
+  }, [save]);
+
+  return (
+    <SettingsSection title={`${environmentLabel} · Configuration`}>
+      <View className="gap-3 p-4">
+        <View className="gap-1">
+          <Text className="text-base font-t3-medium text-foreground">Headroom proxy URL</Text>
+          <Text className="text-sm leading-normal text-foreground-muted">
+            The HTTP loopback origin where this environment can reach an existing Headroom proxy.
+            Use the base origin, such as http://127.0.0.1:8787; /v1 is not needed. T3 only detects
+            and measures it and never starts or configures Headroom.
+          </Text>
+        </View>
+        <TextInput
+          value={draft ?? proxyUrl}
+          editable={connected && !saving}
+          autoCapitalize="none"
+          autoCorrect={false}
+          spellCheck={false}
+          keyboardType="url"
+          returnKeyType="done"
+          accessibilityLabel="Headroom proxy URL"
+          onChangeText={(value) => {
+            setDraft(value);
+            setError(null);
+          }}
+          onBlur={commit}
+          onSubmitEditing={commit}
+        />
+        <View className="flex-row items-center justify-between gap-3">
+          {error ? (
+            <Text className="min-w-0 flex-1 text-sm text-danger-foreground">{error}</Text>
+          ) : (
+            <Text className="min-w-0 flex-1 text-xs text-foreground-muted">
+              Default: {DEFAULT_HEADROOM_PROXY_URL}
+            </Text>
+          )}
+          {proxyUrl !== DEFAULT_HEADROOM_PROXY_URL ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Reset Headroom proxy URL to default"
+              disabled={!connected || saving}
+              onPress={reset}
+              className="rounded-full bg-subtle px-4 py-2 active:opacity-70 disabled:opacity-40"
+            >
+              <Text className="font-t3-medium text-foreground">Reset</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
+    </SettingsSection>
+  );
+}
+
 function ConnectedEnvironmentOptimizerSections({
   environmentId,
   environmentLabel,
   connected,
+  headroomProxyUrl,
   selectedProjectId,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly connected: boolean;
+  readonly headroomProxyUrl: string;
   readonly selectedProjectId: ProjectId | null;
 }) {
   const query = useEnvironmentQuery(
@@ -468,6 +596,15 @@ function ConnectedEnvironmentOptimizerSections({
         <SavingsHistoryRows snapshot={query.data} />
       </SettingsSection>
 
+      <HeadroomProxySettings
+        key={environmentId}
+        environmentId={environmentId}
+        environmentLabel={environmentLabel}
+        connected={connected}
+        proxyUrl={headroomProxyUrl}
+        onSaved={query.refresh}
+      />
+
       <SettingsSection title={`${environmentLabel} · CBM index health`}>
         <CbmIndexRows snapshot={query.data} selectedProjectId={selectedProjectId} />
         <Text className="px-4 pb-4 text-sm leading-normal text-foreground-muted">
@@ -481,7 +618,6 @@ function ConnectedEnvironmentOptimizerSections({
     </>
   );
 }
-
 export function SettingsOptimizersRouteScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
@@ -660,9 +796,13 @@ export function SettingsOptimizersRouteScreen() {
             ) : null}
             {selectedEnvironment ? (
               <ConnectedEnvironmentOptimizerSections
+                key={selectedEnvironment.environmentId}
                 environmentId={selectedEnvironment.environmentId}
                 environmentLabel={selectedEnvironment.label}
                 connected={selectedEnvironmentConnected}
+                headroomProxyUrl={
+                  selectedEnvironmentConfig?.settings.headroomProxyUrl ?? DEFAULT_HEADROOM_PROXY_URL
+                }
                 selectedProjectId={selectedProject?.id ?? null}
               />
             ) : null}

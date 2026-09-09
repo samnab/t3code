@@ -6,9 +6,14 @@ import type {
   OptimizerStatusSnapshot,
   ProjectId,
 } from "@t3tools/contracts";
+import { DEFAULT_HEADROOM_PROXY_URL } from "@t3tools/contracts";
 import { CheckCircle2Icon, CircleAlertIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { useEnvironmentQuery } from "../../state/query";
 import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environments";
@@ -328,6 +333,116 @@ function CbmIndexRow({
   );
 }
 
+function HeadroomProxySettingsRow({
+  environmentId,
+  environmentConnected,
+  proxyUrl,
+  onSaved,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly environmentConnected: boolean;
+  readonly proxyUrl: string;
+  readonly onSaved: () => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "Headroom proxy URL update",
+    reportFailure: false,
+  });
+
+  const save = useCallback(
+    async (value: string) => {
+      if (saving || !environmentConnected) return;
+      const next = value.trim();
+      if (next === proxyUrl) {
+        setDraft(null);
+        setError(null);
+        return;
+      }
+
+      setSaving(true);
+      setError(null);
+      try {
+        const result = await updateSettings({
+          environmentId,
+          input: { patch: { headroomProxyUrl: next } },
+        });
+        if (result._tag === "Success") {
+          setDraft(null);
+          onSaved();
+        } else if (!isAtomCommandInterrupted(result)) {
+          const failure = squashAtomCommandFailure(result);
+          setError(
+            failure instanceof Error ? failure.message : "Headroom proxy URL could not be saved.",
+          );
+        }
+      } catch (failure) {
+        setError(
+          failure instanceof Error ? failure.message : "Headroom proxy URL could not be saved.",
+        );
+      } finally {
+        setSaving(false);
+      }
+    },
+    [environmentConnected, environmentId, onSaved, proxyUrl, saving, updateSettings],
+  );
+
+  const commit = useCallback(() => {
+    if (draft !== null) void save(draft);
+  }, [draft, save]);
+
+  const reset = useCallback(() => {
+    setDraft(DEFAULT_HEADROOM_PROXY_URL);
+    void save(DEFAULT_HEADROOM_PROXY_URL);
+  }, [save]);
+
+  return (
+    <SettingsRow
+      title="Headroom proxy URL"
+      description="The HTTP loopback origin where this environment can reach an existing Headroom proxy. Use the base origin, such as http://127.0.0.1:8787; /v1 is not needed. T3 only detects and measures it and never starts or configures Headroom."
+      status={error ? <span className="text-destructive">{error}</span> : undefined}
+      resetAction={
+        proxyUrl !== DEFAULT_HEADROOM_PROXY_URL ? (
+          <SettingResetButton
+            label="Headroom proxy URL"
+            disabled={saving || !environmentConnected}
+            onClick={reset}
+          />
+        ) : null
+      }
+      control={
+        <Input
+          size="sm"
+          className="w-full sm:w-64"
+          value={draft ?? proxyUrl}
+          disabled={saving || !environmentConnected}
+          aria-label="Headroom proxy URL"
+          aria-invalid={error ? true : undefined}
+          placeholder={DEFAULT_HEADROOM_PROXY_URL}
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          onChange={(event) => {
+            setDraft(event.currentTarget.value);
+            setError(null);
+          }}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setDraft(null);
+              setError(null);
+            }
+          }}
+        />
+      }
+    />
+  );
+}
+
 function OptimizerEnvironmentSettings({
   environmentId,
 }: {
@@ -567,8 +682,15 @@ function OptimizerEnvironmentSettings({
       <SettingsSection
         id="optimizer-configuration"
         title="Configuration"
-        description="These paths are read on the selected environment. T3 does not install or update optimizer binaries."
+        description="These settings are read on the selected environment. T3 does not install, start, or update optimizer tools."
       >
+        <HeadroomProxySettingsRow
+          key={environmentId}
+          environmentId={environmentId}
+          environmentConnected={environmentConnected}
+          proxyUrl={settings.headroomProxyUrl}
+          onSaved={statusQuery.refresh}
+        />
         <SettingsRow
           title="CBM binary path"
           description="Use a custom codebase-memory-mcp executable when it is not on PATH. Leave blank to use codebase-memory-mcp."
@@ -600,7 +722,6 @@ function OptimizerEnvironmentSettings({
     </>
   );
 }
-
 export function OptimizersSettingsPanel() {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();

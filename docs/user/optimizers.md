@@ -29,6 +29,13 @@ it never starts, stops, or edits Headroom.
 Headroom support in v1 is limited to Claude Code and Codex sessions routed through Headroom. Its
 savings are environment-level counters.
 
+Set the proxy URL in the selected environment's **Settings → Optimizers → Configuration** section.
+Enter the base HTTP loopback origin, without a `/v1` path. T3 defaults to
+`http://127.0.0.1:6767`; if your opt-in shell alias starts Headroom on port 8787, use
+`http://127.0.0.1:8787`. This setting only tells T3 where to detect and measure an existing proxy;
+it does not start Headroom or route provider traffic. Shell aliases are process-local, so they do
+not automatically apply to provider sessions launched by T3.
+
 ## Codebase Memory
 
 [Install Codebase Memory](https://github.com/DeusData/codebase-memory-mcp) on the provider
