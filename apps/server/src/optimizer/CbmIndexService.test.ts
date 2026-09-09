@@ -1,4 +1,4 @@
-import { DEFAULT_SERVER_SETTINGS, ProjectId } from "@t3tools/contracts";
+import { ProjectId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -44,10 +44,7 @@ describe("CbmIndexService", () => {
                   ),
             ),
           ),
-        getSettings: Effect.succeed({
-          ...DEFAULT_SERVER_SETTINGS,
-          optimizerBinaryPaths: { cbm: "/tools/cbm" },
-        }),
+        getCbmBinaryPath: Effect.succeed("/tools/cbm"),
         resolvePath: (path) => path,
         now: Effect.sync(() => `2026-01-01T00:00:0${time++}.000Z`),
       });
@@ -100,7 +97,7 @@ describe("CbmIndexService", () => {
                   '{"projects":[{"name":"repo","root_path":"/repo","nodes":8,"edges":13,"size_bytes":21}]}',
                 ),
           ),
-        getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+        getCbmBinaryPath: Effect.succeed("codebase-memory-mcp"),
         resolvePath: (path) => path,
         now: Effect.succeed("2026-01-01T00:00:00.000Z"),
       });

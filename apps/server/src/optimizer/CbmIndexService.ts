@@ -1,9 +1,4 @@
-import type {
-  CbmProjectIndexStatus,
-  ProjectId,
-  ServerSettings,
-  ServerSettingsError,
-} from "@t3tools/contracts";
+import type { CbmProjectIndexStatus, ProjectId, ServerSettingsError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -50,7 +45,7 @@ export interface CbmIndexServiceDependencies {
   readonly run: (
     input: ProcessRunner.ProcessRunInput,
   ) => Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError>;
-  readonly getSettings: Effect.Effect<ServerSettings, ServerSettingsError>;
+  readonly getCbmBinaryPath: Effect.Effect<string, ServerSettingsError>;
   readonly resolvePath: (path: string) => string;
   readonly now: Effect.Effect<string>;
 }
@@ -72,7 +67,11 @@ export class CbmIndexService extends Context.Service<
 >()("t3/optimizer/CbmIndexService") {}
 
 const normalizedPath = (path: string): string => {
-  const normalized = path.replaceAll("\\", "/").replace(/\/+$/, "");
+  const slashNormalized = path.replaceAll("\\", "/");
+  const normalized =
+    slashNormalized === "/" || /^[a-z]:\/$/i.test(slashNormalized)
+      ? slashNormalized
+      : slashNormalized.replace(/\/+$/, "");
   if (/^[a-z]:\//i.test(normalized) || normalized.startsWith("//")) {
     return normalized.toLowerCase();
   }
@@ -227,14 +226,17 @@ export const makeWith = Effect.fn("CbmIndexService.makeWith")(function* (
     const checkedAt = yield* dependencies.now;
     const nodeCount = nonNegativeInteger(project.nodes);
     const edgeCount = nonNegativeInteger(project.edges);
+    if (nodeCount === undefined || edgeCount === undefined) {
+      return yield* degraded("CBM returned invalid project statistics.");
+    }
     const degradedDetail = decodedIndex.value.hint?.trim();
     return {
       projectId: input.projectId,
       repoPath: input.repoPath,
       state: decodedIndex.value.status === "degraded" ? "degraded" : "ready",
       checkedAt,
-      ...(nodeCount === undefined ? {} : { nodeCount }),
-      ...(edgeCount === undefined ? {} : { edgeCount }),
+      nodeCount,
+      edgeCount,
       ...(decodedIndex.value.status === "degraded"
         ? { detail: degradedDetail || "CBM indexed the repository with partial coverage." }
         : {}),
@@ -242,75 +244,57 @@ export const makeWith = Effect.fn("CbmIndexService.makeWith")(function* (
   });
 
   const ensureIndexed: CbmIndexService["Service"]["ensureIndexed"] = (input) =>
-    Effect.gen(function* () {
-      const repoPath = dependencies.resolvePath(input.cwd);
-      const key = statusKey(input.projectId, repoPath);
-      const job = yield* jobsLock.withPermit(
-        Effect.gen(function* () {
-          const jobs = yield* Ref.get(jobsRef);
-          const existing = jobs.get(key);
-          if (existing !== undefined) return { existing } as const;
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const repoPath = dependencies.resolvePath(input.cwd);
+        const key = statusKey(input.projectId, repoPath);
+        const job = yield* jobsLock.withPermit(
+          Effect.gen(function* () {
+            const jobs = yield* Ref.get(jobsRef);
+            const existing = jobs.get(key);
+            if (existing !== undefined) return { existing } as const;
 
-          const completion = yield* Deferred.make<CbmProjectIndexStatus>();
-          const checkedAt = yield* dependencies.now;
-          const status = {
-            projectId: input.projectId,
-            repoPath,
-            state: "indexing",
-            checkedAt,
-          } satisfies CbmProjectIndexStatus;
-          const next = new Map(jobs);
-          next.set(key, { status, completion });
-          yield* Ref.set(jobsRef, next);
-          return { completion } as const;
-        }),
-      );
-      if ("existing" in job) return yield* Deferred.await(job.existing.completion);
+            const completion = yield* Deferred.make<CbmProjectIndexStatus>();
+            const checkedAt = yield* dependencies.now;
+            const status = {
+              projectId: input.projectId,
+              repoPath,
+              state: "indexing",
+              checkedAt,
+            } satisfies CbmProjectIndexStatus;
+            const next = new Map(jobs);
+            next.set(key, { status, completion });
+            yield* Ref.set(jobsRef, next);
+            return { completion } as const;
+          }),
+        );
+        if ("existing" in job) return yield* restore(Deferred.await(job.existing.completion));
 
-      const settings = yield* dependencies.getSettings.pipe(
-        Effect.match({
-          onFailure: (left) => ({ _tag: "Left" as const, left }),
-          onSuccess: (right) => ({ _tag: "Right" as const, right }),
-        }),
-      );
-      if (settings._tag === "Left") {
+        const exit = yield* Effect.exit(
+          restore(
+            dependencies.getCbmBinaryPath.pipe(
+              Effect.flatMap((binaryPath) =>
+                runIndex({
+                  projectId: input.projectId,
+                  repoPath,
+                  binaryPath,
+                }),
+              ),
+            ),
+          ),
+        );
+        if (exit._tag === "Success") return yield* finish(key, job.completion, exit.value);
+
         const checkedAt = yield* dependencies.now;
         return yield* finish(key, job.completion, {
           projectId: input.projectId,
           repoPath,
           state: "degraded",
           checkedAt,
-          detail: "CBM settings could not be read.",
+          detail: "CBM indexing did not complete.",
         });
-      }
-
-      return yield* Effect.uninterruptibleMask((restore) =>
-        restore(
-          runIndex({
-            projectId: input.projectId,
-            repoPath,
-            binaryPath: settings.right.optimizerBinaryPaths.cbm,
-          }),
-        ).pipe(
-          Effect.exit,
-          Effect.flatMap((exit) =>
-            exit._tag === "Success"
-              ? finish(key, job.completion, exit.value)
-              : dependencies.now.pipe(
-                  Effect.flatMap((checkedAt) =>
-                    finish(key, job.completion, {
-                      projectId: input.projectId,
-                      repoPath,
-                      state: "degraded",
-                      checkedAt,
-                      detail: "CBM indexing was interrupted.",
-                    }),
-                  ),
-                ),
-          ),
-        ),
-      );
-    });
+      }),
+    );
 
   const listStatuses = Ref.get(jobsRef).pipe(
     Effect.map((jobs) =>
@@ -333,7 +317,9 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   return yield* makeWith({
     run: processRunner.run,
-    getSettings: settings.getSettings,
+    getCbmBinaryPath: settings.getSettings.pipe(
+      Effect.map((current) => current.optimizerBinaryPaths.cbm),
+    ),
     resolvePath: path.resolve,
     now: DateTime.now.pipe(Effect.map(DateTime.formatIso)),
   });
