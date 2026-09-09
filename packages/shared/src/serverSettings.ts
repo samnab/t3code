@@ -175,6 +175,7 @@ export function applyServerSettingsPatch(
     usagePriceOverrides: usagePriceOverridesPatch,
     projectAgentBrowserAccessOverrides: projectAgentBrowserAccessOverridesPatch,
     projectAutoPullOverrides: projectAutoPullOverridesPatch,
+    projectOptimizerOverrides: projectOptimizerOverridesPatch,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -244,6 +245,34 @@ export function applyServerSettingsPatch(
           projectAutoPullOverrides: mergeSettingsEntries(
             current.projectAutoPullOverrides,
             projectAutoPullOverridesPatch,
+          ),
+        }
+      : {}),
+    ...(projectOptimizerOverridesPatch !== undefined
+      ? {
+          projectOptimizerOverrides: mergeSettingsEntries(
+            current.projectOptimizerOverrides,
+            Object.fromEntries(
+              Object.entries(projectOptimizerOverridesPatch).map(([projectId, optimizerPatch]) => [
+                projectId,
+                optimizerPatch === null
+                  ? null
+                  : {
+                      rtk:
+                        optimizerPatch.rtk ??
+                        current.projectOptimizerOverrides[projectId]?.rtk ??
+                        false,
+                      headroom:
+                        optimizerPatch.headroom ??
+                        current.projectOptimizerOverrides[projectId]?.headroom ??
+                        false,
+                      cbm:
+                        optimizerPatch.cbm ??
+                        current.projectOptimizerOverrides[projectId]?.cbm ??
+                        false,
+                    },
+              ]),
+            ),
           ),
         }
       : {}),

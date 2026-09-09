@@ -17,6 +17,11 @@ import {
   ProviderOptionSelections,
 } from "./model.ts";
 import { ModelSelection, ProjectScript } from "./orchestration.ts";
+import {
+  DEFAULT_CBM_BINARY_PATH,
+  ProjectOptimizerSettings,
+  ProjectOptimizerSettingsPatch,
+} from "./optimizer.ts";
 import { BrowserProfile, BrowserProfileId, DEFAULT_BROWSER_PROFILE_ID } from "./browserProfile.ts";
 import {
   DEFAULT_PREVIEW_APPEARANCE,
@@ -947,6 +952,12 @@ export const ServerSettings = Schema.Struct({
   projectAutoPullOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  projectOptimizerOverrides: Schema.Record(ProjectId, ProjectOptimizerSettings).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  optimizerBinaryPaths: Schema.Struct({
+    cbm: makeBinaryPathSetting(DEFAULT_CBM_BINARY_PATH),
+  }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   defaultModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1229,6 +1240,14 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   projectAutoPullOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
+  ),
+  projectOptimizerOverrides: Schema.optionalKey(
+    Schema.Record(ProjectId, Schema.NullOr(ProjectOptimizerSettingsPatch)),
+  ),
+  optimizerBinaryPaths: Schema.optionalKey(
+    Schema.Struct({
+      cbm: Schema.optionalKey(TrimmedString),
+    }),
   ),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),

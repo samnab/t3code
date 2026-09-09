@@ -21,6 +21,25 @@ import {
 } from "./serverSettings.ts";
 
 describe("serverSettings helpers", () => {
+  it("merges project optimizer flags per entry and removes a project override", () => {
+    const withOptimizer = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectOptimizerOverrides: {
+        "project-one": { rtk: true },
+        "project-two": { headroom: true },
+      },
+    });
+    const next = applyServerSettingsPatch(withOptimizer, {
+      projectOptimizerOverrides: {
+        "project-one": { cbm: true },
+        "project-two": null,
+      },
+    });
+
+    expect(next.projectOptimizerOverrides).toEqual({
+      "project-one": { rtk: true, headroom: false, cbm: true },
+    });
+  });
+
   it("inherits actions, preserves existing actions, and supports empty overrides and reset", () => {
     const project = { id: ProjectId.make("project-actions"), scripts: [] };
     const action = {

@@ -56,6 +56,39 @@ describe("CodexSettings maximum concurrent subagents", () => {
   });
 });
 
+describe("ServerSettings optimizer configuration", () => {
+  it("defaults all project optimizers off and CBM to its PATH command", () => {
+    const settings = decodeServerSettings({
+      projectOptimizerOverrides: {
+        "project-one": { rtk: true },
+      },
+    });
+
+    expect(settings.projectOptimizerOverrides).toEqual({
+      "project-one": { rtk: true, headroom: false, cbm: false },
+    });
+    expect(settings.optimizerBinaryPaths.cbm).toBe("codebase-memory-mcp");
+  });
+
+  it("accepts partial updates, entry removal, and a CBM path override", () => {
+    const patch = decodeServerSettingsPatch({
+      projectOptimizerOverrides: {
+        "project-one": { cbm: true },
+        "project-two": null,
+      },
+      optimizerBinaryPaths: { cbm: "  /opt/cbm  " },
+    });
+
+    expect(patch).toEqual({
+      projectOptimizerOverrides: {
+        "project-one": { cbm: true },
+        "project-two": null,
+      },
+      optimizerBinaryPaths: { cbm: "/opt/cbm" },
+    });
+  });
+});
+
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
 
