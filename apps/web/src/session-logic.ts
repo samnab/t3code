@@ -564,6 +564,7 @@ function toDerivedWorkLogEntry(
       ? payload.detail
       : null;
   const taskLabel = taskSummary || taskDetailAsLabel;
+  const optimizerDetail = optimizerAttachmentDetail(activity);
   const detail = isTaskActivity
     ? !taskDetailAsLabel &&
       payload &&
@@ -571,7 +572,7 @@ function toDerivedWorkLogEntry(
       payload.detail.length > 0
       ? stripTrailingExitCode(payload.detail).output
       : null
-    : extractToolDetail(payload, title ?? activity.summary);
+    : (optimizerDetail ?? extractToolDetail(payload, title ?? activity.summary));
   const toolCallId = isTaskActivity ? null : extractToolCallId(payload);
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
@@ -964,6 +965,36 @@ function asTrimmedString(value: unknown): string | null {
 
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function optimizerLabel(value: unknown): string | null {
+  switch (value) {
+    case "rtk":
+      return "RTK";
+    case "headroom":
+      return "Headroom";
+    case "cbm":
+      return "Codebase Memory";
+    default:
+      return null;
+  }
+}
+
+function optimizerList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(optimizerLabel).filter((label): label is string => label !== null);
+}
+
+function optimizerAttachmentDetail(activity: OrchestrationThreadActivity): string | null {
+  if (activity.kind !== "optimizer_attached") return null;
+  const payload = asRecord(activity.payload);
+  if (!payload) return null;
+  const configured = optimizerList(payload.configured);
+  const attached = optimizerList(payload.attached);
+  const ready = optimizerList(payload.ready);
+  const format = (values: ReadonlyArray<string>) =>
+    values.length > 0 ? values.join(", ") : "none";
+  return `Configured: ${format(configured)} · Attached: ${format(attached)} · Ready: ${format(ready)}`;
 }
 
 function trimMatchingOuterQuotes(value: string): string {

@@ -10,6 +10,7 @@ export type SettingsPath =
   | "/settings/integrations"
   | "/settings/source-control"
   | "/settings/connections"
+  | "/settings/optimizers"
   | "/settings/archived";
 
 export interface SettingsSearchItem {
@@ -56,6 +57,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/integrations": "Integrations",
   "/settings/source-control": "Source Control",
   "/settings/connections": "Connections",
+  "/settings/optimizers": "Optimizers",
   "/settings/archived": "Archive",
 };
 
@@ -333,6 +335,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/providers",
     searchTerms: [
       "agents cli codex claude cursor grok opencode antigravity google sign in sign out install subscription instances authentication api key models configuration binary path config directory endpoint arguments environment variables display name accent color custom favorite hidden auto compact",
+    ],
+  },
+  {
+    id: "optimizers",
+    title: "Optimizers",
+    to: "/settings/optimizers",
+    searchTerms: [
+      "RTK Headroom Codebase Memory CBM token savings shell output proxy MCP environment project attachments",
     ],
   },
   {

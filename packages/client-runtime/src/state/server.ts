@@ -1047,6 +1047,15 @@ export function createServerEnvironmentAtoms<R, E>(
       staleTimeMs: 60_000,
       refreshTrigger: ({ environmentId }) => usagePricesAtom(environmentId),
     }),
+    // Optimizer probes are host-local and cheap enough to refresh while the
+    // active settings panel is mounted. Keeping the query here means web,
+    // desktop, and mobile all address the same environment-scoped snapshot.
+    optimizersGetStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:optimizers-status",
+      tag: WS_METHODS.optimizersGetStatus,
+      staleTimeMs: 30_000,
+      refreshIntervalMs: 30_000,
+    }),
     configProjection,
     welcome,
     consumeResetCredit: createEnvironmentRpcCommand(runtime, {

@@ -21,6 +21,7 @@ import {
   PaletteIcon,
   SearchIcon,
   Settings2Icon,
+  GaugeIcon,
   XIcon,
 } from "lucide-react";
 import { useLocation, useNavigate, useRouterState } from "@tanstack/react-router";
@@ -79,6 +80,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/integrations": BlocksIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/connections": Link2Icon,
+  "/settings/optimizers": GaugeIcon,
   "/settings/archived": ArchiveIcon,
 };
 

@@ -567,6 +567,7 @@ function toDerivedWorkLogEntry(
       ? payload.taskId
       : undefined;
   const subagentRun = isTaskActivity ? extractSubagentRunMetadata(payload) : null;
+  const optimizerDetail = optimizerAttachmentDetail(activity);
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     createdAt: activity.createdAt,
@@ -608,7 +609,9 @@ function toDerivedWorkLogEntry(
   const viewedImagePath = asTrimmedString(asRecord(payload?.data)?.imagePath);
   const commandOutput = commandPreview.command ? extractCommandOutputText(payload?.data) : null;
   const output = commandOutput ? stripTrailingExitCode(commandOutput).output : null;
-  if (!taskDetailAsLabel && output) {
+  if (optimizerDetail) {
+    entry.detail = optimizerDetail;
+  } else if (!taskDetailAsLabel && output) {
     entry.detail = output;
   } else if (!taskDetailAsLabel && typeof payload?.detail === "string") {
     const detail = stripTrailingExitCode(payload.detail).output;
@@ -1341,6 +1344,36 @@ function asTrimmedString(value: unknown): string | null {
 
 function asNonNegativeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function optimizerLabel(value: unknown): string | null {
+  switch (value) {
+    case "rtk":
+      return "RTK";
+    case "headroom":
+      return "Headroom";
+    case "cbm":
+      return "Codebase Memory";
+    default:
+      return null;
+  }
+}
+
+function optimizerList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(optimizerLabel).filter((label): label is string => label !== null);
+}
+
+function optimizerAttachmentDetail(activity: OrchestrationThreadActivity): string | null {
+  if (activity.kind !== "optimizer_attached") return null;
+  const payload = asRecord(activity.payload);
+  if (!payload) return null;
+  const configured = optimizerList(payload.configured);
+  const attached = optimizerList(payload.attached);
+  const ready = optimizerList(payload.ready);
+  const format = (values: ReadonlyArray<string>) =>
+    values.length > 0 ? values.join(", ") : "none";
+  return `Configured: ${format(configured)} · Attached: ${format(attached)} · Ready: ${format(ready)}`;
 }
 
 function parseTaskUsage(

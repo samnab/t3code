@@ -28,6 +28,7 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   type FilesystemBrowseResult,
+  type OptimizerId,
   type ProjectId,
   type SourceControlDiscoveryResult,
   type SourceControlProviderKind,
@@ -43,6 +44,7 @@ import {
   FileSearchIcon,
   FolderIcon,
   FolderPlusIcon,
+  GaugeIcon,
   LinkIcon,
   MessageSquareIcon,
   PaletteIcon,
@@ -153,7 +155,11 @@ import {
   ThreadCommandSubtitle,
 } from "./ThreadCommandSubtitle";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
-import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
+import {
+  primaryServerKeybindingsAtom,
+  primaryServerProvidersAtom,
+  serverEnvironment,
+} from "../state/server";
 import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
 import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
 import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "./ui/command";
@@ -591,6 +597,10 @@ function OpenCommandPaletteDialog(props: {
   });
   const cloneRepository = useAtomCommand(sourceControlEnvironment.cloneRepository, {
     reportFailure: false,
+  });
+  const updateOptimizerSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "project optimizer setting",
+    reportFailure: true,
   });
   const { environments } = useEnvironments();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
@@ -1740,6 +1750,77 @@ function OpenCommandPaletteDialog(props: {
         });
       },
     });
+
+    const contextualOptimizerTarget =
+      (contextualProjectRef
+        ? contextualProjectGroup.memberProjects.find(
+            (member) =>
+              member.environmentId === contextualProjectRef.environmentId &&
+              member.id === contextualProjectRef.projectId,
+          )
+        : null) ?? contextualProjectGroup.memberProjects[0];
+    const contextualOptimizerEnvironment = contextualOptimizerTarget
+      ? environments.find(
+          (environment) => environment.environmentId === contextualOptimizerTarget.environmentId,
+        )
+      : undefined;
+    if (contextualOptimizerTarget) {
+      const optimizerLabels: Readonly<Record<OptimizerId, string>> = {
+        rtk: "RTK",
+        headroom: "Headroom",
+        cbm: "Codebase Memory",
+      };
+      const optimizerItems: CommandPaletteActionItem[] = (
+        Object.keys(optimizerLabels) as OptimizerId[]
+      ).map((id) => {
+        const enabled =
+          contextualOptimizerEnvironment?.serverConfig?.settings.projectOptimizerOverrides[
+            contextualOptimizerTarget.id
+          ]?.[id] === true;
+        return {
+          kind: "action",
+          value: `action:project-optimizer:${contextualOptimizerTarget.environmentId}:${contextualOptimizerTarget.id}:${id}`,
+          searchTerms: [
+            "optimizer",
+            id,
+            optimizerLabels[id],
+            enabled ? "disable off" : "enable on",
+            contextualProjectGroup.displayName,
+          ],
+          title: `${enabled ? "Disable" : "Enable"} ${optimizerLabels[id]}`,
+          description: enabled ? "Enabled for the next session" : "Off",
+          icon: <GaugeIcon className={ITEM_ICON_CLASS} />,
+          disabled: contextualOptimizerEnvironment?.connection.phase !== "connected",
+          run: async () => {
+            await updateOptimizerSettings({
+              environmentId: contextualOptimizerTarget.environmentId,
+              input: {
+                patch: {
+                  projectOptimizerOverrides: {
+                    [contextualOptimizerTarget.id]: { [id]: !enabled },
+                  },
+                },
+              },
+            });
+          },
+        };
+      });
+      actionItems.push({
+        kind: "submenu",
+        value: "action:project-optimizers",
+        searchTerms: [
+          "project optimizer optimizers RTK Headroom Codebase Memory CBM enable disable toggle",
+          contextualProjectGroup.displayName,
+        ],
+        title: "Project optimizers",
+        description: contextualProjectGroup.displayName,
+        icon: <GaugeIcon className={ITEM_ICON_CLASS} />,
+        addonIcon: <GaugeIcon className={ADDON_ICON_CLASS} />,
+        groups: [
+          { value: "project-optimizers", label: "Project optimizers", items: optimizerItems },
+        ],
+      });
+    }
   }
 
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
