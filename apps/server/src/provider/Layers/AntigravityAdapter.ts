@@ -85,6 +85,11 @@ import {
 } from "../acp/AntigravityProtocol.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import type { EventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  CBM_MCP_SERVER_NAME,
+  readSessionOptimizerAttachments,
+  type SessionCbmAttachment,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 
 const PROVIDER = ProviderDriverKind.make("antigravity");
 const ResumeCursor = Schema.Struct({
@@ -111,6 +116,15 @@ type Runtime = Pick<
 >;
 type NativePermission = EffectAcpSchema.RequestPermissionRequest;
 type NativePermissionResponse = EffectAcpSchema.RequestPermissionResponse;
+
+function toAntigravityCbmMcpServer(attachment: SessionCbmAttachment): EffectAcpSchema.McpServer {
+  return {
+    name: CBM_MCP_SERVER_NAME,
+    command: attachment.command,
+    args: [...attachment.args],
+    env: Object.entries(attachment.env).map(([name, value]) => ({ name, value })),
+  };
+}
 
 function mapAntigravityError(threadId: ThreadId, method: string, cause: EffectAcpErrors.AcpError) {
   return isAntigravitySignInRequiredError(cause)
@@ -786,6 +800,25 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
             stopOwned,
             Effect.gen(function* () {
               const mcp = McpProviderSession.readMcpProviderSession(input.threadId);
+              const optimizerAttachments =
+                mcp?.experiment === undefined
+                  ? readSessionOptimizerAttachments(input.threadId)
+                  : undefined;
+              const mcpServers: ReadonlyArray<EffectAcpSchema.McpServer> = [
+                ...(mcp
+                  ? [
+                      {
+                        type: "http" as const,
+                        name: "t3-code",
+                        url: mcp.endpoint,
+                        headers: [{ name: "Authorization", value: mcp.authorizationHeader }],
+                      },
+                    ]
+                  : []),
+                ...(optimizerAttachments?.cbm
+                  ? [toAntigravityCbmMcpServer(optimizerAttachments.cbm)]
+                  : []),
+              ];
               // The attachments dir grant lets the agent read pasted files at
               // the paths ProviderService injects into the turn text. It is a
               // leaf directory holding only uploads.
@@ -795,16 +828,7 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
                 clientFileSystem: true,
                 additionalDirectories: [serverConfig.attachmentsDir],
                 ...(Option.isSome(cursor) ? { resumeSessionId: cursor.value.sessionId } : {}),
-                mcpServers: mcp
-                  ? [
-                      {
-                        type: "http",
-                        name: "t3-code",
-                        url: mcp.endpoint,
-                        headers: [{ name: "Authorization", value: mcp.authorizationHeader }],
-                      },
-                    ]
-                  : [],
+                mcpServers,
                 ...makeNativeLoggers({
                   nativeEventLogger: options.nativeEventLogger,
                   provider: PROVIDER,

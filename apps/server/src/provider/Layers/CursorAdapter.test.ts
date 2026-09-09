@@ -19,6 +19,8 @@ import { createModelSelection } from "@t3tools/shared/model";
 import {
   ApprovalRequestId,
   CursorSettings,
+  EnvironmentId,
+  ProjectId,
   ProviderDriverKind,
   type ProviderRuntimeEvent,
   ThreadId,
@@ -26,8 +28,13 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  clearSessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { makeCursorAdapter } from "./CursorAdapter.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
@@ -241,6 +248,141 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       }
 
       yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("composes CBM with the T3 MCP server and forwards its scoped env", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-cbm-mcp-composition");
+      const workspace = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-cbm-mcp-")),
+      );
+      const requestLogPath = NodePath.join(workspace, "requests.ndjson");
+      const argvLogPath = NodePath.join(workspace, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-cursor-cbm"),
+        threadId,
+        providerSessionId: "provider-session-cursor-cbm",
+        providerInstanceId: ProviderInstanceId.make("cursor"),
+        endpoint: "http://127.0.0.1:4317/mcp",
+        authorizationHeader: "Bearer cursor-secret",
+      });
+      setSessionOptimizerAttachments(threadId, {
+        projectId: ProjectId.make("project-cursor-cbm"),
+        cwd: workspace,
+        configured: ["cbm"],
+        attached: ["cbm"],
+        ready: ["cbm"],
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: ["serve"],
+          env: { CBM_ALLOWED_ROOT: workspace },
+        },
+      });
+
+      yield* adapter
+        .startSession({
+          threadId,
+          provider: ProviderDriverKind.make("cursor"),
+          cwd: workspace,
+          runtimeMode: "full-access",
+        })
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              McpProviderSession.clearMcpProviderSession(threadId);
+              clearSessionOptimizerAttachments(threadId);
+            }),
+          ),
+        );
+
+      const requests = yield* waitForJsonLogMatch(
+        requestLogPath,
+        (entry) => entry.method === "session/new",
+      );
+      const createRequest = requests.find((entry) => entry.method === "session/new");
+      const params = createRequest?.params as
+        | { readonly mcpServers?: ReadonlyArray<Record<string, unknown>> }
+        | undefined;
+      assert.deepStrictEqual(params?.mcpServers, [
+        {
+          type: "http",
+          name: "t3-code",
+          url: "http://127.0.0.1:4317/mcp",
+          headers: [{ name: "Authorization", value: "Bearer cursor-secret" }],
+        },
+        {
+          name: "codebase-memory",
+          command: "/tools/codebase-memory-mcp",
+          args: ["serve"],
+          env: [{ name: "CBM_ALLOWED_ROOT", value: workspace }],
+        },
+      ]);
+      assert.equal(yield* adapter.hasSession(threadId), true);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("attaches CBM without requiring a T3 MCP credential", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-cbm-without-t3-mcp");
+      const workspace = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-cbm-only-")),
+      );
+      const requestLogPath = NodePath.join(workspace, "requests.ndjson");
+      const argvLogPath = NodePath.join(workspace, "argv.txt");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, "", "utf8"));
+      const wrapperPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, argvLogPath),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+      setSessionOptimizerAttachments(threadId, {
+        projectId: ProjectId.make("project-cursor-cbm-only"),
+        cwd: workspace,
+        configured: ["cbm"],
+        attached: ["cbm"],
+        ready: ["cbm"],
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: [],
+          env: { CBM_ALLOWED_ROOT: workspace },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("cursor"),
+          cwd: workspace,
+          runtimeMode: "full-access",
+        });
+        const requests = yield* waitForJsonLogMatch(
+          requestLogPath,
+          (entry) => entry.method === "session/new",
+        );
+        const createRequest = requests.find((entry) => entry.method === "session/new");
+        const params = createRequest?.params as
+          | { readonly mcpServers?: ReadonlyArray<Record<string, unknown>> }
+          | undefined;
+        assert.deepStrictEqual(params?.mcpServers, [
+          {
+            name: "codebase-memory",
+            command: "/tools/codebase-memory-mcp",
+            args: [],
+            env: [{ name: "CBM_ALLOWED_ROOT", value: workspace }],
+          },
+        ]);
+        yield* adapter.stopSession(threadId);
+      }).pipe(Effect.ensuring(Effect.sync(() => clearSessionOptimizerAttachments(threadId))));
     }),
   );
 

@@ -35,6 +35,11 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  CBM_MCP_SERVER_NAME,
+  readSessionOptimizerAttachments,
+  removeSessionOptimizerAttachment,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   ProviderAdapterProcessError,
@@ -2858,6 +2863,23 @@ export function makeOpenCodeAdapter(
                     },
                   }),
                 );
+              }
+              const cbmAttachment = readSessionOptimizerAttachments(input.threadId)?.cbm;
+              if (cbmAttachment) {
+                if (server.external) {
+                  removeSessionOptimizerAttachment(input.threadId, "cbm");
+                } else {
+                  yield* runOpenCodeSdk("mcp.add", () =>
+                    client.mcp.add({
+                      name: CBM_MCP_SERVER_NAME,
+                      config: {
+                        type: "local",
+                        command: [cbmAttachment.command, ...cbmAttachment.args],
+                        environment: { ...cbmAttachment.env },
+                      },
+                    }),
+                  );
+                }
               }
               // Resume: re-adopt the session named by the durable cursor —
               // OpenCode scopes history by session id. The probe recovers only

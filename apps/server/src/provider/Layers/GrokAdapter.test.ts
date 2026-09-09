@@ -16,8 +16,10 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import {
+  EnvironmentId,
   ApprovalRequestId,
   GrokSettings,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -26,6 +28,11 @@ import {
 } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  clearSessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 import {
   grokPromptSettlementBelongsToContext,
   isGrokEnterPlanModeToolCall,
@@ -212,6 +219,127 @@ it("requires a settlement to match the live Grok turn", () => {
 });
 
 it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
+  it.effect("composes CBM with the T3 MCP server and forwards its scoped env", () =>
+    Effect.gen(function* () {
+      const workspace = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-cbm-mcp-")),
+      );
+      const requestLogPath = NodePath.join(workspace, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const threadId = ThreadId.make("grok-cbm-mcp-composition");
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-grok-cbm"),
+        threadId,
+        providerSessionId: "provider-session-grok-cbm",
+        providerInstanceId: ProviderInstanceId.make("grok"),
+        endpoint: "http://127.0.0.1:4317/mcp",
+        authorizationHeader: "Bearer grok-secret",
+      });
+      setSessionOptimizerAttachments(threadId, {
+        projectId: ProjectId.make("project-grok-cbm"),
+        cwd: workspace,
+        configured: ["cbm"],
+        attached: ["cbm"],
+        ready: ["cbm"],
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: ["serve"],
+          env: { CBM_ALLOWED_ROOT: workspace },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("grok"),
+          cwd: workspace,
+          runtimeMode: "full-access",
+        });
+
+        const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+        const createRequest = requests.find((entry) => entry.method === "session/new");
+        const params = createRequest?.params as
+          | { readonly mcpServers?: ReadonlyArray<Record<string, unknown>> }
+          | undefined;
+        assert.deepStrictEqual(params?.mcpServers, [
+          {
+            type: "http",
+            name: "t3-code",
+            url: "http://127.0.0.1:4317/mcp",
+            headers: [{ name: "Authorization", value: "Bearer grok-secret" }],
+          },
+          {
+            name: "codebase-memory",
+            command: "/tools/codebase-memory-mcp",
+            args: ["serve"],
+            env: [{ name: "CBM_ALLOWED_ROOT", value: workspace }],
+          },
+        ]);
+        yield* adapter.stopSession(threadId);
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            McpProviderSession.clearMcpProviderSession(threadId);
+            clearSessionOptimizerAttachments(threadId);
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("attaches CBM without requiring a T3 MCP credential", () =>
+    Effect.gen(function* () {
+      const workspace = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-cbm-only-")),
+      );
+      const requestLogPath = NodePath.join(workspace, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const threadId = ThreadId.make("grok-cbm-without-t3-mcp");
+      setSessionOptimizerAttachments(threadId, {
+        projectId: ProjectId.make("project-grok-cbm-only"),
+        cwd: workspace,
+        configured: ["cbm"],
+        attached: ["cbm"],
+        ready: ["cbm"],
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: [],
+          env: { CBM_ALLOWED_ROOT: workspace },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          threadId,
+          provider: ProviderDriverKind.make("grok"),
+          cwd: workspace,
+          runtimeMode: "full-access",
+        });
+        yield* waitForFileContent(requestLogPath, 80, '"method":"session/new"');
+        const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+        const createRequest = requests.find((entry) => entry.method === "session/new");
+        const params = createRequest?.params as
+          | { readonly mcpServers?: ReadonlyArray<Record<string, unknown>> }
+          | undefined;
+        assert.deepStrictEqual(params?.mcpServers, [
+          {
+            name: "codebase-memory",
+            command: "/tools/codebase-memory-mcp",
+            args: [],
+            env: [{ name: "CBM_ALLOWED_ROOT", value: workspace }],
+          },
+        ]);
+        yield* adapter.stopSession(threadId);
+      }).pipe(Effect.ensuring(Effect.sync(() => clearSessionOptimizerAttachments(threadId))));
+    }),
+  );
+
   it.effect("sends runtime context with the current model without changing saved prompts", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-runtime-context");

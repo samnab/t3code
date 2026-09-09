@@ -27,6 +27,7 @@ import type {
 import {
   ApprovalRequestId,
   OpenCodeSettings,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -34,6 +35,11 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  clearSessionOptimizerAttachments,
+  readSessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import type { OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
@@ -129,6 +135,7 @@ const runtimeMock = {
     questionListImplementation: null as (() => Promise<Array<QuestionRequest>>) | null,
     sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
     forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
+    mcpAddCalls: [] as Array<{ name: string; config: Record<string, unknown> }>,
   },
   reset() {
     this.state.startCalls.length = 0;
@@ -184,6 +191,7 @@ const runtimeMock = {
     this.state.questionListImplementation = null;
     this.state.sessionUpdateCalls.length = 0;
     this.state.forkCalls.length = 0;
+    this.state.mcpAddCalls.length = 0;
   },
 };
 
@@ -386,6 +394,12 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
               break;
             }
           }
+        },
+      },
+      mcp: {
+        add: async ({ name, config }: { name: string; config: Record<string, unknown> }) => {
+          runtimeMock.state.mcpAddCalls.push({ name, config });
+          return { data: {} };
         },
       },
       event: {
@@ -612,6 +626,87 @@ const questionRequest = (id: string, sessionID: string): QuestionRequest => ({
 });
 
 it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+  it.effect("registers a scoped CBM server on T3-managed OpenCode only", () => {
+    const localOpenCodeSettings = Schema.decodeSync(OpenCodeSettings)({
+      binaryPath: "fake-opencode",
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* makeOpenCodeAdapter(localOpenCodeSettings);
+      const threadId = asThreadId("thread-opencode-cbm-local");
+      const cbmRoot = "/repo/opencode-cbm";
+      setSessionOptimizerAttachments(threadId, {
+        projectId: ProjectId.make("project-opencode-cbm"),
+        cwd: cbmRoot,
+        configured: ["cbm"],
+        attached: ["cbm"],
+        ready: ["cbm"],
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: ["serve"],
+          env: { CBM_ALLOWED_ROOT: cbmRoot },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          cwd: cbmRoot,
+          runtimeMode: "full-access",
+        });
+        NodeAssert.deepEqual(runtimeMock.state.mcpAddCalls, [
+          {
+            name: "codebase-memory",
+            config: {
+              type: "local",
+              command: ["/tools/codebase-memory-mcp", "serve"],
+              environment: { CBM_ALLOWED_ROOT: cbmRoot },
+            },
+          },
+        ]);
+        yield* adapter.stopSession(threadId);
+      }).pipe(Effect.ensuring(Effect.sync(() => clearSessionOptimizerAttachments(threadId))));
+    });
+  });
+
+  it.effect("removes CBM from an externally managed OpenCode attachment", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-cbm-external");
+      const cbmRoot = "/repo/opencode-external-cbm";
+      setSessionOptimizerAttachments(threadId, {
+        projectId: ProjectId.make("project-opencode-external-cbm"),
+        cwd: cbmRoot,
+        configured: ["cbm"],
+        attached: ["cbm"],
+        ready: ["cbm"],
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: [],
+          env: { CBM_ALLOWED_ROOT: cbmRoot },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          cwd: cbmRoot,
+          runtimeMode: "full-access",
+        });
+        NodeAssert.deepEqual(runtimeMock.state.mcpAddCalls, []);
+        NodeAssert.deepEqual(readSessionOptimizerAttachments(threadId), {
+          projectId: ProjectId.make("project-opencode-external-cbm"),
+          cwd: cbmRoot,
+          configured: ["cbm"],
+          attached: [],
+          ready: [],
+        });
+        yield* adapter.stopSession(threadId);
+      }).pipe(Effect.ensuring(Effect.sync(() => clearSessionOptimizerAttachments(threadId))));
+    }),
+  );
+
   it.effect("reuses a configured OpenCode server URL instead of spawning a local server", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
@@ -629,6 +724,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.deepEqual(runtimeMock.state.authHeaders, [
         `Basic ${btoa("opencode:secret-password")}`,
       ]);
+      NodeAssert.deepEqual(runtimeMock.state.mcpAddCalls, []);
     }),
   );
 

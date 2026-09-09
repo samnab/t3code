@@ -80,6 +80,11 @@ import { withVoiceNotificationsEnv } from "../ProviderInstanceEnvironment.ts";
 import { resolveCursorAcpBaseModelId } from "./CursorProvider.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
+  CBM_MCP_SERVER_NAME,
+  readSessionOptimizerAttachments,
+  type SessionCbmAttachment,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
+import {
   discoverCursorSkills,
   hasCursorSkillMention,
   rewriteCursorSkillMentions,
@@ -91,6 +96,15 @@ const CURSOR_RESUME_VERSION = 1 as const;
 const ACP_PLAN_MODE_ALIASES = ["plan", "architect"];
 const ACP_IMPLEMENT_MODE_ALIASES = ["code", "agent", "default", "chat", "implement"];
 const ACP_APPROVAL_MODE_ALIASES = ["ask"];
+
+function toCursorCbmMcpServer(attachment: SessionCbmAttachment): EffectAcpSchema.McpServer {
+  return {
+    name: CBM_MCP_SERVER_NAME,
+    command: attachment.command,
+    args: [...attachment.args],
+    env: Object.entries(attachment.env).map(([name, value]) => ({ name, value })),
+  };
+}
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -540,6 +554,28 @@ export function makeCursorAdapter(
             : cursorSettings;
 
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+          const optimizerAttachments =
+            mcpSession?.experiment === undefined
+              ? readSessionOptimizerAttachments(input.threadId)
+              : undefined;
+          const mcpServers: ReadonlyArray<EffectAcpSchema.McpServer> = [
+            ...(mcpSession
+              ? [
+                  {
+                    type: "http" as const,
+                    name: "t3-code",
+                    url: mcpSession.endpoint,
+                    headers: [
+                      {
+                        name: "Authorization",
+                        value: mcpSession.authorizationHeader,
+                      },
+                    ],
+                  },
+                ]
+              : []),
+            ...(optimizerAttachments?.cbm ? [toCursorCbmMcpServer(optimizerAttachments.cbm)] : []),
+          ];
           const acp = yield* makeCursorAcpRuntime({
             cursorSettings: effectiveCursorSettings,
             environment: withVoiceNotificationsEnv(
@@ -551,23 +587,7 @@ export function makeCursorAdapter(
             runtimeMode: input.runtimeMode,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
-            ...(mcpSession
-              ? {
-                  mcpServers: [
-                    {
-                      type: "http" as const,
-                      name: "t3-code",
-                      url: mcpSession.endpoint,
-                      headers: [
-                        {
-                          name: "Authorization",
-                          value: mcpSession.authorizationHeader,
-                        },
-                      ],
-                    },
-                  ],
-                }
-              : {}),
+            ...(mcpServers.length > 0 ? { mcpServers } : {}),
             ...acpNativeLoggers,
           }).pipe(
             Effect.provideService(Crypto.Crypto, crypto),

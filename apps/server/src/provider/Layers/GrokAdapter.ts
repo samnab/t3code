@@ -82,6 +82,11 @@ import {
 import { type GrokAdapterShape } from "../Services/GrokAdapter.ts";
 import { withVoiceNotificationsEnv } from "../ProviderInstanceEnvironment.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  CBM_MCP_SERVER_NAME,
+  readSessionOptimizerAttachments,
+  type SessionCbmAttachment,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 
@@ -96,6 +101,15 @@ const DEFAULT_GROK_TURN_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1_000;
 // reasoning. It still needs a deadline so a lost tool update cannot leave the
 // turn working forever.
 const DEFAULT_GROK_ACTIVE_TOOL_INACTIVITY_TIMEOUT_MS = 30 * 60 * 1_000;
+
+function toGrokCbmMcpServer(attachment: SessionCbmAttachment): EffectAcpSchema.McpServer {
+  return {
+    name: CBM_MCP_SERVER_NAME,
+    command: attachment.command,
+    args: [...attachment.args],
+    env: Object.entries(attachment.env).map(([name, value]) => ({ name, value })),
+  };
+}
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -988,6 +1002,28 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           });
 
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+          const optimizerAttachments =
+            mcpSession?.experiment === undefined
+              ? readSessionOptimizerAttachments(input.threadId)
+              : undefined;
+          const mcpServers: ReadonlyArray<EffectAcpSchema.McpServer> = [
+            ...(mcpSession
+              ? [
+                  {
+                    type: "http" as const,
+                    name: "t3-code",
+                    url: mcpSession.endpoint,
+                    headers: [
+                      {
+                        name: "Authorization",
+                        value: mcpSession.authorizationHeader,
+                      },
+                    ],
+                  },
+                ]
+              : []),
+            ...(optimizerAttachments?.cbm ? [toGrokCbmMcpServer(optimizerAttachments.cbm)] : []),
+          ];
           const acp = yield* makeGrokAcpRuntime({
             grokSettings,
             environment: withVoiceNotificationsEnv(
@@ -999,23 +1035,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             runtimeMode: input.runtimeMode,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "t3-code", version: "0.0.0" },
-            ...(mcpSession
-              ? {
-                  mcpServers: [
-                    {
-                      type: "http" as const,
-                      name: "t3-code",
-                      url: mcpSession.endpoint,
-                      headers: [
-                        {
-                          name: "Authorization",
-                          value: mcpSession.authorizationHeader,
-                        },
-                      ],
-                    },
-                  ],
-                }
-              : {}),
+            ...(mcpServers.length > 0 ? { mcpServers } : {}),
             ...acpNativeLoggers,
           }).pipe(
             Effect.provideService(Crypto.Crypto, crypto),

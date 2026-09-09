@@ -3,6 +3,8 @@ import { expect, it } from "@effect/vitest";
 import {
   AntigravitySettings,
   ApprovalRequestId,
+  EnvironmentId,
+  ProjectId,
   ProviderInstanceId,
   ThreadId,
   type ProviderRuntimeEvent,
@@ -23,6 +25,11 @@ import * as AcpErrors from "effect-acp/errors";
 import type * as AcpSchema from "effect-acp/schema";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  clearSessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 import { ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE } from "../antigravityAuthSupport.ts";
 import type { AcpSessionRuntimeEvent } from "../acp/AcpSessionRuntime.ts";
 import { makeAntigravityAcpRuntime } from "../acp/AntigravityAcpSupport.ts";
@@ -302,6 +309,101 @@ const layer = ServerConfig.layerTest(process.cwd(), {
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 it.layer(layer)("AntigravityAdapter", (it) => {
+  it.effect("composes CBM with the T3 MCP server and forwards its scoped env", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const cbmThreadId = ThreadId.make("antigravity-cbm-mcp-composition");
+      const cbmRoot = "/repo/antigravity-cbm";
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-antigravity-cbm"),
+        threadId: cbmThreadId,
+        providerSessionId: "provider-session-antigravity-cbm",
+        providerInstanceId: instanceId,
+        endpoint: "http://127.0.0.1:4317/mcp",
+        authorizationHeader: "Bearer antigravity-secret",
+      });
+      setSessionOptimizerAttachments(cbmThreadId, {
+        projectId: ProjectId.make("project-antigravity-cbm"),
+        cwd: cbmRoot,
+        configured: ["cbm"],
+        attached: ["cbm"],
+        ready: ["cbm"],
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: ["serve"],
+          env: { CBM_ALLOWED_ROOT: cbmRoot },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        yield* h.adapter.startSession({
+          threadId: cbmThreadId,
+          cwd: cbmRoot,
+          runtimeMode: "full-access",
+        });
+        expect(h.launches[0]?.mcpServers).toEqual([
+          {
+            type: "http",
+            name: "t3-code",
+            url: "http://127.0.0.1:4317/mcp",
+            headers: [{ name: "Authorization", value: "Bearer antigravity-secret" }],
+          },
+          {
+            name: "codebase-memory",
+            command: "/tools/codebase-memory-mcp",
+            args: ["serve"],
+            env: [{ name: "CBM_ALLOWED_ROOT", value: cbmRoot }],
+          },
+        ]);
+        yield* h.adapter.stopSession(cbmThreadId);
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            McpProviderSession.clearMcpProviderSession(cbmThreadId);
+            clearSessionOptimizerAttachments(cbmThreadId);
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("attaches CBM without requiring a T3 MCP credential", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      const cbmThreadId = ThreadId.make("antigravity-cbm-without-t3-mcp");
+      const cbmRoot = "/repo/antigravity-cbm-only";
+      setSessionOptimizerAttachments(cbmThreadId, {
+        projectId: ProjectId.make("project-antigravity-cbm-only"),
+        cwd: cbmRoot,
+        configured: ["cbm"],
+        attached: ["cbm"],
+        ready: ["cbm"],
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: [],
+          env: { CBM_ALLOWED_ROOT: cbmRoot },
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        yield* h.adapter.startSession({
+          threadId: cbmThreadId,
+          cwd: cbmRoot,
+          runtimeMode: "full-access",
+        });
+        expect(h.launches[0]?.mcpServers).toEqual([
+          {
+            name: "codebase-memory",
+            command: "/tools/codebase-memory-mcp",
+            args: [],
+            env: [{ name: "CBM_ALLOWED_ROOT", value: cbmRoot }],
+          },
+        ]);
+        yield* h.adapter.stopSession(cbmThreadId);
+      }).pipe(Effect.ensuring(Effect.sync(() => clearSessionOptimizerAttachments(cbmThreadId))));
+    }),
+  );
+
   it.effect(
     "runs native auth, resume, models, commands, and streaming through the ACP transport",
     () =>
