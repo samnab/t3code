@@ -994,7 +994,7 @@ function optimizerAttachmentDetail(activity: OrchestrationThreadActivity): strin
   const ready = optimizerList(payload.ready);
   const format = (values: ReadonlyArray<string>) =>
     values.length > 0 ? values.join(", ") : "none";
-  return `Configured: ${format(configured)} · Attached: ${format(attached)} · Ready: ${format(ready)}`;
+  return `Session record · Configured: ${format(configured)} · Attached: ${format(attached)} · Ready: ${format(ready)}`;
 }
 
 function trimMatchingOuterQuotes(value: string): string {

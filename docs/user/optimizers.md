@@ -1,12 +1,13 @@
 # Optimizers
 
 T3 Code can connect already-installed optimizer tools to provider sessions. Open **Settings →
-Optimizers** on web or desktop, choose the environment that runs the provider, and inspect the
-host-local status. Optimizers are off for every project until you enable them. Use the command
-palette's **Project optimizers** submenu for a quick per-project toggle.
+Optimizers** on web, desktop, or mobile, choose the environment and project that run the provider,
+and inspect the host-local status. Optimizers are off for every project until you enable them. Use
+the command palette's **Project optimizers** submenu for a quick per-project toggle on web and
+desktop.
 
-The mobile app shows the same environment status, savings counters, and Codebase Memory index
-health. Mobile is an observer: configure project attachments from web or desktop.
+The mobile app shows the same environment status, environment-level savings counters, and Codebase
+Memory index health. It also lets you choose a project and toggle its optimizer attachments.
 
 ## RTK
 
@@ -32,13 +33,14 @@ savings are environment-level counters.
 
 [Install Codebase Memory](https://github.com/DeusData/codebase-memory-mcp) on the provider
 environment. T3 starts it as a project-scoped stdio MCP server for supported providers and keeps
-the index rooted at that project. Claude Code, Codex, Grok, Cursor, and Antigravity are supported
-in v1; OpenCode and Pi are not.
+the index rooted at that project. Claude Code, Codex, Grok, Cursor, Antigravity, and managed
+OpenCode are supported in v1; external OpenCode and Pi are not.
 
 The **CBM index health** section shows indexing, ready, or degraded state and node/edge counts.
 CBM does not report token savings, and T3 does not delete its index data. Use CBM's own tooling if
 you need to manage an index.
 
 When a provider session starts, T3 reports which configured optimizers were attached and which had
-positive readiness evidence. A configured optimizer can still be unavailable on a provider or
-host, so “enabled” does not mean “attached.”
+positive readiness evidence. The current thread indicator distinguishes attached tools from ready
+backends; work-log entries are session records for history. A configured optimizer can still be
+unavailable on a provider or host, so “enabled” does not mean “attached.”

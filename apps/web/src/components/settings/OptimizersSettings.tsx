@@ -1,6 +1,7 @@
 import type {
   EnvironmentId,
   OptimizerId,
+  OptimizerSavingsInterval,
   OptimizerStatus,
   OptimizerStatusSnapshot,
   ProjectId,
@@ -64,7 +65,7 @@ const OPTIMIZER_META: Readonly<
     label: "Codebase Memory",
     description: "Adds project-scoped codebase search tools through MCP.",
     mode: "stdio MCP",
-    supportedProviders: "Claude Code, Codex, Grok, Cursor, and Antigravity",
+    supportedProviders: "Claude Code, Codex, Grok, Cursor, Antigravity, and managed OpenCode",
   },
 };
 
@@ -72,6 +73,19 @@ const OPTIMIZER_ORDER: readonly OptimizerId[] = ["rtk", "headroom", "cbm"];
 
 function formatTokens(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+}
+
+function savingsIntervalLabel(interval: OptimizerSavingsInterval): string {
+  switch (interval) {
+    case "hour":
+      return "Hourly";
+    case "day":
+      return "Daily";
+    case "week":
+      return "Weekly";
+    case "month":
+      return "Monthly";
+  }
 }
 
 function statusLabel(status: OptimizerStatus | undefined): string {
@@ -100,9 +114,9 @@ function ProviderCompatibilityRow({ id }: { readonly id: OptimizerId }) {
   const meta = OPTIMIZER_META[id];
   const unsupported =
     id === "rtk"
-      ? "Cursor, Grok, OpenCode, Antigravity, and Pi are not supported"
+      ? "Cursor, Grok, external OpenCode, Antigravity, and Pi are not supported"
       : id === "cbm"
-        ? "OpenCode and Pi are not supported in v1"
+        ? "Managed OpenCode is supported; external OpenCode and Pi are not supported in v1"
         : "Other providers are not routed through Headroom by T3";
 
   return (
@@ -200,6 +214,50 @@ function SavingsRows({
           }
         />
       ))}
+    </>
+  );
+}
+
+function SavingsHistoryRows({
+  snapshot,
+  environmentConnected = true,
+}: {
+  readonly snapshot: OptimizerStatusSnapshot | null;
+  readonly environmentConnected?: boolean;
+}) {
+  if (!environmentConnected) {
+    return (
+      <SettingsRow
+        title="Savings history unavailable"
+        description="Reconnect this environment to inspect its host-local history."
+      />
+    );
+  }
+  const history = snapshot?.savingsHistory ?? [];
+  if (history.length === 0) {
+    return (
+      <SettingsRow
+        title="No savings history yet"
+        description="Headroom history appears after the selected environment records optimizer-aware work."
+      />
+    );
+  }
+
+  return (
+    <>
+      {[...history]
+        .toSorted((left, right) => right.timestamp.localeCompare(left.timestamp))
+        .slice(0, 8)
+        .map((point) => (
+          <SettingsRow
+            key={`${point.interval}:${point.timestamp}`}
+            title={`Headroom · ${savingsIntervalLabel(point.interval)}`}
+            description={`${new Date(point.timestamp).toLocaleString()} · Environment-level history`}
+            control={
+              <span className="text-sm tabular-nums">{formatTokens(point.tokensSaved)} tokens</span>
+            }
+          />
+        ))}
     </>
   );
 }
@@ -414,6 +472,17 @@ function OptimizerEnvironmentSettings({
         description="RTK and Headroom report their own environment-level counters. CBM has no token-savings telemetry."
       >
         <SavingsRows snapshot={statusQuery.data} environmentConnected={environmentConnected} />
+      </SettingsSection>
+
+      <SettingsSection
+        id="optimizer-savings-history"
+        title="Savings history"
+        description="Headroom history uses host-reported rollups and remains scoped to this environment."
+      >
+        <SavingsHistoryRows
+          snapshot={statusQuery.data}
+          environmentConnected={environmentConnected}
+        />
       </SettingsSection>
 
       <SettingsSection

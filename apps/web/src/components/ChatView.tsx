@@ -41,6 +41,7 @@ import { threadExperimentObjectiveError } from "@t3tools/client-runtime/state/th
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import { type CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
+import { latestOptimizerAttachmentForSession } from "@t3tools/client-runtime/state/optimizer-attachments";
 import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import {
   parseCodexFeedbackCommand,
@@ -2728,6 +2729,10 @@ export default function ChatView(props: ChatViewProps) {
     conversationProviderStatus.supportsConversationRollback !== false;
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  const currentOptimizerAttachment = useMemo(
+    () => latestOptimizerAttachmentForSession(threadActivities, activeThread?.session ?? null),
+    [activeThread?.session, threadActivities],
+  );
   const latestCheckpointCompletedAt = activeThread?.checkpoints.at(-1)?.completedAt ?? null;
   const workspaceMutationId = useMemo(() => {
     const activityId = latestWorkspaceMutationId(threadActivities);
@@ -8238,6 +8243,7 @@ export default function ChatView(props: ChatViewProps) {
             preferredScriptId={
               activeProject ? (lastInvokedScriptByProjectId[activeProject.id] ?? null) : null
             }
+            optimizerAttachment={currentOptimizerAttachment}
             keybindings={keybindings}
             availableEditors={availableEditors}
             rightPanelOpen={rightPanelOpen}

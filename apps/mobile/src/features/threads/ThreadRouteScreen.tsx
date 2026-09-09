@@ -18,6 +18,7 @@ import {
   threadHasOlderTurns,
 } from "@t3tools/client-runtime/state/threads";
 import { deriveTurnOutputUsage } from "@t3tools/client-runtime/state/tokenThroughput";
+import { latestOptimizerAttachmentForSession } from "@t3tools/client-runtime/state/optimizer-attachments";
 import {
   projectScriptCwd,
   projectScriptRuntimeEnv,
@@ -205,6 +206,12 @@ function ThreadRouteContent(
     useThreadSelection();
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  const currentThreadActivities = selectedThreadDetail?.activities ?? [];
+  const currentThreadSession = selectedThreadDetail?.session ?? selectedThread?.session ?? null;
+  const currentOptimizerAttachment = useMemo(
+    () => latestOptimizerAttachmentForSession(currentThreadActivities, currentThreadSession),
+    [currentThreadActivities, currentThreadSession],
+  );
   const selectedThreadOutputUsage = useMemo(
     () =>
       selectedThreadDetail?.latestTurn
@@ -801,6 +808,7 @@ function ThreadRouteContent(
           feedbackSubmissions={composer.feedbackSubmissions}
           onDismissFeedback={composer.dismissFeedback}
           selectedThreadFeed={composer.selectedThreadFeed}
+          currentOptimizerAttachment={currentOptimizerAttachment}
           turnOutputUsage={selectedThreadOutputUsage}
           activeWorkStartedAt={composer.activeWorkStartedAt}
           isCompacting={composer.isCompacting}

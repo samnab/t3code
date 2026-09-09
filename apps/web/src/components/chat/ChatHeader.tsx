@@ -6,11 +6,12 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { OptimizerAttachmentSnapshot } from "@t3tools/client-runtime/state/optimizer-attachments";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, GaugeIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -61,6 +62,7 @@ interface ChatHeaderProps {
   openInCwd: string | null;
   activeProjectScripts: ReadonlyArray<ProjectScript> | undefined;
   preferredScriptId: string | null;
+  optimizerAttachment: OptimizerAttachmentSnapshot | null;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   rightPanelOpen: boolean;
@@ -120,6 +122,55 @@ export function shouldShowOpenInPicker(input: {
   return input.remoteOpenMode !== "local-exec";
 }
 
+const OPTIMIZER_LABELS: Readonly<
+  Record<OptimizerAttachmentSnapshot["configured"][number], string>
+> = {
+  rtk: "RTK",
+  headroom: "Headroom",
+  cbm: "Codebase Memory",
+};
+const OPTIMIZER_SESSION_LABELS: Readonly<
+  Record<OptimizerAttachmentSnapshot["configured"][number], string>
+> = {
+  rtk: "RTK",
+  headroom: "via Headroom",
+  cbm: "Codebase Memory",
+};
+
+function optimizerLabels(
+  values: readonly OptimizerAttachmentSnapshot["configured"][number][],
+  session = false,
+): string {
+  const labels = session ? OPTIMIZER_SESSION_LABELS : OPTIMIZER_LABELS;
+  return values.length > 0 ? values.map((value) => labels[value]).join(", ") : "none";
+}
+
+function CurrentOptimizerIndicator({
+  attachment,
+}: {
+  readonly attachment: OptimizerAttachmentSnapshot;
+}) {
+  const attached = optimizerLabels(attachment.attached, true);
+  const detail = `Current session · Configured: ${optimizerLabels(attachment.configured)} · Attached: ${attached} · Ready: ${optimizerLabels(attachment.ready, true)}`;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            role="status"
+            aria-label={`Current session optimizers: ${attached}`}
+            className="inline-flex min-w-0 max-w-36 items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-foreground"
+          />
+        }
+      >
+        <GaugeIcon aria-hidden className="size-3.5 shrink-0" />
+        <span className="hidden truncate @4xl/header-actions:inline">{attached}</span>
+      </TooltipTrigger>
+      <TooltipPopup side="top">{detail}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
 export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
   activeThreadId,
@@ -133,6 +184,7 @@ export const ChatHeader = memo(function ChatHeader({
   openInCwd,
   activeProjectScripts,
   preferredScriptId,
+  optimizerAttachment,
   keybindings,
   availableEditors,
   rightPanelOpen,
@@ -419,6 +471,9 @@ export const ChatHeader = memo(function ChatHeader({
           "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:motion-safe:ease-out",
         )}
       >
+        {optimizerAttachment ? (
+          <CurrentOptimizerIndicator attachment={optimizerAttachment} />
+        ) : null}
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}

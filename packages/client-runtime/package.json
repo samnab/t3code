@@ -127,6 +127,10 @@
       "types": "./src/state/models.ts",
       "default": "./src/state/models.ts"
     },
+    "./state/optimizer-attachments": {
+      "types": "./src/state/optimizerAttachments.ts",
+      "default": "./src/state/optimizerAttachments.ts"
+    },
     "./state/orchestration": {
       "types": "./src/state/orchestration.ts",
       "default": "./src/state/orchestration.ts"

@@ -1,24 +1,35 @@
+import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import type {
-  EnvironmentId,
   OptimizerId,
+  OptimizerSavingsInterval,
   OptimizerStatus,
   OptimizerStatusSnapshot,
 } from "@t3tools/contracts";
 import { useNavigation } from "@react-navigation/native";
-import { useMemo } from "react";
+import { useMemo, useState, type ComponentProps } from "react";
 import { ActivityIndicator, Linking, Platform, Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
+import { ControlPillMenu } from "../../components/ControlPill";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useEnvironments } from "../../state/environments";
+import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsSection } from "./components/SettingsSection";
+import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
 const OPTIMIZER_ORDER: readonly OptimizerId[] = ["rtk", "headroom", "cbm"];
+
+const OPTIMIZER_ICONS: Readonly<Record<OptimizerId, ComponentProps<typeof SymbolView>["name"]>> = {
+  rtk: "terminal",
+  headroom: "bolt.horizontal.circle",
+  cbm: "cube",
+};
 
 const OPTIMIZER_META: Readonly<
   Record<
@@ -28,6 +39,8 @@ const OPTIMIZER_META: Readonly<
       readonly description: string;
       readonly mode: string;
       readonly installUrl: string;
+      readonly supportedProviders: string;
+      readonly unsupportedProviders: string;
     }
   >
 > = {
@@ -36,23 +49,88 @@ const OPTIMIZER_META: Readonly<
     description: "Shell output filtering",
     mode: "CLI wrapper",
     installUrl: "https://github.com/rtk-ai/rtk",
+    supportedProviders: "Claude Code (hook) and Codex (instructions)",
+    unsupportedProviders: "Cursor, Grok, external OpenCode, Antigravity, and Pi",
   },
   headroom: {
     label: "Headroom",
     description: "Local proxy detection",
     mode: "Detected proxy",
     installUrl: "https://extraheadroom.com",
+    supportedProviders: "Claude Code and Codex when routed through Headroom",
+    unsupportedProviders: "Other providers are not routed through Headroom by T3",
   },
   cbm: {
     label: "Codebase Memory",
     description: "Project-scoped MCP tools",
     mode: "stdio MCP",
     installUrl: "https://github.com/DeusData/codebase-memory-mcp",
+    supportedProviders: "Claude Code, Codex, Grok, Cursor, Antigravity, and managed OpenCode",
+    unsupportedProviders: "External OpenCode and Pi are not supported in v1",
   },
 };
 
+function OptimizerSelectionRow(props: {
+  readonly label: string;
+  readonly value: string;
+  readonly accessibilityLabel: string;
+  readonly actions: ComponentProps<typeof ControlPillMenu>["actions"];
+  readonly onSelect: (id: string) => void;
+}) {
+  return (
+    <ControlPillMenu
+      accessible
+      accessibilityRole="button"
+      accessibilityLabel={props.accessibilityLabel}
+      title={props.label}
+      actions={props.actions}
+      onPressAction={({ nativeEvent }) => props.onSelect(nativeEvent.event)}
+    >
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={props.accessibilityLabel}
+        className="flex-row items-center gap-4 p-4 active:opacity-70"
+      >
+        <SymbolView
+          name="folder"
+          size={22}
+          tintColorClassName="accent-icon"
+          type="monochrome"
+          weight="regular"
+        />
+        <View className="min-w-0 flex-1">
+          <Text className="text-lg text-foreground">{props.label}</Text>
+          <Text className="text-sm text-foreground-muted" numberOfLines={1}>
+            {props.value}
+          </Text>
+        </View>
+        <SymbolView
+          name="chevron.right"
+          size={16}
+          tintColorClassName="accent-chevron"
+          type="monochrome"
+          weight="semibold"
+        />
+      </Pressable>
+    </ControlPillMenu>
+  );
+}
+
 function formatTokens(value: number): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+}
+
+function savingsIntervalLabel(interval: OptimizerSavingsInterval): string {
+  switch (interval) {
+    case "hour":
+      return "Hourly";
+    case "day":
+      return "Daily";
+    case "week":
+      return "Weekly";
+    case "month":
+      return "Monthly";
+  }
 }
 
 function optimizerStatusLabel(status: OptimizerStatus | undefined): string {
@@ -80,12 +158,13 @@ function OptimizerRow({
   readonly onInstall?: () => void;
 }) {
   const meta = OPTIMIZER_META[id];
+  const ready = status?.installed === true && (id !== "headroom" || status.running === true);
   return (
     <View className="flex-row items-start gap-3 border-t border-border-subtle p-4 first:border-t-0">
       <SymbolView
-        name={status?.installed ? "checkmark.circle" : "exclamationmark.triangle"}
+        name={ready ? "checkmark.circle" : "exclamationmark.triangle"}
         size={22}
-        tintColorClassName={status?.installed ? "accent-icon" : "accent-warning-foreground"}
+        tintColorClassName={ready ? "accent-icon" : "accent-warning-foreground"}
         type="monochrome"
         weight="regular"
       />
@@ -164,8 +243,64 @@ function SavingsRows({ snapshot }: { readonly snapshot: OptimizerStatusSnapshot 
   );
 }
 
-function CbmIndexRows({ snapshot }: { readonly snapshot: OptimizerStatusSnapshot | null }) {
-  const indexes = snapshot?.cbmIndexes ?? [];
+function SavingsHistoryRows({ snapshot }: { readonly snapshot: OptimizerStatusSnapshot | null }) {
+  const history = snapshot?.savingsHistory ?? [];
+  if (history.length === 0) {
+    return (
+      <View className="p-4">
+        <Text className="text-base text-foreground">No savings history yet</Text>
+        <Text className="mt-1 text-sm leading-normal text-foreground-muted">
+          Headroom history appears after the selected environment records optimizer-aware work.
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <>
+      {[...history]
+        .toSorted((left, right) => right.timestamp.localeCompare(left.timestamp))
+        .slice(0, 8)
+        .map((point) => (
+          <View
+            key={`${point.interval}:${point.timestamp}`}
+            className="flex-row items-center gap-3 border-t border-border-subtle p-4 first:border-t-0"
+          >
+            <SymbolView
+              name="chart.bar.xaxis"
+              size={22}
+              tintColorClassName="accent-icon"
+              type="monochrome"
+              weight="regular"
+            />
+            <View className="min-w-0 flex-1">
+              <Text className="text-base font-t3-medium text-foreground">
+                Headroom · {savingsIntervalLabel(point.interval)}
+              </Text>
+              <Text className="text-sm text-foreground-muted" numberOfLines={1}>
+                {new Date(point.timestamp).toLocaleString()} · Environment-level history
+              </Text>
+            </View>
+            <Text className="text-sm tabular-nums text-foreground">
+              {formatTokens(point.tokensSaved)} tokens
+            </Text>
+          </View>
+        ))}
+    </>
+  );
+}
+
+function CbmIndexRows({
+  snapshot,
+  selectedProjectId,
+}: {
+  readonly snapshot: OptimizerStatusSnapshot | null;
+  readonly selectedProjectId: ProjectId | null;
+}) {
+  const indexes =
+    snapshot?.cbmIndexes.filter(
+      (index) => selectedProjectId === null || index.projectId === selectedProjectId,
+    ) ?? [];
   if (indexes.length === 0) {
     return (
       <View className="p-4">
@@ -221,18 +356,44 @@ function CbmIndexRows({ snapshot }: { readonly snapshot: OptimizerStatusSnapshot
   );
 }
 
+function ProviderCompatibilityRows() {
+  return (
+    <>
+      {OPTIMIZER_ORDER.map((id) => (
+        <View key={id} className="border-t border-border-subtle p-4 first:border-t-0">
+          <Text className="text-base font-t3-medium text-foreground">
+            {OPTIMIZER_META[id].label}
+          </Text>
+          <Text className="mt-1 text-sm text-foreground-muted">
+            Supported: {OPTIMIZER_META[id].supportedProviders}
+          </Text>
+          <Text className="mt-1 text-xs text-foreground-muted">
+            Unsupported: {OPTIMIZER_META[id].unsupportedProviders}
+          </Text>
+        </View>
+      ))}
+    </>
+  );
+}
+
 function ConnectedEnvironmentOptimizerSections({
   environmentId,
   environmentLabel,
+  connected,
+  selectedProjectId,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
+  readonly connected: boolean;
+  readonly selectedProjectId: ProjectId | null;
 }) {
   const query = useEnvironmentQuery(
-    serverEnvironment.optimizersGetStatus({
-      environmentId,
-      input: { refresh: true },
-    }),
+    connected
+      ? serverEnvironment.optimizersGetStatus({
+          environmentId,
+          input: { refresh: true },
+        })
+      : null,
   );
   const statusById = useMemo(
     () => new Map(query.data?.optimizers.map((status) => [status.id, status]) ?? []),
@@ -242,7 +403,14 @@ function ConnectedEnvironmentOptimizerSections({
   return (
     <>
       <SettingsSection title={`${environmentLabel} · Status`}>
-        {query.error ? (
+        {!connected ? (
+          <View className="p-4">
+            <Text className="text-base text-foreground">Environment is not connected</Text>
+            <Text className="mt-1 text-sm leading-normal text-foreground-muted">
+              Reconnect this environment to inspect its host-local optimizer installations.
+            </Text>
+          </View>
+        ) : query.error ? (
           <View className="items-start gap-2 p-4">
             <Text className="text-base text-danger-foreground">
               Could not check optimizer status
@@ -275,7 +443,7 @@ function ConnectedEnvironmentOptimizerSections({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Refresh optimizer status for ${environmentLabel}`}
-          disabled={query.isPending}
+          disabled={!connected || query.isPending}
           onPress={query.refresh}
           className="flex-row items-center gap-3 border-t border-border-subtle p-4 disabled:opacity-40"
         >
@@ -296,11 +464,19 @@ function ConnectedEnvironmentOptimizerSections({
         <SavingsRows snapshot={query.data} />
       </SettingsSection>
 
+      <SettingsSection title={`${environmentLabel} · Savings history`}>
+        <SavingsHistoryRows snapshot={query.data} />
+      </SettingsSection>
+
       <SettingsSection title={`${environmentLabel} · CBM index health`}>
-        <CbmIndexRows snapshot={query.data} />
+        <CbmIndexRows snapshot={query.data} selectedProjectId={selectedProjectId} />
         <Text className="px-4 pb-4 text-sm leading-normal text-foreground-muted">
           CBM has no token-savings telemetry. T3 does not delete its index data.
         </Text>
+      </SettingsSection>
+
+      <SettingsSection title={`${environmentLabel} · Provider compatibility`}>
+        <ProviderCompatibilityRows />
       </SettingsSection>
     </>
   );
@@ -310,8 +486,84 @@ export function SettingsOptimizersRouteScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const { environments } = useEnvironments();
-  const connectedEnvironments = environments.filter(
-    (environment) => environment.connection.phase === "connected",
+  const projects = useProjects();
+  const [environmentSelection, setEnvironmentSelection] = useState<EnvironmentId | null>(null);
+  const [projectSelection, setProjectSelection] = useState<ProjectId | null>(null);
+  const [savingOptimizer, setSavingOptimizer] = useState<OptimizerId | null>(null);
+  const selectedEnvironment = useMemo(
+    () =>
+      environments.find((environment) => environment.environmentId === environmentSelection) ??
+      environments[0] ??
+      null,
+    [environmentSelection, environments],
+  );
+  const selectedEnvironmentId = selectedEnvironment?.environmentId ?? null;
+  const selectedEnvironmentConnected = selectedEnvironment?.connection.phase === "connected";
+  const selectedEnvironmentConfig = useEnvironmentServerConfig(selectedEnvironmentId);
+  const environmentProjects = useMemo(
+    () =>
+      selectedEnvironmentId === null
+        ? []
+        : projects.filter((project) => project.environmentId === selectedEnvironmentId),
+    [projects, selectedEnvironmentId],
+  );
+  const selectedProject = useMemo(
+    () =>
+      environmentProjects.find((project) => project.id === projectSelection) ??
+      environmentProjects[0] ??
+      null,
+    [environmentProjects, projectSelection],
+  );
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "project optimizer setting",
+    reportFailure: true,
+  });
+  const updateProjectOptimizer = async (id: OptimizerId, enabled: boolean) => {
+    if (
+      selectedEnvironmentId === null ||
+      !selectedEnvironmentConnected ||
+      selectedEnvironmentConfig === null ||
+      selectedProject === null ||
+      savingOptimizer !== null
+    ) {
+      return;
+    }
+    setSavingOptimizer(id);
+    try {
+      await updateSettings({
+        environmentId: selectedEnvironmentId,
+        input: {
+          patch: {
+            projectOptimizerOverrides: {
+              [selectedProject.id]: { [id]: enabled },
+            },
+          },
+        },
+      });
+    } finally {
+      setSavingOptimizer(null);
+    }
+  };
+  const environmentActions = useMemo(
+    () =>
+      environments.map((environment) => ({
+        id: environment.environmentId,
+        title: environment.label,
+        subtitle: environment.connection.phase,
+        state:
+          environment.environmentId === selectedEnvironmentId ? ("on" as const) : ("off" as const),
+      })),
+    [environments, selectedEnvironmentId],
+  );
+  const projectActions = useMemo(
+    () =>
+      environmentProjects.map((project) => ({
+        id: project.id,
+        title: project.title,
+        subtitle: project.workspaceRoot,
+        state: project.id === selectedProject?.id ? ("on" as const) : ("off" as const),
+      })),
+    [environmentProjects, selectedProject?.id],
   );
 
   return (
@@ -330,27 +582,91 @@ export function SettingsOptimizersRouteScreen() {
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
       >
         <Text className="px-2 text-sm leading-normal text-foreground-muted">
-          Optimizers run where each T3 environment runs its provider sessions. Mobile observes host
-          status and environment-level savings; configure project attachments from the web or
-          desktop Settings.
+          Optimizers run where each T3 environment runs its provider sessions. Select an environment
+          and project to inspect host status and toggle project attachments.
         </Text>
-        {connectedEnvironments.length === 0 ? (
+        {environments.length === 0 ? (
           <SettingsSection title="Optimizer status">
             <View className="p-4">
               <Text className="text-base text-foreground">Connect an environment</Text>
               <Text className="mt-1 text-sm leading-normal text-foreground-muted">
-                Connect a T3 server to inspect its host-local optimizer installations.
+                Connect a T3 server to inspect and configure its host-local optimizer installations.
               </Text>
             </View>
           </SettingsSection>
         ) : (
-          connectedEnvironments.map((environment) => (
-            <ConnectedEnvironmentOptimizerSections
-              key={environment.environmentId}
-              environmentId={environment.environmentId}
-              environmentLabel={environment.label}
-            />
-          ))
+          <>
+            <SettingsSection title="Environment">
+              <OptimizerSelectionRow
+                label="T3 environment"
+                value={
+                  selectedEnvironment
+                    ? `${selectedEnvironment.label} · ${selectedEnvironment.connection.phase}`
+                    : "Select an environment"
+                }
+                accessibilityLabel="Select optimizer environment"
+                actions={environmentActions}
+                onSelect={(id) => setEnvironmentSelection(EnvironmentId.make(id))}
+              />
+            </SettingsSection>
+            {selectedEnvironment && selectedEnvironmentId !== null ? (
+              <SettingsSection title={`${selectedEnvironment.label} · Project optimizers`}>
+                {selectedProject && projectActions.length > 0 ? (
+                  <>
+                    <OptimizerSelectionRow
+                      label="Project"
+                      value={selectedProject.title}
+                      accessibilityLabel="Select optimizer project"
+                      actions={projectActions}
+                      onSelect={(id) => setProjectSelection(ProjectId.make(id))}
+                    />
+                    {OPTIMIZER_ORDER.map((id) => {
+                      const enabled =
+                        selectedEnvironmentConfig?.settings.projectOptimizerOverrides[
+                          selectedProject.id
+                        ]?.[id] ?? false;
+                      return (
+                        <SettingsSwitchRow
+                          key={id}
+                          icon={OPTIMIZER_ICONS[id]}
+                          label={OPTIMIZER_META[id].label}
+                          subtitle={
+                            id === "headroom"
+                              ? "Selects proxy use; never starts or stops Headroom"
+                              : id === "cbm"
+                                ? "Adds project-scoped MCP tools; no token savings"
+                                : "Filters supported CLI output for this project"
+                          }
+                          value={enabled}
+                          disabled={
+                            !selectedEnvironmentConnected ||
+                            selectedEnvironmentConfig === null ||
+                            savingOptimizer !== null
+                          }
+                          onValueChange={(value) => void updateProjectOptimizer(id, value)}
+                        />
+                      );
+                    })}
+                  </>
+                ) : (
+                  <View className="p-4">
+                    <Text className="text-base text-foreground">No projects available</Text>
+                    <Text className="mt-1 text-sm leading-normal text-foreground-muted">
+                      Sync a project from this environment before configuring optimizer attachments.
+                    </Text>
+                  </View>
+                )}
+              </SettingsSection>
+            ) : null}
+            {selectedEnvironment ? (
+              <ConnectedEnvironmentOptimizerSections
+                environmentId={selectedEnvironment.environmentId}
+                environmentLabel={selectedEnvironment.label}
+                connected={selectedEnvironmentConnected}
+                selectedProjectId={selectedProject?.id ?? null}
+              />
+            ) : null}
+          </>
         )}
       </ScrollView>
     </View>

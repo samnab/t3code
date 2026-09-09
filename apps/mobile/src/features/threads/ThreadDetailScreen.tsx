@@ -4,6 +4,7 @@ import {
   type CodexArtifactTemplate,
 } from "@t3tools/client-runtime/codex-artifact-templates";
 import type { ExecutionGoalPanelState } from "@t3tools/client-runtime/state/executionGoalPanel";
+import type { OptimizerAttachmentSnapshot } from "@t3tools/client-runtime/state/optimizer-attachments";
 import {
   resolveThreadGoalDisplay,
   type ThreadGoalEditorState,
@@ -67,6 +68,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { collectProviderUsageLimits } from "@t3tools/shared/usageLimits";
+import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/AppSymbol";
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
 import type { StatusTone } from "../../components/StatusPill";
 import type { DraftComposerAttachment } from "../../lib/composerImages";
@@ -117,6 +120,7 @@ export interface ThreadDetailScreenProps {
   readonly feedbackSubmissions: ReadonlyArray<CodexFeedbackSubmission>;
   readonly onDismissFeedback: (id: MessageId) => void;
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
+  readonly currentOptimizerAttachment: OptimizerAttachmentSnapshot | null;
   readonly turnOutputUsage?: ThreadFeedTurnOutputUsage | null;
   readonly activeWorkStartedAt: string | null;
   readonly isCompacting: boolean;
@@ -265,6 +269,59 @@ const USER_INPUT_TOGGLE_TIMING = {
   duration: USER_INPUT_TOGGLE_DURATION_MS,
   easing: Easing.out(Easing.cubic),
 };
+
+const OPTIMIZER_LABELS: Readonly<
+  Record<OptimizerAttachmentSnapshot["configured"][number], string>
+> = {
+  rtk: "RTK",
+  headroom: "Headroom",
+  cbm: "Codebase Memory",
+};
+
+const OPTIMIZER_SESSION_LABELS: Readonly<
+  Record<OptimizerAttachmentSnapshot["configured"][number], string>
+> = {
+  rtk: "RTK",
+  headroom: "via Headroom",
+  cbm: "Codebase Memory",
+};
+
+function optimizerLabels(
+  values: readonly OptimizerAttachmentSnapshot["configured"][number][],
+  session = false,
+) {
+  const labels = session ? OPTIMIZER_SESSION_LABELS : OPTIMIZER_LABELS;
+  return values.length > 0 ? values.map((value) => labels[value]).join(", ") : "none";
+}
+
+function CurrentOptimizerIndicator({
+  attachment,
+}: {
+  readonly attachment: OptimizerAttachmentSnapshot;
+}) {
+  return (
+    <View
+      accessibilityRole="summary"
+      accessibilityLabel={`Current session optimizers. Attached: ${optimizerLabels(attachment.attached, true)}. Ready: ${optimizerLabels(attachment.ready, true)}.`}
+      className="flex-row items-center gap-3 border-b border-adaptive-neutral-200-a80-white-a8 bg-screen px-4 py-2"
+    >
+      <SymbolView
+        name="bolt.horizontal.circle"
+        size={18}
+        tintColorClassName="accent-icon"
+        type="monochrome"
+        weight="regular"
+      />
+      <View className="min-w-0 flex-1">
+        <Text className="text-sm font-t3-medium text-foreground">Current session optimizers</Text>
+        <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+          Attached: {optimizerLabels(attachment.attached, true)} · Ready:{" "}
+          {optimizerLabels(attachment.ready, true)}
+        </Text>
+      </View>
+    </View>
+  );
+}
 
 export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: ThreadDetailScreenProps) {
   const insets = useSafeAreaInsets();
@@ -823,6 +880,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           onTouchEnd={handleFeedTouchEnd}
           onTouchCancel={handleFeedTouchCancel}
         >
+          {props.currentOptimizerAttachment ? (
+            <CurrentOptimizerIndicator attachment={props.currentOptimizerAttachment} />
+          ) : null}
           <ThreadFeed
             key={selectedThreadKey}
             environmentId={props.environmentId}
