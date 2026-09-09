@@ -1040,9 +1040,13 @@ const buildAppUnderTest = (options?: {
 
     const appLayer = servedRoutesLayer.pipe(
       Layer.provide(resourceTelemetryLayer),
-      Layer.provide(UsageService.layerTest),
-      Layer.provide(CbmIndexService.layerTest()),
-      Layer.provide(OptimizerProbeService.layerTest()),
+      Layer.provide(
+        Layer.mergeAll(
+          UsageService.layerTest,
+          CbmIndexService.layerTest(),
+          OptimizerProbeService.layerTest(),
+        ),
+      ),
       Layer.provide(
         Layer.mock(AnalyticsService.AnalyticsService)({
           record: () => Effect.void,

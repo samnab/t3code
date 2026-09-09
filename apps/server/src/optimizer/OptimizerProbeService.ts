@@ -24,7 +24,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { CbmIndexService } from "./CbmIndexService.ts";
 
 const PROBE_TIMEOUT = Duration.seconds(4);
-const HEADROOM_STATS_URL = "http://127.0.0.1:6767/stats?cached=1";
+const HEADROOM_STATS_URL = "http://127.0.0.1:6767/stats";
 
 const RtkGain = Schema.Struct({
   summary: Schema.Struct({
