@@ -22,16 +22,18 @@ import {
 
 describe("serverSettings helpers", () => {
   it("merges project optimizer flags per entry and removes a project override", () => {
+    const projectOne = ProjectId.make("project-one");
+    const projectTwo = ProjectId.make("project-two");
     const withOptimizer = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       projectOptimizerOverrides: {
-        "project-one": { rtk: true },
-        "project-two": { headroom: true },
+        [projectOne]: { rtk: true },
+        [projectTwo]: { headroom: true },
       },
     });
     const next = applyServerSettingsPatch(withOptimizer, {
       projectOptimizerOverrides: {
-        "project-one": { cbm: true },
-        "project-two": null,
+        [projectOne]: { cbm: true },
+        [projectTwo]: null,
       },
     });
 

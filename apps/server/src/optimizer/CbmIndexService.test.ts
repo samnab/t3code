@@ -20,6 +20,12 @@ const success = (stdout: string): ProcessRunOutput => ({
   stderrInvalidUtf8: false,
 });
 
+const failure = (stderr: string): ProcessRunOutput => ({
+  ...success(""),
+  stderr,
+  code: ChildProcessSpawner.ExitCode(1),
+});
+
 describe("CbmIndexService", () => {
   it.effect("publishes indexing immediately and coalesces one-shot index work", () =>
     Effect.gen(function* () {
@@ -110,6 +116,53 @@ describe("CbmIndexService", () => {
         edgeCount: 13,
         detail: "Some files were skipped.",
       });
+    }),
+  );
+
+  it.effect("retries degraded work and reindexes when the configured binary changes", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-1");
+      const indexCommands = yield* Ref.make<ReadonlyArray<string>>([]);
+      let binaryPath = "/tools/cbm-a";
+      const service = yield* makeWith({
+        run: (input) =>
+          input.args.includes("index_repository")
+            ? Ref.updateAndGet(indexCommands, (commands) => [...commands, input.command]).pipe(
+                Effect.map((commands) =>
+                  commands.length === 1
+                    ? failure("temporary index failure")
+                    : success('{"project":"repo","status":"indexed"}'),
+                ),
+              )
+            : Effect.succeed(
+                success(
+                  '{"projects":[{"name":"repo","root_path":"/repo","nodes":12,"edges":34,"size_bytes":56}]}',
+                ),
+              ),
+        getCbmBinaryPath: Effect.sync(() => binaryPath),
+        resolvePath: (path) => path,
+        now: Effect.succeed("2026-01-01T00:00:00.000Z"),
+      });
+
+      expect(yield* service.ensureIndexed({ projectId, cwd: "/repo" })).toMatchObject({
+        state: "degraded",
+        detail: "temporary index failure",
+      });
+      expect(yield* service.ensureIndexed({ projectId, cwd: "/repo" })).toMatchObject({
+        state: "ready",
+      });
+      yield* service.ensureIndexed({ projectId, cwd: "/repo" });
+      expect(yield* Ref.get(indexCommands)).toEqual(["/tools/cbm-a", "/tools/cbm-a"]);
+
+      binaryPath = "/tools/cbm-b";
+      expect(yield* service.ensureIndexed({ projectId, cwd: "/repo" })).toMatchObject({
+        state: "ready",
+      });
+      expect(yield* Ref.get(indexCommands)).toEqual([
+        "/tools/cbm-a",
+        "/tools/cbm-a",
+        "/tools/cbm-b",
+      ]);
     }),
   );
 });

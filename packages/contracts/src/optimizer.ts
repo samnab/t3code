@@ -36,9 +36,23 @@ export const OptimizerSavingsSummary = Schema.Struct({
 });
 export type OptimizerSavingsSummary = typeof OptimizerSavingsSummary.Type;
 
+export const OptimizerSavingsInterval = Schema.Literals(["hour", "day", "week", "month"]);
+export type OptimizerSavingsInterval = typeof OptimizerSavingsInterval.Type;
+
+/** A Headroom rollup delta from the host-local savings history. */
+export const OptimizerSavingsPoint = Schema.Struct({
+  source: Schema.Literal("headroom"),
+  scope: Schema.Literal("environment"),
+  interval: OptimizerSavingsInterval,
+  timestamp: IsoDateTime,
+  tokensSaved: NonNegativeInt,
+});
+export type OptimizerSavingsPoint = typeof OptimizerSavingsPoint.Type;
+
 export const OptimizerStatusSnapshot = Schema.Struct({
   optimizers: Schema.Array(OptimizerStatus),
   savings: Schema.Array(OptimizerSavingsSummary),
+  savingsHistory: Schema.Array(OptimizerSavingsPoint),
   cbmIndexes: Schema.Array(
     Schema.Struct({
       projectId: ProjectId,

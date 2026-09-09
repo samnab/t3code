@@ -37,8 +37,9 @@ const decodeIndexResult = Schema.decodeUnknownOption(Schema.fromJsonString(CbmIn
 const decodeProjectList = Schema.decodeUnknownOption(Schema.fromJsonString(CbmProjectList));
 
 interface CbmIndexJob {
+  readonly binaryPath: string | null;
   readonly status: CbmProjectIndexStatus;
-  readonly completion: Deferred.Deferred<CbmProjectIndexStatus>;
+  readonly completion: Deferred.Deferred<CbmProjectIndexStatus> | null;
 }
 
 export interface CbmIndexServiceDependencies {
@@ -54,9 +55,8 @@ export class CbmIndexService extends Context.Service<
   CbmIndexService,
   {
     /**
-     * Run the first index requested for a project/root pair and share that
-     * terminal result with concurrent callers. Callers may fork this effect
-     * when provider startup must continue without waiting for indexing.
+     * Index a project/root for the configured binary and share in-flight work
+     * with concurrent callers. A degraded result retries on the next call.
      */
     readonly ensureIndexed: (input: {
       readonly projectId: ProjectId;
@@ -109,13 +109,15 @@ export const makeWith = Effect.fn("CbmIndexService.makeWith")(function* (
 
   const finish = Effect.fn("CbmIndexService.finish")(function* (
     key: string,
+    binaryPath: string | null,
     completion: Deferred.Deferred<CbmProjectIndexStatus>,
     status: CbmProjectIndexStatus,
   ) {
     yield* jobsLock.withPermit(
       Ref.update(jobsRef, (jobs) => {
+        if (jobs.get(key)?.completion !== completion) return jobs;
         const next = new Map(jobs);
-        next.set(key, { status, completion });
+        next.set(key, { binaryPath, status, completion: null });
         return next;
       }),
     );
@@ -248,11 +250,22 @@ export const makeWith = Effect.fn("CbmIndexService.makeWith")(function* (
       Effect.gen(function* () {
         const repoPath = dependencies.resolvePath(input.cwd);
         const key = statusKey(input.projectId, repoPath);
+        const binaryPathResult = yield* Effect.exit(restore(dependencies.getCbmBinaryPath));
+        const binaryPath = binaryPathResult._tag === "Success" ? binaryPathResult.value : null;
         const job = yield* jobsLock.withPermit(
           Effect.gen(function* () {
             const jobs = yield* Ref.get(jobsRef);
             const existing = jobs.get(key);
-            if (existing !== undefined) return { existing } as const;
+            if (existing?.completion !== null && existing?.completion !== undefined) {
+              return { _tag: "InFlight" as const, completion: existing.completion };
+            }
+            if (
+              existing?.status.state === "ready" &&
+              binaryPath !== null &&
+              existing.binaryPath === binaryPath
+            ) {
+              return { _tag: "Ready" as const, status: existing.status };
+            }
 
             const completion = yield* Deferred.make<CbmProjectIndexStatus>();
             const checkedAt = yield* dependencies.now;
@@ -263,30 +276,34 @@ export const makeWith = Effect.fn("CbmIndexService.makeWith")(function* (
               checkedAt,
             } satisfies CbmProjectIndexStatus;
             const next = new Map(jobs);
-            next.set(key, { status, completion });
+            next.set(key, { binaryPath, status, completion });
             yield* Ref.set(jobsRef, next);
-            return { completion } as const;
+            return { _tag: "Started" as const, completion };
           }),
         );
-        if ("existing" in job) return yield* restore(Deferred.await(job.existing.completion));
+        if (job._tag === "InFlight") return yield* restore(Deferred.await(job.completion));
+        if (job._tag === "Ready") return job.status;
+
+        if (binaryPath === null) {
+          const checkedAt = yield* dependencies.now;
+          return yield* finish(key, binaryPath, job.completion, {
+            projectId: input.projectId,
+            repoPath,
+            state: "degraded",
+            checkedAt,
+            detail: "CBM indexing did not complete.",
+          });
+        }
 
         const exit = yield* Effect.exit(
-          restore(
-            dependencies.getCbmBinaryPath.pipe(
-              Effect.flatMap((binaryPath) =>
-                runIndex({
-                  projectId: input.projectId,
-                  repoPath,
-                  binaryPath,
-                }),
-              ),
-            ),
-          ),
+          restore(runIndex({ projectId: input.projectId, repoPath, binaryPath })),
         );
-        if (exit._tag === "Success") return yield* finish(key, job.completion, exit.value);
+        if (exit._tag === "Success") {
+          return yield* finish(key, binaryPath, job.completion, exit.value);
+        }
 
         const checkedAt = yield* dependencies.now;
-        return yield* finish(key, job.completion, {
+        return yield* finish(key, binaryPath, job.completion, {
           projectId: input.projectId,
           repoPath,
           state: "degraded",

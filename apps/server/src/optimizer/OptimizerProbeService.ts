@@ -1,12 +1,15 @@
 import {
   DEFAULT_CBM_BINARY_PATH,
   type CbmProjectIndexStatus,
+  type OptimizerSavingsInterval,
+  type OptimizerSavingsPoint,
   type OptimizerSavingsSummary,
   type OptimizerStatus,
   type OptimizerStatusSnapshot,
   type ServerSettingsError,
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -24,7 +27,9 @@ import * as ServerSettings from "../serverSettings.ts";
 import { CbmIndexService } from "./CbmIndexService.ts";
 
 const PROBE_TIMEOUT = Duration.seconds(4);
+const REFRESH_COOLDOWN_MS = 5_000;
 const HEADROOM_STATS_URL = "http://127.0.0.1:6767/stats";
+const HEADROOM_HISTORY_URL = "http://127.0.0.1:6767/stats-history";
 
 const RtkGain = Schema.Struct({
   summary: Schema.Struct({
@@ -33,24 +38,33 @@ const RtkGain = Schema.Struct({
 });
 
 const HeadroomStats = Schema.Struct({
-  savings: Schema.optionalKey(Schema.Unknown),
-  tokens: Schema.optionalKey(Schema.Unknown),
   display_session: Schema.optionalKey(Schema.Unknown),
 });
 
-const HeadroomSavings = Schema.Struct({ total_tokens: Schema.optionalKey(Schema.Unknown) });
-const HeadroomTokens = Schema.Struct({ saved: Schema.optionalKey(Schema.Unknown) });
 const HeadroomDisplaySession = Schema.Struct({ tokens_saved: Schema.optionalKey(Schema.Unknown) });
+const HeadroomHistoryPoint = Schema.Struct({
+  timestamp: Schema.String,
+  tokens_saved: Schema.Unknown,
+});
+const HeadroomHistorySeries = Schema.Struct({
+  hourly: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  daily: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  weekly: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+  monthly: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+});
+const HeadroomHistory = Schema.Struct({ series: Schema.optionalKey(Schema.Unknown) });
 
 const decodeRtkGain = Schema.decodeUnknownOption(Schema.fromJsonString(RtkGain));
 const decodeHeadroomStats = Schema.decodeUnknownOption(HeadroomStats);
-const decodeHeadroomSavings = Schema.decodeUnknownOption(HeadroomSavings);
-const decodeHeadroomTokens = Schema.decodeUnknownOption(HeadroomTokens);
 const decodeHeadroomDisplaySession = Schema.decodeUnknownOption(HeadroomDisplaySession);
+const decodeHeadroomHistory = Schema.decodeUnknownOption(HeadroomHistory);
+const decodeHeadroomHistorySeries = Schema.decodeUnknownOption(HeadroomHistorySeries);
+const decodeHeadroomHistoryPoint = Schema.decodeUnknownOption(HeadroomHistoryPoint);
 
 interface OptimizerDiscoverySnapshot {
   readonly optimizers: ReadonlyArray<OptimizerStatus>;
   readonly savings: ReadonlyArray<OptimizerSavingsSummary>;
+  readonly savingsHistory: ReadonlyArray<OptimizerSavingsPoint>;
 }
 
 export interface OptimizerProbeDependencies {
@@ -59,9 +73,11 @@ export interface OptimizerProbeDependencies {
   ) => Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError>;
   readonly isMissingResult: (result: ProcessRunner.ProcessRunOutput) => Effect.Effect<boolean>;
   readonly fetchHeadroomStats: Effect.Effect<unknown, HeadroomStatsProbeError>;
+  readonly fetchHeadroomHistory: Effect.Effect<unknown, HeadroomStatsProbeError>;
   readonly getCbmBinaryPath: Effect.Effect<string, ServerSettingsError>;
   readonly listCbmIndexes: Effect.Effect<ReadonlyArray<CbmProjectIndexStatus>>;
   readonly now: Effect.Effect<string>;
+  readonly nowMs: Effect.Effect<number>;
 }
 
 class HeadroomStatsProbeError extends Schema.TaggedErrorClass<HeadroomStatsProbeError>()(
@@ -91,18 +107,42 @@ export function parseHeadroomSavings(input: unknown): number | null {
   const stats = decodeHeadroomStats(input);
   if (Option.isNone(stats)) return null;
 
-  const savings = decodeHeadroomSavings(stats.value.savings);
-  if (Option.isSome(savings)) {
-    const count = safeTokenCount(savings.value.total_tokens);
-    if (count !== null) return count;
-  }
-  const tokens = decodeHeadroomTokens(stats.value.tokens);
-  if (Option.isSome(tokens)) {
-    const count = safeTokenCount(tokens.value.saved);
-    if (count !== null) return count;
-  }
   const displaySession = decodeHeadroomDisplaySession(stats.value.display_session);
   return Option.isSome(displaySession) ? safeTokenCount(displaySession.value.tokens_saved) : null;
+}
+
+export function parseHeadroomSavingsHistory(input: unknown): ReadonlyArray<OptimizerSavingsPoint> {
+  const history = decodeHeadroomHistory(input);
+  if (Option.isNone(history)) return [];
+  const series = decodeHeadroomHistorySeries(history.value.series);
+  if (Option.isNone(series)) return [];
+
+  const intervals: ReadonlyArray<
+    readonly [OptimizerSavingsInterval, ReadonlyArray<unknown> | undefined]
+  > = [
+    ["hour", series.value.hourly],
+    ["day", series.value.daily],
+    ["week", series.value.weekly],
+    ["month", series.value.monthly],
+  ];
+  const points: OptimizerSavingsPoint[] = [];
+  for (const [interval, entries] of intervals) {
+    for (const entry of entries ?? []) {
+      const decoded = decodeHeadroomHistoryPoint(entry);
+      if (Option.isNone(decoded)) continue;
+      const timestamp = DateTime.make(decoded.value.timestamp);
+      const tokensSaved = safeTokenCount(decoded.value.tokens_saved);
+      if (Option.isNone(timestamp) || tokensSaved === null) continue;
+      points.push({
+        source: "headroom",
+        scope: "environment",
+        interval,
+        timestamp: DateTime.formatIso(timestamp.value),
+        tokensSaved,
+      });
+    }
+  }
+  return points;
 }
 
 const versionFromOutput = (output: string): string | null =>
@@ -130,7 +170,9 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
   const cache = yield* Ref.make<{
     readonly revision: number;
     readonly snapshot: OptimizerDiscoverySnapshot | null;
-  }>({ revision: 0, snapshot: null });
+    readonly cbmBinaryPath: string | null;
+    readonly refreshedAtMs: number | null;
+  }>({ revision: 0, snapshot: null, cbmBinaryPath: null, refreshedAtMs: null });
   const refreshLock = yield* Semaphore.make(1);
 
   const versionProbe = Effect.fn("OptimizerProbeService.versionProbe")(function* (
@@ -151,35 +193,51 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
         }),
       );
     if (attempt._tag === "Left") {
-      return isMissingRunError(attempt.left)
-        ? { installed: false, version: null, detail: "Command was not found." }
-        : { installed: true, version: null, detail: failureDetail(attempt.left) };
+      return {
+        installed: false,
+        version: null,
+        detail: isMissingRunError(attempt.left)
+          ? "Command was not found."
+          : failureDetail(attempt.left),
+      };
     }
     if (yield* dependencies.isMissingResult(attempt.right)) {
       return { installed: false, version: null, detail: "Command was not found." };
     }
     const version = versionFromOutput(`${attempt.right.stdout}\n${attempt.right.stderr}`);
-    return {
-      installed: true,
-      version,
-      ...(attempt.right.code === 0
-        ? version === null
-          ? { detail: "The installed version could not be parsed." }
-          : {}
-        : { detail: `Version probe exited with code ${String(attempt.right.code)}.` }),
-    };
+    if (attempt.right.timedOut) {
+      return { installed: false, version: null, detail: "Version probe timed out." };
+    }
+    if (attempt.right.code !== 0) {
+      return {
+        installed: false,
+        version,
+        detail: `Version probe exited with code ${String(attempt.right.code)}.`,
+      };
+    }
+    if (version === null) {
+      return {
+        installed: false,
+        version: null,
+        detail: "The installed version could not be parsed.",
+      };
+    }
+    return { installed: true, version };
   });
 
-  const discover = Effect.fn("OptimizerProbeService.discover")(function* () {
-    const cbmBinaryPath = yield* dependencies.getCbmBinaryPath.pipe(
-      Effect.catchCause(() => Effect.succeed(DEFAULT_CBM_BINARY_PATH)),
-    );
-    const [rtk, cbm, headroomCli, headroomStatsResult] = yield* Effect.all(
+  const discover = Effect.fn("OptimizerProbeService.discover")(function* (cbmBinaryPath: string) {
+    const [rtk, cbm, headroomCli, headroomStatsResult, headroomHistoryResult] = yield* Effect.all(
       [
         versionProbe("rtk"),
         versionProbe(cbmBinaryPath),
         versionProbe("headroom"),
         dependencies.fetchHeadroomStats.pipe(
+          Effect.match({
+            onFailure: (left) => ({ _tag: "Left" as const, left }),
+            onSuccess: (right) => ({ _tag: "Right" as const, right }),
+          }),
+        ),
+        dependencies.fetchHeadroomHistory.pipe(
           Effect.match({
             onFailure: (left) => ({ _tag: "Left" as const, left }),
             onSuccess: (right) => ({ _tag: "Right" as const, right }),
@@ -198,6 +256,10 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
     const headroomSavings = Option.isSome(headroomStats)
       ? parseHeadroomSavings(headroomStats.value)
       : null;
+    const savingsHistory =
+      headroomRunning && headroomHistoryResult._tag === "Right"
+        ? parseHeadroomSavingsHistory(headroomHistoryResult.right)
+        : [];
 
     const rtkSavings = rtk.installed
       ? yield* dependencies
@@ -267,23 +329,36 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
             },
           ]),
     ];
-    return { optimizers, savings } satisfies OptimizerDiscoverySnapshot;
+    return { optimizers, savings, savingsHistory } satisfies OptimizerDiscoverySnapshot;
   });
 
   const getStatus: OptimizerProbeService["Service"]["getStatus"] = (input) =>
     Effect.gen(function* () {
+      const cbmBinaryPath = yield* dependencies.getCbmBinaryPath.pipe(
+        Effect.catchCause(() => Effect.succeed(DEFAULT_CBM_BINARY_PATH)),
+      );
+      const nowMs = yield* dependencies.nowMs;
       const observedRevision = (yield* Ref.get(cache)).revision;
       const snapshot = yield* refreshLock.withPermit(
         Effect.gen(function* () {
           const current = yield* Ref.get(cache);
+          const sameCbmBinary = current.cbmBinaryPath === cbmBinaryPath;
+          const refreshIsCoolingDown =
+            current.refreshedAtMs !== null && nowMs - current.refreshedAtMs < REFRESH_COOLDOWN_MS;
           if (
             current.snapshot !== null &&
-            (!input.refresh || current.revision !== observedRevision)
+            sameCbmBinary &&
+            (!input.refresh || current.revision !== observedRevision || refreshIsCoolingDown)
           ) {
             return current.snapshot;
           }
-          const next = yield* discover();
-          yield* Ref.set(cache, { revision: current.revision + 1, snapshot: next });
+          const next = yield* discover(cbmBinaryPath);
+          yield* Ref.set(cache, {
+            revision: current.revision + 1,
+            snapshot: next,
+            cbmBinaryPath,
+            refreshedAtMs: nowMs,
+          });
           return next;
         }),
       );
@@ -315,11 +390,18 @@ export const make = Effect.gen(function* () {
       Effect.timeout(Duration.seconds(2)),
       Effect.mapError(() => new HeadroomStatsProbeError()),
     ),
+    fetchHeadroomHistory: httpClient.get(HEADROOM_HISTORY_URL).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap((response) => response.json),
+      Effect.timeout(Duration.seconds(2)),
+      Effect.mapError(() => new HeadroomStatsProbeError()),
+    ),
     getCbmBinaryPath: settings.getSettings.pipe(
       Effect.map((current) => current.optimizerBinaryPaths.cbm),
     ),
     listCbmIndexes: cbmIndexes.listStatuses,
     now: DateTime.now.pipe(Effect.map(DateTime.formatIso)),
+    nowMs: Clock.currentTimeMillis,
   });
 });
 
@@ -359,6 +441,7 @@ export const layerTest = (snapshot?: OptimizerStatusSnapshot) =>
               },
             ],
             savings: [],
+            savingsHistory: [],
             cbmIndexes: [],
           },
         ),
