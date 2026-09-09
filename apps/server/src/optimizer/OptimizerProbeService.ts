@@ -1,5 +1,7 @@
 import {
   DEFAULT_CBM_BINARY_PATH,
+  DEFAULT_HEADROOM_PROXY_URL,
+  normalizeHeadroomProxyUrl,
   type CbmProjectIndexStatus,
   type OptimizerSavingsInterval,
   type OptimizerSavingsPoint,
@@ -28,8 +30,6 @@ import { CbmIndexService } from "./CbmIndexService.ts";
 
 const PROBE_TIMEOUT = Duration.seconds(4);
 const REFRESH_COOLDOWN_MS = 5_000;
-const HEADROOM_STATS_URL = "http://127.0.0.1:6767/stats";
-const HEADROOM_HISTORY_URL = "http://127.0.0.1:6767/stats-history";
 
 const RtkGain = Schema.Struct({
   summary: Schema.Struct({
@@ -38,7 +38,13 @@ const RtkGain = Schema.Struct({
 });
 
 const HeadroomStats = Schema.Struct({
-  display_session: Schema.optionalKey(Schema.Unknown),
+  display_session: Schema.Unknown,
+});
+
+const HeadroomHealth = Schema.Struct({
+  service: Schema.Literal("headroom-proxy"),
+  status: Schema.Literals(["healthy", "unhealthy"]),
+  version: Schema.optionalKey(Schema.String),
 });
 
 const HeadroomDisplaySession = Schema.Struct({ tokens_saved: Schema.optionalKey(Schema.Unknown) });
@@ -56,6 +62,7 @@ const HeadroomHistory = Schema.Struct({ series: Schema.optionalKey(Schema.Unknow
 
 const decodeRtkGain = Schema.decodeUnknownOption(Schema.fromJsonString(RtkGain));
 const decodeHeadroomStats = Schema.decodeUnknownOption(HeadroomStats);
+const decodeHeadroomHealth = Schema.decodeUnknownOption(HeadroomHealth);
 const decodeHeadroomDisplaySession = Schema.decodeUnknownOption(HeadroomDisplaySession);
 const decodeHeadroomHistory = Schema.decodeUnknownOption(HeadroomHistory);
 const decodeHeadroomHistorySeries = Schema.decodeUnknownOption(HeadroomHistorySeries);
@@ -72,9 +79,17 @@ export interface OptimizerProbeDependencies {
     input: ProcessRunner.ProcessRunInput,
   ) => Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError>;
   readonly isMissingResult: (result: ProcessRunner.ProcessRunOutput) => Effect.Effect<boolean>;
-  readonly fetchHeadroomStats: Effect.Effect<unknown, HeadroomStatsProbeError>;
-  readonly fetchHeadroomHistory: Effect.Effect<unknown, HeadroomStatsProbeError>;
+  readonly fetchHeadroomStats: (
+    proxyUrl: string,
+  ) => Effect.Effect<unknown, HeadroomStatsProbeError>;
+  readonly fetchHeadroomHealth: (
+    proxyUrl: string,
+  ) => Effect.Effect<unknown, HeadroomStatsProbeError>;
+  readonly fetchHeadroomHistory: (
+    proxyUrl: string,
+  ) => Effect.Effect<unknown, HeadroomStatsProbeError>;
   readonly getCbmBinaryPath: Effect.Effect<string, ServerSettingsError>;
+  readonly getHeadroomProxyUrl: Effect.Effect<string, ServerSettingsError>;
   readonly listCbmIndexes: Effect.Effect<ReadonlyArray<CbmProjectIndexStatus>>;
   readonly now: Effect.Effect<string>;
   readonly nowMs: Effect.Effect<number>;
@@ -171,8 +186,15 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
     readonly revision: number;
     readonly snapshot: OptimizerDiscoverySnapshot | null;
     readonly cbmBinaryPath: string | null;
+    readonly headroomProxyUrl: string | null;
     readonly refreshedAtMs: number | null;
-  }>({ revision: 0, snapshot: null, cbmBinaryPath: null, refreshedAtMs: null });
+  }>({
+    revision: 0,
+    snapshot: null,
+    cbmBinaryPath: null,
+    headroomProxyUrl: null,
+    refreshedAtMs: null,
+  });
   const refreshLock = yield* Semaphore.make(1);
 
   const versionProbe = Effect.fn("OptimizerProbeService.versionProbe")(function* (
@@ -225,19 +247,35 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
     return { installed: true, version };
   });
 
-  const discover = Effect.fn("OptimizerProbeService.discover")(function* (cbmBinaryPath: string) {
-    const [rtk, cbm, headroomCli, headroomStatsResult, headroomHistoryResult] = yield* Effect.all(
+  const discover = Effect.fn("OptimizerProbeService.discover")(function* (
+    cbmBinaryPath: string,
+    headroomProxyUrl: string,
+  ) {
+    const [
+      rtk,
+      cbm,
+      headroomCli,
+      headroomStatsResult,
+      headroomHealthResult,
+      headroomHistoryResult,
+    ] = yield* Effect.all(
       [
         versionProbe("rtk"),
         versionProbe(cbmBinaryPath),
         versionProbe("headroom"),
-        dependencies.fetchHeadroomStats.pipe(
+        dependencies.fetchHeadroomStats(headroomProxyUrl).pipe(
           Effect.match({
             onFailure: (left) => ({ _tag: "Left" as const, left }),
             onSuccess: (right) => ({ _tag: "Right" as const, right }),
           }),
         ),
-        dependencies.fetchHeadroomHistory.pipe(
+        dependencies.fetchHeadroomHealth(headroomProxyUrl).pipe(
+          Effect.match({
+            onFailure: (left) => ({ _tag: "Left" as const, left }),
+            onSuccess: (right) => ({ _tag: "Right" as const, right }),
+          }),
+        ),
+        dependencies.fetchHeadroomHistory(headroomProxyUrl).pipe(
           Effect.match({
             onFailure: (left) => ({ _tag: "Left" as const, left }),
             onSuccess: (right) => ({ _tag: "Right" as const, right }),
@@ -252,10 +290,20 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
       headroomStatsResult._tag === "Right"
         ? decodeHeadroomStats(headroomStatsResult.right)
         : Option.none();
-    const headroomRunning = Option.isSome(headroomStats);
-    const headroomSavings = Option.isSome(headroomStats)
-      ? parseHeadroomSavings(headroomStats.value)
-      : null;
+    const headroomHealth =
+      headroomHealthResult._tag === "Right"
+        ? decodeHeadroomHealth(headroomHealthResult.right)
+        : Option.none();
+    const headroomReportedUnhealthy =
+      Option.isSome(headroomHealth) && headroomHealth.value.status === "unhealthy";
+    const headroomRunning =
+      !headroomReportedUnhealthy &&
+      (Option.isSome(headroomStats) ||
+        (Option.isSome(headroomHealth) && headroomHealth.value.status === "healthy"));
+    const headroomSavings =
+      headroomRunning && Option.isSome(headroomStats)
+        ? parseHeadroomSavings(headroomStats.value)
+        : null;
     const savingsHistory =
       headroomRunning && headroomHistoryResult._tag === "Right"
         ? parseHeadroomSavingsHistory(headroomHistoryResult.right)
@@ -287,16 +335,30 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
       },
       {
         id: "headroom",
-        installed: headroomRunning || headroomCli.installed,
-        version: headroomCli.version,
+        installed:
+          headroomCli.installed || Option.isSome(headroomStats) || Option.isSome(headroomHealth),
+        version:
+          headroomCli.version ??
+          (Option.isSome(headroomHealth)
+            ? versionFromOutput(headroomHealth.value.version ?? "")
+            : null),
         running: headroomRunning,
         mode: "detected-proxy",
         checkedAt,
-        ...(!headroomRunning && headroomCli.installed
-          ? { detail: "Headroom is installed, but its local proxy is not responding." }
-          : !headroomRunning && headroomCli.detail !== undefined
-            ? { detail: headroomCli.detail }
-            : {}),
+        ...(headroomReportedUnhealthy
+          ? { detail: "The configured Headroom proxy reported an unhealthy status." }
+          : !headroomRunning && headroomHealthResult._tag === "Right"
+            ? { detail: "The configured endpoint did not identify itself as a Headroom proxy." }
+            : !headroomRunning && headroomCli.installed
+              ? {
+                  detail:
+                    "Headroom is installed, but its configured local proxy is not responding.",
+                }
+              : !headroomRunning && headroomCli.detail !== undefined
+                ? { detail: headroomCli.detail }
+                : headroomRunning && Option.isNone(headroomStats)
+                  ? { detail: "Headroom is running, but savings statistics are unavailable." }
+                  : {}),
       },
       {
         id: "cbm",
@@ -337,26 +399,34 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
       const cbmBinaryPath = yield* dependencies.getCbmBinaryPath.pipe(
         Effect.catchCause(() => Effect.succeed(DEFAULT_CBM_BINARY_PATH)),
       );
+      const configuredHeadroomProxyUrl = yield* dependencies.getHeadroomProxyUrl.pipe(
+        Effect.catchCause(() => Effect.succeed(DEFAULT_HEADROOM_PROXY_URL)),
+      );
+      const headroomProxyUrl =
+        normalizeHeadroomProxyUrl(configuredHeadroomProxyUrl) ?? DEFAULT_HEADROOM_PROXY_URL;
       const nowMs = yield* dependencies.nowMs;
       const observedRevision = (yield* Ref.get(cache)).revision;
       const snapshot = yield* refreshLock.withPermit(
         Effect.gen(function* () {
           const current = yield* Ref.get(cache);
           const sameCbmBinary = current.cbmBinaryPath === cbmBinaryPath;
+          const sameHeadroomProxy = current.headroomProxyUrl === headroomProxyUrl;
           const refreshIsCoolingDown =
             current.refreshedAtMs !== null && nowMs - current.refreshedAtMs < REFRESH_COOLDOWN_MS;
           if (
             current.snapshot !== null &&
             sameCbmBinary &&
+            sameHeadroomProxy &&
             (!input.refresh || current.revision !== observedRevision || refreshIsCoolingDown)
           ) {
             return current.snapshot;
           }
-          const next = yield* discover(cbmBinaryPath);
+          const next = yield* discover(cbmBinaryPath, headroomProxyUrl);
           yield* Ref.set(cache, {
             revision: current.revision + 1,
             snapshot: next,
             cbmBinaryPath,
+            headroomProxyUrl,
             refreshedAtMs: nowMs,
           });
           return next;
@@ -384,20 +454,32 @@ export const make = Effect.gen(function* () {
       ProcessRunner.isWindowsCommandNotFound(Number(result.code), result.stderr).pipe(
         Effect.provideService(HostProcessPlatform, hostPlatform),
       ),
-    fetchHeadroomStats: httpClient.get(HEADROOM_STATS_URL).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.timeout(Duration.seconds(2)),
-      Effect.mapError(() => new HeadroomStatsProbeError()),
-    ),
-    fetchHeadroomHistory: httpClient.get(HEADROOM_HISTORY_URL).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.timeout(Duration.seconds(2)),
-      Effect.mapError(() => new HeadroomStatsProbeError()),
-    ),
+    fetchHeadroomStats: (proxyUrl) =>
+      httpClient.get(`${proxyUrl}/stats`).pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap((response) => response.json),
+        Effect.timeout(Duration.seconds(2)),
+        Effect.mapError(() => new HeadroomStatsProbeError()),
+      ),
+    fetchHeadroomHealth: (proxyUrl) =>
+      httpClient.get(`${proxyUrl}/health`).pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap((response) => response.json),
+        Effect.timeout(Duration.seconds(2)),
+        Effect.mapError(() => new HeadroomStatsProbeError()),
+      ),
+    fetchHeadroomHistory: (proxyUrl) =>
+      httpClient.get(`${proxyUrl}/stats-history`).pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap((response) => response.json),
+        Effect.timeout(Duration.seconds(2)),
+        Effect.mapError(() => new HeadroomStatsProbeError()),
+      ),
     getCbmBinaryPath: settings.getSettings.pipe(
       Effect.map((current) => current.optimizerBinaryPaths.cbm),
+    ),
+    getHeadroomProxyUrl: settings.getSettings.pipe(
+      Effect.map((current) => current.headroomProxyUrl),
     ),
     listCbmIndexes: cbmIndexes.listStatuses,
     now: DateTime.now.pipe(Effect.map(DateTime.formatIso)),

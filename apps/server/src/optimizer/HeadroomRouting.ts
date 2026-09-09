@@ -3,6 +3,8 @@ import * as NodeOS from "node:os";
 import {
   ClaudeSettings,
   CodexSettings,
+  DEFAULT_HEADROOM_PROXY_URL,
+  normalizeHeadroomProxyUrl,
   type ProviderDriverKind,
   type ProviderInstanceId,
   type ServerSettings,
@@ -16,8 +18,6 @@ import * as Schema from "effect/Schema";
 import { expandHomePath } from "../pathExpansion.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
-
-const HEADROOM_PROXY_PORT = "6767";
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
@@ -43,7 +43,7 @@ interface ProviderRoutingConfig {
 export interface DetectHeadroomRoutingInput {
   readonly provider: ProviderDriverKind;
   readonly providerInstanceId: ProviderInstanceId;
-  readonly settings: Pick<ServerSettings, "providerInstances" | "providers">;
+  readonly settings: Pick<ServerSettings, "headroomProxyUrl" | "providerInstances" | "providers">;
   readonly cwd?: string;
   readonly environment?: NodeJS.ProcessEnv;
 }
@@ -57,17 +57,16 @@ function isHeadroomRoutableProvider(
 export function isHeadroomProxyUrl(
   value: string | undefined,
   provider: HeadroomRoutableProvider,
+  configuredProxyUrl: string = DEFAULT_HEADROOM_PROXY_URL,
 ): boolean {
   if (value === undefined) return false;
+  const configuredOrigin = normalizeHeadroomProxyUrl(configuredProxyUrl);
+  if (configuredOrigin === null) return false;
   try {
     const url = new URL(value.trim());
-    const loopback =
-      url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
     const pathname = url.pathname.replace(/\/$/, "") || "/";
     return (
-      url.protocol === "http:" &&
-      loopback &&
-      url.port === HEADROOM_PROXY_PORT &&
+      url.origin === configuredOrigin &&
       url.username === "" &&
       url.password === "" &&
       url.search === "" &&
@@ -79,11 +78,14 @@ export function isHeadroomProxyUrl(
   }
 }
 
-export function claudeSettingsRouteThroughHeadroom(contents: string): boolean {
+export function claudeSettingsRouteThroughHeadroom(
+  contents: string,
+  configuredProxyUrl: string = DEFAULT_HEADROOM_PROXY_URL,
+): boolean {
   const decoded = decodeClaudeRoutingSettings(contents);
   return (
     Option.isSome(decoded) &&
-    isHeadroomProxyUrl(decoded.value.env?.ANTHROPIC_BASE_URL, "claudeAgent")
+    isHeadroomProxyUrl(decoded.value.env?.ANTHROPIC_BASE_URL, "claudeAgent", configuredProxyUrl)
   );
 }
 
@@ -174,7 +176,7 @@ export const detectHeadroomRouting = Effect.fn("HeadroomRouting.detect")(functio
     if (Option.isNone(config)) return false;
     const environmentBaseUrl = resolved.environment.ANTHROPIC_BASE_URL;
     if (environmentBaseUrl !== undefined) {
-      return isHeadroomProxyUrl(environmentBaseUrl, "claudeAgent");
+      return isHeadroomProxyUrl(environmentBaseUrl, "claudeAgent", input.settings.headroomProxyUrl);
     }
     const configuredHome = config.value.homePath.trim();
     const configDir =
@@ -183,7 +185,10 @@ export const detectHeadroomRouting = Effect.fn("HeadroomRouting.detect")(functio
         : (environmentHomePath(path, resolved.environment.CLAUDE_CONFIG_DIR, input.cwd) ??
           path.join(NodeOS.homedir(), ".claude"));
     const contents = yield* readOptional(fileSystem, path.join(configDir, "settings.json"));
-    return Option.isSome(contents) && claudeSettingsRouteThroughHeadroom(contents.value);
+    return (
+      Option.isSome(contents) &&
+      claudeSettingsRouteThroughHeadroom(contents.value, input.settings.headroomProxyUrl)
+    );
   }
 
   const config = decodeCodexSettings(resolved.config);
@@ -197,12 +202,12 @@ export const detectHeadroomRouting = Effect.fn("HeadroomRouting.detect")(functio
   const inspected = inspectCodexHeadroomRouting(Option.getOrElse(contents, () => ""));
 
   if (inspected.modelProvider === "headroom") {
-    return isHeadroomProxyUrl(inspected.headroomBaseUrl, "codex");
+    return isHeadroomProxyUrl(inspected.headroomBaseUrl, "codex", input.settings.headroomProxyUrl);
   }
   if (inspected.modelProvider !== undefined && inspected.modelProvider !== "openai") return false;
 
   const environmentBaseUrl = resolved.environment.OPENAI_BASE_URL;
   return environmentBaseUrl !== undefined
-    ? isHeadroomProxyUrl(environmentBaseUrl, "codex")
-    : isHeadroomProxyUrl(inspected.openAiBaseUrl, "codex");
+    ? isHeadroomProxyUrl(environmentBaseUrl, "codex", input.settings.headroomProxyUrl)
+    : isHeadroomProxyUrl(inspected.openAiBaseUrl, "codex", input.settings.headroomProxyUrl);
 });

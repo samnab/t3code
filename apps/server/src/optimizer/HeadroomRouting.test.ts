@@ -21,12 +21,17 @@ const claude = ProviderDriverKind.make("claudeAgent");
 const codex = ProviderDriverKind.make("codex");
 
 describe("HeadroomRouting", () => {
-  it("accepts only the fixed local proxy URL for each provider", () => {
+  it("accepts only the configured local proxy URL for each provider", () => {
     expect(isHeadroomProxyUrl("http://127.0.0.1:6767", "claudeAgent")).toBe(true);
-    expect(isHeadroomProxyUrl("http://localhost:6767/v1/", "codex")).toBe(true);
+    expect(isHeadroomProxyUrl("http://localhost:6767/v1/", "codex", "http://localhost:6767")).toBe(
+      true,
+    );
     expect(isHeadroomProxyUrl("http://127.0.0.1:6767/v1", "claudeAgent")).toBe(false);
     expect(isHeadroomProxyUrl("https://127.0.0.1:6767/v1", "codex")).toBe(false);
     expect(isHeadroomProxyUrl("http://127.0.0.1:8787/v1", "codex")).toBe(false);
+    expect(isHeadroomProxyUrl("http://127.0.0.1:8787/v1", "codex", "http://127.0.0.1:8787/")).toBe(
+      true,
+    );
   });
 
   it("reads only Claude's settings env route", () => {
@@ -150,6 +155,28 @@ model_provider = "other"
           environment: { OPENAI_BASE_URL: "http://127.0.0.1:6767/v1" },
         }),
       ).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("matches provider routing against the configured Headroom origin", () =>
+    Effect.gen(function* () {
+      const settings = decodeSettings({ headroomProxyUrl: "http://127.0.0.1:8787" });
+      expect(
+        yield* detectHeadroomRouting({
+          provider: claude,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          settings,
+          environment: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8787" },
+        }),
+      ).toBe(true);
+      expect(
+        yield* detectHeadroomRouting({
+          provider: claude,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          settings,
+          environment: { ANTHROPIC_BASE_URL: "http://127.0.0.1:6767" },
+        }),
+      ).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

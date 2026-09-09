@@ -19,6 +19,8 @@ import {
 import { ModelSelection, ProjectScript } from "./orchestration.ts";
 import {
   DEFAULT_CBM_BINARY_PATH,
+  DEFAULT_HEADROOM_PROXY_URL,
+  HeadroomProxyUrl,
   ProjectOptimizerSettings,
   ProjectOptimizerSettingsPatch,
 } from "./optimizer.ts";
@@ -958,6 +960,9 @@ export const ServerSettings = Schema.Struct({
   optimizerBinaryPaths: Schema.Struct({
     cbm: makeBinaryPathSetting(DEFAULT_CBM_BINARY_PATH),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  headroomProxyUrl: HeadroomProxyUrl.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_HEADROOM_PROXY_URL)),
+  ),
   defaultModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1249,6 +1254,7 @@ export const ServerSettingsPatch = Schema.Struct({
       cbm: Schema.optionalKey(TrimmedString),
     }),
   ),
+  headroomProxyUrl: Schema.optionalKey(HeadroomProxyUrl),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),

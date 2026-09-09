@@ -44,21 +44,26 @@ describe("OptimizerProbeService", () => {
             ),
           ),
         isMissingResult: () => Effect.succeed(false),
-        fetchHeadroomStats: Effect.succeed({
-          savings: { total_tokens: 999 },
-          display_session: { tokens_saved: 321 },
-        }),
-        fetchHeadroomHistory: Effect.succeed({
-          series: {
-            hourly: [
-              { timestamp: "2026-01-01T01:00:00Z", tokens_saved: 12 },
-              { timestamp: "invalid", tokens_saved: 99 },
-            ],
-            daily: [{ timestamp: "2026-01-01T00:00:00Z", tokens_saved: 33 }],
-            weekly: [{ timestamp: "2025-12-29T00:00:00Z", tokens_saved: -1 }],
-          },
-        }),
+        fetchHeadroomStats: () =>
+          Effect.succeed({
+            savings: { total_tokens: 999 },
+            display_session: { tokens_saved: 321 },
+          }),
+        fetchHeadroomHealth: () =>
+          Effect.succeed({ service: "headroom-proxy", status: "healthy", version: "0.9.0" }),
+        fetchHeadroomHistory: () =>
+          Effect.succeed({
+            series: {
+              hourly: [
+                { timestamp: "2026-01-01T01:00:00Z", tokens_saved: 12 },
+                { timestamp: "invalid", tokens_saved: 99 },
+              ],
+              daily: [{ timestamp: "2026-01-01T00:00:00Z", tokens_saved: 33 }],
+              weekly: [{ timestamp: "2025-12-29T00:00:00Z", tokens_saved: -1 }],
+            },
+          }),
         getCbmBinaryPath: Effect.succeed("/tools/cbm"),
+        getHeadroomProxyUrl: Effect.succeed("http://127.0.0.1:6767"),
         listCbmIndexes: Effect.succeed([
           {
             projectId: ProjectId.make("project-1"),
@@ -138,18 +143,21 @@ describe("OptimizerProbeService", () => {
             ),
           ),
         isMissingResult: () => Effect.succeed(false),
-        fetchHeadroomStats: Ref.updateAndGet(headroomCalls, (current) => current + 1).pipe(
-          Effect.flatMap((attempt) =>
-            attempt === 1
-              ? Effect.succeed({ display_session: { tokens_saved: 1 } })
-              : Deferred.succeed(refreshStarted, undefined).pipe(
-                  Effect.andThen(Deferred.await(releaseRefresh)),
-                  Effect.as({ display_session: { tokens_saved: 1 } }),
-                ),
+        fetchHeadroomStats: () =>
+          Ref.updateAndGet(headroomCalls, (current) => current + 1).pipe(
+            Effect.flatMap((attempt) =>
+              attempt === 1
+                ? Effect.succeed({ display_session: { tokens_saved: 1 } })
+                : Deferred.succeed(refreshStarted, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseRefresh)),
+                    Effect.as({ display_session: { tokens_saved: 1 } }),
+                  ),
+            ),
           ),
-        ),
-        fetchHeadroomHistory: Effect.succeed({ series: {} }),
+        fetchHeadroomHealth: () => Effect.succeed({ service: "headroom-proxy", status: "healthy" }),
+        fetchHeadroomHistory: () => Effect.succeed({ series: {} }),
         getCbmBinaryPath: Effect.succeed("cbm"),
+        getHeadroomProxyUrl: Effect.succeed("http://127.0.0.1:6767"),
         listCbmIndexes: Effect.succeed([]),
         now: Effect.succeed("2026-01-01T00:00:00.000Z"),
         nowMs: Ref.get(nowMs),
@@ -185,9 +193,11 @@ describe("OptimizerProbeService", () => {
             ),
           ),
         isMissingResult: () => Effect.succeed(false),
-        fetchHeadroomStats: Effect.succeed({ display_session: { tokens_saved: 1 } }),
-        fetchHeadroomHistory: Effect.succeed({ series: {} }),
+        fetchHeadroomStats: () => Effect.succeed({ display_session: { tokens_saved: 1 } }),
+        fetchHeadroomHealth: () => Effect.succeed({ service: "headroom-proxy", status: "healthy" }),
+        fetchHeadroomHistory: () => Effect.succeed({ series: {} }),
         getCbmBinaryPath: Ref.get(cbmBinaryPath),
+        getHeadroomProxyUrl: Effect.succeed("http://127.0.0.1:6767"),
         listCbmIndexes: Effect.succeed([]),
         now: Effect.succeed("2026-01-01T00:00:00.000Z"),
         nowMs: Effect.succeed(0),
@@ -200,6 +210,125 @@ describe("OptimizerProbeService", () => {
       const observed = yield* Ref.get(commands);
       expect(observed.filter((command) => command === "/tools/cbm-a")).toHaveLength(1);
       expect(observed.filter((command) => command === "/tools/cbm-b")).toHaveLength(1);
+    }),
+  );
+
+  it.effect("uses the configured Headroom origin and invalidates the cache when it changes", () =>
+    Effect.gen(function* () {
+      const observedOrigins = yield* Ref.make<ReadonlyArray<string>>([]);
+      const headroomProxyUrl = yield* Ref.make("http://127.0.0.1:6767");
+      const observe = (origin: string, result: unknown) =>
+        Ref.update(observedOrigins, (current) => [...current, origin]).pipe(Effect.as(result));
+      const service = yield* makeWith({
+        run: (input) =>
+          Effect.succeed(
+            success(input.args[0] === "gain" ? '{"summary":{"total_saved":1}}' : "tool 1.2.3"),
+          ),
+        isMissingResult: () => Effect.succeed(false),
+        fetchHeadroomStats: (origin) => observe(origin, { display_session: { tokens_saved: 1 } }),
+        fetchHeadroomHealth: (origin) =>
+          observe(origin, { service: "headroom-proxy", status: "healthy" }),
+        fetchHeadroomHistory: (origin) => observe(origin, { series: {} }),
+        getCbmBinaryPath: Effect.succeed("cbm"),
+        getHeadroomProxyUrl: Ref.get(headroomProxyUrl),
+        listCbmIndexes: Effect.succeed([]),
+        now: Effect.succeed("2026-01-01T00:00:00.000Z"),
+        nowMs: Effect.succeed(0),
+      });
+
+      yield* service.getStatus({});
+      yield* service.getStatus({});
+      yield* Ref.set(headroomProxyUrl, "http://127.0.0.1:8787/");
+      yield* service.getStatus({});
+
+      expect(yield* Ref.get(observedOrigins)).toEqual([
+        "http://127.0.0.1:6767",
+        "http://127.0.0.1:6767",
+        "http://127.0.0.1:6767",
+        "http://127.0.0.1:8787",
+        "http://127.0.0.1:8787",
+        "http://127.0.0.1:8787",
+      ]);
+    }),
+  );
+
+  it.effect("recognizes the CLI health response when savings endpoints are unavailable", () =>
+    Effect.gen(function* () {
+      const service = yield* makeWith({
+        run: (input) =>
+          Effect.succeed(
+            success(
+              input.args[0] === "gain"
+                ? '{"summary":{"total_saved":1}}'
+                : input.command === "headroom"
+                  ? "headroom 0.33.0"
+                  : "tool 1.2.3",
+            ),
+          ),
+        isMissingResult: () => Effect.succeed(false),
+        fetchHeadroomStats: () => Effect.succeed({ status: "not-stats" }),
+        fetchHeadroomHealth: () =>
+          Effect.succeed({
+            service: "headroom-proxy",
+            status: "healthy",
+            version: "0.33.0",
+          }),
+        fetchHeadroomHistory: () => Effect.succeed({ status: "not-history" }),
+        getCbmBinaryPath: Effect.succeed("cbm"),
+        getHeadroomProxyUrl: Effect.succeed("http://127.0.0.1:8787"),
+        listCbmIndexes: Effect.succeed([]),
+        now: Effect.succeed("2026-01-01T00:00:00.000Z"),
+        nowMs: Effect.succeed(0),
+      });
+
+      const snapshot = yield* service.getStatus({});
+      expect(snapshot.optimizers.find((optimizer) => optimizer.id === "headroom")).toEqual({
+        id: "headroom",
+        installed: true,
+        version: "0.33.0",
+        running: true,
+        mode: "detected-proxy",
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        detail: "Headroom is running, but savings statistics are unavailable.",
+      });
+      expect(snapshot.savings).not.toContainEqual(expect.objectContaining({ source: "headroom" }));
+      expect(snapshot.savingsHistory).toEqual([]);
+    }),
+  );
+
+  it.effect("does not treat a non-healthy Headroom response as running", () =>
+    Effect.gen(function* () {
+      const service = yield* makeWith({
+        run: (input) =>
+          Effect.succeed(
+            success(
+              input.args[0] === "gain"
+                ? '{"summary":{"total_saved":1}}'
+                : input.command === "headroom"
+                  ? "unknown version"
+                  : "tool 1.2.3",
+            ),
+          ),
+        isMissingResult: () => Effect.succeed(false),
+        fetchHeadroomStats: () => Effect.succeed({ display_session: { tokens_saved: 1 } }),
+        fetchHeadroomHealth: () =>
+          Effect.succeed({ service: "headroom-proxy", status: "unhealthy", version: "0.33.0" }),
+        fetchHeadroomHistory: () => Effect.succeed({ series: {} }),
+        getCbmBinaryPath: Effect.succeed("cbm"),
+        getHeadroomProxyUrl: Effect.succeed("http://127.0.0.1:8787"),
+        listCbmIndexes: Effect.succeed([]),
+        now: Effect.succeed("2026-01-01T00:00:00.000Z"),
+        nowMs: Effect.succeed(0),
+      });
+
+      const snapshot = yield* service.getStatus({});
+      expect(snapshot.optimizers.find((optimizer) => optimizer.id === "headroom")).toMatchObject({
+        installed: true,
+        version: "0.33.0",
+        running: false,
+        detail: "The configured Headroom proxy reported an unhealthy status.",
+      });
+      expect(snapshot.savings).not.toContainEqual(expect.objectContaining({ source: "headroom" }));
     }),
   );
 
@@ -217,9 +346,11 @@ describe("OptimizerProbeService", () => {
           return Effect.succeed(success("headroom 0.9.0"));
         },
         isMissingResult: () => Effect.succeed(false),
-        fetchHeadroomStats: Effect.succeed("offline"),
-        fetchHeadroomHistory: Effect.succeed("offline"),
+        fetchHeadroomStats: () => Effect.succeed("offline"),
+        fetchHeadroomHealth: () => Effect.succeed("offline"),
+        fetchHeadroomHistory: () => Effect.succeed("offline"),
         getCbmBinaryPath: Effect.succeed("/tools/cbm"),
+        getHeadroomProxyUrl: Effect.succeed("http://127.0.0.1:6767"),
         listCbmIndexes: Effect.succeed([]),
         now: Effect.succeed("2026-01-01T00:00:00.000Z"),
         nowMs: Effect.succeed(0),

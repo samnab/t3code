@@ -87,3 +87,37 @@ export const ProjectOptimizerSettingsPatch = Schema.Struct({
 export type ProjectOptimizerSettingsPatch = typeof ProjectOptimizerSettingsPatch.Type;
 
 export const DEFAULT_CBM_BINARY_PATH = "codebase-memory-mcp";
+
+export const DEFAULT_HEADROOM_PROXY_URL = "http://127.0.0.1:6767";
+
+/** Return the canonical origin for a local Headroom proxy URL. */
+export function normalizeHeadroomProxyUrl(value: string): string | null {
+  try {
+    const url = new URL(value.trim());
+    const isLoopback =
+      url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+    if (
+      url.protocol !== "http:" ||
+      !isLoopback ||
+      url.pathname !== "/" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
+      return null;
+    }
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+const HeadroomProxyUrlFilter = Schema.makeFilter((value: string) =>
+  normalizeHeadroomProxyUrl(value) === null
+    ? "Expected an HTTP loopback origin without credentials, query, fragment, or path."
+    : undefined,
+);
+
+export const HeadroomProxyUrl = TrimmedNonEmptyString.check(HeadroomProxyUrlFilter);
+export type HeadroomProxyUrl = typeof HeadroomProxyUrl.Type;
