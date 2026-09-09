@@ -23,7 +23,7 @@ function activity(
 
 describe("latestOptimizerAttachmentForSession", () => {
   it("uses the latest authoritative event and clears an older session state", () => {
-    const currentSession = { providerInstanceId: "provider-current" };
+    const currentSession = { providerInstanceId: "provider-current", status: "ready" as const };
     const result = latestOptimizerAttachmentForSession(
       [
         activity(
@@ -73,7 +73,11 @@ describe("latestOptimizerAttachmentForSession", () => {
           2,
         ),
       ],
-      { providerInstanceId: "provider", createdAt: "2026-09-09T00:00:01.000Z" },
+      {
+        providerInstanceId: "provider",
+        createdAt: "2026-09-09T00:00:01.000Z",
+        status: "running",
+      },
     );
 
     expect(result?.attached).toEqual(["rtk"]);
@@ -91,7 +95,52 @@ describe("latestOptimizerAttachmentForSession", () => {
     } satisfies OrchestrationThreadActivity;
 
     expect(
-      latestOptimizerAttachmentForSession([malformed], { providerInstanceId: "provider" }),
+      latestOptimizerAttachmentForSession([malformed], {
+        providerInstanceId: "provider",
+        status: "running",
+      }),
     ).toBeNull();
+  });
+
+  it.each(["idle", "starting", "interrupted", "stopped", "error"] as const)(
+    "hides attachment state while the session is %s",
+    (status) => {
+      const result = latestOptimizerAttachmentForSession(
+        [
+          activity(
+            "active-session",
+            { providerInstanceId: "provider", createdAt: "2026-09-09T00:00:01.000Z" },
+            { configured: ["rtk"], attached: ["rtk"], ready: ["rtk"] },
+            1,
+          ),
+        ],
+        { providerInstanceId: "provider", status },
+      );
+
+      expect(result).toBeNull();
+    },
+  );
+
+  it("selects the new activity when a provider instance is restarted", () => {
+    const result = latestOptimizerAttachmentForSession(
+      [
+        activity(
+          "previous-run",
+          { providerInstanceId: "provider", createdAt: "2026-09-09T00:00:01.000Z" },
+          { configured: ["rtk"], attached: ["rtk"], ready: ["rtk"] },
+          1,
+        ),
+        activity(
+          "restarted-run",
+          { providerInstanceId: "provider", createdAt: "2026-09-09T00:00:02.000Z" },
+          { configured: ["cbm"], attached: ["cbm"], ready: ["cbm"] },
+          2,
+        ),
+      ],
+      { providerInstanceId: "provider", status: "ready" },
+    );
+
+    expect(result?.attached).toEqual(["cbm"]);
+    expect(result?.createdAt).toBe("2026-09-09T00:00:02.000Z");
   });
 });

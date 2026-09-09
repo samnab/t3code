@@ -1,4 +1,8 @@
-import type { OptimizerId, OrchestrationThreadActivity } from "@t3tools/contracts";
+import type {
+  OptimizerId,
+  OrchestrationSessionStatus,
+  OrchestrationThreadActivity,
+} from "@t3tools/contracts";
 
 export interface OptimizerAttachmentSnapshot {
   readonly providerInstanceId: string;
@@ -66,23 +70,24 @@ function isLaterActivity(
 }
 
 /**
- * Returns the latest authoritative attachment event for the currently bound
- * provider session. A new session always emits an event, including empty
- * arrays, so an older session's attachment state cannot remain visible.
+ * Returns the latest authoritative attachment event for an active provider
+ * session. Indicators stay hidden while a session is starting or leaving its
+ * active state, when its adapter attachment is not yet current.
  *
  * When a caller has the session creation timestamp, both identity fields are
- * matched. The read-model session currently exposes only providerInstanceId,
- * so the provider id is the stable current-session seam for existing clients;
- * the event's createdAt is retained for diagnostics and exact matching when
- * that field becomes available on the read model.
+ * matched. Existing read-model sessions expose providerInstanceId as their
+ * stable identity; the event's createdAt remains available for exact matching
+ * when the read model exposes that field.
  */
 export function latestOptimizerAttachmentForSession(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   currentSession: {
+    readonly status: OrchestrationSessionStatus;
     readonly providerInstanceId?: string | null | undefined;
     readonly createdAt?: string | null | undefined;
   } | null,
 ): OptimizerAttachmentSnapshot | null {
+  if (currentSession?.status !== "running" && currentSession?.status !== "ready") return null;
   const providerInstanceId = currentSession?.providerInstanceId;
   const createdAt = currentSession?.createdAt;
   if (providerInstanceId === undefined || providerInstanceId === null) return null;
