@@ -3,7 +3,7 @@ import {
   isProviderAvailable,
   resolveProviderInstanceEnabled,
   type ModelSelection,
-  type ProjectId,
+  ProjectId,
   type ProviderDriverKind,
   type ServerProvider,
   ServerSettings,
@@ -260,15 +260,15 @@ export function applyServerSettingsPatch(
                   : {
                       rtk:
                         optimizerPatch.rtk ??
-                        current.projectOptimizerOverrides[projectId]?.rtk ??
+                        current.projectOptimizerOverrides[ProjectId.make(projectId)]?.rtk ??
                         false,
                       headroom:
                         optimizerPatch.headroom ??
-                        current.projectOptimizerOverrides[projectId]?.headroom ??
+                        current.projectOptimizerOverrides[ProjectId.make(projectId)]?.headroom ??
                         false,
                       cbm:
                         optimizerPatch.cbm ??
-                        current.projectOptimizerOverrides[projectId]?.cbm ??
+                        current.projectOptimizerOverrides[ProjectId.make(projectId)]?.cbm ??
                         false,
                     },
               ]),

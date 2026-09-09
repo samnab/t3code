@@ -151,6 +151,7 @@ import * as HostResources from "./resourceTelemetry/HostResources.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import { OptimizerProbeService } from "./optimizer/OptimizerProbeService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import { ExperimentService } from "./experiments/ExperimentService.ts";
 import type { ExperimentError } from "./experiments/Model.ts";
@@ -595,6 +596,7 @@ const makeWsRpcLayer = (
       const keybindings = yield* Keybindings.Keybindings;
       const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
+      const optimizerProbe = yield* OptimizerProbeService;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
@@ -1898,6 +1900,10 @@ const makeWsRpcLayer = (
           ),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.optimizersGetStatus]: (input) =>
+          observeRpcEffect(WS_METHODS.optimizersGetStatus, optimizerProbe.getStatus(input), {
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.serverGetConfig]: (_input) =>

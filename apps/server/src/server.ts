@@ -136,6 +136,8 @@ import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinar
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as CbmIndexService from "./optimizer/CbmIndexService.ts";
+import * as OptimizerProbeService from "./optimizer/OptimizerProbeService.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -179,6 +181,17 @@ const PtyAdapterLive = Layer.unwrap(
 const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(SqlitePersistenceLayerLive),
+);
+
+const CbmIndexLayerLive = CbmIndexService.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSettingsLayerLive),
+);
+
+const OptimizerLayerLive = OptimizerProbeService.layer.pipe(
+  Layer.provideMerge(CbmIndexLayerLive),
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSettingsLayerLive),
 );
 
 const NativeTelemetryLayerLive = NativeTelemetryClient.layer.pipe(
@@ -553,6 +566,7 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
   Layer.provideMerge(UsageLayerLive),
+  Layer.provideMerge(OptimizerLayerLive),
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),
   Layer.provideMerge(ExternalLauncher.layer),
