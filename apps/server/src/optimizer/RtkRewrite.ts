@@ -7,6 +7,25 @@ export interface RtkRewriteCommandResult {
 
 export type RtkRewriteRunner = (command: string) => Promise<RtkRewriteCommandResult>;
 
+export function isSupportedRtkVersion(version: string | null): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(
+    version ?? "",
+  );
+  if (match === null) return false;
+
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const patch = Number(match[3]);
+  if (major !== 0) return major > 0;
+  if (minor !== 23) return minor > 23;
+  if (patch !== 0) return patch > 0;
+  return match[4] === undefined;
+}
+
+function isUnknownRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function applyRtkRewriteResult(
   toolInput: Readonly<Record<string, unknown>>,
   result: RtkRewriteCommandResult,
@@ -21,16 +40,6 @@ export function applyRtkRewriteResult(
     return {};
   }
 
-  if (result.code === 0) {
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        permissionDecisionReason: "RTK auto-rewrite",
-        updatedInput: { ...toolInput, command: rewritten },
-      },
-    };
-  }
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -46,7 +55,7 @@ export async function runRtkPreToolUseHook(
   if (input.tool_name !== "Bash") {
     return {};
   }
-  if (typeof input.tool_input !== "object" || input.tool_input === null) {
+  if (!isUnknownRecord(input.tool_input)) {
     return {};
   }
   const command = Reflect.get(input.tool_input, "command");

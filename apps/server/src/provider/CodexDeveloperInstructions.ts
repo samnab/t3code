@@ -22,6 +22,17 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 const browserToolInstructions = (browserToolsAvailable: boolean): string =>
   browserToolsAvailable ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "";
 
+const RTK_DEVELOPER_INSTRUCTIONS = `<rtk_instructions>
+## RTK shell output filtering
+
+Prefix supported shell commands with \`rtk\`, for example \`rtk git status\`, \`rtk npm test\`, or \`rtk ls src/\`. Keep the prefix on each command in a chain. RTK leaves unsupported commands unchanged and preserves the wrapped command's exit code.
+
+Treat condensed output as the complete result. Use \`rtk proxy <command>\` only when condensed output is unusable. Use \`RTK_DISABLED=1 <command>\` to bypass RTK for one command.
+</rtk_instructions>`;
+
+const rtkInstructions = (rtkEnabled: boolean): string =>
+  rtkEnabled ? RTK_DEVELOPER_INSTRUCTIONS : "";
+
 const codexPlanModeDeveloperInstructions = (
   browserToolsAvailable: boolean,
 ): string => `<collaboration_mode># Plan Mode (Conversational)
@@ -185,12 +196,16 @@ export function buildCodexDeveloperInstructions(
    * setting, so the prompt cannot claim tools the turn doesn't have.
    */
   browserToolsAvailable = true,
+  /** Whether this session attached RTK command guidance. */
+  rtkEnabled = false,
 ): string {
   const base =
     interactionMode === "plan"
       ? codexPlanModeDeveloperInstructions(browserToolsAvailable)
       : codexDefaultModeDeveloperInstructions(browserToolsAvailable);
   return `${base}
+
+${rtkInstructions(rtkEnabled)}
 
 ${buildRuntimeInstructions({ harness: "Codex", ...runtime })}`;
 }

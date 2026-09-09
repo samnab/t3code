@@ -1,8 +1,10 @@
 import {
   type ChatAttachment,
+  type CbmProjectIndexStatus,
   CommandId,
   EventId,
   type ModelSelection,
+  type OptimizerId,
   type OrchestrationEvent,
   type OrchestrationMessageOrigin,
   ProviderDriverKind,
@@ -57,6 +59,11 @@ import {
 } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import {
+  isCurrentSessionOptimizerAttachments,
+  readSessionOptimizerAttachments,
+  type SessionOptimizerAttachmentDescriptor,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
@@ -418,6 +425,45 @@ const make = Effect.gen(function* () {
             createdAt: input.createdAt,
           },
           createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendOptimizerAttachedActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly session: ProviderSession;
+    readonly descriptor: SessionOptimizerAttachmentDescriptor | undefined;
+    readonly ready?: SessionOptimizerAttachmentDescriptor["ready"];
+    readonly cbmIndex?: CbmProjectIndexStatus;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("optimizer-attached"),
+      eventId: serverEventId(),
+    }).pipe(
+      Effect.flatMap(({ commandId, eventId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: eventId,
+            tone: "info",
+            kind: "optimizer_attached",
+            summary: "Session optimizers updated",
+            payload: {
+              session: {
+                providerInstanceId: input.session.providerInstanceId,
+                createdAt: input.session.createdAt,
+              },
+              configured: input.descriptor?.configured ?? [],
+              attached: input.descriptor?.attached ?? [],
+              ready: input.ready ?? input.descriptor?.ready ?? [],
+              ...(input.cbmIndex ? { cbmIndex: input.cbmIndex } : {}),
+            },
+            turnId: null,
+            createdAt: input.cbmIndex?.checkedAt ?? input.session.updatedAt,
+          },
+          createdAt: input.cbmIndex?.checkedAt ?? input.session.updatedAt,
         }),
       ),
     );
@@ -798,6 +844,35 @@ const make = Effect.gen(function* () {
           },
           createdAt,
         });
+        const descriptor = readSessionOptimizerAttachments(threadId);
+        yield* appendOptimizerAttachedActivity({ threadId, session, descriptor });
+        if (descriptor?.cbmIndexCompletion !== undefined) {
+          yield* descriptor.cbmIndexCompletion.pipe(
+            Effect.flatMap((cbmIndex) => {
+              if (!isCurrentSessionOptimizerAttachments(threadId, descriptor)) {
+                return Effect.void;
+              }
+              const ready: ReadonlyArray<OptimizerId> =
+                cbmIndex.state === "ready"
+                  ? [...descriptor.ready, "cbm" satisfies OptimizerId]
+                  : descriptor.ready.filter((id) => id !== "cbm");
+              return appendOptimizerAttachedActivity({
+                threadId,
+                session,
+                descriptor,
+                ready,
+                cbmIndex,
+              });
+            }),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Failed to publish CBM indexing status.", {
+                threadId,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+            Effect.forkDetach,
+          );
+        }
       });
 
     const existingSessionThreadId =

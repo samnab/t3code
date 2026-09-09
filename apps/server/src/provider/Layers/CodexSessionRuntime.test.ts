@@ -837,6 +837,14 @@ describe("hasConfiguredMcpServer", () => {
       true,
     );
   });
+
+  it("distinguishes T3 and codebase-memory MCP configuration", () => {
+    const cbmArgs = ["-c", 'mcp_servers.codebase-memory.command="codebase-memory-mcp"'];
+
+    NodeAssert.equal(hasConfiguredMcpServer(cbmArgs), true);
+    NodeAssert.equal(hasConfiguredMcpServer(cbmArgs, "t3-code"), false);
+    NodeAssert.equal(hasConfiguredMcpServer(cbmArgs, "codebase-memory"), true);
+  });
 });
 
 function makeThreadStartedNotification(

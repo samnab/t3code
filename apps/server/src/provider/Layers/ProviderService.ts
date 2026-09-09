@@ -14,6 +14,7 @@ import {
   MessageId,
   ModelSelection,
   NonNegativeInt,
+  type OptimizerId,
   ProviderExecutionGoalSetInput,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
@@ -39,6 +40,7 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -79,6 +81,16 @@ import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { preflightExperimentProvider } from "../ExperimentProviderSupport.ts";
+import { CbmIndexService } from "../../optimizer/CbmIndexService.ts";
+import { OptimizerProbeService } from "../../optimizer/OptimizerProbeService.ts";
+import { isSupportedRtkVersion } from "../../optimizer/RtkRewrite.ts";
+import {
+  clearAllSessionOptimizerAttachments,
+  clearSessionOptimizerAttachments,
+  isCurrentSessionOptimizerAttachments,
+  readSessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
 /** How long a manual context compaction may run before ProviderService gives up on it. */
@@ -358,6 +370,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const projectionQuery = yield* Effect.serviceOption(
     ProjectionSnapshotQuery.ProjectionSnapshotQuery,
   );
+  const optimizerProbe = yield* Effect.serviceOption(OptimizerProbeService);
+  const cbmIndexService = yield* Effect.serviceOption(CbmIndexService);
   const issueMcpCredential =
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
   const revokeMcpCredential =
@@ -790,6 +804,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // per-thread browser-access setting. Revoke before reissuing so a
       // previously issued bearer token cannot outlive this prepare.
       const browserEnabled = yield* agentBrowserAccessEnabled(threadId);
+      yield* Effect.sync(() => clearSessionOptimizerAttachments(threadId));
       yield* revokeMcpCredential(threadId);
       yield* Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId));
       const credential = yield* issueMcpCredential({
@@ -802,9 +817,110 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
       return credential;
     });
+
+  const prepareOptimizerAttachments = Effect.fn("ProviderService.prepareOptimizerAttachments")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly provider: ProviderDriverKind;
+      readonly cwd: string | undefined;
+    }) {
+      yield* Effect.sync(() => clearSessionOptimizerAttachments(input.threadId));
+      if (input.cwd === undefined || Option.isNone(projectionQuery)) return;
+      const cwd = input.cwd;
+
+      const thread = yield* projectionQuery.value.getThreadShellById(input.threadId);
+      if (Option.isNone(thread)) return;
+      const settings = yield* serverSettings.getSettings;
+      const projectSettings = settings.projectOptimizerOverrides[thread.value.projectId] ?? {
+        rtk: false,
+        headroom: false,
+        cbm: false,
+      };
+      const configured: OptimizerId[] = [];
+      if (projectSettings.rtk) configured.push("rtk");
+      if (projectSettings.headroom) configured.push("headroom");
+      if (projectSettings.cbm) configured.push("cbm");
+
+      const snapshot =
+        configured.length > 0 && Option.isSome(optimizerProbe)
+          ? yield* optimizerProbe.value.getStatus({ refresh: true })
+          : { optimizers: [], savings: [], savingsHistory: [], cbmIndexes: [] };
+      const rtkStatus = snapshot.optimizers.find((status) => status.id === "rtk");
+      const cbmStatus = snapshot.optimizers.find((status) => status.id === "cbm");
+      const provider = String(input.provider);
+      const rtkAttached =
+        projectSettings.rtk &&
+        rtkStatus?.installed === true &&
+        isSupportedRtkVersion(rtkStatus.version) &&
+        (provider === "claudeAgent" || provider === "codex");
+      const cbmAttached =
+        projectSettings.cbm &&
+        cbmStatus?.installed === true &&
+        provider !== "pi" &&
+        ["claudeAgent", "codex", "cursor", "grok", "antigravity", "opencode"].includes(provider);
+      const attached: OptimizerId[] = [
+        ...(rtkAttached ? (["rtk"] satisfies OptimizerId[]) : []),
+        ...(cbmAttached ? (["cbm"] satisfies OptimizerId[]) : []),
+      ];
+      const ready: OptimizerId[] = rtkAttached ? ["rtk"] : [];
+
+      yield* Effect.sync(() =>
+        setSessionOptimizerAttachments(input.threadId, {
+          projectId: thread.value.projectId,
+          cwd,
+          configured,
+          attached,
+          ready,
+          ...(rtkAttached ? { rtk: { command: "rtk" } } : {}),
+          ...(cbmAttached
+            ? {
+                cbm: {
+                  command: settings.optimizerBinaryPaths.cbm,
+                  args: [],
+                  env: { CBM_ALLOWED_ROOT: cwd },
+                },
+              }
+            : {}),
+        }),
+      );
+    },
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Could not prepare optimizer attachments for provider session.", {
+        cause,
+      }),
+    ),
+  );
+
+  const startCbmIndex = Effect.fn("ProviderService.startCbmIndex")(function* (threadId: ThreadId) {
+    if (Option.isNone(cbmIndexService)) return;
+    const descriptor = readSessionOptimizerAttachments(threadId);
+    if (descriptor?.cbm === undefined) return;
+
+    const completion = Fiber.join(
+      yield* Effect.forkDetach(
+        cbmIndexService.value.ensureIndexed({
+          projectId: descriptor.projectId,
+          cwd: descriptor.cwd,
+        }),
+      ),
+    );
+    yield* Effect.sync(() => {
+      if (!isCurrentSessionOptimizerAttachments(threadId, descriptor)) return;
+      setSessionOptimizerAttachments(threadId, {
+        ...descriptor,
+        cbmIndexCompletion: completion,
+      });
+    });
+  });
+
   const clearMcpSession = (threadId: ThreadId) =>
     McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
-      Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+      Effect.ensuring(
+        Effect.sync(() => {
+          McpProviderSession.clearMcpProviderSession(threadId);
+          clearSessionOptimizerAttachments(threadId);
+        }),
+      ),
     );
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
@@ -1091,6 +1207,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      yield* prepareOptimizerAttachments({
+        threadId: input.binding.threadId,
+        provider: adapter.provider,
+        cwd: persistedCwd,
+      });
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -1119,6 +1240,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         strategy: "resume-thread",
         hasResumeCursor: resumed.resumeCursor !== undefined,
       });
+      yield* startCbmIndex(input.binding.threadId);
       return { adapter, session: resumed } as const;
     }).pipe(
       withMetrics({
@@ -1346,6 +1468,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
         yield* prepareMcpSession(threadId, resolvedInstanceId);
+        yield* prepareOptimizerAttachments({
+          threadId,
+          provider: adapter.provider,
+          cwd: effectiveCwd,
+        });
         const session = yield* adapter
           .startSession({
             ...input,
@@ -1398,6 +1525,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           });
         }
 
+        yield* startCbmIndex(threadId);
         return sessionWithInstance;
       }).pipe(
         withMetrics({
@@ -2449,6 +2577,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
     yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
     McpProviderSession.clearAllMcpProviderSessions();
+    clearAllSessionOptimizerAttachments();
     experimentSessions.clear();
     const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) =>

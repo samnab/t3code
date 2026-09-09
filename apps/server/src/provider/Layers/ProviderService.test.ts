@@ -16,10 +16,12 @@ import {
   ASSISTANT_CITATION_MAX_TEXT_LENGTH,
   AssistantCitation,
   ApprovalRequestId,
+  CbmProjectIndexStatus,
   EnvironmentId,
   EventId,
   MessageId,
   OrchestrationThreadShell,
+  OptimizerStatusSnapshot,
   ProjectId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderDriverKind,
@@ -81,6 +83,12 @@ import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMoc
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import type { ProviderServiceLiveOptions } from "./ProviderService.ts";
+import {
+  readSessionOptimizerAttachments,
+  removeSessionOptimizerAttachment,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
+import { OptimizerProbeService } from "../../optimizer/OptimizerProbeService.ts";
+import { CbmIndexService } from "../../optimizer/CbmIndexService.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
@@ -4712,6 +4720,8 @@ boundedListing.layer("ProviderServiceLive session listing", (it) => {
 });
 
 const decodeBrowserAccessThreadShell = Schema.decodeUnknownEffect(OrchestrationThreadShell);
+const decodeOptimizerStatusSnapshot = Schema.decodeSync(OptimizerStatusSnapshot);
+const decodeCbmProjectIndexStatus = Schema.decodeSync(CbmProjectIndexStatus);
 
 describe("agent browser access", () => {
   const revokedThreads: Array<ThreadId> = [];
@@ -4721,20 +4731,96 @@ describe("agent browser access", () => {
     enableAgentBrowserAccess: boolean,
     threadId: ThreadId,
     projectOverride?: boolean,
+    optimizerOverride?: {
+      readonly rtk: boolean;
+      readonly headroom: boolean;
+      readonly cbm: boolean;
+    },
+    optimizerRuntime?: {
+      readonly rtkVersion?: string;
+      readonly dropCbmDuringStart?: boolean;
+    },
   ) =>
     Effect.gen(function* () {
       const issued: Array<{ threadId: ThreadId; capabilities: ReadonlyArray<string> | undefined }> =
         [];
+      const probeRefreshes: Array<boolean | undefined> = [];
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
-        makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter }),
+        makeAdapterRegistryMock({
+          [CODEX_DRIVER]: optimizerRuntime?.dropCbmDuringStart
+            ? {
+                ...codex.adapter,
+                startSession: (input) =>
+                  codex.adapter
+                    .startSession(input)
+                    .pipe(
+                      Effect.tap(() =>
+                        Effect.sync(() => removeSessionOptimizerAttachment(input.threadId, "cbm")),
+                      ),
+                    ),
+              }
+            : codex.adapter,
+        }),
       );
       const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
         Layer.provide(SqlitePersistenceMemory),
       );
       const directoryLayer = ProviderSessionDirectoryLive.pipe(
         Layer.provide(runtimeRepositoryLayer),
+      );
+      const indexCalls: Array<{ readonly projectId: ProjectId; readonly cwd: string }> = [];
+      const optimizerServicesLayer = Layer.merge(
+        Layer.succeed(OptimizerProbeService, {
+          getStatus: ({ refresh }) =>
+            Effect.succeed(
+              decodeOptimizerStatusSnapshot({
+                optimizers: [
+                  {
+                    id: "rtk",
+                    installed: true,
+                    version: optimizerRuntime?.rtkVersion ?? "0.23.0",
+                    mode: "cli-wrapper",
+                    checkedAt: "2026-01-01T00:00:00.000Z",
+                  },
+                  {
+                    id: "headroom",
+                    installed: true,
+                    version: "1.0.0",
+                    running: true,
+                    mode: "detected-proxy",
+                    checkedAt: "2026-01-01T00:00:00.000Z",
+                  },
+                  {
+                    id: "cbm",
+                    installed: true,
+                    version: "1.0.0",
+                    mode: "stdio-mcp",
+                    checkedAt: "2026-01-01T00:00:00.000Z",
+                  },
+                ],
+                savings: [],
+                savingsHistory: [],
+                cbmIndexes: [],
+              }),
+            ).pipe(Effect.tap(() => Effect.sync(() => probeRefreshes.push(refresh)))),
+        }),
+        Layer.succeed(CbmIndexService, {
+          ensureIndexed: (request) =>
+            Effect.sync(() => {
+              indexCalls.push(request);
+              return decodeCbmProjectIndexStatus({
+                projectId: request.projectId,
+                repoPath: request.cwd,
+                state: "ready",
+                checkedAt: "2026-01-01T00:00:01.000Z",
+                nodeCount: 10,
+                edgeCount: 12,
+              });
+            }),
+          listStatuses: Effect.succeed([]),
+        }),
       );
       const projectionLayer = Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
         getTurnStartMessage: () => Effect.die("unused"),
@@ -4791,11 +4877,14 @@ describe("agent browser access", () => {
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(projectionLayer),
+        Layer.provide(optimizerServicesLayer),
         Layer.provide(
           ServerSettings.ServerSettingsService.layerTest({
             enableAgentBrowserAccess,
             projectAgentBrowserAccessOverrides:
               projectOverride === undefined ? {} : { [projectId]: projectOverride },
+            projectOptimizerOverrides:
+              optimizerOverride === undefined ? {} : { [projectId]: optimizerOverride },
           }),
         ),
         Layer.provide(serverConfigTestLayer),
@@ -4808,22 +4897,25 @@ describe("agent browser access", () => {
         ),
       );
 
-      yield* Effect.gen(function* () {
+      const attachment = yield* Effect.gen(function* () {
         const provider = yield* ProviderService.ProviderService;
-        return yield* provider.startSession(threadId, {
+        yield* provider.startSession(threadId, {
           provider: CODEX_DRIVER,
           providerInstanceId: codexInstanceId,
           threadId,
+          cwd: fixtureCwd(`browser-${threadId}`),
           runtimeMode: "full-access",
         });
+        yield* Effect.yieldNow;
+        return readSessionOptimizerAttachments(threadId);
       }).pipe(Effect.provide(providerLayer));
 
-      return issued;
+      return { issued, attachment, indexCalls, probeRefreshes };
     });
 
   it.effect("grants delegation without preview when agent browser access is off", () =>
     Effect.gen(function* () {
-      const issued = yield* startSessionWith(false, asThreadId("thread-browser-off"));
+      const { issued } = yield* startSessionWith(false, asThreadId("thread-browser-off"));
 
       assert.deepEqual(issued, [
         { threadId: asThreadId("thread-browser-off"), capabilities: ["delegation"] },
@@ -4836,12 +4928,16 @@ describe("agent browser access", () => {
       const threadId = asThreadId("thread-browser-revoke");
       revokedThreads.length = 0;
 
-      yield* startSessionWith(false, threadId);
+      const { attachment, probeRefreshes } = yield* startSessionWith(false, threadId);
 
       // Clearing the in-memory map is not enough: a token issued before the
       // toggle flipped stays valid against `/mcp` for its whole liveness
       // window, and later turns refresh it.
       assert.deepEqual(revokedThreads, [threadId]);
+      assert.deepEqual(attachment?.configured, []);
+      assert.deepEqual(attachment?.attached, []);
+      assert.deepEqual(probeRefreshes, []);
+      assert.equal(readSessionOptimizerAttachments(threadId), undefined);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -4849,7 +4945,7 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-browser-on");
 
-      const issued = yield* startSessionWith(true, threadId);
+      const { issued } = yield* startSessionWith(true, threadId);
 
       assert.deepEqual(issued, [{ threadId, capabilities: ["preview", "delegation"] }]);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -4859,7 +4955,7 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-project-browser-off");
       revokedThreads.length = 0;
-      const issued = yield* startSessionWith(true, threadId, false);
+      const { issued } = yield* startSessionWith(true, threadId, false);
       assert.deepEqual(issued, [{ threadId, capabilities: ["delegation"] }]);
       assert.deepEqual(revokedThreads, [threadId]);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -4868,8 +4964,67 @@ describe("agent browser access", () => {
   it.effect("requests a preview credential when the project overrides browser access to on", () =>
     Effect.gen(function* () {
       const threadId = asThreadId("thread-project-browser-on");
-      const issued = yield* startSessionWith(false, threadId, true);
+      const { issued } = yield* startSessionWith(false, threadId, true);
       assert.deepEqual(issued, [{ threadId, capabilities: ["preview", "delegation"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("resolves project optimizer settings and starts one scoped CBM index", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-project-optimizers");
+      const { attachment, indexCalls, probeRefreshes } = yield* startSessionWith(
+        false,
+        threadId,
+        undefined,
+        {
+          rtk: true,
+          headroom: true,
+          cbm: true,
+        },
+      );
+
+      assert.deepEqual(attachment?.configured, ["rtk", "headroom", "cbm"]);
+      assert.deepEqual(attachment?.attached, ["rtk", "cbm"]);
+      assert.deepEqual(attachment?.ready, ["rtk"]);
+      assert.equal(typeof attachment?.cwd, "string");
+      if (attachment === undefined) return;
+      assert.deepEqual(attachment.cbm?.env, { CBM_ALLOWED_ROOT: attachment.cwd });
+      assert.equal(attachment?.cbm?.command, "codebase-memory-mcp");
+      assert.deepEqual(indexCalls, [{ projectId, cwd: attachment.cwd }]);
+      assert.deepEqual(probeRefreshes, [true]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not attach an RTK version older than the supported rewrite contract", () =>
+    Effect.gen(function* () {
+      const { attachment } = yield* startSessionWith(
+        false,
+        asThreadId("thread-old-rtk"),
+        undefined,
+        { rtk: true, headroom: false, cbm: false },
+        { rtkVersion: "0.22.9" },
+      );
+
+      assert.deepEqual(attachment?.configured, ["rtk"]);
+      assert.deepEqual(attachment?.attached, []);
+      assert.deepEqual(attachment?.ready, []);
+      assert.equal(attachment?.rtk, undefined);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not index CBM when the adapter declines its attachment", () =>
+    Effect.gen(function* () {
+      const { attachment, indexCalls } = yield* startSessionWith(
+        false,
+        asThreadId("thread-cbm-declined"),
+        undefined,
+        { rtk: false, headroom: false, cbm: true },
+        { dropCbmDuringStart: true },
+      );
+
+      assert.deepEqual(attachment?.configured, ["cbm"]);
+      assert.deepEqual(attachment?.attached, []);
+      assert.deepEqual(indexCalls, []);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

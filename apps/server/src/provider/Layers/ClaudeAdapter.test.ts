@@ -14,12 +14,14 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
   type RuntimeMode,
   ThreadId,
   ProviderInstanceId,
+  ProjectId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
@@ -37,6 +39,11 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  clearSessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   SYNTHETIC_CLAUDE_CAPABLE_MODEL,
@@ -331,6 +338,67 @@ describe("ClaudeAdapterLive", () => {
           issue: "Expected provider 'claudeAgent' but received 'codex'.",
         }),
       );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("composes the T3 and CBM MCP servers and installs the RTK Bash hook", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-1"),
+        threadId: THREAD_ID,
+        providerSessionId: "provider-session-1",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint: "http://127.0.0.1:4317/mcp",
+        authorizationHeader: "Bearer secret",
+      });
+      setSessionOptimizerAttachments(THREAD_ID, {
+        projectId: ProjectId.make("project-1"),
+        cwd: "/repo/project-1",
+        configured: ["rtk", "cbm"],
+        attached: ["rtk", "cbm"],
+        ready: ["rtk"],
+        rtk: { command: "rtk" },
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: [],
+          env: { CBM_ALLOWED_ROOT: "/repo/project-1" },
+        },
+      });
+
+      yield* adapter
+        .startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          cwd: "/repo/project-1",
+          runtimeMode: "full-access",
+        })
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              McpProviderSession.clearMcpProviderSession(THREAD_ID);
+              clearSessionOptimizerAttachments(THREAD_ID);
+            }),
+          ),
+        );
+
+      const queryOptions = harness.getLastCreateQueryInput()?.options;
+      assert.deepEqual(Object.keys(queryOptions?.mcpServers ?? {}).sort(), [
+        "codebase-memory",
+        "t3-code",
+      ]);
+      assert.deepEqual(queryOptions?.mcpServers?.["codebase-memory"], {
+        type: "stdio",
+        command: "/tools/codebase-memory-mcp",
+        args: [],
+        env: { CBM_ALLOWED_ROOT: "/repo/project-1" },
+      });
+      assert.equal(queryOptions?.hooks?.PreToolUse?.[0]?.matcher, "Bash");
+      assert.equal(queryOptions?.hooks?.PreToolUse?.[0]?.hooks.length, 1);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

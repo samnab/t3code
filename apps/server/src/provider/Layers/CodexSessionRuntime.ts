@@ -115,8 +115,12 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "no rollout found",
 ];
 
-export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
-  return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
+export function hasConfiguredMcpServer(
+  appServerArgs: ReadonlyArray<string> | undefined,
+  serverName?: string,
+): boolean {
+  const marker = serverName === undefined ? "mcp_servers." : `mcp_servers.${serverName}.`;
+  return appServerArgs?.some((argument) => argument.includes(marker)) === true;
 }
 
 export const CodexResumeCursorSchema = Schema.Struct({
@@ -220,6 +224,7 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  readonly rtkEnabled?: boolean;
   readonly experimentRestriction?: {
     readonly mcpServerName: string;
     readonly toolNames: ReadonlyArray<string>;
@@ -720,6 +725,7 @@ function buildCodexCollaborationMode(input: {
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly browserToolsAvailable?: boolean;
+  readonly rtkEnabled?: boolean;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
@@ -735,6 +741,7 @@ function buildCodexCollaborationMode(input: {
         input.interactionMode,
         { model, reasoningEffort },
         input.browserToolsAvailable ?? true,
+        input.rtkEnabled ?? false,
       ),
     },
   };
@@ -754,6 +761,8 @@ export function buildTurnStartParams(input: {
   readonly interactionMode?: ProviderInteractionMode;
   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
   readonly browserToolsAvailable?: boolean;
+  /** Whether RTK command guidance is attached to this provider session. */
+  readonly rtkEnabled?: boolean;
   readonly experimentRestricted?: boolean;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
@@ -779,6 +788,7 @@ export function buildTurnStartParams(input: {
         ...(input.model ? { model: input.model } : {}),
         ...(input.effort ? { effort: input.effort } : {}),
         browserToolsAvailable: input.browserToolsAvailable ?? true,
+        rtkEnabled: input.rtkEnabled ?? false,
       });
 
   return decodeCodexTurnStartParamsWithCollaborationMode({
@@ -2504,7 +2514,8 @@ export const makeCodexSessionRuntime = (
             // Derived from the session's own MCP configuration rather than the
             // setting, so the prompt describes the tools this turn actually
             // has even if the setting changed after the session started.
-            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs, "t3-code"),
+            rtkEnabled: options.rtkEnabled === true,
             experimentRestricted: options.experimentRestriction !== undefined,
           });
           const rawResponse = yield* client.raw.request("turn/start", params);

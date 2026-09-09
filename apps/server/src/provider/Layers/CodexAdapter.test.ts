@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderItemId,
+  ProjectId,
   type ProviderApprovalDecision,
   type ProviderEvent,
   type ProviderSession,
@@ -39,6 +40,10 @@ import type * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  clearSessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
@@ -349,6 +354,54 @@ validationLayer("CodexAdapterLive validation", (it) => {
     }),
   );
 
+  it.effect("attaches CBM and RTK without requiring the T3 MCP credential", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-optimizer-only");
+      setSessionOptimizerAttachments(threadId, {
+        projectId: ProjectId.make("project-optimizer"),
+        cwd: "/repo/optimizer",
+        configured: ["rtk", "cbm"],
+        attached: ["rtk", "cbm"],
+        ready: ["rtk"],
+        rtk: { command: "rtk" },
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: [],
+          env: { CBM_ALLOWED_ROOT: "/repo/optimizer" },
+        },
+      });
+
+      yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          cwd: "/repo/optimizer",
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.ensuring(Effect.sync(() => clearSessionOptimizerAttachments(threadId))));
+
+      const runtimeOptions = validationRuntimeFactory.factory.mock.calls[0]?.[0];
+      NodeAssert.ok(runtimeOptions !== undefined);
+      NodeAssert.equal(runtimeOptions.rtkEnabled, true);
+      NodeAssert.ok(
+        runtimeOptions.appServerArgs?.includes(
+          'mcp_servers.codebase-memory.command="/tools/codebase-memory-mcp"',
+        ),
+      );
+      NodeAssert.ok(
+        runtimeOptions.appServerArgs?.includes(
+          'mcp_servers.codebase-memory.env.CBM_ALLOWED_ROOT="/repo/optimizer"',
+        ),
+      );
+      NodeAssert.equal(
+        runtimeOptions.appServerArgs?.some((argument) => argument.includes("mcp_servers.t3-code")),
+        false,
+      );
+    }),
+  );
+
   it.effect("ignores inherited state and forces the restricted experiment runtime", () =>
     Effect.gen(function* () {
       validationRuntimeFactory.factory.mockClear();
@@ -363,6 +416,19 @@ validationLayer("CodexAdapterLive validation", (it) => {
         authorizationHeader: "Bearer experiment-secret",
         experiment: { runId: "run-1", generation: 1 },
       });
+      setSessionOptimizerAttachments(threadId, {
+        projectId: ProjectId.make("project-experiment"),
+        cwd: "/repo/experiment",
+        configured: ["rtk", "cbm"],
+        attached: ["rtk", "cbm"],
+        ready: ["rtk"],
+        rtk: { command: "rtk" },
+        cbm: {
+          command: "/tools/codebase-memory-mcp",
+          args: [],
+          env: { CBM_ALLOWED_ROOT: "/repo/experiment" },
+        },
+      });
 
       yield* adapter
         .startSession({
@@ -375,6 +441,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
           Effect.ensuring(
             Effect.sync(() => {
               McpProviderSession.clearMcpProviderSession(threadId);
+              clearSessionOptimizerAttachments(threadId);
             }),
           ),
         );
@@ -388,6 +455,13 @@ validationLayer("CodexAdapterLive validation", (it) => {
       NodeAssert.equal(runtimeOptions.environment?.CODEX_HOME, undefined);
       NodeAssert.ok(runtimeOptions.homePath?.endsWith("provider-session-experiment"));
       NodeAssert.equal("resumeCursor" in runtimeOptions, false);
+      NodeAssert.equal(runtimeOptions.rtkEnabled, undefined);
+      NodeAssert.equal(
+        runtimeOptions.appServerArgs?.some((argument) =>
+          argument.includes("mcp_servers.codebase-memory"),
+        ),
+        false,
+      );
       NodeAssert.deepStrictEqual(runtimeOptions.experimentRestriction, {
         mcpServerName: "t3_experiment",
         toolNames: [

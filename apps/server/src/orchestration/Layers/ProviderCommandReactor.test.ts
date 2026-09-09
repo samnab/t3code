@@ -74,6 +74,10 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import {
+  clearAllSessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -128,6 +132,7 @@ describe("ProviderCommandReactor", () => {
   const createdBaseDirs = new Set<string>();
 
   afterEach(async () => {
+    clearAllSessionOptimizerAttachments();
     if (scope) {
       await Effect.runPromise(Scope.close(scope, Exit.void));
     }
@@ -880,6 +885,97 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("persists optimizer attachment state and the terminal CBM index result", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.make("thread-1");
+    const indexCompletion = Effect.runSync(
+      Deferred.make<{
+        readonly projectId: ProjectId;
+        readonly repoPath: string;
+        readonly state: "ready";
+        readonly checkedAt: string;
+        readonly nodeCount: number;
+        readonly edgeCount: number;
+      }>(),
+    );
+    setSessionOptimizerAttachments(threadId, {
+      projectId: ProjectId.make("project-1"),
+      cwd: "/tmp/provider-project",
+      configured: ["rtk", "cbm"],
+      attached: ["rtk", "cbm"],
+      ready: ["rtk"],
+      rtk: { command: "rtk" },
+      cbm: {
+        command: "codebase-memory-mcp",
+        args: [],
+        env: { CBM_ALLOWED_ROOT: "/tmp/provider-project" },
+      },
+      cbmIndexCompletion: Deferred.await(indexCompletion),
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-optimizer"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-optimizer"),
+          role: "user",
+          text: "inspect the repository",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      return thread?.activities.some((activity) => activity.kind === "optimizer_attached") === true;
+    });
+    let thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.activities).toContainEqual(
+      expect.objectContaining({
+        kind: "optimizer_attached",
+        tone: "info",
+        payload: expect.objectContaining({
+          session: expect.objectContaining({ providerInstanceId: "codex" }),
+          configured: ["rtk", "cbm"],
+          attached: ["rtk", "cbm"],
+          ready: ["rtk"],
+        }),
+      }),
+    );
+
+    const terminalStatus = {
+      projectId: ProjectId.make("project-1"),
+      repoPath: "/tmp/provider-project",
+      state: "ready",
+      checkedAt: "2026-01-01T00:00:01.000Z",
+      nodeCount: 42,
+      edgeCount: 64,
+    } as const;
+    await Effect.runPromise(Deferred.succeed(indexCompletion, terminalStatus));
+    await waitFor(async () => {
+      const updated = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      return (
+        updated?.activities.filter((activity) => activity.kind === "optimizer_attached").length ===
+        2
+      );
+    });
+    thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.activities).toContainEqual(
+      expect.objectContaining({
+        kind: "optimizer_attached",
+        payload: expect.objectContaining({
+          ready: ["rtk", "cbm"],
+          cbmIndex: expect.objectContaining({ state: "ready", nodeCount: 42, edgeCount: 64 }),
+        }),
+      }),
+    );
   });
 
   effectIt.effect("retains a turn dispatched immediately after start until activation", () =>

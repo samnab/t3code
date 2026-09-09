@@ -8,6 +8,8 @@
  */
 import {
   type CanUseTool,
+  type HookInput,
+  type HookJSONOutput,
   query,
   type Options as ClaudeQueryOptions,
   type PermissionMode,
@@ -78,11 +80,18 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as ChildProcess from "effect/unstable/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { runRtkPreToolUseHook } from "../../optimizer/RtkRewrite.ts";
+import {
+  CBM_MCP_SERVER_NAME,
+  readSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { buildClaudeExperimentQueryOptions } from "../ClaudeExperimentSession.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
@@ -111,6 +120,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import { spawnAndCollect } from "../providerSnapshot.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
@@ -1911,6 +1921,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig;
   const crypto = yield* Crypto.Crypto;
+  const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
@@ -4149,6 +4160,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? candidateMcpSession
           : undefined;
       const isExperiment = mcpSession?.experiment !== undefined;
+      const optimizerAttachments = isExperiment
+        ? undefined
+        : readSessionOptimizerAttachments(input.threadId);
       const resumeState = isExperiment ? undefined : readClaudeResumeState(input.resumeCursor);
       const threadId = input.threadId;
       const existingResumeSessionId = resumeState?.resume;
@@ -4623,6 +4637,52 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.cwd ? [input.cwd] : []),
         serverConfig.attachmentsDir,
       ];
+      const mcpServers: NonNullable<ClaudeQueryOptions["mcpServers"]> = {
+        ...(mcpSession
+          ? {
+              "t3-code": {
+                type: "http",
+                url: mcpSession.endpoint,
+                headers: {
+                  Authorization: mcpSession.authorizationHeader,
+                },
+              },
+            }
+          : {}),
+        ...(optimizerAttachments?.cbm
+          ? {
+              [CBM_MCP_SERVER_NAME]: {
+                type: "stdio",
+                command: optimizerAttachments.cbm.command,
+                args: [...optimizerAttachments.cbm.args],
+                env: { ...optimizerAttachments.cbm.env },
+              },
+            }
+          : {}),
+      };
+      const rtkCommand = optimizerAttachments?.rtk?.command;
+      const rtkHook = rtkCommand
+        ? async (hookInput: HookInput): Promise<HookJSONOutput> => {
+            if (hookInput.hook_event_name !== "PreToolUse") return {};
+            return runRtkPreToolUseHook(hookInput, (command) =>
+              runPromise(
+                spawnAndCollect(
+                  rtkCommand,
+                  ChildProcess.make(
+                    rtkCommand,
+                    ["rewrite", command],
+                    input.cwd ? { cwd: input.cwd } : undefined,
+                  ),
+                ).pipe(
+                  Effect.provideService(
+                    ChildProcessSpawner.ChildProcessSpawner,
+                    childProcessSpawner,
+                  ),
+                ),
+              ),
+            );
+          }
+        : undefined;
       const standardQueryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -4655,16 +4715,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         env: withVoiceNotificationsEnv(claudeEnvironment, input.voiceNotifications),
         additionalDirectories,
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
-        ...(mcpSession
+        ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+        ...(rtkHook
           ? {
-              mcpServers: {
-                "t3-code": {
-                  type: "http",
-                  url: mcpSession.endpoint,
-                  headers: {
-                    Authorization: mcpSession.authorizationHeader,
-                  },
-                },
+              hooks: {
+                PreToolUse: [{ matcher: "Bash", hooks: [rtkHook] }],
               },
             }
           : {}),

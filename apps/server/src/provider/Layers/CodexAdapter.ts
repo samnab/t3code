@@ -53,6 +53,10 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  buildCodexCbmAppServerArgs,
+  readSessionOptimizerAttachments,
+} from "../../optimizer/SessionOptimizerAttachments.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -2346,6 +2350,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const isExperiment = mcpSession?.experiment !== undefined;
+        const optimizerAttachments = isExperiment
+          ? undefined
+          : readSessionOptimizerAttachments(input.threadId);
         // Voice-notification preference rides the spawn env; see
         // withVoiceNotificationsEnv.
         const sessionEnvironment = withVoiceNotificationsEnv(
@@ -2407,6 +2414,28 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               );
           }
         }
+        const appServerArgs = [
+          ...(mcpSession
+            ? [
+                ...(isExperiment ? buildCodexExperimentAppServerArgs().slice(1) : []),
+                "-c",
+                `mcp_servers.${isExperiment ? CODEX_EXPERIMENT_MCP_SERVER_NAME : "t3-code"}.url=${mcpSession.endpoint}`,
+                "-c",
+                `mcp_servers.${isExperiment ? CODEX_EXPERIMENT_MCP_SERVER_NAME : "t3-code"}.bearer_token_env_var="T3_MCP_BEARER_TOKEN"`,
+                ...(isExperiment
+                  ? [
+                      "-c",
+                      `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.default_tools_approval_mode="approve"`,
+                      "-c",
+                      `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.enabled_tools=${JSON.stringify(CODEX_EXPERIMENT_TOOL_NAMES)}`,
+                    ]
+                  : []),
+              ]
+            : []),
+          ...(optimizerAttachments?.cbm
+            ? buildCodexCbmAppServerArgs(optimizerAttachments.cbm)
+            : []),
+        ];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -2438,29 +2467,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   ...sessionEnvironment,
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
-                appServerArgs: [
-                  ...(isExperiment ? buildCodexExperimentAppServerArgs().slice(1) : []),
-                  "-c",
-                  `mcp_servers.${isExperiment ? CODEX_EXPERIMENT_MCP_SERVER_NAME : "t3-code"}.url=${mcpSession.endpoint}`,
-                  "-c",
-                  `mcp_servers.${isExperiment ? CODEX_EXPERIMENT_MCP_SERVER_NAME : "t3-code"}.bearer_token_env_var="T3_MCP_BEARER_TOKEN"`,
-                  ...(isExperiment
-                    ? [
-                        "-c",
-                        `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.default_tools_approval_mode="approve"`,
-                        "-c",
-                        `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.enabled_tools=${JSON.stringify(CODEX_EXPERIMENT_TOOL_NAMES)}`,
-                      ]
-                    : []),
-                ],
-                ...(isExperiment
-                  ? {
-                      experimentRestriction: {
-                        mcpServerName: CODEX_EXPERIMENT_MCP_SERVER_NAME,
-                        toolNames: CODEX_EXPERIMENT_TOOL_NAMES,
-                      },
-                    }
-                  : {}),
+              }
+            : {}),
+          ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
+          ...(optimizerAttachments?.rtk ? { rtkEnabled: true } : {}),
+          ...(isExperiment
+            ? {
+                experimentRestriction: {
+                  mcpServerName: CODEX_EXPERIMENT_MCP_SERVER_NAME,
+                  toolNames: CODEX_EXPERIMENT_TOOL_NAMES,
+                },
               }
             : {}),
         };
