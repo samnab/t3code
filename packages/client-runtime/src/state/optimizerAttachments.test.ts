@@ -102,7 +102,23 @@ describe("latestOptimizerAttachmentForSession", () => {
     ).toBeNull();
   });
 
-  it.each(["idle", "starting", "interrupted", "stopped", "error"] as const)(
+  it("allows the settled idle session to show the latest event", () => {
+    const result = latestOptimizerAttachmentForSession(
+      [
+        activity(
+          "idle-session",
+          { providerInstanceId: "provider", createdAt: "2026-09-09T00:00:01.000Z" },
+          { configured: ["rtk"], attached: ["rtk"], ready: ["rtk"] },
+          1,
+        ),
+      ],
+      { providerInstanceId: "provider", status: "idle" },
+    );
+
+    expect(result?.attached).toEqual(["rtk"]);
+  });
+
+  it.each(["starting", "interrupted", "stopped", "error"] as const)(
     "hides attachment state while the session is %s",
     (status) => {
       const result = latestOptimizerAttachmentForSession(

@@ -87,7 +87,12 @@ export function latestOptimizerAttachmentForSession(
     readonly createdAt?: string | null | undefined;
   } | null,
 ): OptimizerAttachmentSnapshot | null {
-  if (currentSession?.status !== "running" && currentSession?.status !== "ready") return null;
+  if (
+    currentSession?.status !== "idle" &&
+    currentSession?.status !== "running" &&
+    currentSession?.status !== "ready"
+  )
+    return null;
   const providerInstanceId = currentSession?.providerInstanceId;
   const createdAt = currentSession?.createdAt;
   if (providerInstanceId === undefined || providerInstanceId === null) return null;
