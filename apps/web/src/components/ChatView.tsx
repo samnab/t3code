@@ -3218,17 +3218,22 @@ export default function ChatView(props: ChatViewProps) {
             });
           });
 
-    const localMessages = optimisticUserMessages;
-    const serverIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
-    const pendingMessages = localMessages.filter((message) => !serverIds.has(message.id));
-
-    // Child results are already represented by the Agents panel. Keep the
-    // server-authored delivery in the provider conversation so the parent can
-    // synthesize it, but do not duplicate that synthetic user turn in the
-    // main transcript. Goal-loop continuations remain visible here.
-    return [...serverMessagesWithPreviewHandoff, ...pendingMessages].filter(
+    const visibleServerMessages = serverMessagesWithPreviewHandoff.filter(
       (message) => message.origin !== "subagent-delivery",
     );
+    const localMessages = optimisticUserMessages;
+    if (localMessages.length === 0) {
+      return visibleServerMessages;
+    }
+    const serverIds = new Set(visibleServerMessages.map((message) => message.id));
+    const pendingMessages = localMessages.filter((message) => !serverIds.has(message.id));
+    if (pendingMessages.length === 0) {
+      return visibleServerMessages;
+    }
+    // Child results are represented by the Agents panel. Keep the
+    // server-authored delivery in the provider conversation so the parent can
+    // synthesize it, but do not duplicate that synthetic user turn here.
+    return [...visibleServerMessages, ...pendingMessages];
   }, [
     attachmentPreviewHandoffByMessageId,
     displayServerMessages,
