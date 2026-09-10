@@ -238,7 +238,7 @@ function buildDeliveryBatchText(runs: ReadonlyArray<NativeChildRun>): {
   }
   const prefix = [
     "[T3 subagent results]",
-    "No user-facing reply is required unless these results contain useful new information or require action.",
+    "Completion notification: continue or synthesize the useful findings when they matter; do not echo individual child reports.",
   ];
   const maximumSummary = `Included ${runs.length} of ${runs.length} pending run${runs.length === 1 ? "" : "s"} from ${grouped.size} agent${grouped.size === 1 ? "" : "s"}. Remaining runs stay pending for a later notification.`;
   const metadata: string[] = [];

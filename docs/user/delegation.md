@@ -24,12 +24,16 @@ to receive a message. Cancelled or failed children stay stopped until the
 parent explicitly starts a follow-up.
 
 When a child finishes, T3 delivers its result after the parent becomes idle.
-Finished results survive server and parent-session restarts. Work interrupted
-by a server restart is reported as failed rather than left running. Explicitly
-stopping the parent cancels its active children without restarting the
-conversation. Long output is truncated explicitly. Delegation is independent
-of agent browser access.
+Continue useful independent work while children run and rely on that automatic
+completion report instead of repeatedly polling status or reconstructing
+unfinished work from files. Use a result lookup when the task or user request
+needs a specific child detail. Finished results survive server and parent-session
+restarts. Work interrupted by a server restart is reported as failed rather than
+left running. Explicitly stopping the parent cancels its active children without
+restarting the conversation. Long output is truncated explicitly. Delegation is
+independent of agent browser access.
 
-Delivery appears as a subagent result card in the conversation rather than as
-something you typed yourself, even though the agent receives it as a normal
-turn.
+On web and desktop, child progress and completed results appear in the Agents
+view; the parent still receives the completion as provider input so it can
+synthesize the useful findings in its own response. Mobile has no Agents view,
+so it keeps the existing inline result fallback.

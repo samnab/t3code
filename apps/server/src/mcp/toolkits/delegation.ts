@@ -33,7 +33,7 @@ export const DelegationToolkit = Toolkit.make(
   }).annotate(Tool.Readonly, true),
   Tool.make("subagent_spawn", {
     description:
-      "Start one child turn using a configured provider instance and native model identifier. Pass optional options as `{id, value}` entries from subagent_capabilities; unknown or unsupported options fail before launch. The child inherits the parent's working directory and runtime mode and receives only sibling-messaging T3 tools. The result includes its stable agentId for teammate addressing. Options stay fixed across steering, restart recovery, and terminal follow-ups. Returns immediately. Interactive requests fail explicitly. Codex, Claude and Pi each run through their own native adapter.",
+      "Start one child turn using a configured provider instance and native model identifier. Pass optional options as `{id, value}` entries from subagent_capabilities; unknown or unsupported options fail before launch. The child inherits the parent's working directory and runtime mode and receives only sibling-messaging T3 tools. The result includes its stable agentId for teammate addressing. Options stay fixed across steering, restart recovery, and terminal follow-ups. Returns immediately: continue useful independent work in the parent and rely on T3's automatic completion report when the parent is idle; do not poll for routine progress or reconstruct unfinished child work from files. Interactive requests fail explicitly. Codex, Claude and Pi each run through their own native adapter.",
     parameters: ChildRunSpawnInput,
     success: ChildRunResult,
     failure: ChildRunError,
@@ -49,7 +49,7 @@ export const DelegationToolkit = Toolkit.make(
   }),
   Tool.make("subagent_result", {
     description:
-      "Read a child run's durable status, bounded assistant output, and requestedOptions. The result echoes what was requested; forwarding to a provider is not confirmation that it applied an option. Set waitMs up to 30000 to wait for completion. Set acknowledge to true to suppress a still-pending automatic notification for a terminal result; it has no effect while the run is active and fails if a durable notification attempt may already be in flight. It cannot retract an already dispatched notification. The default is false, so ordinary reads remain repeatable without changing delivery.",
+      "Read a child run's durable status, bounded assistant output, and requestedOptions when you need a targeted lookup for the actual task or user request. T3 automatically reports completed results when the parent is idle, so do not repeatedly poll this tool for routine progress or use it to reconstruct unfinished work. Set waitMs up to 30000 only when an explicit lookup needs to wait for completion. Set acknowledge to true to suppress a still-pending automatic notification for a terminal result; it has no effect while the run is active and fails if a durable notification attempt may already be in flight. It cannot retract an already dispatched notification. The default is false, so ordinary reads remain repeatable without changing delivery.",
     parameters: Schema.Struct({
       ...target.fields,
       waitMs: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 30_000 }))),
