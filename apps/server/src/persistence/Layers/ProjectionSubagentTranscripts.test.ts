@@ -98,6 +98,58 @@ const seedRun = (
     return runId;
   });
 
+const seedNativeRun = (
+  repository: ProjectionSubagentRunRepositoryShape,
+  options?: {
+    readonly runId?: string;
+    readonly threadId?: ThreadId;
+    readonly childThreadId?: ThreadId;
+  },
+) =>
+  Effect.gen(function* () {
+    const runId = RuntimeTaskId.make(options?.runId ?? "opaque-native-transcript-run");
+    const threadId = options?.threadId ?? THREAD_ID;
+    const childThreadId = options?.childThreadId ?? ThreadId.make("native-child-thread");
+    const runNumber = yield* repository.reserveRunNumber({
+      runId,
+      allocatedAt: at(0),
+      ownerId: null,
+      ownerEpoch: "t3-native",
+      nativeRunId: childThreadId,
+      activationId: null,
+    });
+    yield* repository.insertStart({
+      runId,
+      runNumber,
+      threadId,
+      parentRunId: null,
+      runtimeFamily: "t3-native",
+      harness: "pi",
+      provider: ProviderDriverKind.make("pi"),
+      providerInstanceId: null,
+      model: null,
+      effort: null,
+      title: null,
+      summary: null,
+      status: "active",
+      terminalReason: null,
+      controlAvailability: "owner-routed",
+      historyAvailability: "durable",
+      capabilities: { steer: true, cancel: true, resume: false },
+      createdAt: at(0),
+      updatedAt: at(0),
+      terminalAt: null,
+      runBirth: RUN_BIRTH,
+      ownerId: null,
+      ownerEpoch: "reserved",
+      nativeRunId: null,
+      activationId: null,
+      firstEventSequence: 1,
+      lastEventSequence: 1,
+    });
+    return { runId, threadId, childThreadId };
+  });
+
 const item = (sequence: number, text = `item ${sequence}`) => ({
   kind: "assistant" as const,
   transcriptSequence: sequence,
@@ -141,6 +193,50 @@ const pageOf = (
 };
 
 layer("ProjectionSubagentTranscriptStore", (it) => {
+  it.effect("validates native child and parent ownership before writing", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionSubagentRunRepository;
+      const store = yield* ProjectionSubagentTranscriptStore;
+      const native = yield* seedNativeRun(repository);
+      const put = (input: {
+        readonly parentThreadId?: ThreadId;
+        readonly childThreadId?: ThreadId;
+        readonly runBirth?: string;
+      }) =>
+        store.ingestNativeItem({
+          runId: native.runId,
+          parentThreadId: input.parentThreadId ?? native.threadId,
+          childThreadId: input.childThreadId ?? native.childThreadId,
+          runBirth: input.runBirth ?? RUN_BIRTH,
+          item: item(1, "native child output"),
+          observedAt: at(1),
+        });
+
+      assert.strictEqual(
+        (yield* put({ parentThreadId: ThreadId.make("foreign-parent") })).outcome,
+        "rejected-binding",
+      );
+      assert.strictEqual(
+        (yield* put({ childThreadId: ThreadId.make("foreign-child") })).outcome,
+        "rejected-binding",
+      );
+      assert.strictEqual((yield* put({ runBirth: OTHER_RUN_BIRTH })).outcome, "rejected-binding");
+      assert.deepStrictEqual(pageOf(yield* readPage(store, native.runId)).entries, []);
+
+      assert.strictEqual((yield* put({})).outcome, "stored");
+      assert.deepStrictEqual(pageOf(yield* readPage(store, native.runId)).entries, [
+        {
+          kind: "assistant",
+          transcriptSequence: 1,
+          text: "native child output",
+          truncated: false,
+          upstreamTruncated: false,
+          createdAt: null,
+        },
+      ]);
+    }),
+  );
+
   it.effect("validates the binding tuple before any write", () =>
     Effect.gen(function* () {
       const repository = yield* ProjectionSubagentRunRepository;

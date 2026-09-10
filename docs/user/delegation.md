@@ -30,6 +30,8 @@ stopping the parent cancels its active children without restarting the
 conversation. Long output is truncated explicitly. Delegation is independent
 of agent browser access.
 
-On web and desktop, open Agents to read child progress and completed reports.
-The parent receives completed results automatically and can summarize them in
-the conversation. On mobile, completed reports appear in the conversation.
+On web and desktop, open Agents to read each child's prompt, progress, tool
+activity and completed report. Runs created before full child history was
+available continue to show their saved summary. The parent receives completed
+results automatically and can summarize them in the conversation. On mobile,
+completed reports appear in the conversation.

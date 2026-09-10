@@ -16,9 +16,14 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { toPersistenceSqlError } from "../Errors.ts";
-import { ProjectionSubagentRunRepository } from "../Services/ProjectionSubagentRuns.ts";
+import {
+  ProjectionSubagentRunRepository,
+  type ProjectionSubagentRunBinding,
+} from "../Services/ProjectionSubagentRuns.ts";
 import {
   ProjectionSubagentTranscriptStore,
+  type IngestNativeSubagentTranscriptItemInput,
+  type IngestSubagentTranscriptItemInput,
   type IngestSubagentTranscriptResult,
   type ProjectionSubagentTranscriptStoreShape,
   type ReadSubagentTranscriptPageResult,
@@ -206,18 +211,19 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
     `;
   };
 
-  const ingestItem: ProjectionSubagentTranscriptStoreShape["ingestItem"] = (input) =>
+  const ingestBoundItem = (
+    input: Pick<
+      IngestSubagentTranscriptItemInput | IngestNativeSubagentTranscriptItemInput,
+      "runId" | "item" | "observedAt"
+    >,
+    bindingMatches: (binding: ProjectionSubagentRunBinding) => boolean,
+    operation: string,
+  ) =>
     sql
       .withTransaction(
         Effect.gen(function* () {
           const binding = yield* runs.getRunBinding({ runId: input.runId });
-          const bindingMatches =
-            binding !== null &&
-            binding.managerId === input.managerId &&
-            binding.managerRunId === input.managerRunId &&
-            binding.activationId === input.activationId &&
-            binding.runBirth === input.runBirth;
-          if (!bindingMatches) {
+          if (binding === null || !bindingMatches(binding)) {
             return {
               outcome: "rejected-binding",
               watermark: binding?.lastTranscriptSequence ?? 0,
@@ -317,11 +323,31 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
           } satisfies IngestSubagentTranscriptResult;
         }),
       )
-      .pipe(
-        Effect.mapError(
-          toPersistenceSqlError("ProjectionSubagentTranscriptStore.ingestItem:query"),
-        ),
-      );
+      .pipe(Effect.mapError(toPersistenceSqlError(operation)));
+
+  const ingestItem: ProjectionSubagentTranscriptStoreShape["ingestItem"] = (input) =>
+    ingestBoundItem(
+      input,
+      (binding) =>
+        binding.managerId === input.managerId &&
+        binding.managerRunId === input.managerRunId &&
+        binding.activationId === input.activationId &&
+        binding.runBirth === input.runBirth,
+      "ProjectionSubagentTranscriptStore.ingestItem:query",
+    );
+
+  const ingestNativeItem: ProjectionSubagentTranscriptStoreShape["ingestNativeItem"] = (input) =>
+    ingestBoundItem(
+      input,
+      (binding) =>
+        binding.threadId === input.parentThreadId &&
+        binding.managerId === null &&
+        binding.managerRunId === input.childThreadId &&
+        binding.activationId === null &&
+        binding.runBirth === input.runBirth &&
+        binding.historyAvailability === "durable",
+      "ProjectionSubagentTranscriptStore.ingestNativeItem:query",
+    );
 
   const getWatermark: ProjectionSubagentTranscriptStoreShape["getWatermark"] = ({ runId }) =>
     Effect.map(runs.getRunBinding({ runId }), (binding) => binding?.lastTranscriptSequence ?? 0);
@@ -441,6 +467,7 @@ const makeProjectionSubagentTranscriptStore = Effect.gen(function* () {
     signalStartCommitted,
     awaitStartCommitted,
     ingestItem,
+    ingestNativeItem,
     getWatermark,
     readWatermarks,
     readWatermarksForManager,

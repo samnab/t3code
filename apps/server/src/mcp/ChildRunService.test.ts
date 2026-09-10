@@ -6,7 +6,9 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderOptionDescriptor,
+  RuntimeItemId,
   RuntimeTaskId,
+  SubagentRunEvidence,
   type ServerProvider,
   ThreadId,
   TurnId,
@@ -38,11 +40,19 @@ import {
   OrchestrationListenerCallbackError,
 } from "../orchestration/Errors.ts";
 import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
+import { ProjectionSubagentRunRepositoryLive } from "../persistence/Layers/ProjectionSubagentRuns.ts";
+import { ProjectionSubagentTranscriptStoreLive } from "../persistence/Layers/ProjectionSubagentTranscripts.ts";
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import {
   NativeChildRun,
   NativeChildRunRepository,
 } from "../persistence/Services/NativeChildRuns.ts";
+import { ProjectionSubagentRunRepository } from "../persistence/Services/ProjectionSubagentRuns.ts";
+import {
+  ProjectionSubagentTranscriptStore,
+  type ReadSubagentTranscriptPageResult,
+} from "../persistence/Services/ProjectionSubagentTranscripts.ts";
 import type { ProviderAdapterShape } from "../provider/Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import { ProviderInstanceRegistry } from "../provider/Services/ProviderInstanceRegistry.ts";
@@ -62,6 +72,21 @@ const now = "2026-09-06T00:00:00.000Z";
 const parentId = ThreadId.make("parent");
 const otherParentId = ThreadId.make("other-parent");
 const decodeChildRunResult = Schema.decodeUnknownEffect(ChildRunResult);
+const NativeActivityPayload = Schema.Struct({ subagentRun: SubagentRunEvidence });
+const decodeNativeActivityPayload = Schema.decodeUnknownEffect(NativeActivityPayload);
+const decodeNativeActivityPayloadSync = Schema.decodeUnknownSync(NativeActivityPayload);
+const noopTranscriptStore = ProjectionSubagentTranscriptStore.of({
+  signalStartCommitted: () => Effect.void,
+  awaitStartCommitted: () => Effect.succeed(true),
+  ingestItem: (input) =>
+    Effect.succeed({ outcome: "stored", watermark: input.item.transcriptSequence }),
+  ingestNativeItem: (input) =>
+    Effect.succeed({ outcome: "stored", watermark: input.item.transcriptSequence }),
+  getWatermark: () => Effect.succeed(0),
+  readWatermarks: () => Effect.succeed([]),
+  readWatermarksForManager: () => Effect.succeed([]),
+  readPage: () => Effect.succeed({ unavailable: "unavailable" }),
+});
 const makeHarness = Effect.fn("makeHarness")(function* (
   parentDriver = "codex",
   childDriver = "claudeAgent",
@@ -78,6 +103,10 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     outcomes?: Array<"success" | "accepted" | "busy" | "uncertain" | "uncertain-after-accept">;
     acceptedCommandIds?: Set<string>;
     attempts?: OrchestrationCommand[];
+  },
+  transcriptControl?: {
+    readonly store: ProjectionSubagentTranscriptStore["Service"];
+    readonly projectActivity?: (command: OrchestrationCommand) => Effect.Effect<void>;
   },
 ) {
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -293,6 +322,14 @@ const makeHarness = Effect.fn("makeHarness")(function* (
             { readonly sequence: number },
             OrchestrationCommandInvariantError | OrchestrationListenerCallbackError
           > => {
+            const projectActivity = transcriptControl?.projectActivity;
+            if (projectActivity !== undefined && command.type === "thread.activity.append") {
+              return Effect.gen(function* () {
+                yield* projectActivity(command);
+                commands.push(command);
+                return { sequence: commands.length };
+              });
+            }
             if (shouldFailActivity && command.type === "thread.activity.append") {
               shouldFailActivity = false;
               return Effect.fail(
@@ -389,6 +426,12 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   };
   const childLayer = layerWithRepositoryAndMcpHooks(mcpHooks).pipe(
     Layer.provide(repositoryLayer ?? NativeChildRunRepositoryAuto),
+    Layer.provide(
+      Layer.succeed(
+        ProjectionSubagentTranscriptStore,
+        transcriptControl?.store ?? noopTranscriptStore,
+      ),
+    ),
   );
   return {
     scope,
@@ -906,6 +949,369 @@ for (const [parentDriver, childDriver] of [
       }),
   );
 }
+
+it.effect(
+  "persists the complete native child transcript before terminal projection and delivery",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const infrastructureScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(infrastructureScope, Exit.void));
+        const infrastructure = yield* Layer.buildWithScope(
+          Layer.mergeAll(
+            NativeChildRunRepositoryAuto,
+            ProjectionSubagentRunRepositoryLive,
+            ProjectionSubagentTranscriptStoreLive,
+          ).pipe(Layer.provide(SqlitePersistenceMemory)),
+          infrastructureScope,
+        );
+        const repository = Context.get(infrastructure, NativeChildRunRepository);
+        const projectionRuns = Context.get(infrastructure, ProjectionSubagentRunRepository);
+        const transcriptStore = Context.get(infrastructure, ProjectionSubagentTranscriptStore);
+        const terminalPages = new Map<RuntimeTaskId, ReadSubagentTranscriptPageResult["entries"]>();
+        let eventSequence = 0;
+        const projectActivity = (command: OrchestrationCommand): Effect.Effect<void> =>
+          Effect.gen(function* () {
+            if (command.type !== "thread.activity.append") return;
+            const { subagentRun: evidence } = yield* decodeNativeActivityPayload(
+              command.activity.payload,
+            );
+            eventSequence += 1;
+            if (command.activity.kind === "task.started") {
+              if (evidence.runNumber === undefined) throw new Error("missing native run number");
+              yield* projectionRuns.insertStart({
+                runId: evidence.runId,
+                runNumber: evidence.runNumber,
+                threadId: command.threadId,
+                parentRunId: evidence.parentRunId ?? null,
+                runtimeFamily: evidence.runtimeFamily,
+                harness: evidence.harness ?? null,
+                provider: evidence.provider,
+                providerInstanceId: evidence.providerInstanceId ?? null,
+                model: "native-model",
+                effort: null,
+                title: "Coordinate",
+                summary: null,
+                status: evidence.status,
+                terminalReason: evidence.terminalReason ?? null,
+                controlAvailability: evidence.controlAvailability,
+                historyAvailability: evidence.historyAvailability,
+                capabilities: evidence.capabilities,
+                createdAt: evidence.startedAt,
+                updatedAt: command.activity.createdAt,
+                terminalAt: null,
+                runBirth: evidence.runBirth ?? null,
+                ownerId: null,
+                ownerEpoch: "reserved",
+                nativeRunId: null,
+                activationId: null,
+                firstEventSequence: eventSequence,
+                lastEventSequence: eventSequence,
+              });
+              yield* transcriptStore.signalStartCommitted({ runId: evidence.runId });
+              return;
+            }
+            const page = yield* transcriptStore.readPage({
+              threadId: command.threadId,
+              runId: evidence.runId,
+            });
+            if (!("unavailable" in page)) terminalPages.set(evidence.runId, page.entries);
+            yield* projectionRuns.updateLifecycle({
+              runId: evidence.runId,
+              status: evidence.status,
+              terminalReason: evidence.terminalReason ?? null,
+              title: "Coordinate",
+              model: "native-model",
+              effort: null,
+              summary: command.activity.summary,
+              updatedAt: command.activity.createdAt,
+              eventSequence,
+            });
+          }).pipe(Effect.orDie);
+        const h = yield* makeHarness(
+          "codex",
+          "pi",
+          "full-access",
+          false,
+          false,
+          Layer.succeed(NativeChildRunRepository, repository),
+          false,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          { store: transcriptStore, projectActivity },
+        );
+
+        yield* Effect.gen(function* () {
+          const service = yield* ChildRunService;
+          const receiver = yield* service.spawn(h.scope, h.input);
+          const receiverThreadId = h.starts[0]!.threadId;
+          const sender = yield* service.spawn(h.scope, h.secondInput);
+
+          const publish = (event: ProviderRuntimeEvent) => PubSub.publish(h.events, event);
+          const assistantOne = RuntimeItemId.make("assistant-one");
+          yield* publish({
+            type: "content.delta",
+            eventId: EventId.make("assistant-one-a"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: assistantOne,
+            createdAt: now,
+            payload: { streamKind: "assistant_text", delta: "First " },
+          });
+          yield* publish({
+            type: "content.delta",
+            eventId: EventId.make("assistant-one-b"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: assistantOne,
+            createdAt: now,
+            payload: { streamKind: "assistant_text", delta: "update" },
+          });
+          yield* publish({
+            type: "item.completed",
+            eventId: EventId.make("assistant-one-complete"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: assistantOne,
+            createdAt: now,
+            payload: {
+              itemType: "assistant_message",
+              status: "completed",
+              detail: "First update",
+            },
+          });
+          const reasoning = RuntimeItemId.make("reasoning-one");
+          yield* publish({
+            type: "content.delta",
+            eventId: EventId.make("reasoning-delta"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: reasoning,
+            createdAt: now,
+            payload: { streamKind: "reasoning_text", delta: "Check the durable path" },
+          });
+          yield* publish({
+            type: "item.completed",
+            eventId: EventId.make("reasoning-complete"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: reasoning,
+            createdAt: now,
+            payload: {
+              itemType: "reasoning",
+              status: "completed",
+              detail: "Check the durable path",
+            },
+          });
+          const tool = RuntimeItemId.make("tool-one");
+          yield* publish({
+            type: "item.started",
+            eventId: EventId.make("tool-started"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: tool,
+            createdAt: now,
+            payload: {
+              itemType: "mcp_tool_call",
+              status: "inProgress",
+              title: "read_file",
+              data: { path: "README.md" },
+            },
+          });
+          yield* publish({
+            type: "content.delta",
+            eventId: EventId.make("tool-output"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: tool,
+            createdAt: now,
+            payload: { streamKind: "command_output", delta: "permission denied" },
+          });
+          yield* publish({
+            type: "item.completed",
+            eventId: EventId.make("tool-completed"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: tool,
+            createdAt: now,
+            payload: {
+              itemType: "mcp_tool_call",
+              status: "failed",
+              title: "read_file",
+              detail: "permission denied",
+            },
+          });
+          yield* publish({
+            type: "task.progress",
+            eventId: EventId.make("progress"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            createdAt: now,
+            payload: {
+              taskId: receiver.runId,
+              description: "Retrying with another source",
+              summary: "The first tool failed",
+            },
+          });
+
+          const beforeSteer = RuntimeItemId.make("assistant-before-steer");
+          yield* publish({
+            type: "content.delta",
+            eventId: EventId.make("assistant-before-steer-delta"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: beforeSteer,
+            createdAt: now,
+            payload: { streamKind: "assistant_text", delta: "Output before steer" },
+          });
+          yield* service.send(h.scope, { runId: receiver.runId, prompt: "Parent follow-up" });
+          const nativeStatus = (yield* service.controlPlane.status())[0];
+          if (
+            nativeStatus === undefined ||
+            !nativeStatus.supported ||
+            nativeStatus.managerId === undefined
+          ) {
+            throw new Error("missing native control status");
+          }
+          yield* service.controlPlane.steer({
+            managerId: nativeStatus.managerId,
+            runId: receiver.runId,
+            text: "Parent steering",
+          });
+          const senderCredential = h.credentialRequests.find(
+            (request) => request.agentMessaging?.agentId === sender.agentId,
+          );
+          if (senderCredential === undefined) throw new Error("missing sender credential");
+          yield* service.agentSend(messagingScope(h.scope, senderCredential), {
+            messageId: "sibling-message",
+            targetAgentId: receiver.agentId,
+            message: "Sibling evidence",
+          });
+          yield* publish({
+            type: "item.completed",
+            eventId: EventId.make("assistant-before-steer-complete"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: h.sentTurns[0],
+            itemId: beforeSteer,
+            createdAt: now,
+            payload: {
+              itemType: "assistant_message",
+              status: "completed",
+              detail: "Output before steer",
+            },
+          });
+
+          const finalAssistant = RuntimeItemId.make("assistant-final");
+          const finalTurnId = h.sentTurns.at(-1)!;
+          yield* publish({
+            type: "content.delta",
+            eventId: EventId.make("assistant-final-delta"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: finalTurnId,
+            itemId: finalAssistant,
+            createdAt: now,
+            payload: { streamKind: "assistant_text", delta: "Final child report" },
+          });
+          yield* publish({
+            type: "item.completed",
+            eventId: EventId.make("assistant-final-complete"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: finalTurnId,
+            itemId: finalAssistant,
+            createdAt: now,
+            payload: {
+              itemType: "assistant_message",
+              status: "completed",
+              detail: "Final child report",
+            },
+          });
+          yield* publish({
+            type: "turn.completed",
+            eventId: EventId.make("receiver-completed"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: receiverThreadId,
+            turnId: finalTurnId,
+            createdAt: now,
+            payload: { state: "completed" },
+          });
+          expect((yield* service.result(h.scope, receiver.runId, 30_000)).status).toBe("completed");
+
+          const page = yield* transcriptStore.readPage({
+            threadId: parentId,
+            runId: receiver.runId,
+          });
+          if ("unavailable" in page) throw new Error(`transcript unavailable: ${page.unavailable}`);
+          expect(page.entries.map((entry) => ("text" in entry ? entry.text : ""))).toEqual([
+            "Do the task",
+            "First update",
+            "[Reasoning]\nCheck the durable path",
+            '[Tool call: read_file]\n{\n  "path": "README.md"\n}',
+            "[Command output]\npermission denied",
+            "[Tool result: read_file (failed)]\npermission denied",
+            "[Progress: Retrying with another source]\nThe first tool failed",
+            "Output before steer",
+            "Parent follow-up",
+            "Parent steering",
+            `[T3 agent message sibling-message from Coordinate (${sender.agentId})]\nSibling evidence\n\nRead pending messages and acknowledge this message after processing it with agent_inbox.`,
+            "Final child report",
+            "[Run completed]",
+          ]);
+          const siblingEntry = page.entries[10];
+          if (siblingEntry === undefined || !("text" in siblingEntry)) {
+            throw new Error("missing sibling transcript entry");
+          }
+          expect(siblingEntry.text).toContain(`from Coordinate (${sender.agentId})`);
+          const terminalEntry = terminalPages.get(receiver.runId)?.at(-1);
+          expect(
+            terminalEntry !== undefined && "text" in terminalEntry ? terminalEntry.text : null,
+          ).toBe("[Run completed]");
+          const deliveries = h.commands.filter(
+            (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+              command.type === "thread.turn.start",
+          );
+          expect(deliveries).toHaveLength(1);
+          expect(deliveries[0]!.message.text).toContain("Final child report");
+
+          const senderThreadId = h.starts[1]!.threadId;
+          yield* publish({
+            type: "runtime.error",
+            eventId: EventId.make("sender-runtime-error"),
+            provider: ProviderDriverKind.make("pi"),
+            threadId: senderThreadId,
+            turnId: h.sentTurns[1],
+            createdAt: now,
+            payload: { message: "Provider transport failed", class: "transport_error" },
+          });
+          expect((yield* service.result(h.scope, sender.runId, 30_000)).error).toContain(
+            "Provider transport failed",
+          );
+          const failedPage = yield* transcriptStore.readPage({
+            threadId: parentId,
+            runId: sender.runId,
+          });
+          if ("unavailable" in failedPage) throw new Error("failed transcript unavailable");
+          expect(
+            failedPage.entries.map((entry) => ("text" in entry ? entry.text : "")).at(-1),
+          ).toContain("Provider transport failed");
+        }).pipe(Effect.provide(h.services));
+      }),
+    ),
+);
 
 it.effect("denies other parents and callers without delegation capability", () =>
   Effect.gen(function* () {
@@ -1877,6 +2283,13 @@ it.effect("preserves options for a repository-backed restart follow-up", () =>
           "task.started",
           "task.completed",
         ]);
+        expect(
+          activities.map(
+            (command) =>
+              decodeNativeActivityPayloadSync(command.activity.payload).subagentRun
+                .historyAvailability,
+          ),
+        ).toEqual(["summary-only", "summary-only"]);
         expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
           1,
         );

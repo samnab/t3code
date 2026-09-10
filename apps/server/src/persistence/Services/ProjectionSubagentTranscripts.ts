@@ -3,7 +3,7 @@ import {
   PositiveInt,
   RuntimeTaskId,
   SubagentTranscriptItemKind,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -31,6 +31,17 @@ export const IngestSubagentTranscriptItemInput = Schema.Struct({
   observedAt: Schema.String,
 });
 export type IngestSubagentTranscriptItemInput = typeof IngestSubagentTranscriptItemInput.Type;
+
+export const IngestNativeSubagentTranscriptItemInput = Schema.Struct({
+  runId: RuntimeTaskId,
+  parentThreadId: ThreadId,
+  childThreadId: ThreadId,
+  runBirth: Schema.String,
+  item: IngestSubagentTranscriptItemInput.fields.item,
+  observedAt: Schema.String,
+});
+export type IngestNativeSubagentTranscriptItemInput =
+  typeof IngestNativeSubagentTranscriptItemInput.Type;
 
 export type IngestSubagentTranscriptOutcome =
   | "stored"
@@ -95,6 +106,10 @@ export interface ProjectionSubagentTranscriptStoreShape {
   readonly ingestItem: (
     input: IngestSubagentTranscriptItemInput,
   ) => Effect.Effect<IngestSubagentTranscriptResult, ProjectionRepositoryError>;
+  /** Validate a T3-native child against its durable parent/child binding and ingest it. */
+  readonly ingestNativeItem: (
+    input: IngestNativeSubagentTranscriptItemInput,
+  ) => Effect.Effect<IngestSubagentTranscriptResult, ProjectionRepositoryError>;
   /** Durable per-run replay watermark (0 when nothing was observed). */
   readonly getWatermark: (
     input: GetSubagentTranscriptWatermarkInput,
@@ -131,10 +146,10 @@ export interface ProjectionSubagentTranscriptStoreShape {
 }
 
 /**
- * Side store for Phase 1.5 enhanced-manager child transcripts. One shared
- * instance per server: the in-memory durable-start receipts rendezvous the
- * projector (signaler) with runtime ingestion (waiter), so composition must
- * provide this layer once at a shared level.
+ * Durable child transcript store. One shared instance per server: the in-memory
+ * durable-start receipts rendezvous the projector (signaler) with runtime
+ * ingestion (waiter), so composition must provide this layer once at a shared
+ * level.
  */
 export class ProjectionSubagentTranscriptStore extends Context.Service<
   ProjectionSubagentTranscriptStore,

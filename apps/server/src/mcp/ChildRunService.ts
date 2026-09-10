@@ -12,6 +12,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
+  isToolLifecycleItemType,
   type ProviderRuntimeEvent,
   type ProviderSession,
 } from "@t3tools/contracts";
@@ -33,6 +34,8 @@ import {
   OrchestrationCommandPreviouslyRejectedError,
 } from "../orchestration/Errors.ts";
 import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
+import { ProjectionSubagentTranscriptStoreLive } from "../persistence/Layers/ProjectionSubagentTranscripts.ts";
+import { ProjectionSubagentTranscriptStore } from "../persistence/Services/ProjectionSubagentTranscripts.ts";
 import {
   NativeChildDeliveryBatch,
   NativeChildRunRepository,
@@ -165,6 +168,7 @@ export const ChildRunCapabilities = Schema.Struct({
 
 interface ActiveRun {
   readonly run: NativeChildRun;
+  readonly runBirth: string;
   readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
   readonly parentProviderInstanceId: ProviderInstanceId;
   readonly done: Deferred.Deferred<void>;
@@ -182,6 +186,21 @@ interface ActiveRun {
   sessionStopped: boolean;
   expectedTurnId: TurnId | null;
   readonly steerMutex: Semaphore.Semaphore;
+  readonly transcriptMutex: Semaphore.Semaphore;
+  transcriptSequence: number;
+  readonly transcriptDeltas: Map<
+    string,
+    {
+      readonly kind: "assistant" | "toolResult";
+      readonly label: string | null;
+      readonly itemId: string | null;
+      readonly createdAt: string;
+      text: string;
+      upstreamTruncated: boolean;
+    }
+  >;
+  transcriptDeltasTruncated: boolean;
+  readonly transcriptBoundaryItems: Set<string>;
   credentialIssued: boolean;
   pendingSteers: number;
   pendingCompletions: Array<{
@@ -201,6 +220,10 @@ const MAX_DELIVERY_ERROR = 2_000;
 const MAX_INBOX_MESSAGE_TEXT = 75_000;
 const MAX_PER_PARENT = 4;
 const MAX_RUNNING = 16;
+const MAX_TRANSCRIPT_DELTA_LENGTH = 16_384;
+const MAX_TRANSCRIPT_DELTA_STREAMS = 32;
+const MAX_TRANSCRIPT_BOUNDARY_ITEMS = 64;
+const START_COMMIT_TIMEOUT_MS = 5_000;
 const decodeRuntimeTaskId = Schema.decodeUnknownEffect(RuntimeTaskId);
 const NATIVE_CONTROL_CAPABILITIES = {
   normalizedEvents: true,
@@ -212,7 +235,7 @@ const NATIVE_CONTROL_CAPABILITIES = {
   scheduling: false,
   nativeChildProjection: true,
   deliveryAcknowledgements: true,
-  childTranscripts: false,
+  childTranscripts: true,
 } as const;
 const isTerminal = (run: NativeChildRun) =>
   run.status === "completed" || run.status === "failed" || run.status === "cancelled";
@@ -286,6 +309,35 @@ function buildDeliveryBatchText(runs: ReadonlyArray<NativeChildRun>): {
 
 function nativeManagerId(threadId: ThreadId): string {
   return `t3-native:${NodeCrypto.createHash("sha256").update(threadId).digest("hex").slice(0, 32)}`;
+}
+
+function displayUnknown(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? "";
+  } catch {
+    return "[Unserializable provider data]";
+  }
+}
+
+function labeledTranscript(label: string, ...details: ReadonlyArray<unknown>): string {
+  const body = details
+    .map(displayUnknown)
+    .filter((part) => part.length > 0)
+    .join("\n");
+  return body.length === 0 ? `[${label}]` : `[${label}]\n${body}`;
+}
+
+function deltaKey(
+  event: Extract<ProviderRuntimeEvent, { readonly type: "content.delta" }>,
+): string {
+  return [
+    event.payload.streamKind,
+    event.itemId ?? "turn",
+    event.payload.contentIndex ?? "",
+    event.payload.summaryIndex ?? "",
+  ].join(":");
 }
 
 function toResult(run: NativeChildRun): ChildRunResult {
@@ -372,6 +424,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
   const providers = yield* ProviderService;
   const providerInstances = yield* ProviderInstanceRegistry;
   const repository = yield* NativeChildRunRepository;
+  const transcriptStore = yield* ProjectionSubagentTranscriptStore;
   const engine = yield* OrchestrationEngineService;
   const startup = yield* ServerRuntimeStartup;
   const serviceScope = yield* Scope.Scope;
@@ -387,6 +440,130 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
 
   const persistenceError = (operation: string) => (_cause: unknown) =>
     new ChildRunError({ message: `${operation} failed.` });
+
+  const appendTranscriptUnlocked = Effect.fn("ChildRunService.appendTranscriptUnlocked")(function* (
+    active: ActiveRun,
+    kind: "user" | "assistant" | "toolResult",
+    text: string,
+    createdAt: string | null,
+    upstreamTruncated = false,
+  ) {
+    if (text.length === 0) return;
+    const transcriptSequence = active.transcriptSequence + 1;
+    const result = yield* transcriptStore
+      .ingestNativeItem({
+        runId: active.run.runId,
+        parentThreadId: active.run.parentThreadId,
+        childThreadId: active.run.childThreadId,
+        runBirth: active.runBirth,
+        item: {
+          kind,
+          transcriptSequence,
+          text,
+          truncated: false,
+          upstreamTruncated,
+          createdAt,
+        },
+        observedAt: yield* nowIso,
+      })
+      .pipe(Effect.mapError(persistenceError("Persisting the child transcript")));
+    if (result.outcome === "rejected-binding") {
+      return yield* new ChildRunError({
+        message: "The child transcript binding was rejected.",
+      });
+    }
+    active.transcriptSequence = transcriptSequence;
+  });
+
+  const flushTranscriptDeltasUnlocked = Effect.fn("ChildRunService.flushTranscriptDeltasUnlocked")(
+    function* (active: ActiveRun, itemId?: string) {
+      for (const [key, delta] of active.transcriptDeltas) {
+        if (itemId !== undefined && delta.itemId !== itemId) continue;
+        active.transcriptDeltas.delete(key);
+        if (delta.text.length === 0) continue;
+        if (itemId === undefined && delta.itemId !== null) {
+          active.transcriptBoundaryItems.add(delta.itemId);
+          if (active.transcriptBoundaryItems.size > MAX_TRANSCRIPT_BOUNDARY_ITEMS) {
+            const oldest = active.transcriptBoundaryItems.values().next().value;
+            if (oldest !== undefined) active.transcriptBoundaryItems.delete(oldest);
+          }
+        }
+        yield* appendTranscriptUnlocked(
+          active,
+          delta.kind,
+          delta.label === null ? delta.text : labeledTranscript(delta.label, delta.text),
+          delta.createdAt,
+          delta.upstreamTruncated,
+        );
+      }
+      if (itemId === undefined && active.transcriptDeltasTruncated) {
+        active.transcriptDeltasTruncated = false;
+        yield* appendTranscriptUnlocked(
+          active,
+          "toolResult",
+          "[Additional streamed output omitted because too many output streams were active]",
+          yield* nowIso,
+          true,
+        );
+      }
+    },
+  );
+
+  const appendPrompt = Effect.fn("ChildRunService.appendPrompt")(function* (
+    active: ActiveRun,
+    prompt: string,
+  ) {
+    yield* Effect.gen(function* () {
+      yield* flushTranscriptDeltasUnlocked(active);
+      yield* appendTranscriptUnlocked(active, "user", prompt, yield* nowIso);
+    }).pipe(active.transcriptMutex.withPermits(1));
+  });
+
+  const bufferTranscriptDelta = (
+    active: ActiveRun,
+    event: Extract<ProviderRuntimeEvent, { readonly type: "content.delta" }>,
+  ) => {
+    const streamKind = event.payload.streamKind;
+    const kind =
+      streamKind === "command_output" || streamKind === "file_change_output"
+        ? ("toolResult" as const)
+        : ("assistant" as const);
+    const label =
+      streamKind === "reasoning_text"
+        ? "Reasoning"
+        : streamKind === "reasoning_summary_text"
+          ? "Reasoning summary"
+          : streamKind === "plan_text"
+            ? "Plan"
+            : streamKind === "command_output"
+              ? "Command output"
+              : streamKind === "file_change_output"
+                ? "File change output"
+                : streamKind === "unknown"
+                  ? "Provider output"
+                  : null;
+    const key = deltaKey(event);
+    let buffered = active.transcriptDeltas.get(key);
+    if (buffered === undefined) {
+      if (active.transcriptDeltas.size >= MAX_TRANSCRIPT_DELTA_STREAMS) {
+        active.transcriptDeltasTruncated = true;
+        return;
+      } else {
+        buffered = {
+          kind,
+          label,
+          itemId: event.itemId ?? null,
+          createdAt: event.createdAt,
+          text: "",
+          upstreamTruncated: false,
+        };
+        active.transcriptDeltas.set(key, buffered);
+      }
+    }
+    const combined = buffered.text + event.payload.delta;
+    buffered.text = combined.slice(0, MAX_TRANSCRIPT_DELTA_LENGTH);
+    buffered.upstreamTruncated ||= combined.length > MAX_TRANSCRIPT_DELTA_LENGTH;
+  };
 
   const mutexForAgent = Effect.fn("ChildRunService.mutexForAgent")(function* (
     agentId: RuntimeTaskId,
@@ -512,6 +689,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
     run: NativeChildRun,
     status: "active" | "done" | "error" | "cancelled" | "interrupted",
     summary: string,
+    runBirth?: string,
   ) {
     const createdAt = yield* nowIso;
     yield* startup
@@ -560,7 +738,8 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
                         ? { terminalReason: "server-restart" as const }
                         : {}),
                 controlAvailability: status === "active" ? "owner-routed" : "read-only",
-                historyAvailability: "summary-only",
+                historyAvailability: runBirth === undefined ? "summary-only" : "durable",
+                ...(runBirth === undefined ? {} : { runBirth }),
                 capabilities: {
                   steer: status === "active",
                   cancel: status === "active",
@@ -726,10 +905,36 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
   ) {
     const stopped = yield* stopActiveSession(active);
     const updatedAt = yield* nowIso;
-    const status = stopped ? outcome.status : "failed";
-    const error = stopped
+    let status = stopped ? outcome.status : "failed";
+    let error = stopped
       ? (outcome.error ?? null)
       : "Child session cleanup failed; inspect the provider session.";
+    const transcriptStored = yield* Effect.gen(function* () {
+      yield* flushTranscriptDeltasUnlocked(active);
+      yield* appendTranscriptUnlocked(
+        active,
+        "toolResult",
+        status === "completed"
+          ? "[Run completed]"
+          : status === "cancelled"
+            ? labeledTranscript("Run cancelled", error)
+            : labeledTranscript("Run failed", error),
+        updatedAt,
+      );
+    }).pipe(
+      active.transcriptMutex.withPermits(1),
+      Effect.as(true),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Child terminal transcript persistence failed", {
+          runId: active.run.runId,
+          cause,
+        }).pipe(Effect.as(false)),
+      ),
+    );
+    if (!transcriptStored) {
+      status = "failed";
+      error = "Child transcript persistence failed; inspect the server logs.";
+    }
     yield* repository
       .markTerminal({
         runId: active.run.runId,
@@ -751,6 +956,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
         stored,
         status === "completed" ? "done" : status === "cancelled" ? "cancelled" : "error",
         status === "completed" ? active.output || "Completed" : (error ?? status),
+        active.runBirth,
       );
       if (active.suppressDelivery) {
         yield* repository
@@ -764,11 +970,13 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
 
   const makeActive = Effect.fn("ChildRunService.makeActive")(function* (
     run: NativeChildRun,
+    runBirth: string,
     adapter: ProviderAdapterShape<ProviderAdapterError>,
     parentProviderInstanceId: ProviderInstanceId,
   ) {
     const active: ActiveRun = {
       run,
+      runBirth,
       adapter,
       parentProviderInstanceId,
       done: yield* Deferred.make<void>(),
@@ -786,6 +994,11 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
       sessionStopped: false,
       expectedTurnId: null,
       steerMutex: yield* Semaphore.make(1),
+      transcriptMutex: yield* Semaphore.make(1),
+      transcriptSequence: 0,
+      transcriptDeltas: new Map(),
+      transcriptDeltasTruncated: false,
+      transcriptBoundaryItems: new Set(),
       credentialIssued: false,
       pendingSteers: 0,
       pendingCompletions: [],
@@ -827,6 +1040,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
   ) {
     const { run, adapter } = active;
     const work = Effect.gen(function* () {
+      yield* appendPrompt(active, prompt);
       const credential = yield* mcpHooks.issue({
         threadId: run.childThreadId,
         providerInstanceId: run.providerInstanceId,
@@ -915,6 +1129,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
     active.pendingSteers += 1;
     let released = false;
     yield* Effect.gen(function* () {
+      yield* appendPrompt(active, prompt);
       const turn = yield* active.adapter
         .sendTurn({
           threadId: active.run.childThreadId,
@@ -1010,7 +1225,8 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
         updatedAt: createdAt,
       });
       yield* repository.insert(run).pipe(Effect.mapError(persistenceError("Persisting child run")));
-      const active = yield* makeActive(run, adapter, scope.providerInstanceId);
+      const runBirth = `native-birth-${NodeCrypto.randomUUID()}`;
+      const active = yield* makeActive(run, runBirth, adapter, scope.providerInstanceId);
       if (stoppedParents.has(scope.threadId)) {
         yield* repository
           .markTerminal({
@@ -1031,7 +1247,18 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
           );
         return yield* new ChildRunError({ message: "Parent session is no longer active." });
       }
-      yield* activity(run, "active", input.title).pipe(
+      yield* Effect.gen(function* () {
+        yield* activity(run, "active", input.title, runBirth);
+        const committed = yield* transcriptStore.awaitStartCommitted({
+          runId,
+          timeoutMs: START_COMMIT_TIMEOUT_MS,
+        });
+        if (!committed) {
+          return yield* new ChildRunError({
+            message: "T3 Code could not prepare durable child history.",
+          });
+        }
+      }).pipe(
         Effect.catch((cause) =>
           repository
             .markTerminal({
@@ -1265,52 +1492,318 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
     });
   };
 
-  const onProviderEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
-    const child = activeByThread.get(event.threadId);
-    if (child !== undefined) {
-      if (event.type === "content.delta" && event.payload.streamKind === "assistant_text") {
-        return Effect.sync(() => {
+  const recordProviderEventUnlocked = Effect.fn("ChildRunService.recordProviderEventUnlocked")(
+    function* (child: ActiveRun, event: ProviderRuntimeEvent) {
+      if (event.type === "content.delta") {
+        if (event.payload.streamKind === "assistant_text") {
           const output = child.output + event.payload.delta;
           child.output = output.slice(0, MAX_OUTPUT);
           child.outputTruncated ||= output.length > MAX_OUTPUT;
-        });
+        }
+        bufferTranscriptDelta(child, event);
+        return;
       }
-      if (event.type === "turn.completed") {
-        const outcome: {
-          readonly status: "completed" | "failed" | "cancelled";
-          readonly error?: string;
-        } = {
-          status:
-            event.payload.state === "completed"
-              ? "completed"
-              : event.payload.state === "failed"
-                ? "failed"
-                : "cancelled",
-          ...(event.payload.errorMessage === undefined
-            ? {}
-            : { error: event.payload.errorMessage.slice(0, 2_000) }),
-        };
-        return completeChildTurn(child, event.turnId, outcome);
+
+      if (event.type === "item.started") {
+        if (isToolLifecycleItemType(event.payload.itemType)) {
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript(
+              `Tool call: ${event.payload.title ?? event.payload.itemType}`,
+              event.payload.detail,
+              event.payload.data,
+            ),
+            event.createdAt,
+          );
+        }
+        return;
       }
-      if (event.type === "turn.aborted") {
-        return completeChildTurn(child, event.turnId, {
-          status: "failed",
-          error: "Child provider ended before completing its turn.",
-        });
+
+      if (event.type === "item.completed") {
+        const hadBufferedOutput =
+          event.itemId !== undefined &&
+          (child.transcriptBoundaryItems.delete(event.itemId) ||
+            Array.from(child.transcriptDeltas.values()).some(
+              (delta) => delta.itemId === event.itemId,
+            ));
+        if (event.itemId !== undefined) {
+          yield* flushTranscriptDeltasUnlocked(child, event.itemId);
+        }
+        if (isToolLifecycleItemType(event.payload.itemType)) {
+          yield* appendTranscriptUnlocked(
+            child,
+            "toolResult",
+            labeledTranscript(
+              `Tool result: ${event.payload.title ?? event.payload.itemType}${event.payload.status === undefined ? "" : ` (${event.payload.status})`}`,
+              event.payload.detail,
+              event.payload.data,
+            ),
+            event.createdAt,
+          );
+        } else if (
+          !hadBufferedOutput &&
+          event.payload.detail !== undefined &&
+          (event.payload.itemType === "assistant_message" ||
+            event.payload.itemType === "reasoning" ||
+            event.payload.itemType === "plan" ||
+            event.payload.itemType === "error")
+        ) {
+          const label =
+            event.payload.itemType === "assistant_message"
+              ? null
+              : event.payload.itemType === "reasoning"
+                ? "Reasoning"
+                : event.payload.itemType === "plan"
+                  ? "Plan"
+                  : "Error";
+          yield* appendTranscriptUnlocked(
+            child,
+            event.payload.itemType === "error" ? "toolResult" : "assistant",
+            label === null
+              ? event.payload.detail
+              : labeledTranscript(label, event.payload.detail, event.payload.data),
+            event.createdAt,
+          );
+        }
+        return;
       }
-      if (event.type === "session.exited" || event.type === "runtime.error") {
-        return Deferred.succeed(child.terminal, {
-          status: "failed",
-          error: "Child provider ended before completing its turn.",
-        }).pipe(Effect.asVoid);
+
+      switch (event.type) {
+        case "task.started":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript(
+              `Task started: ${event.payload.title ?? event.payload.description ?? event.payload.taskId}`,
+            ),
+            event.createdAt,
+          );
+          return;
+        case "task.progress":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript(
+              `Progress: ${event.payload.description}`,
+              event.payload.summary,
+              event.payload.error,
+            ),
+            event.createdAt,
+          );
+          return;
+        case "task.updated":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript(
+              `Task updated: ${event.payload.description ?? event.payload.taskId}`,
+              event.payload.status,
+              event.payload.error,
+            ),
+            event.createdAt,
+          );
+          return;
+        case "task.completed":
+          yield* appendTranscriptUnlocked(
+            child,
+            "toolResult",
+            labeledTranscript(
+              `Task completed: ${event.payload.taskId} (${event.payload.status})`,
+              event.payload.summary,
+            ),
+            event.createdAt,
+          );
+          return;
+        case "hook.started":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript(`Hook started: ${event.payload.hookName}`, event.payload.hookEvent),
+            event.createdAt,
+          );
+          return;
+        case "hook.progress":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript(
+              `Hook progress: ${event.payload.hookId}`,
+              event.payload.output,
+              event.payload.stdout,
+              event.payload.stderr,
+            ),
+            event.createdAt,
+          );
+          return;
+        case "hook.completed":
+          yield* appendTranscriptUnlocked(
+            child,
+            "toolResult",
+            labeledTranscript(
+              `Hook completed: ${event.payload.hookId} (${event.payload.outcome})`,
+              event.payload.output,
+              event.payload.stdout,
+              event.payload.stderr,
+              event.payload.exitCode,
+            ),
+            event.createdAt,
+          );
+          return;
+        case "tool.progress":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript(
+              `Tool progress: ${event.payload.toolName ?? event.payload.toolUseId ?? "tool"}`,
+              event.payload.summary,
+            ),
+            event.createdAt,
+          );
+          return;
+        case "tool.summary":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript("Tool summary", event.payload.summary),
+            event.createdAt,
+          );
+          return;
+        case "tool.denied":
+          yield* appendTranscriptUnlocked(
+            child,
+            "toolResult",
+            labeledTranscript(`Tool denied: ${event.payload.toolName}`, event.payload.reason),
+            event.createdAt,
+          );
+          return;
+        case "turn.plan.updated":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript(
+              "Plan",
+              event.payload.explanation,
+              event.payload.plan.map((step) => `${step.status}: ${step.step}`).join("\n"),
+            ),
+            event.createdAt,
+          );
+          return;
+        case "turn.proposed.completed":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript("Proposed plan", event.payload.planMarkdown),
+            event.createdAt,
+          );
+          return;
+        case "request.opened":
+          yield* appendTranscriptUnlocked(
+            child,
+            "toolResult",
+            labeledTranscript(
+              `Interactive request: ${event.payload.requestType}`,
+              event.payload.detail,
+              event.payload.args,
+            ),
+            event.createdAt,
+          );
+          return;
+        case "user-input.requested":
+          yield* appendTranscriptUnlocked(
+            child,
+            "toolResult",
+            labeledTranscript(
+              "User input requested",
+              event.payload.questions.map((question) => question.question).join("\n"),
+            ),
+            event.createdAt,
+          );
+          return;
+        case "runtime.warning":
+          yield* appendTranscriptUnlocked(
+            child,
+            "assistant",
+            labeledTranscript("Runtime warning", event.payload.message, event.payload.detail),
+            event.createdAt,
+          );
+          return;
+        case "runtime.error":
+          yield* appendTranscriptUnlocked(
+            child,
+            "toolResult",
+            labeledTranscript("Runtime error", event.payload.message, event.payload.detail),
+            event.createdAt,
+          );
+          return;
+        case "turn.completed":
+        case "turn.aborted":
+        case "session.exited":
+          yield* flushTranscriptDeltasUnlocked(child);
+          return;
+        default:
+          return;
       }
-      if (event.type === "request.opened" || event.type === "user-input.requested") {
-        return Deferred.succeed(child.terminal, {
-          status: "failed",
-          error: "Child requires interactive input. Run this task in a regular thread.",
-        }).pipe(Effect.asVoid);
-      }
-      return Effect.void;
+    },
+  );
+
+  const recordProviderEvent = (child: ActiveRun, event: ProviderRuntimeEvent) =>
+    recordProviderEventUnlocked(child, event).pipe(child.transcriptMutex.withPermits(1));
+
+  const onProviderEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
+    const child = activeByThread.get(event.threadId);
+    if (child !== undefined) {
+      return Effect.gen(function* () {
+        const recorded = yield* recordProviderEvent(child, event).pipe(Effect.result);
+        if (recorded._tag === "Failure") {
+          yield* completeChildTurn(child, event.turnId, {
+            status: "failed",
+            error: "Child transcript persistence failed; inspect the server logs.",
+          });
+          return;
+        }
+        if (event.type === "turn.completed") {
+          const outcome: {
+            readonly status: "completed" | "failed" | "cancelled";
+            readonly error?: string;
+          } = {
+            status:
+              event.payload.state === "completed"
+                ? "completed"
+                : event.payload.state === "failed"
+                  ? "failed"
+                  : "cancelled",
+            ...(event.payload.errorMessage === undefined
+              ? {}
+              : { error: event.payload.errorMessage.slice(0, 2_000) }),
+          };
+          yield* completeChildTurn(child, event.turnId, outcome);
+          return;
+        }
+        if (event.type === "turn.aborted") {
+          yield* completeChildTurn(child, event.turnId, {
+            status: "failed",
+            error: event.payload.reason,
+          });
+          return;
+        }
+        if (event.type === "session.exited" || event.type === "runtime.error") {
+          yield* Deferred.succeed(child.terminal, {
+            status: "failed",
+            error:
+              event.type === "runtime.error"
+                ? event.payload.message
+                : (event.payload.reason ?? "Child provider ended before completing its turn."),
+          });
+          return;
+        }
+        if (event.type === "request.opened" || event.type === "user-input.requested") {
+          yield* Deferred.succeed(child.terminal, {
+            status: "failed",
+            error: "Child requires interactive input. Run this task in a regular thread.",
+          });
+        }
+      });
     }
     return event.type === "session.exited"
       ? suppressParent(event.threadId, event.providerInstanceId)
@@ -1693,4 +2186,7 @@ export const layerWithRepositoryAndMcpHooks = (mcpHooks: ChildRunMcpHooks) =>
 
 export const layerWithRepository = Layer.effect(ChildRunService, makeWithOptions(liveMcpHooks));
 
-export const layer = layerWithRepository.pipe(Layer.provide(NativeChildRunRepositoryAuto));
+export const layer = layerWithRepository.pipe(
+  Layer.provide(NativeChildRunRepositoryAuto),
+  Layer.provide(ProjectionSubagentTranscriptStoreLive),
+);
