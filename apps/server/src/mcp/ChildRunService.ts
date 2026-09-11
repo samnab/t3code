@@ -22,6 +22,7 @@ import {
   Deferred,
   Effect,
   Layer,
+  Option,
   Schema,
   Scope,
   Semaphore,
@@ -29,6 +30,7 @@ import {
 } from "effect";
 
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
+import { ThreadBackgroundLivenessService } from "../orchestration/ThreadBackgroundLiveness.ts";
 import {
   isOrchestrationCommandRejection,
   OrchestrationCommandPreviouslyRejectedError,
@@ -426,6 +428,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
   const repository = yield* NativeChildRunRepository;
   const transcriptStore = yield* ProjectionSubagentTranscriptStore;
   const engine = yield* OrchestrationEngineService;
+  const threadBackgroundLiveness = yield* Effect.serviceOption(ThreadBackgroundLivenessService);
   const startup = yield* ServerRuntimeStartup;
   const serviceScope = yield* Scope.Scope;
   const spawnMutex = yield* Semaphore.make(1);
@@ -692,6 +695,22 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
     runBirth?: string,
   ) {
     const createdAt = yield* nowIso;
+    if (Option.isSome(threadBackgroundLiveness)) {
+      threadBackgroundLiveness.value.recordTaskLiveness({
+        threadId: run.parentThreadId,
+        taskId: run.runId,
+        taskType: "subagent",
+        status:
+          status === "done"
+            ? "completed"
+            : status === "error"
+              ? "failed"
+              : status === "active"
+                ? "running"
+                : status,
+        kind: status === "active" ? "started" : "completed",
+      });
+    }
     yield* startup
       .enqueueCommand(
         engine.dispatch({

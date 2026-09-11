@@ -35,6 +35,7 @@ import {
 import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/unstable/ai";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
+import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLiveness.ts";
 import {
   OrchestrationCommandInvariantError,
   OrchestrationListenerCallbackError,
@@ -111,6 +112,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
 ) {
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const domainEvents = yield* PubSub.unbounded<OrchestrationEvent>();
+  const backgroundLiveness = ThreadBackgroundLiveness.make();
   const sent = yield* Deferred.make<ThreadId>();
   const terminalActivityReached = yield* Deferred.make<void>();
   const releaseTerminalActivity = yield* Deferred.make<void>();
@@ -309,6 +311,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
   };
   const runtimeServices = Layer.mergeAll(
+    Layer.succeed(ThreadBackgroundLiveness.ThreadBackgroundLivenessService, backgroundLiveness),
     Layer.mock(ProviderService)({ streamEvents: Stream.fromPubSub(events) }),
     Layer.mock(OrchestrationEngineService)({
       getAutomaticTurnState: () =>
@@ -447,6 +450,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
       parentRuntimeMode = runtimeMode;
     },
     commands,
+    backgroundLiveness,
     sent,
     events,
     domainEvents,
@@ -2043,6 +2047,26 @@ it.effect("exposes active native children through the shared Agents control plan
       expect((yield* service.result(h.scope, run.runId, 30_000)).status).toBe("cancelled");
       expect(h.stopped).toEqual([childThreadId]);
       expect(yield* service.controlPlane.status()).toEqual([]);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("keeps the sidebar liveness live while native siblings settle independently", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness("codex", "claudeAgent", "full-access", false);
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const first = yield* service.spawn(h.scope, h.input);
+      const second = yield* service.spawn(h.scope, h.secondInput);
+      expect(h.backgroundLiveness.getThreadBackgroundLiveness(parentId)).toBe("working");
+
+      yield* service.cancel(h.scope, first.runId);
+      expect((yield* service.result(h.scope, first.runId, 30_000)).status).toBe("cancelled");
+      expect(h.backgroundLiveness.getThreadBackgroundLiveness(parentId)).toBe("working");
+
+      yield* service.cancel(h.scope, second.runId);
+      expect((yield* service.result(h.scope, second.runId, 30_000)).status).toBe("cancelled");
+      expect(h.backgroundLiveness.getThreadBackgroundLiveness(parentId)).toBeNull();
     }).pipe(Effect.provide(h.services));
   }),
 );
