@@ -246,20 +246,19 @@ describe("CodexSessionRuntime collab integration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("retries a failed child metadata lookup on later activity", () =>
+  it.effect("recovers child metadata after three failed attempts", () =>
     Effect.gen(function* () {
       const script = {
         rootThreadId: ROOT,
         recordRequests: true,
-        notifications: [
-          capturedStartedActivity(),
-          {
-            method: "thread/status/changed",
-            params: { threadId: CHILD_A, status: { type: "active", activeFlags: [] } },
-          },
-        ],
+        notifications: [capturedStartedActivity()],
         childResumeSnapshots: {
-          [CHILD_A]: [{ error: "temporary" }, { model: "gpt-5.6-luna", reasoningEffort: "low" }],
+          [CHILD_A]: [
+            { error: "temporary-1" },
+            { error: "temporary-2" },
+            { error: "temporary-3" },
+            { model: "gpt-5.6-luna", reasoningEffort: "low" },
+          ],
         },
       };
       NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
@@ -288,7 +287,7 @@ describe("CodexSessionRuntime collab integration", () => {
         model: "gpt-5.6-luna",
         effort: "low",
       });
-      assert.equal(readRecordedRequests().length, 2);
+      assert.equal(readRecordedRequests().length, 4);
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
