@@ -1566,6 +1566,7 @@ export const makeCodexSessionRuntime = (
               }
             }),
           ),
+          Effect.retry({ times: 1 }),
           Effect.catch(() => Effect.void),
           Effect.forkIn(runtimeScope),
         );

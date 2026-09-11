@@ -246,6 +246,53 @@ describe("CodexSessionRuntime collab integration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("retries a failed child metadata lookup on later activity", () =>
+    Effect.gen(function* () {
+      const script = {
+        rootThreadId: ROOT,
+        recordRequests: true,
+        notifications: [
+          capturedStartedActivity(),
+          {
+            method: "thread/status/changed",
+            params: { threadId: CHILD_A, status: { type: "active", activeFlags: [] } },
+          },
+        ],
+        childResumeSnapshots: {
+          [CHILD_A]: [{ error: "temporary" }, { model: "gpt-5.6-luna", reasoningEffort: "low" }],
+        },
+      };
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scriptPath, { force: true });
+          NodeFS.rmSync(`${scriptPath}.requests`, { force: true });
+        }),
+      );
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-retry"),
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const fiber = yield* runtime.events.pipe(
+        Stream.filter((event) => event.method === "collabAgent/metadataUpdated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "retry" });
+      assert.deepInclude((yield* Fiber.join(fiber))[0]?.payload, {
+        model: "gpt-5.6-luna",
+        effort: "low",
+      });
+      assert.equal(readRecordedRequests().length, 2);
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("keeps child settings and reroutes newer than the resume snapshot", () =>
     Effect.gen(function* () {
       const statusChanged = wireFixture.notifications.find(
