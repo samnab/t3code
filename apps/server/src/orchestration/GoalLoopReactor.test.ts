@@ -178,8 +178,8 @@ function makeTurnDiffCompletedEvent(
 const RESUMED_AT = "2026-09-03T12:05:00.000Z";
 
 /**
- * The event a `thread.goal.loop` resume/reset produces. `resumed` is what the
- * reactor keys on; a freshly set goal emits the same event without it.
+ * The event a goal activation or `thread.goal.loop` resume/reset produces.
+ * `resumed` is what the reactor keys on; held goals omit it.
  */
 function makeGoalLoopUpdatedEvent(input: {
   readonly loop: ThreadGoalLoop | null;
@@ -648,7 +648,7 @@ describe("GoalLoopReactor", () => {
     ),
   );
 
-  it.effect("a freshly set goal waits for the user's first message", () =>
+  it.effect("a freshly set goal starts the first T3 continuation", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fixture = yield* makeHarness({
@@ -658,23 +658,70 @@ describe("GoalLoopReactor", () => {
         yield* Effect.gen(function* () {
           const reactor = yield* GoalLoopReactor.GoalLoopReactor;
           // Queued ahead of the tracer below, and before the reactor starts —
-          // the harness uses a buffered queue, so nothing is lost. No
-          // `resumed`: the goal was set, not resumed.
+          // the harness uses a buffered queue, so nothing is lost. Goal
+          // activation carries `resumed` so it can start without a user turn.
           yield* Queue.offer(
             fixture.events,
-            makeGoalLoopUpdatedEvent({ loop: makeLoop({ state: "idle", iterations: 0 }) }),
+            makeGoalLoopUpdatedEvent({
+              loop: makeLoop({ state: "idle", iterations: 0 }),
+              resumed: true,
+            }),
           );
           yield* runSignals({
             reactor,
             activation: fixture.activation,
             shellReads: fixture.shellReads,
             events: fixture.events,
-            // A signal for an unknown thread: it reads the shell (so the wait
-            // in `runSignals` lands) and dispatches nothing, proving the loop
-            // update ahead of it in the queue produced nothing either.
+            // A signal for an unknown thread lands after the activation event
+            // and gives the harness a progress marker for both reads.
             signals: [makeTurnDiffCompletedEvent(ThreadId.make("other-thread"))],
           });
-          assert.deepStrictEqual(yield* Ref.get(fixture.commands), []);
+          const commands = yield* Ref.get(fixture.commands);
+          assert.strictEqual(commands.length, 1);
+          assert.strictEqual(commands[0]!.type, "thread.turn.start");
+          if (commands[0]!.type === "thread.turn.start") {
+            assert.strictEqual(commands[0]!.continuation, true);
+          }
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("holds a fresh goal wake until a busy turn finishes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const loop = makeLoop({ state: "idle", iterations: 0 });
+        const fixture = yield* makeHarness({
+          shell: makeShell({
+            goalLoop: loop,
+            session: makeSession({ status: "running", activeTurnId: TURN_ID }),
+          }),
+          messages: [makeAssistantMessage("The previous goal ended. <goal_complete>")],
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* GoalLoopReactor.GoalLoopReactor;
+          yield* reactor.start();
+          yield* Deferred.succeed(fixture.activation, undefined);
+          yield* reactor.drain;
+
+          yield* Queue.offer(fixture.events, makeGoalLoopUpdatedEvent({ loop, resumed: true }));
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          yield* Ref.set(
+            fixture.shell,
+            makeShell({
+              goalLoop: loop,
+              session: makeSession({ status: "idle" }),
+            }),
+          );
+          yield* Queue.offer(fixture.events, makeTurnDiffCompletedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          const commands = yield* Ref.get(fixture.commands);
+          assert.strictEqual(commands.length, 1);
+          assert.strictEqual(commands[0]!.type, "thread.turn.start");
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),

@@ -163,11 +163,11 @@ Android opens the system chooser.
 Set a goal for the current thread with `/goal` followed by a short description, for example
 `/goal ship the login fix`, or use the target button in the composer controls. Picking `/goal`
 from the slash menu switches the input into goal mode directly, the same as selecting the target
-button. Once a goal is set,
-the button becomes a compact pill showing the goal's first line in the composer. Select the pill
-to switch the chat input into goal mode: the input changes colour, and sending writes the goal
-instead of a message. Select the pill again to go back. On mobile, the goal pill lives in the
-thread composer's toolbar and opens a goal editor as a bottom sheet. Sending `/goal` on its own
+button. Once a goal is set, the goal appears in a compact strip above the composer, and the button
+becomes a compact pill showing the goal's first line. Select the pill to switch the chat input into
+goal mode: the input changes colour, and sending writes the goal instead of a message. Select the
+pill again to go back. On mobile, the goal pill lives in the thread composer's toolbar and opens a
+goal editor as a bottom sheet. Sending `/goal` on its own
 fills in the current goal for editing, and `/goal clear` removes it. The `mod+shift+g` shortcut
 toggles goal mode without leaving the keyboard. Pressing Esc while typing in goal mode leaves goal
 mode and keeps whatever you typed.
@@ -198,9 +198,11 @@ takes effect once the turn that is running ends. The goal pill shows the loop's 
   set the count back to zero.
 - **Complete** means the agent reported the goal done.
 
-A resume or a **Continue anyway** starts the next turn on its own — you do not have to send a
-message — and the agent picks up from where the loop stopped rather than re-reading the reply that
-paused or blocked it. Clearing the goal with `/goal clear`, or the pill, stops the loop along with it.
+A newly set goal starts its first turn on its own when the thread is idle. If a turn is already
+running, the goal starts as soon as that turn ends. A resume or a **Continue anyway** also starts
+the next turn on its own — you do not have to send a message — and the agent picks up from where the
+loop stopped rather than re-reading the reply that paused or blocked it. Clearing the goal with
+`/goal clear`, or the pill, stops the loop along with it.
 
 You can send a `/goal` command while a turn is running — setting, editing, and clearing a goal are
 thread state, not messages to the agent, so the composer sends them instead of queueing them.

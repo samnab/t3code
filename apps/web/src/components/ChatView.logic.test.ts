@@ -34,6 +34,7 @@ import {
   agentControlledBrowserCloseConfirmation,
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
+  buildDraftGoalBootstrapSubmission,
   buildLoadingThreadFromShell,
   buildOutgoingMessageText,
   buildThreadTurnInterruptInput,
@@ -74,6 +75,22 @@ import {
   shouldWriteThreadErrorToCurrentServerThread,
   toolGroupConsumesUpwardNavigation,
 } from "./ChatView.logic";
+
+describe("draft goal bootstrap", () => {
+  it("turns a saved goal into a provider submission for the first thread turn", () => {
+    const submission = buildDraftGoalBootstrapSubmission("Ship the release");
+
+    expect(submission).toEqual({
+      goal: "Ship the release",
+      prompt: "Continue working toward the thread goal.",
+    });
+    expect(parseThreadGoalCommand(submission?.prompt ?? "")).toBeNull();
+  });
+
+  it("does not create a bootstrap turn when clearing a draft goal", () => {
+    expect(buildDraftGoalBootstrapSubmission(null)).toBeNull();
+  });
+});
 
 describe("agent browser close confirmation", () => {
   const surfaces = [

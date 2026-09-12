@@ -179,7 +179,12 @@ export function isThreadGoalLoopActionAvailable(
   if (!loop) return false;
   if (loop.kind === "experiment") {
     const phase = loop.experiment?.phase;
-    if (phase === undefined || phase === "exhausted" || phase === "failed" || phase === "complete") {
+    if (
+      phase === undefined ||
+      phase === "exhausted" ||
+      phase === "failed" ||
+      phase === "complete"
+    ) {
       return false;
     }
   }
@@ -202,6 +207,14 @@ export function threadGoalEditorCanSave(state: ThreadGoalEditorState): boolean {
     state.draft !== (state.savedGoal ?? "") &&
     threadGoalEditorDraftError(state.draft) === null
   );
+}
+
+/** The goal is visibly active only while its loop is driving work. */
+export function isThreadGoalBeingPursued(input: {
+  goal: string | null;
+  loop: ThreadGoalLoop | null | undefined;
+}): boolean {
+  return input.goal !== null && input.loop?.state === "running";
 }
 
 export type ThreadGoalDisplay = "control" | "passive" | "none";

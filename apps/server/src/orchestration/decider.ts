@@ -56,7 +56,7 @@ const goalLoopEvent = Effect.fn("goalLoopEvent")(function* (input: {
   readonly commandId: OrchestrationCommand["commandId"];
   readonly occurredAt: string;
   readonly loop: ThreadGoalLoop | null;
-  /** See ThreadGoalLoopUpdatedPayload.resumed — only resume/reset set it. */
+  /** See ThreadGoalLoopUpdatedPayload.resumed — set when the loop should start work immediately. */
   readonly resumed?: boolean;
 }) {
   return {
@@ -960,7 +960,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
       // The loop is a property of the goal: setting one starts it, clearing
       // one removes it, and replacing the text restarts the iteration count
-      // (a paused loop stays paused, because that is a user hold).
+      // (a paused loop stays paused, because that is a user hold). A fresh
+      // goal gets the same wake marker as resume/reset so T3 can begin its
+      // first continuation without requiring a second user message.
       if (command.goal === undefined || command.goal === thread.goal) return metaUpdated;
       const nextLoop: ThreadGoalLoop | null =
         command.goal === null
@@ -974,6 +976,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 reason: null,
                 updatedAt: occurredAt,
               };
+      const startsGoalLoop = nextLoop !== null && nextLoop.state === "idle";
       if (nextLoop === null && thread.goalLoop == null) return metaUpdated;
       return [
         metaUpdated,
@@ -982,6 +985,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           commandId: command.commandId,
           occurredAt,
           loop: nextLoop,
+          ...(startsGoalLoop ? { resumed: true } : {}),
         }),
       ];
     }
@@ -994,8 +998,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       const occurredAt = yield* nowIso;
       const loop = thread.goalLoop ?? initialGoalLoop({ thread, updatedAt: occurredAt });
-      // `resumed` marks the two actions that hand a held loop back to the
-      // reactor, which starts the next turn on that alone.
+      // `resumed` marks actions that hand an idle loop to the reactor, which
+      // starts the next turn on that alone. Goal metadata updates use the same
+      // marker when they create or replace an active goal.
       const emit = (patch: Partial<ThreadGoalLoop>, resumed = false) =>
         goalLoopEvent({
           threadId: command.threadId,

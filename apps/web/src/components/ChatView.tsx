@@ -382,6 +382,7 @@ import {
   buildLocalDraftThread,
   buildLoadingThreadFromShell,
   buildOutgoingMessageText,
+  buildDraftGoalBootstrapSubmission,
   buildThreadTurnInterruptInput,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
@@ -404,6 +405,7 @@ import {
   getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
+  type GoalBootstrapSubmission,
   type LocalDispatchSnapshot,
   PullRequestDialogState,
   cloneComposerImageForRetry,
@@ -6361,6 +6363,7 @@ export default function ChatView(props: ChatViewProps) {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
     },
+    goalBootstrap?: GoalBootstrapSubmission,
   ) => {
     e?.preventDefault();
     // Typed out in full rather than picked from the menu. Attachments or contexts
@@ -6491,7 +6494,8 @@ export default function ChatView(props: ChatViewProps) {
     // Goal mode sends the input as a /goal command; the raw text is what the
     // draft store holds, so draft-clearing compares against that.
     const rawPrompt = promptRef.current;
-    const promptForSend = sendCtx.goalMode ? `/goal ${rawPrompt}` : rawPrompt;
+    const promptForSend =
+      goalBootstrap === undefined && sendCtx.goalMode ? `/goal ${rawPrompt}` : rawPrompt;
     const {
       trimmedPrompt: trimmed,
       sendableTerminalContexts: sendableComposerTerminalContexts,
@@ -6509,9 +6513,10 @@ export default function ChatView(props: ChatViewProps) {
     // Parse on the placeholder-stripped but untrimmed prompt: native
     // String.trim removes U+FEFF, which the /goal delimiter policy keeps as
     // content, so a FEFF-joined text must never become a goal command.
-    const goalCommand = parseThreadGoalCommand(
-      stripInlineTerminalContextPlaceholders(promptForSend),
-    );
+    const goalCommand =
+      goalBootstrap === undefined
+        ? parseThreadGoalCommand(stripInlineTerminalContextPlaceholders(promptForSend))
+        : null;
     if (goalCommand) {
       const experimentObjective = threadExperimentCommandObjective(goalCommand);
       const goalBlockReason = resolveThreadGoalCommandBlockReason({
@@ -6676,10 +6681,21 @@ export default function ChatView(props: ChatViewProps) {
       // composer draft and rides along in the first send's bootstrap.
       if (isDraftGoalTarget) {
         setComposerThreadSettings(composerDraftTarget, { goal: goalNextValue });
-        promptRef.current = "";
-        clearComposerDraftContent(composerDraftTarget);
-        composerRef.current?.resetCursorState();
-        composerRef.current?.setGoalMode(false);
+        const goalBootstrap = buildDraftGoalBootstrapSubmission(goalNextValue);
+        if (goalBootstrap !== null) {
+          // Bootstrap a draft with one server-authored continuation prompt so
+          // setting a goal starts work immediately without a second user send.
+          promptRef.current = goalBootstrap.prompt;
+          setComposerDraftPrompt(composerDraftTarget, goalBootstrap.prompt);
+          composerRef.current?.resetCursorState({ prompt: goalBootstrap.prompt });
+          composerRef.current?.setGoalMode(false);
+          await onSend(undefined, submissionIntent, undefined, goalBootstrap);
+        } else {
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+          composerRef.current?.setGoalMode(false);
+        }
         return;
       }
       if (goalMetadataInFlightRef.current || !activeServerThread) return;
@@ -7063,6 +7079,7 @@ export default function ChatView(props: ChatViewProps) {
         id: messageIdForSend,
         role: "user",
         text: outgoingMessageText,
+        ...(goalBootstrap ? { origin: "goal-continue" as const } : {}),
         ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
         turnId: null,
         createdAt: messageCreatedAt,
@@ -7095,7 +7112,7 @@ export default function ChatView(props: ChatViewProps) {
         firstComposerImageName = firstComposerImage.name;
       }
     }
-    let titleSeed = assistantCitationsToPlainText(trimmed);
+    let titleSeed = goalBootstrap?.goal ?? assistantCitationsToPlainText(trimmed);
     if (!titleSeed) {
       if (firstComposerImageName) {
         titleSeed = `Image: ${firstComposerImageName}`;
@@ -7115,6 +7132,7 @@ export default function ChatView(props: ChatViewProps) {
       ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
       ctxSelectedModelSelection.options,
     );
+    const draftGoalForBootstrap = goalBootstrap?.goal ?? composerDraftGoal;
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
     // Auto-title from first message
@@ -7172,7 +7190,7 @@ export default function ChatView(props: ChatViewProps) {
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode: sendInteractionMode,
-                      ...(composerDraftGoal === null ? {} : { goal: composerDraftGoal }),
+                      ...(draftGoalForBootstrap === null ? {} : { goal: draftGoalForBootstrap }),
                       ...(composerDraftVoiceNotifications === null
                         ? {}
                         : { voiceNotifications: composerDraftVoiceNotifications }),
@@ -7211,6 +7229,7 @@ export default function ChatView(props: ChatViewProps) {
             role: "user",
             text: outgoingMessageText,
             attachments: turnAttachmentsResult.value,
+            ...(goalBootstrap ? { origin: "goal-continue" as const } : {}),
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: title,

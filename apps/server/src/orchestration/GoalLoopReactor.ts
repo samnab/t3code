@@ -20,9 +20,9 @@
  * swallows the new goal's complete/block/continue.
  *
  * The other wake is `thread.goal-loop-updated` with `resumed`, which the
- * decider sets only for the `resume` and `reset` actions: a user who resumes a
- * paused loop or pushes past the iteration cap gets the next turn immediately
- * rather than having to send a message.
+ * decider sets when a user resumes/resets a held loop or sets a fresh goal. A
+ * newly active goal therefore gets its first turn immediately rather than
+ * waiting for another user message.
  *
  * @module GoalLoopReactor
  */
@@ -138,11 +138,10 @@ interface Signal {
   readonly threadId: ThreadId;
   readonly turnId: TurnId | null;
   /**
-   * Set when a user resumed or reset a held loop, to the loop's `updatedAt`.
-   * Such a signal starts the next turn straight away and never scans the last
-   * assistant message: that message is the one whose `<goal_blocked>` or
-   * `<goal_complete>` tag stopped the loop, and re-reading it would just stop
-   * it again.
+   * Set when a fresh goal or user action hands an idle loop back, to the
+   * loop's `updatedAt`. Such a signal starts the next turn straight away once
+   * the thread is driveable and never scans the last assistant message: that
+   * message may carry the stale tag that stopped a previous goal generation.
    */
   readonly resumedAt?: string;
 }
@@ -158,6 +157,27 @@ export const make = Effect.gen(function* () {
   // durable alternative is another projected counter; not worth it until an
   // agent is observed wedging silently across a restart.
   const emptyRuns = new Map<ThreadId, number>();
+
+  // A goal can be set while the current turn is still running. Keep that
+  // explicit wake until the turn-end signal makes the thread driveable, or
+  // until a clear/pause/terminal update makes it stale.
+  const pendingResumes = new Map<ThreadId, string>();
+
+  const canRetainResume = (thread: OrchestrationThreadShell): boolean => {
+    const loop = thread.goalLoop;
+    return (
+      thread.goal != null &&
+      loop != null &&
+      (loop.state === "idle" || loop.state === "running") &&
+      resolveThreadGoalLoopMode(
+        thread.session?.providerName ?? thread.modelSelection.instanceId,
+      ) === "t3" &&
+      loop.iterations < loop.maxIterations &&
+      thread.archivedAt == null &&
+      thread.settledOverride !== "settled" &&
+      thread.snoozedUntil == null
+    );
+  };
 
   const dispatchLoopAction = Effect.fn("GoalLoopReactor.dispatchLoopAction")(function* (input: {
     readonly threadId: ThreadId;
@@ -210,17 +230,33 @@ export const make = Effect.gen(function* () {
   });
 
   const evaluate = Effect.fn("GoalLoopReactor.evaluate")(function* (signal: Signal) {
+    if (signal.resumedAt !== undefined) pendingResumes.set(signal.threadId, signal.resumedAt);
     const thread = Option.getOrUndefined(yield* snapshots.getThreadShellById(signal.threadId));
-    if (thread === undefined || !canDriveGoalLoop(thread)) return;
-    if (thread.goalLoop?.kind === "experiment") {
-      if (Option.isNone(experiments)) return;
-      if (signal.resumedAt !== undefined) yield* experiments.value.resume(thread.id);
-      if (!(yield* experiments.value.canContinue(thread.id))) return;
+    if (thread === undefined) {
+      pendingResumes.delete(signal.threadId);
+      return;
     }
-    if (signal.resumedAt !== undefined) {
+    const resumedAt = signal.resumedAt ?? pendingResumes.get(signal.threadId);
+    if (!canDriveGoalLoop(thread)) {
+      if (!canRetainResume(thread)) pendingResumes.delete(signal.threadId);
+      return;
+    }
+    if (thread.goalLoop?.kind === "experiment") {
+      if (Option.isNone(experiments)) {
+        pendingResumes.delete(signal.threadId);
+        return;
+      }
+      if (resumedAt !== undefined) yield* experiments.value.resume(thread.id);
+      if (!(yield* experiments.value.canContinue(thread.id))) {
+        pendingResumes.delete(signal.threadId);
+        return;
+      }
+    }
+    if (resumedAt !== undefined) {
       // Explicit user intent, so it outranks the error-session hold below.
       emptyRuns.delete(signal.threadId);
-      return yield* startContinuationTurn(thread, `resume:${signal.resumedAt}`);
+      pendingResumes.delete(signal.threadId);
+      return yield* startContinuationTurn(thread, `resume:${resumedAt}`);
     }
     // A failed turn leaves the loop exactly as it is: the user decides
     // whether to retry, and a retry storm on a broken session helps nobody.
@@ -324,9 +360,9 @@ export const make = Effect.gen(function* () {
                 turnId: event.payload.turnId,
               });
             }
-            // Resume and "continue anyway" have no turn to end, so the loop
-            // update is their start signal. Only those two actions set
-            // `resumed`; a freshly set goal waits for the user's first message.
+            // Goal activation, resume, and "continue anyway" have no turn to
+            // end, so the loop update is their start signal. These actions set
+            // `resumed`; a paused goal remains held and does not wake us.
             if (event.type === "thread.goal-loop-updated" && event.payload.resumed === true) {
               const loop = event.payload.loop;
               return loop !== null && loop.state === "idle"
@@ -336,6 +372,9 @@ export const make = Effect.gen(function* () {
                     resumedAt: loop.updatedAt,
                   })
                 : Effect.void;
+            }
+            if (event.type === "thread.session-set" && pendingResumes.has(event.payload.threadId)) {
+              return worker.enqueue({ threadId: event.payload.threadId, turnId: null });
             }
             return Effect.void;
           });

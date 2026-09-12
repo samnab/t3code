@@ -86,6 +86,20 @@ export function shouldClearSubmittedThreadGoalDraft(input: {
   );
 }
 
+export const GOAL_BOOTSTRAP_PROMPT = "Continue working toward the thread goal.";
+
+export type GoalBootstrapSubmission = {
+  readonly goal: string;
+  readonly prompt: typeof GOAL_BOOTSTRAP_PROMPT;
+};
+
+/** Turn a saved draft goal into the first provider submission for its thread. */
+export function buildDraftGoalBootstrapSubmission(
+  goal: string | null,
+): GoalBootstrapSubmission | null {
+  return goal === null ? null : { goal, prompt: GOAL_BOOTSTRAP_PROMPT };
+}
+
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
 export function agentControlledBrowserCloseConfirmation(

@@ -353,6 +353,7 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
       ]);
       const loopEvent = events[1];
       if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.resumed).toBe(true);
         expect(loopEvent.payload.loop).toMatchObject({
           state: "idle",
           // The thread's provider instance is `codex`, so the loop is native.
@@ -481,7 +482,30 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
 
       expect(loopEvent?.type).toBe("thread.goal-loop-updated");
       if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.resumed).toBe(true);
         expect(loopEvent.payload.loop).toMatchObject({ state: "idle", iterations: 0 });
+      }
+    }),
+  );
+
+  it.effect("keeps a replaced paused goal held without waking its loop", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-goal-loop-replace-paused"),
+          threadId: ThreadId.make("thread-1"),
+          goal: "Ship the logout fix",
+        },
+        readModel: withLoop({ state: "paused", iterations: 4 }, "Ship the login fix"),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      const loopEvent = events[1];
+
+      expect(loopEvent?.type).toBe("thread.goal-loop-updated");
+      if (loopEvent?.type === "thread.goal-loop-updated") {
+        expect(loopEvent.payload.resumed).toBeUndefined();
+        expect(loopEvent.payload.loop).toMatchObject({ state: "paused", iterations: 0 });
       }
     }),
   );

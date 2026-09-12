@@ -800,7 +800,10 @@ import {
   VolumeXIcon,
   XIcon,
 } from "lucide-react";
-import { resolveThreadGoalDisplay } from "@t3tools/client-runtime/state/threadGoalEditor";
+import {
+  isThreadGoalBeingPursued,
+  resolveThreadGoalDisplay,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import { proposedPlanTitle } from "../../proposedPlan";
 import { hasProviderSetup } from "./ProviderStatusBanner";
 import {
@@ -1116,6 +1119,7 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
   goal: string | null;
   goalLoop: ThreadGoalLoop | null;
   active: boolean;
+  pursuing: boolean;
   onToggle: () => void;
   onGoalLoopAction: (action: "pause" | "resume" | "continue" | "reset") => void;
   shortcutLabel: string | null;
@@ -1140,9 +1144,10 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
                   : "Set thread goal"
               }
               aria-pressed={props.active}
+              data-thread-goal-pursuing={props.pursuing ? "true" : "false"}
               className={cn(
                 "min-w-0 shrink",
-                props.active
+                props.active || props.pursuing
                   ? "bg-primary/15 text-primary hover:bg-primary/25 hover:text-primary"
                   : GOAL_LOOP_TONE_CLASSNAME[tone] ||
                       (props.goal !== null
@@ -1208,39 +1213,54 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
   );
 });
 
-/**
- * Read-only goal text for the states where the interactive pill cannot
- * render (footer collapsed/unmounted/hidden, pending input, or capability
- * not known): the durable goal stays visible without offering edits.
- */
-const ComposerThreadGoalPassive = memo(function ComposerThreadGoalPassive(props: {
+const GOAL_LOOP_STRIP_TONE_CLASSNAME: Record<ReturnType<typeof describeGoalLoop>["tone"], string> =
+  {
+    idle: "text-secondary-label",
+    running: "text-primary",
+    paused: "text-muted-foreground",
+    blocked: "text-destructive",
+    capped: "text-warning",
+    completed: "text-success",
+  };
+
+/** Durable goal context attached above the composer, independent of its controls. */
+const ComposerThreadGoalStrip = memo(function ComposerThreadGoalStrip(props: {
   goal: string;
   goalLoop: ThreadGoalLoop | null;
+  pursuing: boolean;
 }) {
-  const { tooltip, suffix } = describeGoalLoop(props.goalLoop);
+  const { tone, tooltip, suffix } = describeGoalLoop(props.goalLoop);
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <div
-            data-thread-goal-passive="true"
-            data-thread-goal-loop-state={props.goalLoop?.state ?? undefined}
-            className="flex min-w-0 items-center gap-1.5 px-3 pt-1 pb-3 text-xs text-secondary-label sm:px-4 sm:pb-4"
-          >
-            <TargetArrowIcon aria-hidden className="size-3 shrink-0" />
-            {/* Truncated visually; the label keeps the full text for AT. */}
-            <span
-              aria-label={`Thread goal: ${props.goal}${tooltip ? `. ${tooltip}` : ""}`}
-              className="min-w-0 truncate"
-            >
-              {props.goal}
-            </span>
-            {suffix !== null ? <span className="shrink-0 tabular-nums">{suffix}</span> : null}
-          </div>
-        }
-      />
-      <TooltipPopup side="top">{tooltip ?? props.goal}</TooltipPopup>
-    </Tooltip>
+    <ComposerBanner.Attachment data-chat-composer-goal-strip="true">
+      <ComposerBanner.Root
+        data-thread-goal-passive="true"
+        data-thread-goal-loop-state={props.goalLoop?.state ?? undefined}
+        className={GOAL_LOOP_STRIP_TONE_CLASSNAME[tone]}
+      >
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <ComposerBanner.Row>
+                <ComposerBanner.Icon className={props.pursuing ? "text-primary" : undefined}>
+                  <TargetArrowIcon />
+                </ComposerBanner.Icon>
+                <ComposerBanner.Content>
+                  {/* Truncated visually; the label keeps the full text for AT. */}
+                  <span
+                    aria-label={`Thread goal: ${props.goal}${tooltip ? `. ${tooltip}` : ""}`}
+                    className="min-w-0 truncate"
+                  >
+                    {props.goal}
+                  </span>
+                  {suffix !== null ? <span className="shrink-0 tabular-nums">{suffix}</span> : null}
+                </ComposerBanner.Content>
+              </ComposerBanner.Row>
+            }
+          />
+          <TooltipPopup side="top">{tooltip ?? props.goal}</TooltipPopup>
+        </Tooltip>
+      </ComposerBanner.Root>
+    </ComposerBanner.Attachment>
   );
 });
 
@@ -2412,13 +2432,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
 
-  // Editing control only while its control row is on screen with known
-  // support; a durable goal otherwise stays readable (passive) so loading,
-  // reconnecting, approval, and collapsed states never hide it.
+  // The editing control only appears while its control row is on screen with
+  // known support; the durable goal strip remains readable through loading,
+  // reconnecting, approval, and collapsed states.
   // A `/goal …` draft (typed, or written through goal mode) is thread
   // metadata, not provider input, so it stays sendable while a turn runs —
   // otherwise a goal loop's own continuation turn hides the way to stop it.
   const promptWritesThreadGoal = goalMode || parseThreadGoalCommand(prompt) !== null;
+  const threadGoalLoop = supportsThreadGoalLoop ? activeThreadGoalLoop : null;
+  const threadGoalPursued = isThreadGoalBeingPursued({
+    goal: activeThreadGoal,
+    loop: threadGoalLoop,
+  });
   const threadGoalDisplay = resolveThreadGoalDisplay({
     goal: activeThreadGoal,
     controlsVisible:
@@ -5364,6 +5389,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               />
             </ComposerBanner.Attachment>
           ) : null}
+          {activeThreadGoal !== null ? (
+            <ComposerThreadGoalStrip
+              goal={activeThreadGoal}
+              goalLoop={threadGoalLoop}
+              pursuing={threadGoalPursued}
+            />
+          ) : null}
         </ComposerBanner.Column>
         {!isComposerApprovalState ? (
           <ComposerStashBadge
@@ -5387,7 +5419,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             className={cn(
               "rounded-[20px] transition-[background-color] duration-200",
               isDragOverComposer ? "bg-accent/45 ring-1 ring-primary/70" : null,
-              goalModeActive ? "bg-primary/10 ring-1 ring-primary/60" : null,
+              goalModeActive || threadGoalPursued ? "bg-primary/10 ring-1 ring-primary/60" : null,
               projectSelectionRequired ? "opacity-75" : null,
               composerProviderState.composerSurfaceClassName,
             )}
@@ -5916,13 +5948,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
 
-            {threadGoalDisplay === "passive" && activeThreadGoal !== null ? (
-              <ComposerThreadGoalPassive
-                goal={activeThreadGoal}
-                goalLoop={supportsThreadGoalLoop ? activeThreadGoalLoop : null}
-              />
-            ) : null}
-
             {/* Bottom toolbar */}
             {isComposerCollapsedMobile || isComposerApprovalState ? null : (
               <div
@@ -5950,8 +5975,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   {threadGoalDisplay === "control" ? (
                     <ComposerThreadGoalControl
                       goal={activeThreadGoal}
-                      goalLoop={supportsThreadGoalLoop ? activeThreadGoalLoop : null}
+                      goalLoop={threadGoalLoop}
                       active={goalModeActive}
+                      pursuing={threadGoalPursued}
                       onToggle={() => {
                         setGoalMode(!goalModeActive);
                         composerEditorRef.current?.focusAtEnd();

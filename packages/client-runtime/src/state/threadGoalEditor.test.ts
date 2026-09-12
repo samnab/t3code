@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   nextThreadGoalEditorEpoch,
+  isThreadGoalBeingPursued,
   isThreadGoalLoopActionAvailable,
   resolveThreadGoalCommandBlockReason,
   resolveThreadGoalDisplay,
@@ -120,6 +121,32 @@ describe("thread experiment goal controls", () => {
     expect(isThreadGoalLoopActionAvailable(exhaustedLoop, "continue")).toBe(false);
     expect(isThreadGoalLoopActionAvailable(exhaustedLoop, "resume")).toBe(false);
     expect(isThreadGoalLoopActionAvailable(exhaustedLoop, "reset")).toBe(false);
+  });
+});
+
+describe("thread goal pursuit state", () => {
+  const baseLoop = {
+    kind: "standard",
+    mode: "t3",
+    iterations: 1,
+    maxIterations: 10,
+    reason: null,
+    experiment: null,
+    updatedAt: "2026-09-07T04:00:00.000Z",
+  } as const;
+
+  it("only marks a set goal active while its loop is running", () => {
+    expect(
+      isThreadGoalBeingPursued({ goal: "ship it", loop: { ...baseLoop, state: "running" } }),
+    ).toBe(true);
+    for (const state of ["idle", "paused", "blocked", "capped", "completed"] as const) {
+      expect(isThreadGoalBeingPursued({ goal: "ship it", loop: { ...baseLoop, state } })).toBe(
+        false,
+      );
+    }
+    expect(isThreadGoalBeingPursued({ goal: null, loop: { ...baseLoop, state: "running" } })).toBe(
+      false,
+    );
   });
 });
 
