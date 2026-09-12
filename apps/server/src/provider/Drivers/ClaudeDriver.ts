@@ -13,6 +13,7 @@
  * @module provider/Drivers/ClaudeDriver
  */
 import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
@@ -53,6 +54,8 @@ import {
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
+  type ProviderMaintenanceCapabilitiesResolver,
+  type ProviderMaintenanceResolutionContext,
 } from "../providerMaintenance.ts";
 import {
   haveProviderSnapshotSettingsChanged,
@@ -65,6 +68,8 @@ const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
+const CMUX_CLAUDE_WRAPPER_SHIM = "CMUX_CLAUDE_WRAPPER_SHIM";
+const CMUX_CLAUDE_WRAPPER_SHIM_ROOT = "CMUX_CLAUDE_WRAPPER_SHIM_ROOT";
 
 function isClaudeNativeCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
@@ -75,7 +80,61 @@ function isClaudeNativeCommandPath(commandPath: string): boolean {
   );
 }
 
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
+// CMUX puts a temporary `claude` shim first on PATH. Its markers identify that
+// shim, so maintenance can inspect the next PATH entry without changing how
+// Claude itself launches through CMUX.
+function isMarkedCmuxClaudeShim(context: ProviderMaintenanceResolutionContext): boolean {
+  const shimPath = context.env[CMUX_CLAUDE_WRAPPER_SHIM]?.trim();
+  const shimRoot = context.env[CMUX_CLAUDE_WRAPPER_SHIM_ROOT]?.trim();
+  const path = context.env.PATH;
+  if (context.platform !== "darwin" || context.binaryPath !== "claude") return false;
+  if (!shimPath || !shimRoot || !path) return false;
+  return (
+    context.resolvedCommandPath === shimPath &&
+    shimPath.startsWith(`${shimRoot}/`) &&
+    path.split(":").includes(shimRoot)
+  );
+}
+
+const resolveClaudeMaintenanceContext = Effect.fn("resolveClaudeMaintenanceContext")(function* (
+  context: ProviderMaintenanceResolutionContext | null,
+) {
+  if (!context || !isMarkedCmuxClaudeShim(context)) {
+    return context;
+  }
+
+  const shimRoot = context.env[CMUX_CLAUDE_WRAPPER_SHIM_ROOT]!.trim();
+  const env = {
+    ...context.env,
+    PATH: context.env
+      .PATH!.split(":")
+      .filter((entry) => entry !== shimRoot)
+      .join(":"),
+  };
+  const resolvedCommandPath = yield* resolveCommandPath(context.binaryPath, { env }).pipe(
+    Effect.orElseSucceed(() => null),
+  );
+  if (!resolvedCommandPath || resolvedCommandPath === context.resolvedCommandPath) {
+    return context;
+  }
+
+  const fileSystem = yield* FileSystem.FileSystem;
+  const realCommandPath = yield* fileSystem
+    .realPath(resolvedCommandPath)
+    .pipe(Effect.orElseSucceed(() => null));
+  if (!realCommandPath) {
+    return context;
+  }
+
+  return {
+    ...context,
+    resolvedCommandPath,
+    realCommandPath,
+    env,
+  } satisfies ProviderMaintenanceResolutionContext;
+});
+
+const CLAUDE_UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "@anthropic-ai/claude-code",
   nativeUpdate: {
@@ -83,6 +142,18 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
     isCommandPath: isClaudeNativeCommandPath,
   },
 });
+
+export function makeClaudeMaintenanceResolver(): ProviderMaintenanceCapabilitiesResolver {
+  return {
+    resolve: (context) =>
+      Effect.gen(function* () {
+        const resolvedContext = yield* resolveClaudeMaintenanceContext(context);
+        return yield* CLAUDE_UPDATE.resolve(resolvedContext);
+      }),
+  };
+}
+
+const UPDATE = makeClaudeMaintenanceResolver();
 
 export type ClaudeDriverEnv =
   | BackgroundPolicy.BackgroundPolicy

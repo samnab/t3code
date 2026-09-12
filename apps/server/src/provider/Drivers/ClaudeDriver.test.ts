@@ -1,0 +1,88 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodePath from "node:path";
+import { expect, it } from "@effect/vitest";
+import { ProviderDriverKind } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+
+import {
+  makePackageManagedProviderMaintenanceResolver,
+  normalizeCommandPath,
+  resolveProviderMaintenanceCapabilitiesEffect,
+} from "../providerMaintenance.ts";
+import { makeClaudeMaintenanceResolver as makeClaudeDriverMaintenanceResolver } from "./ClaudeDriver.ts";
+
+const windowsHost = HostProcessPlatform.defaultValue() === "win32";
+
+it.layer(NodeServices.layer)("ClaudeDriver maintenance", (it) => {
+  it.effect.skipIf(windowsHost)(
+    "unwraps the marked CMUX Claude shim before proving native ownership",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-cmux-" });
+        const shimRoot = NodePath.join(tempDir, "cmux-cli-shims", "session");
+        const shimPath = NodePath.join(shimRoot, "claude");
+        const nativeBinDir = NodePath.join(tempDir, ".local", "bin");
+        const nativePath = NodePath.join(nativeBinDir, "claude");
+        yield* fs.makeDirectory(shimRoot, { recursive: true });
+        yield* fs.makeDirectory(nativeBinDir, { recursive: true });
+        yield* fs.writeFileString(shimPath, "#!/bin/sh\n");
+        yield* fs.writeFileString(nativePath, "#!/bin/sh\n");
+        yield* fs.chmod(shimPath, 0o755);
+        yield* fs.chmod(nativePath, 0o755);
+
+        const env = {
+          PATH: [shimRoot, nativeBinDir].join(NodePath.delimiter),
+          CMUX_CLAUDE_WRAPPER_SHIM: shimPath,
+          CMUX_CLAUDE_WRAPPER_SHIM_ROOT: shimRoot,
+        };
+        const baseResolver = makePackageManagedProviderMaintenanceResolver({
+          provider: ProviderDriverKind.make("claudeAgent"),
+          npmPackageName: "@anthropic-ai/claude-code",
+          nativeUpdate: {
+            args: ["update"],
+            isCommandPath: (commandPath) =>
+              normalizeCommandPath(commandPath).endsWith("/.local/bin/claude"),
+          },
+        });
+        const before = yield* resolveProviderMaintenanceCapabilitiesEffect(baseResolver, {
+          binaryPath: "claude",
+          env,
+        });
+        expect(before.update).toBeNull();
+
+        const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+          makeClaudeDriverMaintenanceResolver(),
+          { binaryPath: "claude", env },
+        );
+
+        expect(capabilities.update).toMatchObject({
+          executable: nativePath,
+          args: ["update"],
+          lockKey: "claudeAgent-native",
+        });
+
+        const unknownWrapper = yield* resolveProviderMaintenanceCapabilitiesEffect(
+          makeClaudeDriverMaintenanceResolver(),
+          {
+            binaryPath: "claude",
+            env: {
+              ...env,
+              CMUX_CLAUDE_WRAPPER_SHIM: NodePath.join(tempDir, "other-wrapper", "claude"),
+              CMUX_CLAUDE_WRAPPER_SHIM_ROOT: NodePath.join(tempDir, "other-wrapper"),
+            },
+          },
+        );
+        expect(unknownWrapper.update).toBeNull();
+
+        const explicitPath = yield* resolveProviderMaintenanceCapabilitiesEffect(
+          makeClaudeDriverMaintenanceResolver(),
+          { binaryPath: shimPath, env },
+        );
+        expect(explicitPath.update).toBeNull();
+      }).pipe(Effect.provideService(HostProcessPlatform, "darwin"), Effect.scoped),
+  );
+});
