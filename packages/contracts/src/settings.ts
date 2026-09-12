@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import {
   ForwardCompatibleNullable,
+  PositiveInt,
   ProjectId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -668,6 +669,12 @@ export const GrokSettings = makeProviderSettingsSchema(
 );
 export type GrokSettings = typeof GrokSettings.Type;
 
+/**
+ * Per-model concurrent active-turn caps for Pi, keyed by canonical model
+ * slug (`provider/model`). Absent key (or absent field) means unlimited.
+ */
+export const PiModelConcurrency = Schema.Record(TrimmedNonEmptyString, PositiveInt);
+
 export const PiSettings = makeProviderSettingsSchema(
   {
     // Disabled by default while Pi support is Early Access.
@@ -692,6 +699,12 @@ export const PiSettings = makeProviderSettingsSchema(
     ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    // Whole-map replacement; edited per model row in Settings → Providers →
+    // Models, never through the auto-generated settings form.
+    modelConcurrency: PiModelConcurrency.pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
@@ -1219,6 +1232,7 @@ const PiSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   launchArgs: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
+  modelConcurrency: Schema.optionalKey(PiModelConcurrency),
 });
 
 const OpenCodeSettingsPatch = Schema.Struct({

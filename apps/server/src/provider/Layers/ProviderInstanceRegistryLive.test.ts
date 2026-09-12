@@ -141,6 +141,7 @@ const makePiConfig = (overrides: Partial<PiSettings>): PiSettings => ({
   binaryPath: "pi",
   launchArgs: "",
   customModels: [],
+  modelConcurrency: {},
   ...overrides,
 });
 

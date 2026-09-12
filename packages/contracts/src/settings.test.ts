@@ -8,6 +8,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   DEFAULT_SERVER_SETTINGS,
+  PiSettings,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -21,6 +22,7 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
+const decodePiSettings = Schema.decodeUnknownSync(PiSettings);
 
 describe("CodexSettings maximum concurrent subagents", () => {
   it("uses Codex's default when no override is configured", () => {
@@ -53,6 +55,34 @@ describe("CodexSettings maximum concurrent subagents", () => {
     expect(
       decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: "  " } } }),
     ).toMatchObject({ providers: { codex: { maxConcurrentSubagents: "" } } });
+  });
+});
+
+describe("PiSettings model concurrency", () => {
+  it("defaults to an empty map when not configured", () => {
+    expect(decodePiSettings({}).modelConcurrency).toEqual({});
+  });
+
+  it.each([1, 4, 9007199254740991])("accepts a positive safe integer cap: %s", (cap) => {
+    expect(decodePiSettings({ modelConcurrency: { "zai/glm-5": cap } }).modelConcurrency).toEqual({
+      "zai/glm-5": cap,
+    });
+    expect(
+      decodeServerSettingsPatch({ providers: { pi: { modelConcurrency: { "zai/glm-5": cap } } } }),
+    ).toBeDefined();
+  });
+
+  it.each([0, -1, 1.5, 9007199254740992])("rejects an invalid cap: %s", (cap) => {
+    expect(() => decodePiSettings({ modelConcurrency: { "zai/glm-5": cap } })).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { pi: { modelConcurrency: { "zai/glm-5": cap } } } }),
+    ).toThrow();
+  });
+
+  it("keeps the patch key optional so other Pi settings round-trip untouched", () => {
+    expect(decodeServerSettingsPatch({ providers: { pi: { launchArgs: "--x" } } })).toMatchObject({
+      providers: { pi: { launchArgs: "--x" } },
+    });
   });
 });
 

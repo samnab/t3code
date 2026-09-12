@@ -71,6 +71,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -270,6 +271,13 @@ interface ActivePiTurn {
   /** Invalidates idle snapshots when new work starts after a settle probe. */
   settleProbeGeneration: number;
   failure: { readonly message: string } | null;
+  /** Model concurrency slot held by this turn; nulled exactly once on release. */
+  slot: PiTurnSlot | null;
+}
+
+/** A held per-model concurrency slot; consumed via `releaseTurnSlot`. */
+interface PiTurnSlot {
+  readonly model: string;
 }
 
 interface PendingPiExtensionUi {
@@ -283,6 +291,13 @@ interface PiSessionContext {
   readonly scope: Scope.Closeable;
   readonly connection: PiRpcConnection;
   readonly pumpFiber: Fiber.Fiber<void, never>;
+  /**
+   * One sender at a time, from the steer decision through the prompt write.
+   * Concurrent sendTurns on one session otherwise both pass the idle check
+   * and the second openTurn overwrites (and leaks) the first turn and its
+   * concurrency slot.
+   */
+  readonly admission: Semaphore.Semaphore;
   /** Skill names discovered from the live session; `$name` chips hoist to them. */
   readonly skillNames: ReadonlySet<string>;
   /** Extension commands are the only slash commands that bypass agent processing. */
@@ -421,6 +436,15 @@ function truncateCodePoints(value: string, limit: number) {
   return value.slice(0, end);
 }
 
+/** Canonical `provider/model` slug from a `get_state` payload, when present. */
+function piStateModelSlug(data: unknown): string | undefined {
+  const model = recordField(data, "model");
+  if (model === undefined) return undefined;
+  const provider = recordString(model, "provider");
+  const modelId = recordString(model, "id");
+  return provider !== undefined && modelId !== undefined ? `${provider}/${modelId}` : undefined;
+}
+
 export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions) {
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId;
@@ -435,6 +459,31 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
     const environment = options?.environment ?? process.env;
 
     const sessions = new Map<ThreadId, PiSessionContext>();
+    /**
+     * Per-model concurrent active-turn caps from `modelConcurrency`. Scoped
+     * to this adapter, i.e. one provider instance: root turns and T3 child
+     * runs share it, so a parent that has saturated a model with children is
+     * rejected on its own next turn of that model instead of being queued —
+     * queuing would deadlock a parent waiting on children behind itself.
+     */
+    const modelConcurrency = piSettings.modelConcurrency;
+    /** Canonical model slug → live turn count. Idle sessions hold nothing. */
+    const activeModelTurns = new Map<string, number>();
+
+    const holdTurnSlot = (model: string): PiTurnSlot => {
+      activeModelTurns.set(model, (activeModelTurns.get(model) ?? 0) + 1);
+      return { model };
+    };
+
+    /** Idempotent release for every terminal path (settle, fail, interrupt, exit, stop). */
+    const releaseTurnSlot = (slot: PiTurnSlot | null): PiTurnSlot | null => {
+      if (slot === null) return null;
+      const count = (activeModelTurns.get(slot.model) ?? 1) - 1;
+      if (count <= 0) activeModelTurns.delete(slot.model);
+      else activeModelTurns.set(slot.model, count);
+      return null;
+    };
+
     const runtimeEventPubSub = yield* Effect.acquireRelease(
       PubSub.unbounded<ProviderRuntimeEvent>(),
       PubSub.shutdown,
@@ -517,7 +566,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
      */
     const openTurn = Effect.fnUntraced(function* (
       ctx: PiSessionContext,
-      options: { readonly mayBeCommandOnly: boolean; readonly sawAgentActivity: boolean },
+      options: {
+        readonly mayBeCommandOnly: boolean;
+        readonly sawAgentActivity: boolean;
+        /** Concurrency slot already held for this turn, or null when uncapped. */
+        readonly slot: PiTurnSlot | null;
+      },
     ) {
       const turnId = TurnId.make(yield* nextUuid);
       const turn: ActivePiTurn = {
@@ -527,6 +581,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         mayBeCommandOnly: options.mayBeCommandOnly,
         settleProbeGeneration: 0,
         failure: null,
+        slot: options.slot,
       };
       ctx.activeTurn = turn;
       ctx.streamItems.clear();
@@ -594,6 +649,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
       Effect.gen(function* () {
         if (ctx.activeTurn !== turn) return;
         ctx.activeTurn = null;
+        turn.slot = releaseTurnSlot(turn.slot);
         const interrupted = turn.interrupted;
         const failure = interrupted ? null : turn.failure;
         for (const [, pending] of ctx.pendingExtensionUi) {
@@ -1722,8 +1778,26 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
                 }
                 // No T3 sendTurn in flight: an extension (e.g. subagents
                 // delivering a settled follow-up) started this agent run on
-                // its own. Open a turn so the reply is not dropped.
-                yield* openTurn(ctx, { mayBeCommandOnly: false, sawAgentActivity: true });
+                // its own. Open a turn so the reply is not dropped. The run
+                // is already executing so it cannot be rejected, but it still
+                // counts against the model's cap when the model is known.
+                // Admission-locked with a re-check so a sendTurn that was
+                // mid-admission when this event arrived keeps its turn.
+                yield* ctx.admission.withPermits(1)(
+                  Effect.gen(function* () {
+                    const pending = ctx.activeTurn;
+                    if (pending !== null) {
+                      pending.sawAgentActivity = true;
+                      return;
+                    }
+                    yield* openTurn(ctx, {
+                      mayBeCommandOnly: false,
+                      sawAgentActivity: true,
+                      slot:
+                        ctx.session.model === undefined ? null : holdTurnSlot(ctx.session.model),
+                    });
+                  }),
+                );
                 return;
               }
               case "compaction_start": {
@@ -1984,6 +2058,11 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
 
     const stopSessionInternal = (ctx: PiSessionContext) =>
       Effect.gen(function* () {
+        // The pump will not finalize after the session leaves the map, so
+        // release a live turn's concurrency slot here.
+        if (ctx.activeTurn !== null) {
+          ctx.activeTurn.slot = releaseTurnSlot(ctx.activeTurn.slot);
+        }
         yield* Effect.forEach(
           Array.from(ctx.managedSubagents.keys()),
           (nativeId) => completeManagedSubagent(ctx, nativeId, "stopped").pipe(Effect.ignore),
@@ -2108,7 +2187,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
               detail: "get_state returned neither sessionFile nor sessionId.",
             });
           }
-          let model: string | undefined;
+          let model = piStateModelSlug(stateData);
           if (input.modelSelection !== undefined) {
             const selectionModel = String(input.modelSelection.model);
             const parsed = selectionModel === "default" ? null : parsePiModelSlug(selectionModel);
@@ -2154,6 +2233,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
             scope,
             connection,
             pumpFiber,
+            admission: yield* Semaphore.make(1),
             skillNames,
             extensionCommandNames,
             streamItems: new Map(),
@@ -2279,6 +2359,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
         // T3's composer inserts skills as `$name` chips; Pi expands skills
         // only through leading `/skill:name` commands, so hoist them here.
         const promptText = expandPiSkillReference(input.input, ctx.skillNames);
+        const commandName = input.input.trimStart().match(/^\/([^\s]+)/)?.[1];
         // Pi RPC accepts images as native ImageContent. Generic files stay out
         // of this array and reach Pi through the path lines ProviderService
         // appends to the prompt.
@@ -2294,40 +2375,100 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterOptions
           { concurrency: 1 },
         );
         // A sendTurn while a turn is active is a steer: the message queues on
-        // Pi's side and lands inside the active run. No new turn starts.
-        const activeTurn = ctx.activeTurn;
-        if (activeTurn !== null) {
-          yield* ctx.connection
-            .send(buildPiPromptRecord({ message: promptText, images, streamingBehavior: "steer" }))
-            .pipe(Effect.mapError((cause) => adapterError(input.threadId, "steer", cause)));
-          activeTurn.settleProbeGeneration += 1;
-          return {
-            threadId: input.threadId,
-            turnId: activeTurn.turnId,
-            resumeCursor: encodeResumeCursor(ctx.nativeSessionPath ?? ""),
-          } satisfies ProviderTurnStartResult;
-        }
-        if (input.modelSelection !== undefined) {
-          yield* applyModelSelection(ctx, input.modelSelection);
-        }
-        const commandName = input.input.trimStart().match(/^\/([^\s]+)/)?.[1];
-        const turn = yield* openTurn(ctx, {
-          mayBeCommandOnly: commandName !== undefined && ctx.extensionCommandNames.has(commandName),
-          sawAgentActivity: false,
-        });
-        const turnId = turn.turnId;
-        // Fire-and-forget: Pi acks `prompt` only after slash-command
-        // expansion completes, and extension commands may block on user
-        // dialogs indefinitely. Rejections arrive later as id-less response
-        // records handled by the event pump.
-        yield* ctx.connection
-          .send(buildPiPromptRecord({ message: promptText, images }))
-          .pipe(Effect.mapError((cause) => adapterError(input.threadId, "prompt", cause)));
-        return {
-          threadId: input.threadId,
-          turnId,
-          resumeCursor: encodeResumeCursor(ctx.nativeSessionPath ?? ""),
-        } satisfies ProviderTurnStartResult;
+        // Pi's side and lands inside the active run. No new turn starts. The
+        // admission permit serializes same-session sendTurns from this steer
+        // decision through the prompt write; concurrent callers would both
+        // pass an unlocked idle check and leak the loser's turn and slot.
+        return yield* ctx.admission.withPermits(1)(
+          Effect.gen(function* () {
+            const activeTurn = ctx.activeTurn;
+            if (activeTurn !== null) {
+              yield* ctx.connection
+                .send(
+                  buildPiPromptRecord({ message: promptText, images, streamingBehavior: "steer" }),
+                )
+                .pipe(Effect.mapError((cause) => adapterError(input.threadId, "steer", cause)));
+              activeTurn.settleProbeGeneration += 1;
+              return {
+                threadId: input.threadId,
+                turnId: activeTurn.turnId,
+                resumeCursor: encodeResumeCursor(ctx.nativeSessionPath ?? ""),
+              } satisfies ProviderTurnStartResult;
+            }
+            if (input.modelSelection !== undefined) {
+              yield* applyModelSelection(ctx, input.modelSelection);
+            }
+            // The cap keys on the model this turn will actually run on.
+            // "default" selections and foreign-driver slugs leave
+            // session.model unset, so resolve it from the process — omitting
+            // the slug must not bypass caps.
+            if (ctx.session.model === undefined) {
+              const state = yield* ctx.connection
+                .request({ type: "get_state" }, SETTLE_PROBE_TIMEOUT_MS)
+                .pipe(Effect.option);
+              if (Option.isSome(state)) {
+                const slug = piStateModelSlug(state.value);
+                if (slug !== undefined) yield* updateSession(ctx, { model: slug });
+              }
+            }
+            const turnModel = ctx.session.model;
+            if (turnModel !== undefined) {
+              const cap = modelConcurrency[turnModel];
+              // Reject, never queue: a parent waiting on children that share
+              // this model would deadlock behind its own cap. The
+              // check-and-hold below is one synchronous segment, so racing
+              // sendTurns cannot both pass.
+              if (cap !== undefined && (activeModelTurns.get(turnModel) ?? 0) >= cap) {
+                return yield* new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "sendTurn",
+                  issue: `Pi model ${turnModel} is at its max concurrent turns (${cap}). Wait for an active turn to finish or raise the cap in Settings → Providers → Models.`,
+                });
+              }
+            }
+            const slot = turnModel === undefined ? null : holdTurnSlot(turnModel);
+            const opened: { turn: ActivePiTurn | null } = { turn: null };
+            const turn = yield* Effect.gen(function* () {
+              const created = yield* openTurn(ctx, {
+                mayBeCommandOnly:
+                  commandName !== undefined && ctx.extensionCommandNames.has(commandName),
+                sawAgentActivity: false,
+                slot,
+              });
+              opened.turn = created;
+              // Fire-and-forget: Pi acks `prompt` only after slash-command
+              // expansion completes, and extension commands may block on user
+              // dialogs indefinitely. Rejections arrive later as id-less
+              // response records handled by the event pump.
+              yield* ctx.connection
+                .send(buildPiPromptRecord({ message: promptText, images }))
+                .pipe(Effect.mapError((cause) => adapterError(input.threadId, "prompt", cause)));
+              return created;
+            }).pipe(
+              // Any failure between the hold and the accepted prompt write —
+              // openTurn error, prompt write failure, or interruption — must
+              // unwind what was created, or the turn and its cap slot strand.
+              Effect.onExit((exit) =>
+                Exit.isSuccess(exit)
+                  ? Effect.void
+                  : Effect.suspend(() => {
+                      const stranded = opened.turn;
+                      if (stranded === null) {
+                        releaseTurnSlot(slot);
+                        return Effect.void;
+                      }
+                      stranded.failure = { message: "Failed to deliver the prompt to Pi." };
+                      return finalizeTurn(ctx, stranded).pipe(Effect.ignore);
+                    }),
+              ),
+            );
+            return {
+              threadId: input.threadId,
+              turnId: turn.turnId,
+              resumeCursor: encodeResumeCursor(ctx.nativeSessionPath ?? ""),
+            } satisfies ProviderTurnStartResult;
+          }),
+        );
       });
 
     const interruptTurn = (threadId: ThreadId, turnId?: TurnId) =>

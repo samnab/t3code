@@ -54,6 +54,7 @@ import {
   ProjectionSubagentTranscriptStore,
   type ReadSubagentTranscriptPageResult,
 } from "../persistence/Services/ProjectionSubagentTranscripts.ts";
+import { ProviderAdapterValidationError, type ProviderAdapterError } from "../provider/Errors.ts";
 import type { ProviderAdapterShape } from "../provider/Services/ProviderAdapter.ts";
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import { ProviderInstanceRegistry } from "../provider/Services/ProviderInstanceRegistry.ts";
@@ -130,6 +131,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   const touchedCredentials: ThreadId[] = [];
   const revokedCredentials: ThreadId[] = [];
   let shouldFailActivity = failFirstActivity;
+  let firstTurnIssue: string | undefined;
   const parentInstance = ProviderInstanceId.make("parent-provider");
   const childInstance = ProviderInstanceId.make("child-provider");
   const secondChildInstance = ProviderInstanceId.make("second-child-provider");
@@ -152,7 +154,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     updatedAt: now,
   };
   let parentRuntimeMode = mode;
-  const adapter: ProviderAdapterShape<never> = {
+  const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider: ProviderDriverKind.make(childDriver),
     capabilities: { sessionModelSwitch: "in-session" },
     startSession: (input) =>
@@ -168,6 +170,15 @@ const makeHarness = Effect.fn("makeHarness")(function* (
       }),
     sendTurn: (input) =>
       Effect.gen(function* () {
+        if (firstTurnIssue !== undefined) {
+          const issue = firstTurnIssue;
+          firstTurnIssue = undefined;
+          return yield* new ProviderAdapterValidationError({
+            provider: ProviderDriverKind.make(childDriver),
+            operation: "sendTurn",
+            issue,
+          });
+        }
         const turnNumber = sentTurns.length + 1;
         const turnId = TurnId.make(`child-turn-${turnNumber}`);
         sentTurns.push(turnId);
@@ -222,7 +233,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     rollbackThread: (threadId) => Effect.succeed({ threadId, turns: [] }),
     streamEvents: Stream.die("ChildRunService must consume ProviderService's canonical stream"),
   };
-  const secondAdapter: ProviderAdapterShape<never> = {
+  const secondAdapter: ProviderAdapterShape<ProviderAdapterError> = {
     ...adapter,
     provider: ProviderDriverKind.make(secondChildDriver ?? childDriver),
   };
@@ -448,6 +459,9 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     revokedCredentials,
     setParentRuntimeMode: (runtimeMode: RuntimeMode) => {
       parentRuntimeMode = runtimeMode;
+    },
+    failFirstTurn: (issue: string) => {
+      firstTurnIssue = issue;
     },
     commands,
     backgroundLiveness,
@@ -1334,6 +1348,20 @@ it.effect("denies other parents and callers without delegation capability", () =
         (yield* service.result({ ...h.scope, providerSessionId: "replacement-session" }, run.runId))
           .runId,
       ).toBe(run.runId);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("surfaces adapter validation failures on the child terminal error", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness();
+    h.failFirstTurn("Pi model zai/glm-5 is at its max concurrent turns (1).");
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const run = yield* service.spawn(h.scope, h.input);
+      const result = yield* service.result(h.scope, run.runId, 30_000);
+      expect(result.status).toBe("failed");
+      expect(result.error).toContain("max concurrent turns");
     }).pipe(Effect.provide(h.services));
   }),
 );

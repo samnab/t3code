@@ -13,6 +13,7 @@ import { cn } from "../../lib/utils";
 import { sortModelsForProviderInstance } from "../../modelOrdering";
 import { MAX_CUSTOM_MODEL_LENGTH } from "../../modelSelection";
 import { Button } from "../ui/button";
+import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -122,6 +123,15 @@ interface ProviderModelsSectionProps {
   /** Explicit user-authored model ordering for this provider instance. */
   readonly modelOrder: ReadonlyArray<string>;
   /**
+   * Per-model max concurrent turns (Pi only), keyed by canonical model
+   * slug. Present only when the caller renders the cap column.
+   */
+  readonly modelConcurrency?: Readonly<Record<string, number>> | undefined;
+  /** Commit the next per-model cap map (whole-map replacement). */
+  readonly onModelConcurrencyChange?:
+    | ((next: Readonly<Record<string, number>>) => void)
+    | undefined;
+  /**
    * Commit the new custom-model list. Caller is responsible for routing the
    * write to the correct storage (legacy `settings.providers[kind]` vs.
    * `providerInstances[id].config`).
@@ -151,6 +161,8 @@ export function ProviderModelsSection({
   hiddenModels,
   favoriteModels,
   modelOrder,
+  modelConcurrency,
+  onModelConcurrencyChange,
   onChange,
   onHiddenModelsChange,
   onFavoriteModelsChange,
@@ -427,6 +439,66 @@ export function ProviderModelsSection({
     </Tooltip>
   );
 
+  const showConcurrencyCaps = driverKind === "pi" && onModelConcurrencyChange !== undefined;
+
+  // Commits on blur/Enter like the other per-row inputs: blank removes the
+  // cap (unlimited); a non-positive or non-integer draft is dropped and the
+  // field snaps back to the persisted value.
+  const setModelCap = (slug: string, next: string) => {
+    if (onModelConcurrencyChange === undefined) return;
+    const current = modelConcurrency ?? {};
+    const trimmed = next.trim();
+    if (trimmed === "") {
+      if (current[slug] === undefined) return;
+      const { [slug]: _removed, ...rest } = current;
+      onModelConcurrencyChange(rest);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isSafeInteger(parsed) || parsed < 1) return;
+    if (current[slug] === parsed) return;
+    onModelConcurrencyChange({ ...current, [slug]: parsed });
+  };
+
+  const capCell = (model: DisplayModel) =>
+    model.slug === "default" ? (
+      // Pi's synthetic "default" row is not a real model: the adapter keys caps
+      // on the canonical slug Pi actually runs, so this row cannot be capped.
+      // Set the cap on that model's row — the default resolves to it.
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span className="flex w-14 shrink-0 items-center justify-end text-[11px] text-muted-foreground/60" />
+          }
+        >
+          auto
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          Caps apply to real models only — set it on the model Pi defaults to.
+        </TooltipPopup>
+      </Tooltip>
+    ) : (
+      <Tooltip>
+        <TooltipTrigger render={<span className="flex shrink-0 items-center" />}>
+          <DraftInput
+            size="sm"
+            className="w-14 text-right tabular-nums"
+            value={
+              modelConcurrency?.[model.slug] !== undefined
+                ? String(modelConcurrency[model.slug])
+                : ""
+            }
+            onCommit={(next) => setModelCap(model.slug, next)}
+            inputMode="numeric"
+            placeholder="∞"
+            spellCheck={false}
+            aria-label={`Max concurrent turns for ${model.name} (blank for unlimited)`}
+          />
+        </TooltipTrigger>
+        <TooltipPopup side="top">Max concurrent turns · blank = unlimited</TooltipPopup>
+      </Tooltip>
+    );
+
   const renderRow = (model: DisplayModel) => {
     const capLabels = describeModelCapabilities(model);
     const group = groupOf(model);
@@ -451,7 +523,9 @@ export function ProviderModelsSection({
         className={cn(
           // Actions column is at least wide enough for the four custom-row
           // buttons so capability labels line up across built-in and custom rows.
-          "grid h-7 grid-cols-[1.5rem_minmax(0,1fr)_auto_minmax(5.5rem,auto)_auto] items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/30",
+          showConcurrencyCaps
+            ? "grid h-7 grid-cols-[1.5rem_minmax(0,1fr)_auto_3.5rem_minmax(5.5rem,auto)_auto] items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/30"
+            : "grid h-7 grid-cols-[1.5rem_minmax(0,1fr)_auto_minmax(5.5rem,auto)_auto] items-center gap-2 rounded-md px-2 transition-colors hover:bg-muted/30",
           isHidden && "opacity-50",
         )}
       >
@@ -476,6 +550,7 @@ export function ProviderModelsSection({
             <span className="hidden sm:inline">{capLabels.join(" · ")}</span>
           ) : null}
         </span>
+        {showConcurrencyCaps ? capCell(model) : null}
         {rowActions(model, { isHidden, canMoveUp, canMoveDown })}
         {pickerSwitch(model, isHidden)}
       </div>

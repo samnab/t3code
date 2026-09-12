@@ -18,6 +18,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeTaskId,
+  type ModelSelection,
   type ProviderRuntimeEvent,
   ThreadId,
 } from "@t3tools/contracts";
@@ -30,7 +31,7 @@ import { ProjectionSubagentTranscriptStoreLive } from "../../persistence/Layers/
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProjectionSubagentTranscriptStore } from "../../persistence/Services/ProjectionSubagentTranscripts.ts";
 import { ProjectionSubagentRunRepository } from "../../persistence/Services/ProjectionSubagentRuns.ts";
-import type { ProviderAdapterError } from "../Errors.ts";
+import { type ProviderAdapterError } from "../Errors.ts";
 import { decodeControlEnvelope } from "../PiSubagentControl.ts";
 import type {
   ProviderAdapterShape,
@@ -1184,6 +1185,426 @@ describe("PiAdapter", () => {
         (event) => event.type === "turn.completed" && payloadOf(event).state === "failed",
       );
       yield* adapter.stopSession(THREAD_ID);
+    }).pipe(provideTestEnv),
+  );
+
+  // ── per-model concurrency caps ───────────────────────────────
+
+  const capThreads = {
+    a: ThreadId.make("pi-adapter-test-cap-a"),
+    b: ThreadId.make("pi-adapter-test-cap-b"),
+  } as const;
+
+  const makeCappedAdapter = (binaryPath: string, cap = 1) =>
+    makeTestAdapter(
+      decodePiSettings({
+        enabled: true,
+        binaryPath,
+        modelConcurrency: { "zai/glm-5": cap },
+      }),
+    );
+
+  const GLM5: ModelSelection = { instanceId: ProviderInstanceId.make("pi"), model: "zai/glm-5" };
+
+  const startForCap = (
+    adapter: ProviderAdapterShape<ProviderAdapterError>,
+    threadId: ThreadId,
+    modelSelection?: ModelSelection,
+  ) =>
+    adapter.startSession({
+      threadId,
+      provider: PROVIDER,
+      runtimeMode: "full-access",
+      ...(modelSelection === undefined ? {} : { modelSelection }),
+    });
+
+  it.live("rejects a second concurrent turn on a capped model and admits it after interrupt", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeCappedAdapter(fixture.binaryPath);
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* startForCap(adapter, capThreads.a);
+      yield* startForCap(adapter, capThreads.b);
+      const held = yield* adapter.sendTurn({
+        threadId: capThreads.a,
+        input: "WAIT_FOR_ABORT",
+        modelSelection: GLM5,
+      });
+      const rejection = yield* adapter
+        .sendTurn({ threadId: capThreads.b, input: "say hello", modelSelection: GLM5 })
+        .pipe(Effect.flip);
+      expect(rejection._tag).toBe("ProviderAdapterValidationError");
+      if (rejection._tag === "ProviderAdapterValidationError") {
+        expect(rejection.issue).toContain("max concurrent turns");
+      }
+
+      yield* adapter.interruptTurn(capThreads.a, held.turnId);
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.a &&
+          payloadOf(event).state === "interrupted",
+      );
+      yield* adapter.sendTurn({ threadId: capThreads.b, input: "say hello", modelSelection: GLM5 });
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.b &&
+          payloadOf(event).state === "completed",
+      );
+      // Exactly the two admitted prompts landed; the rejected turn never
+      // reached the process.
+      expect(readLogLines(fixture).filter((line) => line.type === "prompt")).toHaveLength(2);
+      yield* adapter.stopSession(capThreads.a);
+      yield* adapter.stopSession(capThreads.b);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("caps are per model: a different model still starts while another is at capacity", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeCappedAdapter(fixture.binaryPath);
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* startForCap(adapter, capThreads.a);
+      yield* startForCap(adapter, capThreads.b);
+      yield* adapter.sendTurn({
+        threadId: capThreads.a,
+        input: "WAIT_FOR_ABORT",
+        modelSelection: GLM5,
+      });
+      yield* adapter.sendTurn({
+        threadId: capThreads.b,
+        input: "say hello",
+        modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "zai/glm-5-flash" },
+      });
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.b &&
+          payloadOf(event).state === "completed",
+      );
+      yield* adapter.stopSession(capThreads.a);
+      yield* adapter.stopSession(capThreads.b);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("steering an active turn joins it without consuming another slot", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeCappedAdapter(fixture.binaryPath);
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* startForCap(adapter, capThreads.a);
+      yield* startForCap(adapter, capThreads.b);
+      const held = yield* adapter.sendTurn({
+        threadId: capThreads.a,
+        input: "INTERLEAVE slow turn",
+        modelSelection: GLM5,
+      });
+      // At capacity, a second thread is rejected…
+      const rejection = yield* Effect.exit(
+        adapter.sendTurn({ threadId: capThreads.b, input: "say hello", modelSelection: GLM5 }),
+      );
+      expect(Exit.isFailure(rejection)).toBe(true);
+      // …but a steer on the holding thread still lands in the same turn.
+      const steered = yield* adapter.sendTurn({
+        threadId: capThreads.a,
+        input: "release interleaved turn",
+      });
+      expect(steered.turnId).toBe(held.turnId);
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.a &&
+          payloadOf(event).state === "completed",
+      );
+      yield* adapter.stopSession(capThreads.a);
+      yield* adapter.stopSession(capThreads.b);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("resolves the live model so a default selection cannot bypass the cap", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeCappedAdapter(fixture.binaryPath);
+      yield* startForCap(adapter, capThreads.a);
+      yield* startForCap(adapter, capThreads.b);
+      // No model selection anywhere: the fake pi process reports zai/glm-5.
+      yield* adapter.sendTurn({ threadId: capThreads.a, input: "WAIT_FOR_ABORT" });
+      const rejection = yield* Effect.exit(
+        adapter.sendTurn({
+          threadId: capThreads.b,
+          input: "say hello",
+          modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "default" },
+        }),
+      );
+      expect(Exit.isFailure(rejection)).toBe(true);
+      yield* adapter.stopSession(capThreads.a);
+      yield* adapter.stopSession(capThreads.b);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("releases the slot when a turn fails", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeCappedAdapter(fixture.binaryPath);
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* startForCap(adapter, capThreads.a);
+      yield* startForCap(adapter, capThreads.b);
+      yield* adapter.sendTurn({
+        threadId: capThreads.a,
+        input: "REJECT this",
+        modelSelection: GLM5,
+      });
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.a &&
+          payloadOf(event).state === "failed",
+      );
+      yield* adapter.sendTurn({ threadId: capThreads.b, input: "say hello", modelSelection: GLM5 });
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.b &&
+          payloadOf(event).state === "completed",
+      );
+      yield* adapter.stopSession(capThreads.a);
+      yield* adapter.stopSession(capThreads.b);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live("releases the slot when the session stops mid-turn", () =>
+    Effect.gen(function* () {
+      const fixture = makeFixture();
+      const adapter = yield* makeCappedAdapter(fixture.binaryPath);
+      const collector = yield* collectEvents(adapter.streamEvents);
+      yield* startForCap(adapter, capThreads.a);
+      yield* startForCap(adapter, capThreads.b);
+      yield* adapter.sendTurn({
+        threadId: capThreads.a,
+        input: "WAIT_FOR_ABORT",
+        modelSelection: GLM5,
+      });
+      yield* adapter.stopSession(capThreads.a);
+      yield* adapter.sendTurn({ threadId: capThreads.b, input: "say hello", modelSelection: GLM5 });
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.b &&
+          payloadOf(event).state === "completed",
+      );
+      yield* adapter.stopSession(capThreads.b);
+    }).pipe(provideTestEnv),
+  );
+
+  it.live(
+    "serializes concurrent same-session sendTurns: the late sender steers instead of clobbering the open turn",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeFixture();
+        const adapter = yield* makeTestAdapter(
+          decodePiSettings({
+            enabled: true,
+            binaryPath: fixture.binaryPath,
+            modelConcurrency: { "zai/glm-5": 1, "zai/glm-5-flash": 1 },
+          }),
+        );
+        const collector = yield* collectEvents(adapter.streamEvents);
+        yield* startForCap(adapter, capThreads.a);
+        yield* startForCap(adapter, capThreads.b);
+        // The first sender picks a different model, so its admission suspends
+        // at the set_model request while the second sender (same session)
+        // races through the idle check — exactly the interleaving that used
+        // to open two turns, clobber ctx.activeTurn, and leak the first slot.
+        // Whichever wins, the other must join the same still-open turn.
+        const first = yield* adapter
+          .sendTurn({
+            threadId: capThreads.a,
+            input: "WAIT_FOR_ABORT",
+            modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "zai/glm-5-flash" },
+          })
+          .pipe(Effect.forkScoped);
+        const second = yield* adapter
+          .sendTurn({ threadId: capThreads.a, input: "WAIT_FOR_ABORT" })
+          .pipe(Effect.forkScoped);
+        const [firstResult, secondResult] = yield* Effect.all([
+          Fiber.join(first),
+          Fiber.join(second),
+        ]);
+        expect(secondResult.turnId).toBe(firstResult.turnId);
+        expect(
+          collector.events.filter(
+            (event) => event.type === "turn.started" && event.threadId === capThreads.a,
+          ),
+        ).toHaveLength(1);
+        // Settle the turn, then prove neither capped model's slot leaked.
+        yield* adapter.interruptTurn(capThreads.a, firstResult.turnId);
+        yield* collector.waitFor(
+          (event) =>
+            event.type === "turn.completed" &&
+            event.threadId === capThreads.a &&
+            payloadOf(event).state === "interrupted",
+        );
+        yield* adapter.sendTurn({
+          threadId: capThreads.b,
+          input: "say hello",
+          modelSelection: GLM5,
+        });
+        yield* collector.waitFor(
+          (event) =>
+            event.type === "turn.completed" &&
+            event.threadId === capThreads.b &&
+            payloadOf(event).state === "completed",
+        );
+        yield* adapter.sendTurn({
+          threadId: capThreads.b,
+          input: "say hello",
+          modelSelection: { instanceId: ProviderInstanceId.make("pi"), model: "zai/glm-5-flash" },
+        });
+        yield* collector.waitFor(
+          (event) =>
+            event.type === "turn.completed" &&
+            event.threadId === capThreads.b &&
+            payloadOf(event).state === "completed",
+        );
+        yield* adapter.stopSession(capThreads.a);
+        yield* adapter.stopSession(capThreads.b);
+      }).pipe(provideTestEnv),
+  );
+
+  /**
+   * Minimal self-exiting pi double for transport-death tests: speaks just
+   * enough protocol to start a session, registers its pid under
+   * `liveDir`, and exits only when `<liveDir>/<pid>.exit` appears — so a
+   * test can kill exactly one of several sessions' processes. Written
+   * per-fixture so the shared fake-pi stays untouched.
+   */
+  const makeExitingFixture = () => {
+    const fixture = makeFixture();
+    const scriptPath = NodePath.join(fixture.root, "exiting-pi.mjs");
+    const shimPath = NodePath.join(fixture.root, "exiting-pi");
+    const liveDir = NodePath.join(fixture.root, "live");
+    NodeFS.mkdirSync(liveDir);
+    process.env.FAKE_PI_LIVE_DIR = liveDir;
+    NodeFS.writeFileSync(
+      scriptPath,
+      [
+        "import * as NodeFS from 'node:fs';",
+        "const record = (value) => NodeFS.appendFileSync(process.env.FAKE_PI_LOG, JSON.stringify(value) + '\\n');",
+        "const send = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
+        "const liveDir = process.env.FAKE_PI_LIVE_DIR;",
+        "const pid = String(process.pid);",
+        "NodeFS.writeFileSync(`${liveDir}/${pid}`, pid);",
+        "record({ type: 'launch', pid, args: process.argv.slice(2) });",
+        "const poll = setInterval(() => {",
+        "  if (!NodeFS.existsSync(`${liveDir}/${pid}.exit`)) return;",
+        "  clearInterval(poll);",
+        "  NodeFS.writeFileSync(process.env.FAKE_PI_CLOSED, 'closed');",
+        "  process.exit(1);",
+        "}, 10);",
+        "let buffer = '';",
+        "const respond = (id, data) => send({ type: 'response', id, success: true, data });",
+        "process.stdin.setEncoding('utf8');",
+        "process.stdin.on('data', (chunk) => {",
+        "  buffer += chunk;",
+        "  let index;",
+        "  while ((index = buffer.indexOf('\\n')) >= 0) {",
+        "    const line = buffer.slice(0, index);",
+        "    buffer = buffer.slice(index + 1);",
+        "    if (!line.trim()) continue;",
+        "    let req; try { req = JSON.parse(line); } catch { continue; }",
+        "    record(req);",
+        "    if (req.type === 'get_state') {",
+        "      respond(req.id, { sessionFile: process.env.FAKE_PI_SESSION_FILE, model: { provider: 'zai', id: 'glm-5' }, isStreaming: false, isCompacting: false, pendingMessageCount: 0 });",
+        "    } else if (req.type === 'get_commands') {",
+        "      respond(req.id, { commands: [] });",
+        "    } else if (req.type === 'prompt') {",
+        "      send({ type: 'response', command: 'prompt', success: true });",
+        "      send({ type: 'agent_start' });",
+        "      send({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Hello world' }], stopReason: 'stop' } });",
+        "      send({ type: 'agent_settled' });",
+        "    } else {",
+        "      respond(req.id, {});",
+        "    }",
+        "  }",
+        "});",
+        "process.stdin.on('end', () => process.exit(0));",
+        "",
+      ].join("\n"),
+    );
+    NodeFS.writeFileSync(shimPath, `#!/bin/sh\nexec node "${scriptPath}" "$@"\n`);
+    NodeFS.chmodSync(shimPath, 0o755);
+    return { fixture: { ...fixture, binaryPath: shimPath }, liveDir };
+  };
+
+  const waitForLiveProcesses = (liveDir: string, count: number) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        if (NodeFS.readdirSync(liveDir).length >= count) return;
+        yield* Effect.sleep(25);
+      }
+      throw new Error(`Expected ${count} live pi processes.`);
+    });
+
+  /** Pid of the first-launched double, from the received log: deterministic. */
+  const firstLaunchPid = (fixture: Fixture) => {
+    const pid = readLogLines(fixture).find((line) => line.type === "launch")?.pid;
+    if (typeof pid !== "string" || pid.length === 0) throw new Error("No launch pid recorded.");
+    return pid;
+  };
+
+  const waitForSessionStatus = (
+    adapter: ProviderAdapterShape<ProviderAdapterError>,
+    threadId: ThreadId,
+    status: string,
+  ) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const sessions = yield* adapter.listSessions();
+        if (
+          sessions.some((session) => session.threadId === threadId && session.status === status)
+        ) {
+          return;
+        }
+        yield* Effect.sleep(25);
+      }
+      throw new Error(`Session never reached status ${status}.`);
+    });
+
+  it.live("fails the turn and releases its slot when the prompt write cannot be delivered", () =>
+    Effect.gen(function* () {
+      const { fixture, liveDir } = makeExitingFixture();
+      const adapter = yield* makeCappedAdapter(fixture.binaryPath);
+      const collector = yield* collectEvents(adapter.streamEvents);
+      // Both sessions start on the capped model, so the failing turn's
+      // admission runs no RPC between the idle check and the prompt write.
+      yield* startForCap(adapter, capThreads.a, GLM5);
+      yield* startForCap(adapter, capThreads.b, GLM5);
+      yield* waitForLiveProcesses(liveDir, 2);
+      // Kill only thread A's process (the first one launched).
+      NodeFS.writeFileSync(NodePath.join(liveDir, `${firstLaunchPid(fixture)}.exit`), "die");
+      yield* waitForSessionStatus(adapter, capThreads.a, "closed");
+      const failed = yield* Effect.exit(
+        adapter.sendTurn({ threadId: capThreads.a, input: "say hello" }),
+      );
+      expect(Exit.isFailure(failed)).toBe(true);
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.a &&
+          payloadOf(event).state === "failed",
+      );
+      // The stranded turn's slot was released: the other thread's turn on the
+      // same capped model is admitted.
+      yield* adapter.sendTurn({ threadId: capThreads.b, input: "say hello", modelSelection: GLM5 });
+      yield* collector.waitFor(
+        (event) =>
+          event.type === "turn.completed" &&
+          event.threadId === capThreads.b &&
+          payloadOf(event).state === "completed",
+      );
+      yield* adapter.stopSession(capThreads.a);
+      yield* adapter.stopSession(capThreads.b);
     }).pipe(provideTestEnv),
   );
 

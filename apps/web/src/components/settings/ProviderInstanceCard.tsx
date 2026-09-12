@@ -119,6 +119,23 @@ function readConfigCustomModels(config: unknown): ReadonlyArray<CustomModelDefin
 }
 
 /**
+ * Read Pi's `modelConcurrency` map from the opaque config blob. Only
+ * positive safe integers survive; anything else means "no cap".
+ */
+function readConfigModelConcurrency(config: unknown): Record<string, number> {
+  if (config === null || typeof config !== "object") return {};
+  const raw = (config as Record<string, unknown>).modelConcurrency;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const caps: Record<string, number> = {};
+  for (const [slug, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) {
+      caps[slug] = value;
+    }
+  }
+  return caps;
+}
+
+/**
  * Set `key` to an arbitrary value on the opaque config blob. Unlike
  * provider settings field updates, does not drop empty-looking values — the
  * caller is responsible for deciding whether an empty array / empty
@@ -486,6 +503,9 @@ export function ProviderInstanceCard({
     : null;
   const customModels =
     instance.driver === "antigravity" ? [] : readConfigCustomModels(instance.config);
+  // Pi-only per-model turn caps; absent on every other driver.
+  const modelConcurrency =
+    driverKind === "pi" ? readConfigModelConcurrency(instance.config) : undefined;
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
@@ -546,7 +566,40 @@ export function ProviderInstanceCard({
       "customModels",
       next.map(toCustomModelSetting),
     );
+    // Removing a custom model removes its row. A cap keyed to a slug that no
+    // longer has one (custom gone and not probe-reported) could never be
+    // cleared or matched by the adapter — prune it in this same write.
+    const builtInSlugs = new Set(
+      modelsForDisplay.filter((model) => !model.isCustom).map((model) => model.slug),
+    );
+    const removedSlugs = customModels
+      .filter((entry) => !next.some((candidate) => candidate.slug === entry.slug))
+      .map((entry) => entry.slug)
+      .filter((slug) => !builtInSlugs.has(slug));
+    if (removedSlugs.length > 0) {
+      const caps = readConfigModelConcurrency(nextConfig);
+      if (removedSlugs.some((slug) => caps[slug] !== undefined)) {
+        for (const slug of removedSlugs) delete caps[slug];
+        if (Object.keys(caps).length > 0) nextConfig.modelConcurrency = caps;
+        else delete nextConfig.modelConcurrency;
+      }
+    }
     const { config: _omit, ...rest } = instance;
+    onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
+  };
+
+  /** Whole-map replacement; an empty map drops the key entirely (unlimited). */
+  const updateModelConcurrency = (next: Readonly<Record<string, number>>) => {
+    const entries = Object.entries(next);
+    const { modelConcurrency: _omit, ...configWithout } =
+      instance.config !== null && typeof instance.config === "object"
+        ? (instance.config as Record<string, unknown>)
+        : {};
+    const nextConfig =
+      entries.length > 0
+        ? nextConfigBlobWithValue(configWithout, "modelConcurrency", Object.fromEntries(entries))
+        : configWithout;
+    const { config: _drop, ...rest } = instance;
     onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
   };
 
@@ -990,6 +1043,9 @@ export function ProviderInstanceCard({
               hiddenModels={hiddenModels}
               favoriteModels={favoriteModels}
               modelOrder={modelOrder}
+              {...(modelConcurrency !== undefined
+                ? { modelConcurrency, onModelConcurrencyChange: updateModelConcurrency }
+                : {})}
               onChange={updateCustomModels}
               onHiddenModelsChange={onHiddenModelsChange}
               onFavoriteModelsChange={onFavoriteModelsChange}

@@ -1104,10 +1104,17 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
         work,
         Deferred.await(active.cancel).pipe(Effect.as({ status: "cancelled" as const })),
       ).pipe(
-        Effect.orElseSucceed(() => ({
-          status: "failed" as const,
-          error: "Child provider could not execute the turn.",
-        })),
+        // Validation failures carry a safe, actionable message (for example
+        // a per-model concurrency cap) and surface verbatim; every other
+        // failure stays generic so provider internals never leak into the
+        // child's terminal record.
+        Effect.catch((error) =>
+          Effect.succeed(
+            error._tag === "ProviderAdapterValidationError"
+              ? { status: "failed" as const, error: error.message }
+              : { status: "failed" as const, error: "Child provider could not execute the turn." },
+          ),
+        ),
       );
       yield* finish(active, outcome);
     }).pipe(
