@@ -1,9 +1,11 @@
 import {
+  CheckpointRef,
   EventId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationSession,
@@ -114,6 +116,58 @@ function makeMetaUpdatedEvent(): OrchestrationEvent {
     metadata: {},
     type: "thread.meta-updated",
     payload: { threadId: THREAD_ID, updatedAt: NOW },
+  };
+}
+
+function makeGoalLoopUpdatedEvent(
+  state: ThreadGoalLoop["state"],
+  resumed = false,
+): OrchestrationEvent {
+  return {
+    sequence: 2,
+    eventId: EventId.make(`event-goal-loop:${state}:${resumed ? "resumed" : "sync"}`),
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    occurredAt: NOW,
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.goal-loop-updated",
+    payload: {
+      threadId: THREAD_ID,
+      loop: makeLoop({ state }),
+      ...(resumed ? { resumed: true } : {}),
+    },
+  };
+}
+
+function makeGoalActivatedEvent(): OrchestrationEvent {
+  return makeGoalLoopUpdatedEvent("idle", true);
+}
+
+function makeTurnDiffCompletedEvent(): OrchestrationEvent {
+  return {
+    sequence: 3,
+    eventId: EventId.make("event-turn-diff-completed"),
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    occurredAt: NOW,
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "thread.turn-diff-completed",
+    payload: {
+      threadId: THREAD_ID,
+      turnId: TurnId.make("native-goal-turn"),
+      checkpointTurnCount: 1,
+      checkpointRef: CheckpointRef.make("refs/t3/checkpoints/native-goal-thread/1"),
+      status: "ready",
+      files: [],
+      assistantMessageId: null,
+      completedAt: NOW,
+    },
   };
 }
 
@@ -281,10 +335,73 @@ describe("NativeGoalReactor", () => {
   it.effect("sets the Codex execution goal to the T3 goal text", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { goalCalls } = yield* run({ shell: makeShell(), signal: goalChanged });
+        const { commands, goalCalls } = yield* run({ shell: makeShell(), signal: goalChanged });
         assert.deepEqual(goalCalls, [
           { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
         ]);
+        assert.deepEqual(commands, []);
+      }),
+    ),
+  );
+
+  it.effect("starts one idle-only Codex turn when a goal is activated", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { commands, goalCalls } = yield* run({
+          shell: makeShell(),
+          signal: (fixture) => Queue.offer(fixture.events, makeGoalActivatedEvent()),
+        });
+        assert.deepEqual(goalCalls, [
+          { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
+        ]);
+        assert.strictEqual(commands.length, 1);
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.turn.start");
+        if (command.type !== "thread.turn.start") return;
+        assert.strictEqual(command.message.text, NativeGoalReactor.NATIVE_GOAL_BOOTSTRAP_MESSAGE);
+        assert.strictEqual(command.message.origin, "goal-continue");
+        assert.strictEqual(command.onlyIfIdle, true);
+        assert.strictEqual(command.continuation, undefined);
+      }),
+    ),
+  );
+
+  it.effect("waits for a busy native turn before sending its bootstrap", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          shell: makeShell({ session: { ...makeSession(), status: "running" } }),
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* NativeGoalReactor.NativeGoalReactor;
+          yield* reactor.start();
+          yield* Deferred.succeed(fixture.activation, undefined);
+
+          yield* Queue.offer(fixture.events, makeGoalActivatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+          assert.deepEqual(yield* Ref.get(fixture.commands), []);
+
+          // Codex reports its active execution goal while the pre-existing
+          // turn is still running. The mirror's running loop state must not
+          // discard the activation wake.
+          yield* Queue.offer(fixture.runtimeEvents, makeCodexGoalEvent("active"));
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+          yield* Queue.offer(fixture.events, makeGoalLoopUpdatedEvent("running"));
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          yield* Ref.set(fixture.shell, makeShell({ goalLoop: makeLoop({ state: "running" }) }));
+          yield* Queue.offer(fixture.events, makeTurnDiffCompletedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          const commands = yield* Ref.get(fixture.commands);
+          assert.strictEqual(commands.length, 2);
+          assert.strictEqual(commands[0]?.type, "thread.goal.loop");
+          assert.strictEqual(commands[1]?.type, "thread.turn.start");
+        }).pipe(Effect.provide(fixture.layer));
       }),
     ),
   );

@@ -8,6 +8,9 @@
  * - **Push.** Setting the T3 goal sets the Codex execution goal to the same
  *   text; clearing it clears Codex's. A T3 pause sends `status: "paused"` and
  *   a resume sends `status: "active"` — Codex has no separate resume RPC.
+ *   Activating a goal also sends one hidden, idle-only bootstrap turn. The
+ *   turn wakes Codex after a goal is added; Codex owns every continuation after
+ *   that first turn.
  * - **Mirror.** Codex's `thread/goal/updated` and `thread/goal/cleared`
  *   notifications arrive as `thread.goal.updated` runtime events and are
  *   written back onto `goalLoop.state` read-only, via the `sync` action. T3
@@ -28,6 +31,7 @@
 import {
   CommandId,
   EventId,
+  MessageId,
   resolveThreadGoalLoopMode,
   type OrchestrationEvent,
   type OrchestrationThreadShell,
@@ -53,6 +57,9 @@ import * as ProjectionSnapshotQuery from "./Services/ProjectionSnapshotQuery.ts"
 
 /** Reason a mirrored loop carries when Codex threw the goal away itself. */
 export const CODEX_CLEARED_REASON = "Codex cleared its execution goal";
+
+/** The one server-authored prompt that wakes a newly activated native goal. */
+export const NATIVE_GOAL_BOOTSTRAP_MESSAGE = "Continue working toward the thread goal.";
 
 /**
  * Codex's execution-goal status as a T3 loop state. `null` is Codex having
@@ -138,6 +145,13 @@ export const make = Effect.gen(function* () {
   // idempotent, so a durable version buys nothing.
   const lastPushed = new Map<ThreadId, string>();
 
+  // A resumed marker is emitted with the goal-loop event, but that event can
+  // arrive while the provider is still finishing a turn or before its session
+  // is registered. Keep the marker until one of those lifecycle events makes a
+  // normal idle-only turn start safe.
+  const pendingBootstraps = new Map<ThreadId, string>();
+  const startedBootstraps = new Map<ThreadId, string>();
+
   const pushKey = (desired: ReturnType<typeof desiredCodexGoal>) =>
     desired === undefined ? undefined : JSON.stringify(desired);
 
@@ -185,6 +199,67 @@ export const make = Effect.gen(function* () {
     });
   });
 
+  const startBootstrap = Effect.fn("NativeGoalReactor.startBootstrap")(function* (
+    thread: OrchestrationThreadShell,
+  ) {
+    const loop = thread.goalLoop;
+    if (
+      loop == null ||
+      (loop.state !== "idle" && loop.state !== "running") ||
+      thread.goal == null ||
+      thread.session == null ||
+      thread.session.status === "stopped"
+    ) {
+      return;
+    }
+    if (
+      thread.archivedAt != null ||
+      thread.settledOverride === "settled" ||
+      thread.snoozedUntil != null
+    ) {
+      pendingBootstraps.delete(thread.id);
+      return;
+    }
+    if (
+      thread.hasPendingApprovals ||
+      thread.hasPendingUserInput ||
+      thread.hasActionableProposedPlan
+    ) {
+      return;
+    }
+    const pending = pendingBootstraps.get(thread.id);
+    if (pending === undefined) return;
+    // The native provider owns subsequent turns. This command is only the
+    // first wake for this goal generation, and the deterministic key protects
+    // against replayed domain events in addition to this process-local guard.
+    const key = pending;
+    if (startedBootstraps.get(thread.id) === key) {
+      pendingBootstraps.delete(thread.id);
+      return;
+    }
+    if (thread.session.status === "starting" || thread.session.status === "running") return;
+
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    yield* engine.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make(`server:native-goal-start:${thread.id}:${key}`),
+      threadId: thread.id,
+      message: {
+        messageId: MessageId.make(`native-goal-start:${thread.id}:${key}`),
+        role: "user",
+        text: NATIVE_GOAL_BOOTSTRAP_MESSAGE,
+        attachments: [],
+        origin: "goal-continue",
+      },
+      runtimeMode: thread.runtimeMode,
+      interactionMode: thread.interactionMode,
+      onlyIfIdle: true,
+      createdAt,
+    });
+    startedBootstraps.set(thread.id, key);
+    pendingBootstraps.delete(thread.id);
+  });
+
   /** Mode the thread's real driver implies, not the decider's instance-id guess. */
   const derivedMode = (thread: OrchestrationThreadShell) =>
     resolveThreadGoalLoopMode(thread.session?.providerName ?? thread.modelSelection.instanceId);
@@ -195,13 +270,21 @@ export const make = Effect.gen(function* () {
     const loop = thread.goalLoop;
     if (loop == null) {
       lastPushed.delete(threadId);
+      pendingBootstraps.delete(threadId);
+      startedBootstraps.delete(threadId);
       return;
     }
     const mode = derivedMode(thread);
     if (loop.mode !== mode) {
       yield* dispatchSync({ threadId, mode });
     }
-    if (mode !== "native") return;
+    if (mode !== "native") {
+      // A missing session may still become Codex when it is registered, so
+      // retain the wake for that transition. Once a live non-native driver is
+      // known, the T3 reactor owns this goal instead.
+      if (thread.session !== null) pendingBootstraps.delete(threadId);
+      return;
+    }
     // No live session yet: `thread.session-set` brings us back here.
     if (thread.session == null || thread.session.status === "stopped") return;
 
@@ -215,30 +298,47 @@ export const make = Effect.gen(function* () {
 
     const desired = desiredCodexGoal(thread.goal ?? null, loop.state);
     const key = pushKey(desired);
-    if (key === undefined || lastPushed.get(threadId) === key) return;
+    if (key === undefined) {
+      pendingBootstraps.delete(threadId);
+      return;
+    }
 
-    yield* (
-      desired === null
-        ? providerService.clearExecutionGoal({ threadId })
-        : providerService.setExecutionGoal({ threadId, ...desired }).pipe(Effect.asVoid)
-    ).pipe(
-      Effect.flatMap(() => Effect.sync(() => lastPushed.set(threadId, key))),
-      // The T3 goal change already landed; only the provider mirror failed.
-      // Surface it instead of silently leaving the two out of sync.
-      Effect.catch((error) =>
-        error._tag === "ProviderSessionNotFoundError" ||
-        error._tag === "ProviderAdapterSessionNotFoundError"
-          ? Effect.void
-          : appendFailureActivity({
-              threadId,
-              summary:
-                desired === null
-                  ? "Could not clear the Codex execution goal"
-                  : "Could not set the Codex execution goal",
-              detail: error.message,
+    const needsPush = lastPushed.get(threadId) !== key;
+    const pushed = needsPush
+      ? yield* (
+          desired === null
+            ? providerService.clearExecutionGoal({ threadId })
+            : providerService.setExecutionGoal({ threadId, ...desired }).pipe(Effect.asVoid)
+        ).pipe(
+          Effect.flatMap(() =>
+            Effect.sync(() => {
+              lastPushed.set(threadId, key);
+              return true;
             }),
-      ),
-    );
+          ),
+          // The T3 goal change already landed; only the provider mirror failed.
+          // Surface it instead of silently leaving the two out of sync.
+          Effect.catch((error) =>
+            error._tag === "ProviderSessionNotFoundError" ||
+            error._tag === "ProviderAdapterSessionNotFoundError"
+              ? Effect.succeed(false)
+              : appendFailureActivity({
+                  threadId,
+                  summary:
+                    desired === null
+                      ? "Could not clear the Codex execution goal"
+                      : "Could not set the Codex execution goal",
+                  detail: error.message,
+                }).pipe(Effect.as(false)),
+          ),
+        )
+      : true;
+
+    if (desired === null) {
+      pendingBootstraps.delete(threadId);
+      return;
+    }
+    if (pushed && mode === "native") yield* startBootstrap(thread);
   });
 
   const mirror = Effect.fn("NativeGoalReactor.mirror")(function* (
@@ -283,11 +383,36 @@ export const make = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* Effect.forkChild(
             Stream.runForEach(engine.streamDomainEvents, (event: OrchestrationEvent) =>
-              event.type === "thread.meta-updated" ||
-              event.type === "thread.goal-loop-updated" ||
-              event.type === "thread.session-set"
-                ? worker.enqueue({ kind: "push", threadId: event.payload.threadId })
-                : Effect.void,
+              event.type === "thread.goal-loop-updated"
+                ? Effect.sync(() => {
+                    if (event.payload.resumed === true && event.payload.loop?.state === "idle") {
+                      pendingBootstraps.set(event.payload.threadId, event.eventId);
+                    } else if (
+                      event.payload.loop === null ||
+                      (event.payload.loop.state !== "idle" &&
+                        event.payload.loop.state !== "running")
+                    ) {
+                      pendingBootstraps.delete(event.payload.threadId);
+                    }
+                  }).pipe(
+                    Effect.andThen(
+                      worker.enqueue({ kind: "push", threadId: event.payload.threadId }),
+                    ),
+                  )
+                : event.type === "thread.meta-updated" ||
+                    event.type === "thread.session-set" ||
+                    event.type === "thread.turn-diff-completed" ||
+                    event.type === "thread.approval-response-requested" ||
+                    event.type === "thread.user-input-response-requested" ||
+                    event.type === "thread.proposed-plan-upserted" ||
+                    event.type === "thread.archived" ||
+                    event.type === "thread.settled" ||
+                    event.type === "thread.unsettled" ||
+                    event.type === "thread.snoozed" ||
+                    event.type === "thread.unsnoozed" ||
+                    event.type === "thread.reverted"
+                  ? worker.enqueue({ kind: "push", threadId: event.payload.threadId })
+                  : Effect.void,
             ),
           );
           yield* Stream.runForEach(providerService.streamEvents, (event) =>

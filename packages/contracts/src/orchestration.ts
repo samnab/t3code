@@ -1683,11 +1683,12 @@ export const ThreadGoalLoopUpdatedPayload = Schema.Struct({
   /** Null clears the loop (the goal itself was cleared). See ThreadGoalLoop. */
   loop: Schema.NullOr(ThreadGoalLoop),
   /**
-   * True when a fresh goal or user action puts an idle loop in motion. The goal
-   * loop reactor starts a continuation turn on this and nothing else; a goal
-   * included in thread creation intentionally omits it because the bootstrap
-   * turn is already being sent. The resumed turn skips the last-reply scan
-   * because that reply may still carry the stale tag that stopped the loop.
+   * True when a fresh goal or user action puts an idle loop in motion. The T3
+   * goal-loop reactor starts a continuation turn on this; the native reactor
+   * starts one hidden bootstrap turn. A goal included in thread creation
+   * intentionally omits it because the bootstrap turn is already being sent.
+   * The resumed turn skips the last-reply scan because that reply may still
+   * carry the stale tag that stopped the loop.
    */
   resumed: Schema.optional(Schema.Boolean),
 });
