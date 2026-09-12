@@ -1168,9 +1168,7 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
         </TooltipTrigger>
         <TooltipPopup side="top">{goalTooltip}</TooltipPopup>
       </Tooltip>
-      {props.goalLoop !== null &&
-      pauseAction !== null &&
-      (tone === "running" || tone === "paused") ? (
+      {props.goalLoop !== null && pauseAction !== null ? (
         <Tooltip>
           <TooltipTrigger
             render={
