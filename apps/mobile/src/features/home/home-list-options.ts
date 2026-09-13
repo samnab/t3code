@@ -12,6 +12,7 @@ import {
   createElement,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type PropsWithChildren,
@@ -69,6 +70,15 @@ function defaultHomeListOptions(): HomeListOptions {
   };
 }
 
+/** Latest shared thread sort order, readable outside HomeListOptionsProvider —
+    the global ThreadArrangementHost mounts above it in App, so the Arrange
+    sheet can honor the sort the lists are using. */
+let activeThreadSortOrder: SidebarThreadSortOrder = DEFAULT_SIDEBAR_THREAD_SORT_ORDER;
+
+export function getActiveThreadSortOrder(): SidebarThreadSortOrder {
+  return activeThreadSortOrder;
+}
+
 interface HomeListOptionsContextValue {
   readonly options: HomeListOptions;
   readonly setOptions: Dispatch<SetStateAction<HomeListOptions>>;
@@ -85,6 +95,9 @@ export function HomeListOptionsProvider({
   readonly projectGroupingMode: SidebarProjectGroupingMode;
 }>) {
   const [options, setOptions] = useState<HomeListOptions>(defaultHomeListOptions);
+  useEffect(() => {
+    activeThreadSortOrder = options.threadSortOrder;
+  }, [options.threadSortOrder]);
   const value = useMemo(
     () => ({ options, setOptions, projectGroupingMode }),
     [options, projectGroupingMode],
