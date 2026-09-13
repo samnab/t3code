@@ -235,12 +235,10 @@ describe("CodexSessionRuntime collab integration", () => {
         model: "gpt-5.6-luna",
         effort: "low",
       });
-      assert.deepEqual(readRecordedRequests(), [
-        {
-          method: "thread/resume",
-          params: { threadId: CHILD_A, excludeTurns: true },
-        },
-      ]);
+      assert.deepEqual(
+        readRecordedRequests().filter((request) => request.params.threadId === CHILD_A),
+        [{ method: "thread/resume", params: { threadId: CHILD_A, excludeTurns: true } }],
+      );
 
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -288,6 +286,64 @@ describe("CodexSessionRuntime collab integration", () => {
         effort: "low",
       });
       assert.equal(readRecordedRequests().length, 4);
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("looks up metadata for an interacted-only resumed child once", () =>
+    Effect.gen(function* () {
+      const interacted = capturedStartedActivity();
+      const script = {
+        rootThreadId: ROOT,
+        recordRequests: true,
+        notifications: [
+          {
+            ...interacted,
+            params: {
+              ...interacted.params,
+              item: { ...interacted.params.item, kind: "interacted" },
+            },
+          },
+          {
+            ...interacted,
+            params: {
+              ...interacted.params,
+              item: { ...interacted.params.item, kind: "interacted" },
+            },
+          },
+        ],
+        childResumeSnapshots: {
+          [CHILD_A]: { model: "gpt-5.6-luna", reasoningEffort: "low" },
+        },
+      };
+      NodeFS.writeFileSync(scriptPath, encodeJson(script), "utf8");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scriptPath, { force: true });
+          NodeFS.rmSync(`${scriptPath}.requests`, { force: true });
+        }),
+      );
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-collab-interacted-resume"),
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const metadataFiber = yield* runtime.events.pipe(
+        Stream.filter((event) => event.method === "collabAgent/metadataUpdated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "resume child" });
+      assert.deepInclude((yield* Fiber.join(metadataFiber))[0]?.payload, {
+        agentThreadId: CHILD_A,
+        model: "gpt-5.6-luna",
+        effort: "low",
+      });
+      assert.equal(readRecordedRequests().length, 1);
       yield* runtime.close;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

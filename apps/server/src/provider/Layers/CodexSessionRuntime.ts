@@ -1851,9 +1851,7 @@ export const makeCodexSessionRuntime = (
               activityKind: item.kind,
             },
           });
-          if (item.kind === "started") {
-            yield* startCollabChildMetadataLookup(item.agentThreadId);
-          }
+          yield* startCollabChildMetadataLookup(item.agentThreadId);
           return true;
         }
 
