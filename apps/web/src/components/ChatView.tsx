@@ -1604,7 +1604,10 @@ export default function ChatView(props: ChatViewProps) {
           );
         }
       };
-      await dispatch(action === "continue" ? "reset" : action);
+      await runThreadGoalMutation(
+        scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
+        () => dispatch(action === "continue" ? "reset" : action),
+      );
     },
     [activeServerThread, setThreadGoalLoop],
   );

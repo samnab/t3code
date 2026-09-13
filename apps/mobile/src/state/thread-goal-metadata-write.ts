@@ -8,3 +8,14 @@ export function canClaimThreadGoalMetadataWrite(
 ): boolean {
   return currentOwner !== editorEpoch && currentOwner !== COMMAND_GOAL_WRITE;
 }
+
+export function canStartThreadGoalCommandWrite(
+  currentOwner: number | null,
+  deleteInFlight: boolean,
+): boolean {
+  return currentOwner === null && !deleteInFlight;
+}
+
+export function canRunThreadGoalLoopAction(deleteInFlight: boolean): boolean {
+  return !deleteInFlight;
+}

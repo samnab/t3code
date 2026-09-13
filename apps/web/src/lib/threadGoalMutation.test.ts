@@ -54,17 +54,23 @@ describe("runThreadGoalMutation", () => {
 
     await pauseStarted.promise;
     let setCalled = false;
+    let resumeCalled = false;
     let secondDeleteCalled = false;
     const concurrentSet = await runThreadGoalMutation(threadRef, async () => {
       setCalled = true;
+    });
+    const concurrentResume = await runThreadGoalMutation(threadRef, async () => {
+      resumeCalled = true;
     });
     const secondDelete = await runThreadGoalMutation(threadRef, async () => {
       secondDeleteCalled = true;
     });
 
     expect(concurrentSet).toEqual({ status: "busy" });
+    expect(concurrentResume).toEqual({ status: "busy" });
     expect(secondDelete).toEqual({ status: "busy" });
     expect(setCalled).toBe(false);
+    expect(resumeCalled).toBe(false);
     expect(secondDeleteCalled).toBe(false);
 
     pause.resolve();

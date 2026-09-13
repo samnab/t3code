@@ -267,13 +267,13 @@ immediately. The goal pill shows the loop's state:
   set the count back to zero. Pending child results are kept and delivered after you continue.
 - **Complete** means the agent reported the goal done.
 
-The goal strip's menu (and the thread's menu) gathers the lifecycle controls: pause, resume,
-**Continue anyway**, **Restart** for a completed loop, **Stop goal work**, editing the goal, and
-**Delete goal**. Stop pauses the loop and interrupts the running turn, so it takes effect
-immediately, but keeps the goal so you can resume later; delete stops goal-driven work the same
-way and then removes the goal from the thread. The composer's regular stop button pauses a
-running goal loop first for the same reason — stopping mid-goal never restarts it. On mobile,
-the goal editor sheet carries the same controls.
+The goal strip's menu gathers pause, resume, **Continue anyway**, **Restart** for a completed loop,
+**Stop goal work**, editing, and **Delete goal**. The thread's menu has the same lifecycle and
+delete controls; editing stays in the goal strip. Stop pauses the loop and interrupts the running
+turn, so it takes effect immediately, but keeps the goal so you can resume later; delete stops
+goal-driven work the same way and then removes the goal from the thread. The composer's regular
+stop button pauses a running goal loop first for the same reason — stopping mid-goal never restarts
+it. On mobile, the goal editor sheet carries the same controls.
 
 A newly set goal starts its first turn on its own when the thread is idle. If a turn is already
 running, the goal starts as soon as that turn ends. A resume or a **Continue anyway** also starts

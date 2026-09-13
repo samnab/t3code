@@ -90,7 +90,12 @@ import { removeThreadOutboxMessage } from "./thread-outbox-removal";
 import { dispatchingQueuedMessageIdAtom, useThreadOutboxMessages } from "./use-thread-outbox";
 import { threadEnvironment } from "./threads";
 import { resolveComposerThreadGoalCommand } from "./thread-goal-command";
-import { COMMAND_GOAL_WRITE, canClaimThreadGoalMetadataWrite } from "./thread-goal-metadata-write";
+import {
+  COMMAND_GOAL_WRITE,
+  canClaimThreadGoalMetadataWrite,
+  canRunThreadGoalLoopAction,
+  canStartThreadGoalCommandWrite,
+} from "./thread-goal-metadata-write";
 import { useAtomCommand } from "./use-atom-command";
 import {
   composerAttachmentUploadBlockReason,
@@ -787,7 +792,12 @@ export function useThreadComposerState() {
         clearComposerDraftContent(threadKey);
         return null;
       }
-      if (goalMetadataInFlightRef.current !== null) {
+      if (
+        !canStartThreadGoalCommandWrite(
+          goalMetadataInFlightRef.current,
+          goalDeleteInFlightRef.current,
+        )
+      ) {
         return null;
       }
       const goalValue = goalCommand.action === "set" ? goalCommand.goal : null;
@@ -1105,7 +1115,9 @@ export function useThreadComposerState() {
 
   const onThreadGoalLoopAction = useCallback(
     async (action: ThreadGoalLoopAction) => {
-      if (!selectedThreadShell) return;
+      if (!selectedThreadShell || !canRunThreadGoalLoopAction(goalDeleteInFlightRef.current)) {
+        return;
+      }
       const result = await setThreadGoalLoop({
         environmentId: selectedThreadShell.environmentId,
         input: {

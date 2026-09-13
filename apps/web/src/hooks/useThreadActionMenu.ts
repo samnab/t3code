@@ -277,32 +277,38 @@ export function useThreadActionMenu(input: {
             openExecutionGoalDialog(threadRef);
             return;
           case "pause-goal-loop":
-            await reportFailure("Failed to pause goal loop", () =>
-              setThreadGoalLoop({
-                environmentId: threadRef.environmentId,
-                input: { threadId: threadRef.threadId, action: "pause" },
-              }),
+            await runThreadGoalMutation(threadRef, () =>
+              reportFailure("Failed to pause goal loop", () =>
+                setThreadGoalLoop({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, action: "pause" },
+                }),
+              ),
             );
             return;
           case "resume-goal-loop":
-            await reportFailure("Failed to resume goal loop", () =>
-              setThreadGoalLoop({
-                environmentId: threadRef.environmentId,
-                input: { threadId: threadRef.threadId, action: "resume" },
-              }),
+            await runThreadGoalMutation(threadRef, () =>
+              reportFailure("Failed to resume goal loop", () =>
+                setThreadGoalLoop({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, action: "resume" },
+                }),
+              ),
             );
             return;
           case "continue-goal-loop":
           case "restart-goal-loop":
-            await reportFailure(
-              action === "continue-goal-loop"
-                ? "Failed to continue goal loop"
-                : "Failed to restart goal loop",
-              () =>
-                setThreadGoalLoop({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, action: "reset" },
-                }),
+            await runThreadGoalMutation(threadRef, () =>
+              reportFailure(
+                action === "continue-goal-loop"
+                  ? "Failed to continue goal loop"
+                  : "Failed to restart goal loop",
+                () =>
+                  setThreadGoalLoop({
+                    environmentId: threadRef.environmentId,
+                    input: { threadId: threadRef.threadId, action: "reset" },
+                  }),
+              ),
             );
             return;
           case "stop-goal-loop":
