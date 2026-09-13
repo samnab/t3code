@@ -1,4 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Result from "effect/Result";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 export type ProcessTermination = "exit" | "timeout" | "output_limit" | "aborted" | "spawn_error";
 
@@ -11,7 +17,6 @@ export interface BoundedProcessResult {
 }
 
 interface OwnedProcess {
-  readonly child: ChildProcess;
   readonly settled: Promise<void>;
   readonly terminate: (reason: ProcessTermination) => void;
 }
@@ -40,28 +45,17 @@ export function commandEnvironment(source: NodeJS.ProcessEnv = process.env): Nod
   return environment;
 }
 
-function killOwnedProcess(child: ChildProcess, force: boolean): void {
-  if (process.platform === "win32" && child.pid !== undefined) {
-    const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-      windowsHide: true,
-      stdio: "ignore",
-    });
-    const timeout = setTimeout(() => killer.kill("SIGKILL"), 5_000);
-    timeout.unref?.();
-    killer.once("close", () => clearTimeout(timeout));
-    killer.unref();
-    return;
-  }
-  try {
-    if (child.pid !== undefined) process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
-    else child.kill(force ? "SIGKILL" : "SIGTERM");
-  } catch {
-    try {
-      child.kill(force ? "SIGKILL" : "SIGTERM");
-    } catch {
-      // The exact process this registry launched has already exited.
+function abortEffect(signal: AbortSignal | undefined): Effect.Effect<void> {
+  if (signal === undefined) return Effect.never;
+  return Effect.callback<void>((resume) => {
+    if (signal.aborted) {
+      resume(Effect.void);
+      return;
     }
-  }
+    const onAbort = () => resume(Effect.void);
+    signal.addEventListener("abort", onAbort, { once: true });
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 /** Owns only subprocess groups created by experiment evaluation. */
@@ -78,85 +72,138 @@ export class ExperimentProcessRegistry {
       readonly signal?: AbortSignal;
     },
   ): Promise<BoundedProcessResult> {
-    return new Promise((resolve) => {
-      const startedAt = performance.now();
+    const startedAt = performance.now();
+    let requestedTermination: ProcessTermination | undefined;
+    let requestRunningTermination: ((reason: ProcessTermination) => void) | undefined;
+    let settleOwned = () => {};
+    const settled = new Promise<void>((resolve) => {
+      settleOwned = resolve;
+    });
+    const owned: OwnedProcess = {
+      settled,
+      terminate: (reason) => {
+        if (requestedTermination !== undefined) return;
+        requestedTermination = reason;
+        requestRunningTermination?.(reason);
+      },
+    };
+    const processes = this.#runs.get(runId) ?? new Set<OwnedProcess>();
+    processes.add(owned);
+    this.#runs.set(runId, processes);
+
+    const program = Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const spawned = yield* Effect.result(
+        spawner.spawn(
+          ChildProcess.make(argv[0]!, argv.slice(1), {
+            cwd: options.cwd,
+            detached: true,
+            windowsHide: true,
+            env: commandEnvironment(),
+            extendEnv: false,
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            forceKillAfter: "1 second",
+          }),
+        ),
+      );
+      if (Result.isFailure(spawned)) {
+        const stderr = Buffer.from(String(spawned.failure)).subarray(0, options.maxOutputBytes);
+        return {
+          code: null,
+          stdout: "",
+          stderr: stderr.toString("utf8"),
+          durationSeconds: (performance.now() - startedAt) / 1_000,
+          termination: "spawn_error" as const,
+        };
+      }
+
+      const child = spawned.success;
+      const stop = yield* Deferred.make<ProcessTermination>();
+      requestRunningTermination = (reason) => {
+        Deferred.doneUnsafe(stop, Effect.succeed(reason));
+      };
+      if (requestedTermination !== undefined) requestRunningTermination(requestedTermination);
+
       const stdoutChunks: Array<Buffer> = [];
       const stderrChunks: Array<Buffer> = [];
       let capturedBytes = 0;
       let producedBytes = 0;
-      let termination: ProcessTermination = "exit";
-      let finished = false;
-      let escalation: ReturnType<typeof setTimeout> | undefined;
-      let settleOwned = () => {};
-      const settled = new Promise<void>((done) => {
-        settleOwned = done;
-      });
-
-      const child = spawn(argv[0]!, argv.slice(1), {
-        cwd: options.cwd,
-        detached: true,
-        env: commandEnvironment(),
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      });
-
-      const terminate = (reason: ProcessTermination) => {
-        if (termination !== "exit") return;
-        termination = reason;
-        killOwnedProcess(child, false);
-        escalation = setTimeout(() => {
-          if (!finished) killOwnedProcess(child, true);
-        }, 1_000);
-        escalation.unref?.();
-      };
-      const owned: OwnedProcess = { child, settled, terminate };
-      const processes = this.#runs.get(runId) ?? new Set<OwnedProcess>();
-      processes.add(owned);
-      this.#runs.set(runId, processes);
-
-      const capture = (target: Array<Buffer>, chunk: Buffer) => {
-        producedBytes += chunk.byteLength;
-        const remaining = Math.max(0, options.maxOutputBytes - capturedBytes);
-        if (remaining > 0) {
-          const kept = chunk.subarray(0, remaining);
-          target.push(kept);
-          capturedBytes += kept.byteLength;
-        }
-        if (producedBytes > options.maxOutputBytes) terminate("output_limit");
-      };
-      child.stdout?.on("data", (chunk: Buffer) => capture(stdoutChunks, chunk));
-      child.stderr?.on("data", (chunk: Buffer) => capture(stderrChunks, chunk));
-
-      const timeout = setTimeout(() => terminate("timeout"), Math.max(1, options.timeoutMs));
-      timeout.unref?.();
-      const onAbort = () => terminate("aborted");
-      if (options.signal?.aborted) onAbort();
-      else options.signal?.addEventListener("abort", onAbort, { once: true });
-
-      const finish = (code: number | null) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeout);
-        if (escalation !== undefined) clearTimeout(escalation);
-        options.signal?.removeEventListener("abort", onAbort);
-        processes.delete(owned);
-        if (processes.size === 0) this.#runs.delete(runId);
-        settleOwned();
-        resolve({
-          code,
-          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-          stderr: Buffer.concat(stderrChunks).toString("utf8"),
-          durationSeconds: (performance.now() - startedAt) / 1_000,
-          termination,
+      const capture = (target: Array<Buffer>, chunk: Uint8Array) =>
+        Effect.sync(() => {
+          producedBytes += chunk.byteLength;
+          const remaining = Math.max(0, options.maxOutputBytes - capturedBytes);
+          if (remaining > 0) {
+            const kept = Buffer.from(chunk).subarray(0, remaining);
+            target.push(kept);
+            capturedBytes += kept.byteLength;
+          }
+          if (producedBytes > options.maxOutputBytes) {
+            Deferred.doneUnsafe(stop, Effect.succeed("output_limit"));
+          }
         });
-      };
-      child.once("error", (error) => {
-        termination = "spawn_error";
-        capture(stderrChunks, Buffer.from(error.message));
-        finish(null);
+      const stdoutFiber = yield* Stream.runForEach(child.stdout, (chunk) =>
+        capture(stdoutChunks, chunk),
+      ).pipe(Effect.forkScoped);
+      const stderrFiber = yield* Stream.runForEach(child.stderr, (chunk) =>
+        capture(stderrChunks, chunk),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.sleep(Math.max(1, options.timeoutMs)).pipe(
+        Effect.andThen(Deferred.succeed(stop, "timeout")),
+        Effect.forkScoped,
+      );
+      yield* abortEffect(options.signal).pipe(
+        Effect.andThen(Deferred.succeed(stop, "aborted")),
+        Effect.forkScoped,
+      );
+
+      const outcome = yield* Effect.race(
+        Effect.all(
+          [
+            child.exitCode.pipe(
+              Effect.map(Number),
+              Effect.catch(() => Effect.succeed(null)),
+            ),
+            Fiber.await(stdoutFiber),
+            Fiber.await(stderrFiber),
+          ],
+          { concurrency: "unbounded" },
+        ).pipe(Effect.map(([code]) => ({ _tag: "Exit" as const, code }))),
+        Deferred.await(stop).pipe(
+          Effect.map((termination) => ({ _tag: "Stop" as const, termination })),
+        ),
+      );
+      let code: number | null;
+      let termination: ProcessTermination;
+      if (outcome._tag === "Exit") {
+        code = outcome.code;
+        termination = "exit";
+      } else {
+        termination = outcome.termination;
+        code = yield* child.kill({ killSignal: "SIGTERM", forceKillAfter: "1 second" }).pipe(
+          Effect.andThen(child.exitCode),
+          Effect.map(Number),
+          Effect.catch(() => Effect.succeed(null)),
+        );
+      }
+      yield* Effect.all([Fiber.await(stdoutFiber), Fiber.await(stderrFiber)], {
+        concurrency: "unbounded",
       });
-      child.once("close", finish);
+      return {
+        code,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        durationSeconds: (performance.now() - startedAt) / 1_000,
+        termination,
+      };
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+
+    return Effect.runPromise(program).finally(() => {
+      requestRunningTermination = undefined;
+      processes.delete(owned);
+      if (processes.size === 0) this.#runs.delete(runId);
+      settleOwned();
     });
   }
 

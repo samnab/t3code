@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import {
   ProviderDriverKind,
@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -94,6 +95,7 @@ const Objective = Schema.String.check(
   Schema.isMaxLength(1_024),
 );
 const decodeObjective = Schema.decodeUnknownSync(Objective);
+const isExperimentError = Schema.is(ExperimentError);
 
 function error(
   code: ConstructorParameters<typeof ExperimentError>[0]["code"],
@@ -104,7 +106,7 @@ function error(
 }
 
 function asExperimentError(cause: unknown, fallback: string): ExperimentError {
-  return cause instanceof ExperimentError ? cause : error("evaluation_failed", fallback, cause);
+  return isExperimentError(cause) ? cause : error("evaluation_failed", fallback, cause);
 }
 
 function repositoryEffect<A>(operation: string, run: () => Promise<A>) {
@@ -115,17 +117,14 @@ function repositoryEffect<A>(operation: string, run: () => Promise<A>) {
 }
 
 function nowIso(nowMs: number): string {
-  return new Date(nowMs).toISOString();
+  return DateTime.formatIso(DateTime.makeUnsafe(nowMs));
 }
 
 function elapsedSeconds(profile: ExperimentProfile, nowMs: number): number {
   return Math.max(0, Math.min((nowMs - Date.parse(profile.createdAt)) / 1_000, 691_200));
 }
 
-export function publicSummary(
-  profile: ExperimentProfile,
-  nowMs = Date.now(),
-): ThreadExperimentSummary {
+export function publicSummary(profile: ExperimentProfile, nowMs: number): ThreadExperimentSummary {
   const phase: ThreadExperimentSummary["phase"] =
     profile.phase === "applied"
       ? "applying"
@@ -210,7 +209,7 @@ export interface ExperimentCoordinatorShape {
 export class ExperimentCoordinator extends Context.Service<
   ExperimentCoordinator,
   ExperimentCoordinatorShape
->()("t3/experiments/ExperimentCoordinator") {}
+>()("t3/experiments/ExperimentService/ExperimentCoordinator") {}
 
 export interface ExperimentEvaluationResult {
   readonly outcome: "baseline" | "kept" | "restored" | "failed";
@@ -632,8 +631,8 @@ export const make = Effect.gen(function* () {
     if (head !== pending.headBefore || staged.length > 0) {
       throw error("external_drift", "HEAD or index changed; rollback was not attempted.");
     }
-    const expectedPaths = pending.snapshots.map((entry) => entry.path);
-    if (!actualChanged.every((entry) => expectedPaths.includes(entry))) {
+    const expectedPaths = new Set(pending.snapshots.map((entry) => entry.path));
+    if (!actualChanged.every((entry) => expectedPaths.has(entry))) {
       throw error(
         "external_drift",
         "Unowned worktree changes were found; rollback was not attempted.",
@@ -800,16 +799,21 @@ export const make = Effect.gen(function* () {
     });
     const currentMs = yield* Clock.currentTimeMillis;
     const existing = yield* store.list();
-    const owned = yield* repositoryEffect("worktree ownership validation", async () =>
-      existing.some(
-        (profile) =>
-          holdsWorktreeClaim(profile, currentMs) && repositoryPathsEqual(profile.cwd, cwd),
-      ),
-    );
+    const owned = yield* repositoryEffect("worktree ownership validation", async () => {
+      for (const profile of existing) {
+        if (
+          holdsWorktreeClaim(profile, currentMs) &&
+          (await repositoryPathsEqual(profile.cwd, cwd))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    });
     if (owned) {
       return yield* error("invalid_phase", "Another experiment already owns this worktree.");
     }
-    const confirmationId = randomUUID();
+    const confirmationId = NodeCrypto.randomUUID();
     const expiresAt = nowIso(currentMs + CONFIRMATION_TTL_MS);
     const head = yield* repositoryEffect("read HEAD", () => currentHead(cwd));
     confirmations.set(confirmationId, {
@@ -916,13 +920,17 @@ export const make = Effect.gen(function* () {
       await assertClean(confirmation.cwd);
     });
     const all = yield* store.list();
-    const owned = yield* repositoryEffect("worktree ownership revalidation", async () =>
-      all.some(
-        (profile) =>
+    const owned = yield* repositoryEffect("worktree ownership revalidation", async () => {
+      for (const profile of all) {
+        if (
           holdsWorktreeClaim(profile, currentMs) &&
-          repositoryPathsEqual(profile.cwd, confirmation.cwd),
-      ),
-    );
+          (await repositoryPathsEqual(profile.cwd, confirmation.cwd))
+        ) {
+          return true;
+        }
+      }
+      return false;
+    });
     if (owned) {
       return yield* error("invalid_phase", "Another experiment already owns this worktree.");
     }
@@ -930,7 +938,7 @@ export const make = Effect.gen(function* () {
     const createdAt = nowIso(currentMs);
     let profile: ExperimentProfile = {
       version: 1,
-      runId: randomUUID(),
+      runId: NodeCrypto.randomUUID(),
       threadId: input.threadId,
       goalGeneration: (previous?.goalGeneration ?? 0) + 1,
       objective: input.objective,
@@ -1210,10 +1218,12 @@ export const make = Effect.gen(function* () {
       let relativePath: string;
       try {
         relativePath = normalizeApprovedPath(change.path);
-        resolveApprovedFile(profile.cwd, relativePath);
       } catch (cause) {
         return yield* asExperimentError(cause, "Candidate path is unsafe.");
       }
+      yield* repositoryEffect("resolve candidate path", () =>
+        resolveApprovedFile(profile.cwd, relativePath),
+      );
       if (!profile.config.files.includes(relativePath)) {
         return yield* error("authentication_failed", `Path is not approved: ${relativePath}.`);
       }
@@ -1243,7 +1253,7 @@ export const make = Effect.gen(function* () {
       changes.map((change, index) => [change.path, hashes[index]!] as const),
     );
     const pending: PendingExperiment = {
-      id: randomUUID(),
+      id: NodeCrypto.randomUUID(),
       hypothesis,
       headBefore: profile.head,
       snapshots,
@@ -1257,12 +1267,12 @@ export const make = Effect.gen(function* () {
     return yield* Effect.gen(function* () {
       for (const change of changes) {
         const snapshot = pending.snapshots.find((entry) => entry.path === change.path)!;
+        const absolute = yield* repositoryEffect(`resolve ${change.path}`, () =>
+          resolveApprovedFile(profile.cwd, change.path),
+        );
         yield* repositoryEffect(`write ${change.path}`, () =>
-          writeFileAtomically(
-            resolveApprovedFile(profile.cwd, change.path),
-            Buffer.from(change.content, "utf8"),
-            snapshot.mode,
-            () => assertFileMatches(profile.cwd, change.path, snapshot.hash, snapshot.mode),
+          writeFileAtomically(absolute, Buffer.from(change.content, "utf8"), snapshot.mode, () =>
+            assertFileMatches(profile.cwd, change.path, snapshot.hash, snapshot.mode),
           ),
         );
         profile = yield* save({

@@ -54,6 +54,7 @@ const summary: ExperimentModel.ExperimentSummary = {
   lastError: null,
 };
 const decodeReadFileInput = Schema.decodeUnknownEffect(ExperimentModel.ExperimentReadFileInput);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 it.effect(
   "registers only the five experiment tools and derives identity from the credential",
@@ -154,7 +155,7 @@ it.effect("rejects credentials without the exact experiment-only binding", () =>
       Effect.provideService(McpSchema.McpServerClient, client),
     );
     expect(result.isError).toBe(true);
-    expect(JSON.stringify(result)).toContain("MCP credential is not bound to an experiment run.");
+    expect(encodeJson(result)).toContain("MCP credential is not bound to an experiment run.");
   }).pipe(
     Effect.provide(
       ExperimentToolkitRegistrationLive.pipe(
@@ -205,7 +206,7 @@ it.effect(
           Effect.provideService(McpSchema.McpServerClient, client),
         );
       expect(stale.isError).toBe(true);
-      expect(JSON.stringify(stale)).toContain("Experiment credential generation is stale.");
+      expect(encodeJson(stale)).toContain("Experiment credential generation is stale.");
 
       const currentInvocation = {
         ...invocation,

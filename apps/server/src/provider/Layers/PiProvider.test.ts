@@ -41,7 +41,7 @@ const provideTestEnv = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.provide(testLayer));
 
 describe("checkPiProviderStatus", () => {
-  it("reports a disabled provider without probing", () =>
+  it.live("reports a disabled provider without probing", () =>
     Effect.gen(function* () {
       const shimPath = makeFixture();
       const snapshot = yield* checkPiProviderStatus(
@@ -50,9 +50,10 @@ describe("checkPiProviderStatus", () => {
       expect(snapshot.enabled).toBe(false);
       expect(snapshot.installed).toBe(false);
       expect(snapshot.models.map((model) => model.slug)).toContain("default");
-    }).pipe(provideTestEnv));
+    }).pipe(provideTestEnv),
+  );
 
-  it("discovers models, commands, and skills through the ephemeral RPC process", () =>
+  it.live("discovers models, commands, and skills through the ephemeral RPC process", () =>
     Effect.gen(function* () {
       const shimPath = makeFixture();
       const snapshot = yield* checkPiProviderStatus(
@@ -71,12 +72,9 @@ describe("checkPiProviderStatus", () => {
       expect(glm?.name).toBe("GLM 5");
       // The reasoning model advertises the thinking ladder including the
       // mapped xhigh level; the flash model does not.
-      const glmOptions =
-        glm?.capabilities && "options" in glm.capabilities && glm.capabilities.optionDescriptors
-          ? glm.capabilities.optionDescriptors.find(
-              (descriptor) => descriptor.id === "thinking" && "options" in descriptor,
-            )
-          : undefined;
+      const glmOptions = glm?.capabilities?.optionDescriptors?.find(
+        (descriptor) => descriptor.id === "thinking" && "options" in descriptor,
+      );
       const thinkingValues =
         glmOptions && "options" in glmOptions ? glmOptions.options.map((option) => option.id) : [];
       expect(thinkingValues).toContain("xhigh");
@@ -86,9 +84,10 @@ describe("checkPiProviderStatus", () => {
       expect(snapshot.slashCommands.map((command) => command.name)).toContain("review");
       const research = snapshot.skills.find((skill) => skill.name === "research");
       expect(research?.scope).toBe("user");
-    }).pipe(provideTestEnv));
+    }).pipe(provideTestEnv),
+  );
 
-  it("rejects a Pi binary older than the minimum supported version", () =>
+  it.live("rejects a Pi binary older than the minimum supported version", () =>
     Effect.gen(function* () {
       const shimPath = makeFixture();
       process.env.FAKE_PI_VERSION = "0.7.0";
@@ -99,9 +98,10 @@ describe("checkPiProviderStatus", () => {
       expect(snapshot.version).toBe("0.7.0");
       expect(snapshot.status).toBe("error");
       expect(snapshot.message).toContain("unsupported");
-    }).pipe(provideTestEnv));
+    }).pipe(provideTestEnv),
+  );
 
-  it("reports a missing binary as not installed", () =>
+  it.live("reports a missing binary as not installed", () =>
     Effect.gen(function* () {
       const snapshot = yield* checkPiProviderStatus(
         decodePiSettings({ enabled: true, binaryPath: "/nonexistent/pi-binary" }),
@@ -109,5 +109,6 @@ describe("checkPiProviderStatus", () => {
       expect(snapshot.installed).toBe(false);
       expect(snapshot.status).toBe("error");
       expect(snapshot.message).toContain("not installed");
-    }).pipe(provideTestEnv));
+    }).pipe(provideTestEnv),
+  );
 });

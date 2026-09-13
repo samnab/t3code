@@ -1,8 +1,16 @@
-import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { constants, existsSync, lstatSync, realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
+import * as NodeCrypto from "node:crypto";
+import * as NodePath from "@effect/platform-node/NodePath";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Result from "effect/Result";
+import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   decodeExperimentConfig,
@@ -12,6 +20,13 @@ import {
   type ExperimentConfig,
   type FileSnapshot,
 } from "./Model.ts";
+import {
+  lstatNoFollow,
+  nativeRealPath,
+  openNoFollowAppendCreate,
+  openNoFollowRead,
+  type NativeFileInfo,
+} from "./NativeFileAccess.ts";
 
 const CONFIG_PATH = ".auto/config.json";
 const GIT_TIMEOUT_MS = 120_000;
@@ -25,6 +40,17 @@ const DEFAULT_PROTECTED_BRANCHES = new Set([
   "production",
   "prod",
 ]);
+const fileSystem = Effect.runSync(FileSystem.FileSystem.pipe(Effect.provide(NodeServices.layer)));
+const path = Effect.runSync(Path.Path.pipe(Effect.provide(NodePath.layer)));
+const posixPath = Effect.runSync(Path.Path.pipe(Effect.provide(NodePath.layerPosix)));
+
+function runEffect<A, E>(effect: Effect.Effect<A, E>): Promise<A> {
+  return Effect.runPromise(effect);
+}
+
+function runScoped<A, E>(effect: Effect.Effect<A, E, Scope.Scope>): Promise<A> {
+  return Effect.runPromise(Effect.scoped(effect));
+}
 
 function fail(
   code: ConstructorParameters<typeof ExperimentError>[0]["code"],
@@ -34,35 +60,44 @@ function fail(
   throw new ExperimentError({ code, message, ...(cause === undefined ? {} : { cause }) });
 }
 
-function realPath(existingPath: string): string {
-  return realpathSync.native(existingPath);
+function failure(
+  code: ConstructorParameters<typeof ExperimentError>[0]["code"],
+  message: string,
+  cause?: unknown,
+): ExperimentError {
+  return new ExperimentError({ code, message, ...(cause === undefined ? {} : { cause }) });
+}
+
+function realPath(existingPath: string): Promise<string> {
+  return Promise.resolve(nativeRealPath(existingPath));
 }
 
 function samePath(left: string, right: string): boolean {
-  const normalize = (value: string) => (process.platform === "win32" ? value.toLowerCase() : value);
+  const normalize = (value: string) =>
+    HostProcessPlatform.defaultValue() === "win32" ? value.toLowerCase() : value;
   return normalize(left) === normalize(right);
 }
 
-export function canonicalRepositoryPath(cwd: string): string {
+export async function canonicalRepositoryPath(cwd: string): Promise<string> {
   try {
-    return realPath(cwd);
+    return await realPath(cwd);
   } catch (cause) {
     fail("unsafe_repository", `Repository path is unavailable: ${cwd}.`, cause);
   }
 }
 
-export function repositoryPathsEqual(left: string, right: string): boolean {
-  return samePath(canonicalRepositoryPath(left), canonicalRepositoryPath(right));
+export async function repositoryPathsEqual(left: string, right: string): Promise<boolean> {
+  return samePath(await canonicalRepositoryPath(left), await canonicalRepositoryPath(right));
 }
 
 export function normalizeApprovedPath(rawPath: string): string {
   const slashPath = rawPath.replaceAll("\\", "/");
-  const normalized = path.posix.normalize(slashPath);
+  const normalized = posixPath.normalize(slashPath);
   if (
     rawPath.length === 0 ||
     rawPath.includes("\0") ||
     path.isAbsolute(rawPath) ||
-    path.posix.isAbsolute(normalized) ||
+    posixPath.isAbsolute(normalized) ||
     normalized === "." ||
     normalized === ".." ||
     normalized.startsWith("../") ||
@@ -76,15 +111,20 @@ export function normalizeApprovedPath(rawPath: string): string {
   return normalized;
 }
 
-function assertRealDirectory(directory: string, label: string): void {
-  if (!existsSync(directory)) fail("unsafe_repository", `${label} does not exist.`);
-  const info = lstatSync(directory);
-  if (!info.isDirectory() || info.isSymbolicLink()) {
+async function assertRealDirectory(directory: string, label: string): Promise<void> {
+  const exists = await runEffect(fileSystem.exists(directory));
+  if (!exists) fail("unsafe_repository", `${label} does not exist.`);
+  const info = await runEffect(lstatNoFollow(directory));
+  if (info.kind !== "directory") {
     fail("unsafe_repository", `${label} must be a real directory, not a symlink.`);
   }
 }
 
-function assertRealDirectoryChain(root: string, directory: string, label: string): void {
+async function assertRealDirectoryChain(
+  root: string,
+  directory: string,
+  label: string,
+): Promise<void> {
   const relative = path.relative(root, directory);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
     fail("unsafe_repository", `${label} escapes the repository.`);
@@ -92,20 +132,20 @@ function assertRealDirectoryChain(root: string, directory: string, label: string
   let current = root;
   for (const part of relative.split(path.sep).filter(Boolean)) {
     current = path.join(current, part);
-    assertRealDirectory(current, `${label} component ${part}`);
+    await assertRealDirectory(current, `${label} component ${part}`);
   }
 }
 
-export function resolveApprovedFile(cwd: string, relativePath: string): string {
+export async function resolveApprovedFile(cwd: string, relativePath: string): Promise<string> {
   const normalized = normalizeApprovedPath(relativePath);
-  const root = realPath(cwd);
+  const root = await realPath(cwd);
   const absolute = path.resolve(root, normalized);
-  assertRealDirectoryChain(root, path.dirname(absolute), `Approved path ${normalized}`);
-  if (!existsSync(absolute)) {
+  await assertRealDirectoryChain(root, path.dirname(absolute), `Approved path ${normalized}`);
+  if (!(await runEffect(fileSystem.exists(absolute)))) {
     fail("unsafe_repository", `Approved path must already be a regular file: ${normalized}.`);
   }
-  const info = lstatSync(absolute);
-  if (!info.isFile() || info.isSymbolicLink()) {
+  const info = await runEffect(lstatNoFollow(absolute));
+  if (info.kind !== "file") {
     fail("unsafe_repository", `Approved path must be a regular non-symlink file: ${normalized}.`);
   }
   return absolute;
@@ -115,15 +155,6 @@ export interface GitResult {
   readonly code: number;
   readonly stdout: string;
   readonly stderr: string;
-}
-
-function terminateGroup(pid: number | undefined, signal: NodeJS.Signals): void {
-  if (pid === undefined) return;
-  try {
-    process.kill(process.platform === "win32" ? pid : -pid, signal);
-  } catch {
-    // The exact process group launched here already exited.
-  }
 }
 
 function gitFailure(
@@ -143,86 +174,121 @@ export function git(
   timeoutMs = GIT_TIMEOUT_MS,
   signal?: AbortSignal,
 ): Promise<GitResult> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(gitFailure("limits_exhausted", `git ${args[0] ?? "command"} was cancelled.`));
-      return;
+  if (signal?.aborted) {
+    return Promise.reject(
+      gitFailure("limits_exhausted", `git ${args[0] ?? "command"} was cancelled.`),
+    );
+  }
+  const program = Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const spawned = yield* Effect.result(
+      spawner.spawn(
+        ChildProcess.make("git", args, {
+          cwd,
+          detached: true,
+          windowsHide: true,
+          stdin: input === undefined ? "ignore" : "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+          forceKillAfter: "1 second",
+        }),
+      ),
+    );
+    if (Result.isFailure(spawned)) {
+      return yield* gitFailure(
+        "unsafe_repository",
+        `git ${args[0] ?? "command"} failed.`,
+        spawned.failure,
+      );
     }
-    const child = spawn("git", args, {
-      cwd,
-      detached: true,
-      shell: false,
-      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    const child = spawned.success;
+    const stop = yield* Deferred.make<"timeout" | "cancelled" | "output_limit">();
     const stdout: Array<Buffer> = [];
     const stderr: Array<Buffer> = [];
     let outputBytes = 0;
-    let timedOut = false;
-    let aborted = false;
-    let settled = false;
-    let escalation: ReturnType<typeof setTimeout> | undefined;
-    const capture = (target: Array<Buffer>, chunk: Buffer) => {
-      outputBytes += chunk.byteLength;
-      if (outputBytes <= GIT_OUTPUT_CAP) target.push(chunk);
-      if (outputBytes > GIT_OUTPUT_CAP) terminateGroup(child.pid, "SIGTERM");
-    };
-    child.stdout?.on("data", (chunk: Buffer) => capture(stdout, chunk));
-    child.stderr?.on("data", (chunk: Buffer) => capture(stderr, chunk));
-    if (input !== undefined) child.stdin?.end(input);
-    const timeout = setTimeout(
-      () => {
-        timedOut = true;
-        terminateGroup(child.pid, "SIGTERM");
-        escalation = setTimeout(() => terminateGroup(child.pid, "SIGKILL"), 1_000);
-        escalation.unref?.();
-      },
-      Math.max(1, Math.min(GIT_TIMEOUT_MS, timeoutMs)),
+    const capture = (target: Array<Buffer>, chunk: Uint8Array) =>
+      Effect.sync(() => {
+        outputBytes += chunk.byteLength;
+        if (outputBytes <= GIT_OUTPUT_CAP) target.push(Buffer.from(chunk));
+        if (outputBytes > GIT_OUTPUT_CAP) {
+          Deferred.doneUnsafe(stop, Effect.succeed("output_limit"));
+        }
+      });
+    const stdoutFiber = yield* Stream.runForEach(child.stdout, (chunk) =>
+      capture(stdout, chunk),
+    ).pipe(Effect.forkScoped);
+    const stderrFiber = yield* Stream.runForEach(child.stderr, (chunk) =>
+      capture(stderr, chunk),
+    ).pipe(Effect.forkScoped);
+    const stdinFiber = yield* (
+      input === undefined
+        ? Effect.void
+        : Stream.run(
+            Stream.make(typeof input === "string" ? Buffer.from(input) : input),
+            child.stdin,
+          )
+    ).pipe(Effect.forkScoped);
+    yield* Effect.sleep(Math.max(1, Math.min(GIT_TIMEOUT_MS, timeoutMs))).pipe(
+      Effect.andThen(Deferred.succeed(stop, "timeout")),
+      Effect.forkScoped,
     );
-    timeout.unref?.();
-    const onAbort = () => {
-      aborted = true;
-      clearTimeout(timeout);
-      terminateGroup(child.pid, "SIGTERM");
-      escalation = setTimeout(() => terminateGroup(child.pid, "SIGKILL"), 1_000);
-      escalation.unref?.();
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    const finish = (code: number | null, cause?: unknown) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (escalation !== undefined) clearTimeout(escalation);
-      signal?.removeEventListener("abort", onAbort);
-      const result = {
-        code: code ?? -1,
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
-      };
-      if (cause !== undefined) {
-        reject(gitFailure("unsafe_repository", `git ${args[0] ?? "command"} failed.`, cause));
-        return;
-      }
-      if (
-        timedOut ||
-        aborted ||
-        outputBytes > GIT_OUTPUT_CAP ||
-        (result.code !== 0 && !allowFailure)
-      ) {
-        const detail = `${result.stdout}\n${result.stderr}`.trim().slice(-2_000);
-        reject(
-          gitFailure(
-            "unsafe_repository",
-            `git ${args[0] ?? "command"} failed (${timedOut ? "timeout" : aborted ? "cancelled" : result.code}): ${detail}`,
+    if (signal !== undefined) {
+      yield* Effect.callback<void>((resume) => {
+        if (signal.aborted) {
+          resume(Effect.void);
+          return;
+        }
+        const onAbort = () => resume(Effect.void);
+        signal.addEventListener("abort", onAbort, { once: true });
+        return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+      }).pipe(Effect.andThen(Deferred.succeed(stop, "cancelled")), Effect.forkScoped);
+    }
+    const outcome = yield* Effect.race(
+      Effect.all(
+        [
+          child.exitCode.pipe(
+            Effect.map(Number),
+            Effect.catch(() => Effect.succeed(-1)),
           ),
-        );
-        return;
-      }
-      resolve(result);
+          Fiber.await(stdoutFiber),
+          Fiber.await(stderrFiber),
+          Fiber.await(stdinFiber),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.map(([code]) => ({ _tag: "Exit" as const, code }))),
+      Deferred.await(stop).pipe(Effect.map((reason) => ({ _tag: "Stop" as const, reason }))),
+    );
+    let code: number;
+    let stopReason: "timeout" | "cancelled" | "output_limit" | undefined;
+    if (outcome._tag === "Exit") {
+      code = outcome.code;
+    } else {
+      stopReason = outcome.reason;
+      code = yield* child.kill({ killSignal: "SIGTERM", forceKillAfter: "1 second" }).pipe(
+        Effect.andThen(child.exitCode),
+        Effect.map(Number),
+        Effect.catch(() => Effect.succeed(-1)),
+      );
+      yield* Effect.all(
+        [Fiber.await(stdoutFiber), Fiber.await(stderrFiber), Fiber.await(stdinFiber)],
+        { concurrency: "unbounded" },
+      );
+    }
+    const result = {
+      code,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
     };
-    child.once("error", (cause) => finish(null, cause));
-    child.once("close", (code) => finish(code));
-  });
+    if (stopReason !== undefined || (result.code !== 0 && !allowFailure)) {
+      const detail = `${result.stdout}\n${result.stderr}`.trim().slice(-2_000);
+      return yield* gitFailure(
+        "unsafe_repository",
+        `git ${args[0] ?? "command"} failed (${stopReason ?? result.code}): ${detail}`,
+      );
+    }
+    return result;
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+  return Effect.runPromise(program);
 }
 
 export const currentHead = async (
@@ -296,10 +362,10 @@ export async function assertRepository(
   config: ExperimentConfig,
   expectedHead?: string,
 ): Promise<void> {
-  assertRealDirectory(cwd, "Repository root");
-  const physicalRoot = realPath(cwd);
+  await assertRealDirectory(cwd, "Repository root");
+  const physicalRoot = await realPath(cwd);
   const topLevel = (await git(cwd, ["rev-parse", "--show-toplevel"])).stdout.trim();
-  if (!samePath(physicalRoot, realPath(topLevel))) {
+  if (!samePath(physicalRoot, await realPath(topLevel))) {
     fail("unsafe_repository", `Thread cwd must be the Git repository root (${topLevel}).`);
   }
   const branch = await currentBranch(cwd);
@@ -331,8 +397,9 @@ export async function assertRepository(
   }
   const physicalFiles = new Set<string>();
   for (const file of normalized) {
-    const absolute = resolveApprovedFile(cwd, file);
-    const physical = process.platform === "win32" ? absolute.toLowerCase() : absolute;
+    const absolute = await resolveApprovedFile(cwd, file);
+    const physical =
+      HostProcessPlatform.defaultValue() === "win32" ? absolute.toLowerCase() : absolute;
     if (physicalFiles.has(physical))
       fail("unsafe_repository", `Approved path aliases another file: ${file}.`);
     physicalFiles.add(physical);
@@ -343,9 +410,10 @@ export async function readConfig(
   cwd: string,
 ): Promise<{ readonly config: ExperimentConfig; readonly digest: string }> {
   const auto = path.join(cwd, ".auto");
-  assertRealDirectory(auto, ".auto");
+  await assertRealDirectory(auto, ".auto");
   const file = path.join(auto, "config.json");
-  if (!existsSync(file)) fail("invalid_config", `Missing ${CONFIG_PATH}.`);
+  if (!(await runEffect(fileSystem.exists(file))))
+    fail("invalid_config", `Missing ${CONFIG_PATH}.`);
   const bytes = await readStableRegularFile(
     file,
     MAX_CONFIG_BYTES,
@@ -354,7 +422,7 @@ export async function readConfig(
   );
   try {
     const config = decodeExperimentConfig(JSON.parse(bytes.toString("utf8")));
-    return { config, digest: createHash("sha256").update(bytes).digest("hex") };
+    return { config, digest: NodeCrypto.createHash("sha256").update(bytes).digest("hex") };
   } catch (cause) {
     fail("invalid_config", `${CONFIG_PATH} is invalid.`, cause);
   }
@@ -371,7 +439,7 @@ export async function assertConfigDigest(
 }
 
 export async function fileHash(cwd: string, relativePath: string): Promise<string> {
-  resolveApprovedFile(cwd, relativePath);
+  await resolveApprovedFile(cwd, relativePath);
   return (await git(cwd, ["hash-object", "--", relativePath])).stdout.trim();
 }
 
@@ -384,8 +452,8 @@ async function hashBytes(cwd: string, content: Buffer): Promise<string> {
 }
 
 function sameFileIdentity(
-  left: { readonly dev: number | bigint; readonly ino: number | bigint },
-  right: { readonly dev: number | bigint; readonly ino: number | bigint },
+  left: Pick<NativeFileInfo, "dev" | "ino">,
+  right: Pick<NativeFileInfo, "dev" | "ino">,
 ): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
@@ -396,29 +464,26 @@ async function readStableRegularFile(
   code: ConstructorParameters<typeof ExperimentError>[0]["code"],
   message: string,
 ): Promise<Buffer> {
-  const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
-  const handle = await open(absolute, constants.O_RDONLY | noFollow).catch((cause) =>
-    fail(code, message, cause),
+  return runScoped(
+    Effect.gen(function* () {
+      const handle = yield* openNoFollowRead(absolute);
+      const before = yield* handle.stat;
+      if (before.kind !== "file" || before.size > maxBytes) return yield* failure(code, message);
+      const content = yield* handle.readAll;
+      const after = yield* handle.stat;
+      const current = yield* lstatNoFollow(absolute);
+      if (
+        content.byteLength > maxBytes ||
+        after.kind !== "file" ||
+        !sameFileIdentity(before, after) ||
+        !sameFileIdentity(after, current) ||
+        before.size !== after.size
+      ) {
+        return yield* failure(code, message);
+      }
+      return content;
+    }).pipe(Effect.mapError((cause) => failure(code, message, cause))),
   );
-  try {
-    const before = await handle.stat();
-    if (!before.isFile() || before.size > maxBytes) fail(code, message);
-    const content = await handle.readFile();
-    const after = await handle.stat();
-    const current = await lstat(absolute);
-    if (
-      content.byteLength > maxBytes ||
-      !after.isFile() ||
-      !sameFileIdentity(before, after) ||
-      !sameFileIdentity(after, current) ||
-      before.size !== after.size
-    ) {
-      fail(code, message);
-    }
-    return content;
-  } finally {
-    await handle.close();
-  }
 }
 
 export async function readApprovedFile(
@@ -426,7 +491,7 @@ export async function readApprovedFile(
   relativePath: string,
   maxBytes: number,
 ): Promise<string> {
-  const absolute = resolveApprovedFile(cwd, relativePath);
+  const absolute = await resolveApprovedFile(cwd, relativePath);
   const bytes = await readStableRegularFile(
     absolute,
     maxBytes,
@@ -442,48 +507,54 @@ export async function assertFileMatches(
   expectedHash: string,
   expectedMode?: number,
 ): Promise<void> {
-  const absolute = resolveApprovedFile(cwd, relativePath);
-  const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
-  const handle = await open(absolute, constants.O_RDONLY | noFollow);
-  try {
-    const before = await handle.stat();
-    const content = await handle.readFile();
-    const after = await handle.stat();
-    const current = await lstat(absolute);
-    if (
-      !before.isFile() ||
-      before.isSymbolicLink() ||
-      !sameFileIdentity(before, after) ||
-      !sameFileIdentity(after, current) ||
-      (expectedMode !== undefined && (after.mode & 0o777) !== expectedMode) ||
-      (await hashBytes(cwd, content)) !== expectedHash
-    ) {
-      fail("external_drift", `Owned file ${relativePath} changed during the experiment operation.`);
-    }
-  } finally {
-    await handle.close();
-  }
+  const absolute = await resolveApprovedFile(cwd, relativePath);
+  await runScoped(
+    Effect.gen(function* () {
+      const handle = yield* openNoFollowRead(absolute);
+      const before = yield* handle.stat;
+      const content = yield* handle.readAll;
+      const after = yield* handle.stat;
+      const current = yield* lstatNoFollow(absolute);
+      const actualHash = yield* Effect.promise(() => hashBytes(cwd, content));
+      if (
+        before.kind !== "file" ||
+        !sameFileIdentity(before, after) ||
+        !sameFileIdentity(after, current) ||
+        (expectedMode !== undefined && (after.mode & 0o777) !== expectedMode) ||
+        actualHash !== expectedHash
+      ) {
+        return yield* failure(
+          "external_drift",
+          `Owned file ${relativePath} changed during the experiment operation.`,
+        );
+      }
+    }),
+  );
 }
 
 export async function fileState(
   cwd: string,
   relativePath: string,
 ): Promise<{ readonly hash: string; readonly mode: number }> {
-  const absolute = resolveApprovedFile(cwd, relativePath);
-  const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
-  const handle = await open(absolute, constants.O_RDONLY | noFollow);
-  try {
-    const before = await handle.stat();
-    const content = await handle.readFile();
-    const after = await handle.stat();
-    const current = await lstat(absolute);
-    if (!before.isFile() || !sameFileIdentity(before, after) || !sameFileIdentity(after, current)) {
-      fail("external_drift", `Owned file ${relativePath} changed while it was inspected.`);
-    }
-    return { hash: await hashBytes(cwd, content), mode: after.mode & 0o777 };
-  } finally {
-    await handle.close();
-  }
+  const absolute = await resolveApprovedFile(cwd, relativePath);
+  return runScoped(
+    Effect.gen(function* () {
+      const handle = yield* openNoFollowRead(absolute);
+      const before = yield* handle.stat;
+      const content = yield* handle.readAll;
+      const after = yield* handle.stat;
+      const current = yield* lstatNoFollow(absolute);
+      if (
+        before.kind !== "file" ||
+        !sameFileIdentity(before, after) ||
+        !sameFileIdentity(after, current)
+      ) {
+        fail("external_drift", `Owned file ${relativePath} changed while it was inspected.`);
+      }
+      const hash = yield* Effect.promise(() => hashBytes(cwd, content));
+      return { hash, mode: after.mode & 0o777 };
+    }),
+  );
 }
 
 export async function snapshotFiles(
@@ -492,33 +563,36 @@ export async function snapshotFiles(
 ): Promise<Array<FileSnapshot>> {
   return Promise.all(
     paths.map(async (relativePath) => {
-      const absolute = resolveApprovedFile(cwd, relativePath);
-      const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
-      const handle = await open(absolute, constants.O_RDONLY | noFollow);
-      try {
-        const before = await handle.stat();
-        const content = await handle.readFile();
-        const after = await handle.stat();
-        const current = await lstat(absolute);
-        if (
-          !before.isFile() ||
-          before.isSymbolicLink() ||
-          !sameFileIdentity(before, after) ||
-          !sameFileIdentity(after, current)
-        ) {
-          fail("external_drift", `Approved file ${relativePath} changed while it was snapshotted.`);
-        }
-        const hash = await hashBytes(cwd, content);
-        await assertFileMatches(cwd, relativePath, hash, after.mode & 0o777);
-        return {
-          path: relativePath,
-          contentBase64: content.toString("base64"),
-          mode: after.mode & 0o777,
-          hash,
-        };
-      } finally {
-        await handle.close();
-      }
+      const absolute = await resolveApprovedFile(cwd, relativePath);
+      return runScoped(
+        Effect.gen(function* () {
+          const handle = yield* openNoFollowRead(absolute);
+          const before = yield* handle.stat;
+          const content = yield* handle.readAll;
+          const after = yield* handle.stat;
+          const current = yield* lstatNoFollow(absolute);
+          if (
+            before.kind !== "file" ||
+            !sameFileIdentity(before, after) ||
+            !sameFileIdentity(after, current)
+          ) {
+            fail(
+              "external_drift",
+              `Approved file ${relativePath} changed while it was snapshotted.`,
+            );
+          }
+          const hash = yield* Effect.promise(() => hashBytes(cwd, content));
+          yield* Effect.promise(() =>
+            assertFileMatches(cwd, relativePath, hash, after.mode & 0o777),
+          );
+          return {
+            path: relativePath,
+            contentBase64: content.toString("base64"),
+            mode: after.mode & 0o777,
+            hash,
+          };
+        }),
+      );
     }),
   );
 }
@@ -531,15 +605,15 @@ export async function writeFileAtomically(
 ): Promise<void> {
   const temporary = path.join(
     path.dirname(absolute),
-    `.${path.basename(absolute)}.t3-experiment-${process.pid}-${randomUUID()}.tmp`,
+    `.${path.basename(absolute)}.t3-experiment-${process.pid}-${NodeCrypto.randomUUID()}.tmp`,
   );
   try {
-    await writeFile(temporary, content, { mode, flag: "wx" });
+    await runEffect(fileSystem.writeFile(temporary, content, { mode, flag: "wx" }));
     if (beforeRename !== undefined) await beforeRename();
-    await rename(temporary, absolute);
-    await chmod(absolute, mode);
+    await runEffect(fileSystem.rename(temporary, absolute));
+    await runEffect(fileSystem.chmod(absolute, mode));
   } catch (cause) {
-    await unlink(temporary).catch(() => undefined);
+    await runEffect(fileSystem.remove(temporary, { force: true })).catch(() => undefined);
     throw cause;
   }
 }
@@ -550,7 +624,7 @@ export async function restoreSnapshot(
   expectedCurrentHash: string,
   expectedCurrentMode: number,
 ): Promise<void> {
-  const absolute = resolveApprovedFile(cwd, snapshot.path);
+  const absolute = await resolveApprovedFile(cwd, snapshot.path);
   await writeFileAtomically(
     absolute,
     Buffer.from(snapshot.contentBase64, "base64"),
@@ -626,10 +700,12 @@ export async function unstageCandidate(cwd: string, files: ReadonlyArray<string>
 }
 
 async function ensureChildDirectory(parent: string, name: string): Promise<string> {
-  assertRealDirectory(parent, parent);
+  await assertRealDirectory(parent, parent);
   const child = path.join(parent, name);
-  if (!existsSync(child)) await mkdir(child, { mode: 0o700 });
-  assertRealDirectory(child, child);
+  if (!(await runEffect(fileSystem.exists(child)))) {
+    await runEffect(fileSystem.makeDirectory(child, { mode: 0o700 }));
+  }
+  await assertRealDirectory(child, child);
   return child;
 }
 
@@ -647,25 +723,40 @@ export async function appendLedger(
   if (record.byteLength > MAX_LEDGER_RECORD_BYTES) {
     fail("persistence_failed", "Experiment ledger record exceeded its server limit.");
   }
-  const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
-  const handle = await open(
-    ledgerPath,
-    constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollow,
-    0o600,
-  );
-  try {
-    const info = await handle.stat();
-    if (!info.isFile()) fail("unsafe_repository", "Experiment ledger is not a regular file.");
-    let offset = 0;
-    while (offset < record.byteLength) {
-      const result = await handle.write(record, offset, record.byteLength - offset);
-      if (result.bytesWritten <= 0) {
-        fail("persistence_failed", "Experiment ledger write made no progress.");
+  await runScoped(
+    Effect.gen(function* () {
+      const handle = yield* openNoFollowAppendCreate(ledgerPath, 0o600).pipe(
+        Effect.mapError((cause) =>
+          failure("unsafe_repository", "Experiment ledger path is unsafe.", cause),
+        ),
+      );
+      const info = yield* handle.stat;
+      if (info.kind !== "file") {
+        return yield* new ExperimentError({
+          code: "unsafe_repository",
+          message: "Experiment ledger is not a regular file.",
+        });
       }
-      offset += result.bytesWritten;
-    }
-    await handle.datasync();
-  } finally {
-    await handle.close();
-  }
+      yield* handle.writeAll(record).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ExperimentError({
+              code: "persistence_failed",
+              message: "Experiment ledger write failed.",
+              cause,
+            }),
+        ),
+      );
+      yield* handle.sync.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ExperimentError({
+              code: "persistence_failed",
+              message: "Experiment ledger sync failed.",
+              cause,
+            }),
+        ),
+      );
+    }),
+  );
 }

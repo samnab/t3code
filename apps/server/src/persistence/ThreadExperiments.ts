@@ -63,7 +63,7 @@ export interface ThreadExperimentStoreShape {
 export class ThreadExperimentStore extends Context.Service<
   ThreadExperimentStore,
   ThreadExperimentStoreShape
->()("t3/persistence/ThreadExperimentStore") {}
+>()("t3/persistence/ThreadExperiments/ThreadExperimentStore") {}
 
 export const makeThreadExperimentStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;

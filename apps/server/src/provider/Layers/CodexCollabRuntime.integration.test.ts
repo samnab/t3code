@@ -29,6 +29,7 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 const ROOT = wireFixture.rootThreadId;
 const [CHILD_A, CHILD_B] = wireFixture.childThreadIds as [string, string];
 const MEMORY = "memory-consolidation-thread";
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeMcpElicitationResponse = Schema.decodeUnknownEffect(
   Schema.fromJsonString(
     Schema.Struct({
@@ -198,8 +199,7 @@ describe("CodexSessionRuntime collab integration", () => {
           [CHILD_A]: { model: "gpt-5.6-luna", reasoningEffort: "low" },
         },
       };
-      // @effect-diagnostics-next-line preferSchemaOverJson:off
-      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      NodeFS.writeFileSync(scriptPath, encodeJson(script), "utf8");
       NodeFS.rmSync(`${scriptPath}.requests`, { force: true });
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
@@ -261,7 +261,7 @@ describe("CodexSessionRuntime collab integration", () => {
           ],
         },
       };
-      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      NodeFS.writeFileSync(scriptPath, encodeJson(script), "utf8");
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           NodeFS.rmSync(scriptPath, { force: true });

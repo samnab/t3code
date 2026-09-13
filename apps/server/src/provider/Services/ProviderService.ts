@@ -212,4 +212,4 @@ export interface ExperimentProviderSessionServiceShape {
 export class ExperimentProviderSessionService extends Context.Service<
   ExperimentProviderSessionService,
   ExperimentProviderSessionServiceShape
->()("t3/provider/Services/ExperimentProviderSessionService") {}
+>()("t3/provider/Services/ProviderService/ExperimentProviderSessionService") {}

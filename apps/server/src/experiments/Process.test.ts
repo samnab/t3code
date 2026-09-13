@@ -17,24 +17,55 @@ describe("ExperimentProcessRegistry", () => {
     );
   });
 
-  it("terminates a process group at its output cap", async () => {
+  it("classifies a fast process by its combined output cap after both streams drain", async () => {
     const registry = new ExperimentProcessRegistry();
     const result = await registry.run(
       "run",
-      ["node", "-e", "process.stdout.write('x'.repeat(100000))"],
+      ["node", "-e", "process.stdout.write('x'.repeat(700));process.stderr.write('y'.repeat(700))"],
       { cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 1_024 },
     );
     assert.strictEqual(result.termination, "output_limit");
     assert.isAtMost(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr), 1_024);
   });
 
-  it("terminates a process group at its timeout", async () => {
+  it("force-kills a SIGTERM-ignoring process group at its timeout", async () => {
     const registry = new ExperimentProcessRegistry();
-    const result = await registry.run("run", ["node", "-e", "setInterval(() => {}, 1000)"], {
-      cwd: process.cwd(),
-      timeoutMs: 25,
-      maxOutputBytes: 1_024,
-    });
+    const result = await registry.run(
+      "run",
+      ["node", "-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
+      {
+        cwd: process.cwd(),
+        timeoutMs: 25,
+        maxOutputBytes: 1_024,
+      },
+    );
+    assert.strictEqual(result.termination, "timeout");
+  });
+
+  it("cancel interrupts and awaits every owned process", async () => {
+    const registry = new ExperimentProcessRegistry();
+    const running = registry.run(
+      "run",
+      ["node", "-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
+      { cwd: process.cwd(), timeoutMs: 5_000, maxOutputBytes: 1_024 },
+    );
+
+    await registry.cancel("run");
+
+    assert.strictEqual((await running).termination, "aborted");
+  });
+
+  it("force-kills descendants in the owned process group", async () => {
+    const registry = new ExperimentProcessRegistry();
+    const result = await registry.run(
+      "run",
+      [
+        "node",
+        "-e",
+        "const{spawn}=require('child_process');process.on('SIGTERM',()=>{});spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:['ignore','inherit','inherit']});setInterval(()=>{},1000)",
+      ],
+      { cwd: process.cwd(), timeoutMs: 250, maxOutputBytes: 1_024 },
+    );
     assert.strictEqual(result.termination, "timeout");
   });
 });

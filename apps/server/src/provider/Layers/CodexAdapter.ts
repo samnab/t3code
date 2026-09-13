@@ -37,11 +37,11 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -102,6 +102,7 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
 const PROVIDER = ProviderDriverKind.make("codex");
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -2318,6 +2319,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
   const serverConfig = yield* Effect.service(ServerConfig);
@@ -2370,7 +2372,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         }
         const experimentHomePath =
           isExperiment && mcpSession !== undefined
-            ? NodePath.join(
+            ? path.join(
                 serverConfig.providerStatusCacheDir,
                 "codex-experiments",
                 mcpSession.providerSessionId,
@@ -2389,9 +2391,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ),
           );
           const sharedHomePath = expandHomePath(
-            codexConfig.homePath.trim() || NodePath.join(NodeOS.homedir(), ".codex"),
+            codexConfig.homePath.trim() || path.join(NodeOS.homedir(), ".codex"),
           );
-          const sharedAuthPath = NodePath.join(sharedHomePath, "auth.json");
+          const sharedAuthPath = path.join(sharedHomePath, "auth.json");
           const sharedAuthExists = yield* fileSystem.exists(sharedAuthPath).pipe(
             Effect.mapError(
               (cause) =>
@@ -2405,7 +2407,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           );
           if (sharedAuthExists) {
             yield* fileSystem
-              .copyFile(sharedAuthPath, NodePath.join(experimentHomePath, "auth.json"))
+              .copyFile(sharedAuthPath, path.join(experimentHomePath, "auth.json"))
               .pipe(
                 Effect.mapError(
                   (cause) =>
@@ -2432,7 +2434,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                       "-c",
                       `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.default_tools_approval_mode="approve"`,
                       "-c",
-                      `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.enabled_tools=${JSON.stringify(CODEX_EXPERIMENT_TOOL_NAMES)}`,
+                      `mcp_servers.${CODEX_EXPERIMENT_MCP_SERVER_NAME}.enabled_tools=${encodeJson(CODEX_EXPERIMENT_TOOL_NAMES)}`,
                     ]
                   : []),
               ]
