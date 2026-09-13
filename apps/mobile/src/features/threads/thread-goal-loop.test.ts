@@ -1,7 +1,11 @@
 import type { ThreadGoalLoop } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { mobileGoalLoopAction, mobileGoalLoopStatus } from "./thread-goal-loop";
+import {
+  mobileGoalLoopAction,
+  mobileGoalLoopRestart,
+  mobileGoalLoopStatus,
+} from "./thread-goal-loop";
 
 const exhausted: ThreadGoalLoop = {
   kind: "experiment",
@@ -37,5 +41,38 @@ describe("mobile goal experiment status", () => {
 
   it("does not offer a reset or resume after exhaustion", () => {
     expect(mobileGoalLoopAction(exhausted)).toBeNull();
+  });
+});
+
+describe("mobile goal restart", () => {
+  it("restarts a completed loop through a reset", () => {
+    expect(
+      mobileGoalLoopRestart({
+        kind: "standard",
+        state: "completed",
+        mode: "t3",
+        iterations: 3,
+        maxIterations: 10,
+        reason: null,
+        experiment: null,
+        updatedAt: "2026-09-07T02:00:00.000Z",
+      }),
+    ).toBe(true);
+  });
+
+  it("never restarts a running loop or a terminal experiment", () => {
+    expect(
+      mobileGoalLoopRestart({
+        kind: "standard",
+        state: "running",
+        mode: "t3",
+        iterations: 1,
+        maxIterations: 10,
+        reason: null,
+        experiment: null,
+        updatedAt: "2026-09-07T02:00:00.000Z",
+      }),
+    ).toBe(false);
+    expect(mobileGoalLoopRestart(exhausted)).toBe(false);
   });
 });

@@ -81,6 +81,10 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
+import {
+  deleteThreadGoalWork,
+  stopThreadGoalWork,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import { isElectron } from "../env";
 import {
   resolveShortcutCommand,
@@ -2198,6 +2202,9 @@ export default function Sidebar() {
   const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
     reportFailure: false,
   });
+  const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
+    reportFailure: false,
+  });
   const reloadAgent = useAtomCommand(threadEnvironment.stopSession, "reload agent");
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
@@ -4218,6 +4225,128 @@ export default function Sidebar() {
             }
             return;
           }
+          case "stop-goal-loop": {
+            // Pause the loop before interrupting, or the interrupted turn's
+            // completion hands straight into the loop's next continuation.
+            await stopThreadGoalWork({
+              loop: thread.goalLoop ?? null,
+              pauseGoalLoop: async () => {
+                const pauseResult = await setThreadGoalLoop({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, action: "pause" },
+                });
+                if (pauseResult._tag === "Failure") {
+                  if (!isAtomCommandInterrupted(pauseResult)) {
+                    const error = squashAtomCommandFailure(pauseResult);
+                    toastManager.add(
+                      stackedThreadToast({
+                        type: "error",
+                        title: "Failed to pause goal loop",
+                        description: error instanceof Error ? error.message : "An error occurred.",
+                      }),
+                    );
+                  }
+                  return false;
+                }
+                return true;
+              },
+              interruptActiveTurn: async () => {
+                const interruptResult = await interruptThreadTurn({
+                  environmentId: threadRef.environmentId,
+                  input: {
+                    threadId: threadRef.threadId,
+                    ...(thread.session?.activeTurnId
+                      ? { turnId: thread.session.activeTurnId }
+                      : {}),
+                  },
+                });
+                if (
+                  interruptResult._tag === "Failure" &&
+                  !isAtomCommandInterrupted(interruptResult)
+                ) {
+                  const error = squashAtomCommandFailure(interruptResult);
+                  toastManager.add(
+                    stackedThreadToast({
+                      type: "error",
+                      title: "Failed to stop goal work",
+                      description: error instanceof Error ? error.message : "An error occurred.",
+                    }),
+                  );
+                }
+                return interruptResult._tag === "Success";
+              },
+            });
+            return;
+          }
+          case "delete-goal": {
+            await deleteThreadGoalWork({
+              loop: thread.goalLoop ?? null,
+              pauseGoalLoop: async () => {
+                const pauseResult = await setThreadGoalLoop({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, action: "pause" },
+                });
+                if (pauseResult._tag === "Failure") {
+                  if (!isAtomCommandInterrupted(pauseResult)) {
+                    const error = squashAtomCommandFailure(pauseResult);
+                    toastManager.add(
+                      stackedThreadToast({
+                        type: "error",
+                        title: "Failed to pause goal loop",
+                        description: error instanceof Error ? error.message : "An error occurred.",
+                      }),
+                    );
+                  }
+                  return false;
+                }
+                return true;
+              },
+              interruptActiveTurn: async () => {
+                if (!thread.session?.activeTurnId) return true;
+                const interruptResult = await interruptThreadTurn({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, turnId: thread.session.activeTurnId },
+                });
+                // An interrupt failure still clears: removing the goal is
+                // the point; the turn merely finishes on its own.
+                if (
+                  interruptResult._tag === "Failure" &&
+                  !isAtomCommandInterrupted(interruptResult)
+                ) {
+                  const error = squashAtomCommandFailure(interruptResult);
+                  toastManager.add(
+                    stackedThreadToast({
+                      type: "error",
+                      title: "Failed to stop goal work",
+                      description: error instanceof Error ? error.message : "An error occurred.",
+                    }),
+                  );
+                }
+                return true;
+              },
+              clearGoal: async () => {
+                const clearResult = await updateThreadMetadata({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, goal: null },
+                });
+                if (clearResult._tag === "Failure") {
+                  if (!isAtomCommandInterrupted(clearResult)) {
+                    const error = squashAtomCommandFailure(clearResult);
+                    toastManager.add(
+                      stackedThreadToast({
+                        type: "error",
+                        title: "Failed to delete goal",
+                        description: error instanceof Error ? error.message : "An error occurred.",
+                      }),
+                    );
+                  }
+                  return false;
+                }
+                return true;
+              },
+            });
+            return;
+          }
           case "reload-agent": {
             const result = await reloadAgent({
               environmentId: threadRef.environmentId,
@@ -4347,6 +4476,7 @@ export default function Sidebar() {
       startThreadRename,
       updateThreadMetadata,
       setThreadGoalLoop,
+      interruptThreadTurn,
       timestampFormat,
     ],
   );

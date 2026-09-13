@@ -22,6 +22,8 @@ export type ThreadActionMenuId =
   | "execution-goal"
   | "pause-goal-loop"
   | "resume-goal-loop"
+  | "stop-goal-loop"
+  | "delete-goal"
   | "reload-agent"
   | "mark-unread"
   | "copy"
@@ -122,6 +124,22 @@ export function buildThreadActionMenuItems(
       : isThreadGoalLoopActionAvailable(state.goalLoop, "resume")
         ? [{ id: "resume-goal-loop" as const, label: "Resume goal loop", icon: "play" }]
         : []),
+    // Stop pauses the loop first and then interrupts the running turn, so it
+    // is only offered while a turn is actually active; delete clears the
+    // saved goal (stopping active goal work first).
+    ...(state.goalLoop !== null && state.isRunning
+      ? [{ id: "stop-goal-loop" as const, label: "Stop goal work", icon: "square" }]
+      : []),
+    ...(state.goalLoop !== null
+      ? [
+          {
+            id: "delete-goal" as const,
+            label: "Delete goal",
+            icon: "trash",
+            destructive: true,
+          },
+        ]
+      : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
     // Codex-owned live session state; always named in full so it can never
     // read as the T3 thread goal above the composer.

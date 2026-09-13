@@ -9,6 +9,8 @@ export interface GoalLoopPresentation {
   readonly suffix: string | null;
   readonly pauseAction: "pause" | "resume" | null;
   readonly canContinue: boolean;
+  /** Completed loops can be restarted through a reset. */
+  readonly canReset: boolean;
 }
 
 const EXPERIMENT_PHASE_LABELS: Readonly<Record<ThreadExperimentPhase, string>> = {
@@ -37,7 +39,7 @@ function metric(value: number | null): string {
 
 function goalLoopActions(
   loop: ThreadGoalLoop | null,
-): Pick<GoalLoopPresentation, "pauseAction" | "canContinue"> {
+): Pick<GoalLoopPresentation, "pauseAction" | "canContinue" | "canReset"> {
   return {
     pauseAction: isThreadGoalLoopActionAvailable(loop, "pause")
       ? "pause"
@@ -45,6 +47,7 @@ function goalLoopActions(
         ? "resume"
         : null,
     canContinue: isThreadGoalLoopActionAvailable(loop, "continue"),
+    canReset: isThreadGoalLoopActionAvailable(loop, "reset"),
   };
 }
 

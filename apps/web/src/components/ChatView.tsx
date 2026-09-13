@@ -45,7 +45,11 @@ import {
   TerminalOpenInput,
   THREAD_GOAL_MAX_CHARS,
 } from "@t3tools/contracts";
-import { threadExperimentObjectiveError } from "@t3tools/client-runtime/state/threadGoalEditor";
+import {
+  deleteThreadGoalWork,
+  stopThreadGoalWork,
+  threadExperimentObjectiveError,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import { type CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
@@ -1603,6 +1607,31 @@ export default function ChatView(props: ChatViewProps) {
     },
     [activeServerThread, setThreadGoalLoop],
   );
+
+  // Shared pause step for the goal lifecycle sequences (stop, delete, and
+  // the generic interrupt): it must land before the turn is interrupted, or
+  // the completing turn hands straight into the loop's next continuation.
+  const pauseGoalLoopForLifecycle = useCallback(async () => {
+    if (!activeServerThread) return false;
+    const result = await setThreadGoalLoop({
+      environmentId: activeServerThread.environmentId,
+      input: { threadId: activeServerThread.id, action: "pause" },
+    });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not pause the goal loop",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+      return false;
+    }
+    return true;
+  }, [activeServerThread, setThreadGoalLoop]);
 
   // Pagination window state for the routed server thread: drives the
   // "load earlier turns" header when the loaded window has older history.
@@ -3843,20 +3872,115 @@ export default function ChatView(props: ChatViewProps) {
     const { activeThread, phase, setThreadError } = interruptContextRef.current;
     const input = buildRunningThreadTurnInterruptInput(activeThread, phase);
     if (!input || !activeThread) return;
-    const result = await interruptThreadTurn({
-      environmentId: activeThread.environmentId,
-      input,
+    // The generic stop shares the goal sequencing: a pause-able goal loop is
+    // disabled first so the interrupted turn cannot hand into its next
+    // continuation and restart the goal work on its own.
+    await stopThreadGoalWork({
+      loop: activeThread.goalLoop ?? null,
+      pauseGoalLoop: pauseGoalLoopForLifecycle,
+      interruptActiveTurn: async () => {
+        const result = await interruptThreadTurn({
+          environmentId: activeThread.environmentId,
+          input,
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to interrupt the current turn.",
+          );
+        }
+        return result._tag === "Success";
+      },
     });
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      const error = squashAtomCommandFailure(result);
-      setThreadError(
-        activeThread.id,
-        error instanceof Error ? error.message : "Failed to interrupt the current turn.",
-      );
-    }
-  }, [interruptThreadTurn]);
+  }, [interruptThreadTurn, pauseGoalLoopForLifecycle]);
   const canInterruptRunningThread =
     buildRunningThreadTurnInterruptInput(activeThread, phase) !== null;
+
+  // Goal stop: pause the loop, then interrupt the current turn. The turn's
+  // in-flight work is abandoned but the objective is kept, so Resume (or
+  // Restart after completion) picks the goal back up later.
+  const handleStopThreadGoal = useCallback(async () => {
+    if (!activeServerThread) return;
+    const interruptInput = buildRunningThreadTurnInterruptInput(activeServerThread, phase);
+    if (!interruptInput) return;
+    await stopThreadGoalWork({
+      loop: activeServerThread.goalLoop ?? null,
+      pauseGoalLoop: pauseGoalLoopForLifecycle,
+      interruptActiveTurn: async () => {
+        const result = await interruptThreadTurn({
+          environmentId: activeServerThread.environmentId,
+          input: interruptInput,
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            activeServerThread.id,
+            error instanceof Error ? error.message : "Failed to stop the current turn.",
+          );
+        }
+        return result._tag === "Success";
+      },
+    });
+  }, [activeServerThread, interruptThreadTurn, pauseGoalLoopForLifecycle, phase, setThreadError]);
+
+  // Goal delete: stop goal-driven work first (pause so no continuation can
+  // start mid-sequence, interrupt the running turn), then clear the saved
+  // goal. The thread and its history stay untouched.
+  const handleDeleteThreadGoal = useCallback(async () => {
+    if (!activeServerThread || goalMetadataInFlightRef.current) return;
+    const interruptInput = buildRunningThreadTurnInterruptInput(activeServerThread, phase);
+    await deleteThreadGoalWork({
+      loop: activeServerThread.goalLoop ?? null,
+      pauseGoalLoop: pauseGoalLoopForLifecycle,
+      interruptActiveTurn: async () => {
+        if (!interruptInput) return true;
+        const result = await interruptThreadTurn({
+          environmentId: activeServerThread.environmentId,
+          input: interruptInput,
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            activeServerThread.id,
+            error instanceof Error ? error.message : "Failed to stop the current turn.",
+          );
+        }
+        // The clear still runs: removing the goal is the point of delete,
+        // and an uninterruptible turn merely finishes on its own.
+        return true;
+      },
+      clearGoal: async () => {
+        goalMetadataInFlightRef.current = true;
+        const result = await updateThreadMetadata({
+          environmentId: activeServerThread.environmentId,
+          input: { threadId: activeServerThread.id, goal: null },
+        });
+        goalMetadataInFlightRef.current = false;
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not delete thread goal",
+                description: error instanceof Error ? error.message : "An error occurred.",
+              }),
+            );
+          }
+          return false;
+        }
+        return true;
+      },
+    });
+  }, [
+    activeServerThread,
+    interruptThreadTurn,
+    pauseGoalLoopForLifecycle,
+    phase,
+    setThreadError,
+    updateThreadMetadata,
+  ]);
 
   const focusComposer = useCallback(() => {
     composerRef.current?.focusAtEnd();
@@ -6107,24 +6231,38 @@ export default function ChatView(props: ChatViewProps) {
   const handleStopBackgroundWork = useCallback(async () => {
     if (!activeThread) return;
     setIsStoppingBackgroundWork(true);
-    const result = await interruptThreadTurn({
-      environmentId,
-      input: buildThreadTurnInterruptInput(activeThread),
+    // Same goal sequencing as the plain interrupt: a pause-able goal loop is
+    // disabled first so the stopped work cannot restart itself.
+    const outcome = await stopThreadGoalWork({
+      loop: activeThread.goalLoop ?? null,
+      pauseGoalLoop: pauseGoalLoopForLifecycle,
+      interruptActiveTurn: async () => {
+        const result = await interruptThreadTurn({
+          environmentId,
+          input: buildThreadTurnInterruptInput(activeThread),
+        });
+        if (result._tag === "Failure") {
+          // Every failure clears the pending state — an interrupted command
+          // never reached the server, so liveness would hold "Stopping..."
+          // forever. Only real failures toast.
+          setIsStoppingBackgroundWork(false);
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            setThreadError(
+              activeThread.id,
+              error instanceof Error ? error.message : "Failed to stop background work.",
+            );
+          }
+        }
+        return result._tag === "Success";
+      },
     });
-    if (result._tag === "Failure") {
-      // Every failure clears the pending state — an interrupted command
-      // never reached the server, so liveness would hold "Stopping..."
-      // forever. Only real failures toast.
+    if (outcome === "pause-failed") {
+      // Nothing was interrupted, so no liveness change will clear the
+      // pending state on its own.
       setIsStoppingBackgroundWork(false);
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to stop background work.",
-        );
-      }
     }
-  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+  }, [activeThread, environmentId, interruptThreadTurn, pauseGoalLoopForLifecycle, setThreadError]);
   const backgroundLivenessBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (activeBackgroundLiveness === null || !activeThread) {
       return null;
@@ -9391,6 +9529,8 @@ export default function ChatView(props: ChatViewProps) {
                               isServerThread ? (activeServerThread?.goalLoop ?? null) : null
                             }
                             onThreadGoalLoopAction={handleThreadGoalLoopAction}
+                            onStopThreadGoal={handleStopThreadGoal}
+                            onDeleteThreadGoal={handleDeleteThreadGoal}
                             supportsQuestionAttachments={supportsQuestionAttachments}
                             maxFileAttachmentBytes={maxFileAttachmentBytes}
                             routeKind={routeKind}

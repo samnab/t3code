@@ -15,6 +15,7 @@ import {
   experimentPhaseLabel,
   formatExperimentDuration,
   mobileGoalLoopAction,
+  mobileGoalLoopRestart,
 } from "./thread-goal-loop";
 
 // Hidden until the draft approaches the cap, matching the web editor.
@@ -32,6 +33,12 @@ export function ThreadGoalEditorSheet(props: {
   readonly onSave: () => void;
   readonly onClear: () => void;
   readonly onGoalLoopAction: (action: "pause" | "resume" | "continue") => void;
+  /** Stop goal work (pause the loop, then interrupt the running turn). */
+  readonly onStop?: (() => void) | undefined;
+  /** Restart a completed loop through a reset. */
+  readonly onRestart?: (() => void) | undefined;
+  /** Whether a turn is actively running on this thread. */
+  readonly threadActive?: boolean;
   readonly onClose: () => void;
 }) {
   const { state } = props;
@@ -40,6 +47,8 @@ export function ThreadGoalEditorSheet(props: {
   const canSave = threadGoalEditorCanSave(state);
   const experiment = state.savedGoal !== null ? props.goalLoop?.experiment : null;
   const loopAction = mobileGoalLoopAction(props.goalLoop);
+  const canRestart = mobileGoalLoopRestart(props.goalLoop);
+  const canStop = props.threadActive === true;
 
   const actionButton = (
     label: string,
@@ -152,6 +161,11 @@ export function ThreadGoalEditorSheet(props: {
                   : ""}
               </Text>
               <View className="flex-row items-center justify-end gap-1">
+                {canStop && props.onStop
+                  ? actionButton("Stop", props.onStop, {
+                      destructive: true,
+                    })
+                  : null}
                 {loopAction
                   ? actionButton(
                       loopAction === "pause"
@@ -162,6 +176,7 @@ export function ThreadGoalEditorSheet(props: {
                       () => props.onGoalLoopAction(loopAction),
                     )
                   : null}
+                {canRestart && props.onRestart ? actionButton("Restart", props.onRestart) : null}
                 {state.savedGoal !== null
                   ? actionButton(state.saving ? "Clearing…" : "Clear", props.onClear, {
                       disabled: state.saving,

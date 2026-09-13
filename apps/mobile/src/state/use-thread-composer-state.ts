@@ -25,6 +25,7 @@ import {
   nextThreadGoalEditorEpoch,
   threadExperimentObjectiveError,
   threadGoalEditorCanSave,
+  deleteThreadGoalWork,
   threadGoalEditorReducer,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
 import {
@@ -175,6 +176,9 @@ export function useThreadComposerState() {
     reportFailure: false,
   });
   const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
+    reportFailure: false,
+  });
+  const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
   const previewThreadExperiment = useAtomCommand(threadEnvironment.experimentPreview, {
@@ -516,10 +520,68 @@ export function useThreadComposerState() {
     void writeThreadGoalFromEditor(threadGoalEditorState.draft);
   }, [threadGoalEditorState, writeThreadGoalFromEditor]);
 
-  const clearThreadGoalFromEditor = useCallback(() => {
-    if (!threadGoalEditorState || threadGoalEditorState.savedGoal === null) return;
-    void writeThreadGoalFromEditor(null);
-  }, [threadGoalEditorState, writeThreadGoalFromEditor]);
+  const clearThreadGoalFromEditor = useCallback(async () => {
+    const state = threadGoalEditorState;
+    if (!state || state.savedGoal === null) return;
+    const shell = selectedThreadShell;
+    // Deleting a goal that is driving work must stop that work first: pause
+    // the loop (so no continuation can start mid-sequence), interrupt the
+    // running turn, then clear. A goal that is not driving anything clears
+    // directly — and a draft goal is local only, never a server write.
+    if (shell == null || shell.id !== state.threadId) {
+      void writeThreadGoalFromEditor(null);
+      return;
+    }
+    const turnActive = shell.session?.status === "running" || shell.session?.status === "starting";
+    if (shell.goalLoop == null && !turnActive) {
+      void writeThreadGoalFromEditor(null);
+      return;
+    }
+    await deleteThreadGoalWork({
+      loop: shell.goalLoop ?? null,
+      pauseGoalLoop: async () => {
+        const result = await setThreadGoalLoop({
+          environmentId: shell.environmentId,
+          input: { threadId: shell.id, action: "pause" },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = Cause.squash(result.cause);
+            Alert.alert(
+              "Could not pause the goal loop",
+              error instanceof Error ? error.message : "An error occurred.",
+            );
+          }
+          return false;
+        }
+        return true;
+      },
+      interruptActiveTurn: async () => {
+        if (!turnActive) return true;
+        // An interrupt failure still clears: removing the goal is the point
+        // of delete; the current turn merely finishes on its own.
+        const result = await interruptThreadTurn({
+          environmentId: shell.environmentId,
+          input: {
+            threadId: shell.id,
+            ...(shell.session?.activeTurnId ? { turnId: shell.session.activeTurnId } : {}),
+          },
+        });
+        return result._tag === "Success";
+      },
+      clearGoal: async () => {
+        // Clear failures surface through the editor state the sheet renders.
+        await writeThreadGoalFromEditor(null);
+        return true;
+      },
+    });
+  }, [
+    threadGoalEditorState,
+    selectedThreadShell,
+    setThreadGoalLoop,
+    interruptThreadTurn,
+    writeThreadGoalFromEditor,
+  ]);
 
   const onSendMessage = useCallback(async () => {
     if (!selectedThreadShell) {

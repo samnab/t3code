@@ -200,6 +200,54 @@ export function isThreadGoalLoopActionAvailable(
   }
 }
 
+/** Outcome of the stop/delete sequences: which step failed, or that both landed. */
+export type ThreadGoalLifecycleOutcome =
+  | "stopped"
+  | "pause-failed"
+  | "interrupt-failed"
+  | "delete-failed";
+
+/**
+ * Stop sequencing for goal-driven work, shared by web and mobile: the loop
+ * must be paused before the running turn is interrupted. Pausing alone lets
+ * the current turn finish and only prevents the next continuation;
+ * interrupting alone leaves the loop enabled, and the interrupted turn's
+ * completion hands straight into a fresh continuation — the goal restarts
+ * itself. Loops that cannot restart (already paused, capped, completed,
+ * terminal experiments) skip the pause: pausing a completed loop would
+ * revive it, and their interrupted turns start nothing anyway.
+ */
+export async function stopThreadGoalWork(input: {
+  loop: ThreadGoalLoop | null;
+  pauseGoalLoop: () => Promise<boolean>;
+  interruptActiveTurn: () => Promise<boolean>;
+}): Promise<ThreadGoalLifecycleOutcome> {
+  if (isThreadGoalLoopActionAvailable(input.loop, "pause") && !(await input.pauseGoalLoop())) {
+    return "pause-failed";
+  }
+  return (await input.interruptActiveTurn()) ? "stopped" : "interrupt-failed";
+}
+
+/**
+ * Delete sequencing: pause first so no continuation can start while the
+ * interrupt and the goal clear are in flight, then stop the current turn,
+ * then clear the saved goal. An interrupt failure still clears — removing
+ * the goal is the point of delete; the current turn merely finishes on its
+ * own.
+ */
+export async function deleteThreadGoalWork(input: {
+  loop: ThreadGoalLoop | null;
+  pauseGoalLoop: () => Promise<boolean>;
+  interruptActiveTurn: () => Promise<boolean>;
+  clearGoal: () => Promise<boolean>;
+}): Promise<ThreadGoalLifecycleOutcome> {
+  if (isThreadGoalLoopActionAvailable(input.loop, "pause") && !(await input.pauseGoalLoop())) {
+    return "pause-failed";
+  }
+  await input.interruptActiveTurn();
+  return (await input.clearGoal()) ? "stopped" : "delete-failed";
+}
+
 /** Save is a no-op while saving, unchanged, or locally invalid. */
 export function threadGoalEditorCanSave(state: ThreadGoalEditorState): boolean {
   return (

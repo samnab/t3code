@@ -133,6 +133,46 @@ describe("buildThreadActionMenuItems", () => {
     expect(items).not.toContain("pause-goal-loop");
   });
 
+  it("offers stop only while a goal loop exists and a turn is running", () => {
+    const runningLoop = {
+      kind: "standard",
+      state: "running",
+      mode: "t3",
+      iterations: 1,
+      maxIterations: 10,
+      reason: null,
+      experiment: null,
+      updatedAt: "2026-09-07T02:00:00.000Z",
+    } as const;
+    expect(ids({ ...baseState, goalLoop: runningLoop, isRunning: true })).toContain(
+      "stop-goal-loop",
+    );
+    // No active turn: stop has nothing to interrupt.
+    expect(ids({ ...baseState, goalLoop: runningLoop, isRunning: false })).not.toContain(
+      "stop-goal-loop",
+    );
+    // No goal loop at all.
+    expect(ids({ ...baseState, isRunning: true })).not.toContain("stop-goal-loop");
+  });
+
+  it("offers a destructive delete goal whenever a goal loop exists", () => {
+    const runningLoop = {
+      kind: "standard",
+      state: "running",
+      mode: "t3",
+      iterations: 1,
+      maxIterations: 10,
+      reason: null,
+      experiment: null,
+      updatedAt: "2026-09-07T02:00:00.000Z",
+    } as const;
+    const item = buildThreadActionMenuItems({ ...baseState, goalLoop: runningLoop }).find(
+      (candidate) => candidate.id === "delete-goal",
+    );
+    expect(item).toMatchObject({ id: "delete-goal", destructive: true });
+    expect(ids(baseState)).not.toContain("delete-goal");
+  });
+
   it("marks delete as destructive and keeps it last", () => {
     const items = buildThreadActionMenuItems({ ...baseState, branch: "main" });
     expect(items.at(-1)).toMatchObject({ id: "delete", destructive: true });

@@ -5,6 +5,10 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import {
+  deleteThreadGoalWork,
+  stopThreadGoalWork,
+} from "@t3tools/client-runtime/state/threadGoalEditor";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useRouter } from "@tanstack/react-router";
@@ -97,6 +101,9 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
+    reportFailure: false,
+  });
+  const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
@@ -283,6 +290,85 @@ export function useThreadActionMenu(input: {
               }),
             );
             return;
+          case "stop-goal-loop":
+            // Pause the loop before interrupting, or the interrupted turn's
+            // completion hands straight into the loop's next continuation.
+            await stopThreadGoalWork({
+              loop: thread.goalLoop ?? null,
+              pauseGoalLoop: async () => {
+                const result = await setThreadGoalLoop({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, action: "pause" },
+                });
+                if (result._tag === "Failure") {
+                  if (!isAtomCommandInterrupted(result)) {
+                    failureToast("Failed to pause goal loop", squashAtomCommandFailure(result));
+                  }
+                  return false;
+                }
+                return true;
+              },
+              interruptActiveTurn: async () => {
+                const result = await interruptThreadTurn({
+                  environmentId: threadRef.environmentId,
+                  input: {
+                    threadId: threadRef.threadId,
+                    ...(thread.session?.activeTurnId
+                      ? { turnId: thread.session.activeTurnId }
+                      : {}),
+                  },
+                });
+                if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+                  failureToast("Failed to stop goal work", squashAtomCommandFailure(result));
+                }
+                return result._tag === "Success";
+              },
+            });
+            return;
+          case "delete-goal":
+            await deleteThreadGoalWork({
+              loop: thread.goalLoop ?? null,
+              pauseGoalLoop: async () => {
+                const result = await setThreadGoalLoop({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, action: "pause" },
+                });
+                if (result._tag === "Failure") {
+                  if (!isAtomCommandInterrupted(result)) {
+                    failureToast("Failed to pause goal loop", squashAtomCommandFailure(result));
+                  }
+                  return false;
+                }
+                return true;
+              },
+              interruptActiveTurn: async () => {
+                if (!thread.session?.activeTurnId) return true;
+                const result = await interruptThreadTurn({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, turnId: thread.session.activeTurnId },
+                });
+                // An interrupt failure still clears: removing the goal is
+                // the point; the turn merely finishes on its own.
+                if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+                  failureToast("Failed to stop goal work", squashAtomCommandFailure(result));
+                }
+                return true;
+              },
+              clearGoal: async () => {
+                const result = await updateThreadMetadata({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, goal: null },
+                });
+                if (result._tag === "Failure") {
+                  if (!isAtomCommandInterrupted(result)) {
+                    failureToast("Failed to delete goal", squashAtomCommandFailure(result));
+                  }
+                  return false;
+                }
+                return true;
+              },
+            });
+            return;
           case "reload-agent": {
             const result = await reloadAgent({
               environmentId: threadRef.environmentId,
@@ -403,6 +489,7 @@ export function useThreadActionMenu(input: {
       unsnoozeThread,
       updateThreadMetadata,
       setThreadGoalLoop,
+      interruptThreadTurn,
     ],
   );
 

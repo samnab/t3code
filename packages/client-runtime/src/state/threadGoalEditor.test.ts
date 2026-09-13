@@ -5,6 +5,8 @@ import {
   nextThreadGoalEditorEpoch,
   isThreadGoalBeingPursued,
   isThreadGoalLoopActionAvailable,
+  deleteThreadGoalWork,
+  stopThreadGoalWork,
   resolveThreadGoalCommandBlockReason,
   resolveThreadGoalDisplay,
   threadGoalEditorCanSave,
@@ -385,5 +387,153 @@ describe("resolveThreadGoalDisplay", () => {
     expect(
       resolveThreadGoalDisplay({ goal: null, controlsVisible: true, supportsThreadGoals: false }),
     ).toBe("none");
+  });
+});
+
+describe("stopThreadGoalWork", () => {
+  const runningLoop = {
+    kind: "standard",
+    state: "running",
+    mode: "t3",
+    iterations: 1,
+    maxIterations: 10,
+    reason: null,
+    experiment: null,
+    updatedAt: "2026-09-07T04:00:00.000Z",
+  } as const;
+  const pausedLoop = { ...runningLoop, state: "paused" } as const;
+
+  it("pauses the loop before interrupting the turn", async () => {
+    const calls: string[] = [];
+    const outcome = await stopThreadGoalWork({
+      loop: runningLoop,
+      pauseGoalLoop: async () => {
+        calls.push("pause");
+        return true;
+      },
+      interruptActiveTurn: async () => {
+        calls.push("interrupt");
+        return true;
+      },
+    });
+    expect(outcome).toBe("stopped");
+    // Interrupting alone would leave the loop enabled and the interrupted
+    // turn's completion hands straight into the next continuation.
+    expect(calls).toEqual(["pause", "interrupt"]);
+  });
+
+  it("does not interrupt when the pause fails", async () => {
+    let interrupted = false;
+    const outcome = await stopThreadGoalWork({
+      loop: runningLoop,
+      pauseGoalLoop: async () => false,
+      interruptActiveTurn: async () => {
+        interrupted = true;
+        return true;
+      },
+    });
+    expect(outcome).toBe("pause-failed");
+    expect(interrupted).toBe(false);
+  });
+
+  it("still stops after a pause while the turn keeps running", async () => {
+    // Paused loop, running turn: no second pause (it cannot restart), but
+    // the interrupt must still fire.
+    let paused = false;
+    let interrupted = false;
+    const outcome = await stopThreadGoalWork({
+      loop: pausedLoop,
+      pauseGoalLoop: async () => {
+        paused = true;
+        return true;
+      },
+      interruptActiveTurn: async () => {
+        interrupted = true;
+        return true;
+      },
+    });
+    expect(outcome).toBe("stopped");
+    expect(paused).toBe(false);
+    expect(interrupted).toBe(true);
+  });
+
+  it("reports an interrupt failure after the pause landed", async () => {
+    const outcome = await stopThreadGoalWork({
+      loop: runningLoop,
+      pauseGoalLoop: async () => true,
+      interruptActiveTurn: async () => false,
+    });
+    expect(outcome).toBe("interrupt-failed");
+  });
+});
+
+describe("deleteThreadGoalWork", () => {
+  const runningLoop = {
+    kind: "standard",
+    state: "running",
+    mode: "t3",
+    iterations: 1,
+    maxIterations: 10,
+    reason: null,
+    experiment: null,
+    updatedAt: "2026-09-07T04:00:00.000Z",
+  } as const;
+
+  it("pauses and interrupts before clearing the goal", async () => {
+    const calls: string[] = [];
+    const outcome = await deleteThreadGoalWork({
+      loop: runningLoop,
+      pauseGoalLoop: async () => {
+        calls.push("pause");
+        return true;
+      },
+      interruptActiveTurn: async () => {
+        calls.push("interrupt");
+        return true;
+      },
+      clearGoal: async () => {
+        calls.push("clear");
+        return true;
+      },
+    });
+    expect(outcome).toBe("stopped");
+    expect(calls).toEqual(["pause", "interrupt", "clear"]);
+  });
+
+  it("does not clear when the pause fails", async () => {
+    let cleared = false;
+    const outcome = await deleteThreadGoalWork({
+      loop: runningLoop,
+      pauseGoalLoop: async () => false,
+      interruptActiveTurn: async () => true,
+      clearGoal: async () => {
+        cleared = true;
+        return true;
+      },
+    });
+    expect(outcome).toBe("pause-failed");
+    expect(cleared).toBe(false);
+  });
+
+  it("still clears the goal when the interrupt fails", async () => {
+    // Removing the goal is the point of delete; a failed interrupt only
+    // means the current turn finishes on its own.
+    const outcome = await deleteThreadGoalWork({
+      loop: runningLoop,
+      pauseGoalLoop: async () => true,
+      interruptActiveTurn: async () => false,
+      clearGoal: async () => true,
+    });
+    expect(outcome).toBe("stopped");
+  });
+
+  it("reports a failed clear", async () => {
+    const outcome = await deleteThreadGoalWork({
+      loop: runningLoop,
+      pauseGoalLoop: async () => true,
+      interruptActiveTurn: async () => true,
+      clearGoal: async () => false,
+    });
+    expect(outcome).toBe("delete-failed");
   });
 });

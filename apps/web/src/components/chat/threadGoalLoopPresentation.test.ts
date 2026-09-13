@@ -64,4 +64,23 @@ describe("experiment goal loop presentation", () => {
       pauseAction: "pause",
     });
   });
+
+  it("offers a restart for a completed loop and nothing else", () => {
+    expect(
+      describeGoalLoop({
+        kind: "standard",
+        state: "completed",
+        mode: "t3",
+        iterations: 3,
+        maxIterations: 10,
+        updatedAt: "2026-09-07T02:00:00.000Z",
+        experiment: null,
+      }),
+    ).toMatchObject({
+      tone: "completed",
+      pauseAction: null,
+      canContinue: false,
+      canReset: true,
+    });
+  });
 });

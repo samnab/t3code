@@ -34,6 +34,11 @@ export function mobileGoalLoopAction(loop: ThreadGoalLoop | null): MobileGoalLoo
   return null;
 }
 
+/** Completed loops restart through a reset; terminal experiments stay terminal. */
+export function mobileGoalLoopRestart(loop: ThreadGoalLoop | null): boolean {
+  return isThreadGoalLoopActionAvailable(loop, "reset");
+}
+
 export function mobileGoalLoopStatus(loop: ThreadGoalLoop | null): string | null {
   if (!loop) return null;
   if (loop.kind === "experiment" && loop.experiment) {
