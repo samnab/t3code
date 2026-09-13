@@ -34,7 +34,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-export class PiRpcError extends Schema.TaggedErrorClass<PiRpcError>()("PiRpcError", {
+export class PiRpcError extends Schema.TaggedError<PiRpcError>()("PiRpcError", {
   operation: Schema.String,
   detail: Schema.optional(Schema.String),
   cause: Schema.optional(Schema.Defect()),

@@ -21,6 +21,10 @@ import {
 } from "../experiments/ExperimentService.ts";
 import type { ExperimentIdentity, ExperimentThreadContext } from "../experiments/Model.ts";
 import * as ThreadExperiments from "../persistence/ThreadExperiments.ts";
+import * as ServerConfig from "../config.ts";
+import * as DeviceService from "../device/DeviceService.ts";
+import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ChildRunService from "./ChildRunService.ts";
 import * as ExperimentMcpHttpServer from "./ExperimentMcpHttpServer.ts";
 import * as ExperimentMcpServiceLive from "./ExperimentMcpServiceLive.ts";
@@ -180,6 +184,12 @@ it.effect("authenticates experiment MCP calls against the real experiment servic
     disableLogger: true,
   }).pipe(
     Layer.provideMerge(RegistryAndDomainLive),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-experiment-mcp-server-test-" }),
+    ),
+    Layer.provideMerge(Layer.mock(OrchestrationEngineService)({})),
+    Layer.provideMerge(Layer.mock(ProjectionSnapshotQuery)({})),
+    Layer.provideMerge(Layer.mock(DeviceService.DeviceService)({})),
     Layer.provideMerge(NodeHttpServer.layerTest),
     Layer.provideMerge(NodeServices.layer),
     Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),

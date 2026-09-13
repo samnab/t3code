@@ -58,7 +58,7 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as McpProviderSession from "./McpProviderSession.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 
-export class ChildRunError extends Schema.TaggedErrorClass<ChildRunError>()("ChildRunError", {
+export class ChildRunError extends Schema.TaggedError<ChildRunError>()("ChildRunError", {
   message: Schema.String,
 }) {}
 

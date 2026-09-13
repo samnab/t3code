@@ -26,6 +26,7 @@ describe("buildClaudeExperimentQueryOptions", () => {
       providerInstanceId: ProviderInstanceId.make("claudeAgent"),
       endpoint: "http://127.0.0.1/mcp/experiment",
       authorizationHeader: "Bearer token",
+      capabilities: new Set(["experiment"] as const),
       experiment: { runId: "run-1", generation: 1 },
     },
   });

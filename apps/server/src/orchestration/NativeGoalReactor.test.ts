@@ -86,6 +86,7 @@ function makeShell(overrides: Partial<OrchestrationThreadShell> = {}): Orchestra
     voiceNotifications: true,
     branch: null,
     worktreePath: null,
+    pullRequests: [],
     latestTurn: null,
     createdAt: NOW,
     updatedAt: NOW,

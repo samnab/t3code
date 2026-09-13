@@ -127,6 +127,7 @@ const makeProjectedThread = (input: {
     voiceNotifications: false,
     goal: null,
     goalLoop: null,
+    pullRequests: [],
     branch: null,
     worktreePath: null,
     latestTurn: null,

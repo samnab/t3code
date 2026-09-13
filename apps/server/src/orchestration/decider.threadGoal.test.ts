@@ -32,6 +32,7 @@ const readModel: OrchestrationReadModel = {
       voiceNotifications: true,
       branch: null,
       worktreePath: null,
+      pullRequests: [],
       latestTurn: null,
       createdAt: UPDATED_AT,
       updatedAt: UPDATED_AT,

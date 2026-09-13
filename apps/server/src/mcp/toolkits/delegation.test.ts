@@ -21,8 +21,12 @@ it("keeps acknowledgement optional on subagent_result", () => {
   const schema = Tool.getJsonSchemaFromSchema(
     DelegationToolkit.tools.subagent_result.parametersSchema,
   );
-  expect(schema.properties?.acknowledge).toMatchObject({
-    anyOf: expect.arrayContaining([expect.objectContaining({ type: "boolean" })]),
+  expect(schema).toMatchObject({
+    properties: {
+      acknowledge: {
+        anyOf: expect.arrayContaining([expect.objectContaining({ type: "boolean" })]),
+      },
+    },
   });
   expect(schema.required).not.toContain("acknowledge");
 });

@@ -91,6 +91,7 @@ describe("orchestration projector", () => {
         goalLoop: null,
         branch: null,
         worktreePath: null,
+        pullRequests: [],
         branchPullRequest: null,
         latestTurn: null,
         createdAt: now,
@@ -122,7 +123,31 @@ describe("orchestration projector", () => {
         commandId: null,
       };
       let model = yield* projectEvent(
-        createEmptyReadModel(now),
+        {
+          ...createEmptyReadModel(now),
+          projects: [
+            {
+              id: ProjectId.make("project-1"),
+              title: "T3 Code",
+              workspaceRoot: "/repo",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: now,
+              updatedAt: now,
+              deletedAt: null,
+              repositoryIdentity: {
+                canonicalKey: "github.com/pingdotgg/t3code",
+                provider: "github",
+                displayName: "pingdotgg/t3code",
+                locator: {
+                  source: "git-remote",
+                  remoteName: "origin",
+                  remoteUrl: "https://github.com/pingdotgg/t3code.git",
+                },
+              },
+            },
+          ],
+        },
         makeEvent({
           ...eventFields,
           sequence: 1,
@@ -649,7 +674,7 @@ describe("orchestration projector", () => {
     }),
   );
 
-  it("marks assistant messages completed with non-streaming updates", async () => {
+  it("preserves context and origin when a streamed message completes", async () => {
     const createdAt = "2026-02-23T09:00:00.000Z";
     const deltaAt = "2026-02-23T09:00:01.000Z";
     const completeAt = "2026-02-23T09:00:03.500Z";
@@ -698,6 +723,19 @@ describe("orchestration projector", () => {
             messageId: "assistant:msg-1",
             role: "assistant",
             text: "hello",
+            context: {
+              version: 1,
+              records: [
+                {
+                  version: 1,
+                  contextId: "ctx_projector",
+                  kind: "skill",
+                  label: "$review",
+                  name: "review",
+                },
+              ],
+            },
+            origin: "goal-continue",
             turnId: "turn-1",
             streaming: true,
             createdAt: deltaAt,
@@ -736,6 +774,19 @@ describe("orchestration projector", () => {
     expect(message?.text).toBe("hello");
     expect(message?.streaming).toBe(false);
     expect(message?.updatedAt).toBe(completeAt);
+    expect(message?.origin).toBe("goal-continue");
+    expect(message?.context).toEqual({
+      version: 1,
+      records: [
+        {
+          version: 1,
+          contextId: "ctx_projector",
+          kind: "skill",
+          label: "$review",
+          name: "review",
+        },
+      ],
+    });
   });
 
   it("prunes reverted turn messages from in-memory thread snapshot", async () => {

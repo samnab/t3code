@@ -425,6 +425,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
             providerInstanceId: request.providerInstanceId,
             endpoint: "http://127.0.0.1/mcp/agent",
             authorizationHeader: "Bearer test-child-token",
+            capabilities: new Set(request.capabilities ?? []),
           },
         };
       }),
@@ -1556,6 +1557,8 @@ it.effect("exposes native delegation through MCP with invocation-bound result co
     const h = yield* makeHarness();
     const client = McpSchema.McpServerClient.of({
       clientId: 1,
+      clientCapabilities: {},
+      clientInfo: { name: "test", version: "1" },
       protocolVersion: "2025-06-18",
       initializePayload: {
         protocolVersion: "2025-06-18",

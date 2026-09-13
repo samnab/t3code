@@ -224,7 +224,7 @@ export const ThreadExperimentErrorReason = Schema.Literals([
 ]);
 export type ThreadExperimentErrorReason = typeof ThreadExperimentErrorReason.Type;
 
-export class ThreadExperimentError extends Schema.TaggedErrorClass<ThreadExperimentError>()(
+export class ThreadExperimentError extends Schema.TaggedError<ThreadExperimentError>()(
   "ThreadExperimentError",
   {
     threadId: ThreadId,

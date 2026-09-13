@@ -321,6 +321,7 @@ it.layer(layer)("AntigravityAdapter", (it) => {
         providerInstanceId: instanceId,
         endpoint: "http://127.0.0.1:4317/mcp",
         authorizationHeader: "Bearer antigravity-secret",
+        capabilities: new Set(["pull-requests", "delegation"] as const),
       });
       setSessionOptimizerAttachments(cbmThreadId, {
         projectId: ProjectId.make("project-antigravity-cbm"),

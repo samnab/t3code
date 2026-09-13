@@ -29,8 +29,10 @@ export function threadDetailToShell(
     branch: thread.branch,
     worktreePath: thread.worktreePath,
     linkedPullRequest: thread.linkedPullRequest ?? null,
+    pullRequests: thread.pullRequests,
     branchPullRequest: thread.branchPullRequest ?? null,
     ...(thread.goal !== undefined ? { goal: thread.goal } : {}),
+    ...(thread.goalLoop !== undefined ? { goalLoop: thread.goalLoop } : {}),
     latestTurn: thread.latestTurn,
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
@@ -48,5 +50,8 @@ export function threadDetailToShell(
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    ...(thread.titleRegeneration !== undefined
+      ? { titleRegeneration: thread.titleRegeneration }
+      : {}),
   };
 }

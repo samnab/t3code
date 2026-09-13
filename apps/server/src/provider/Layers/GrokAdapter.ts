@@ -1026,9 +1026,12 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           ];
           const acp = yield* makeGrokAcpRuntime({
             grokSettings,
-            environment: withVoiceNotificationsEnv(
-              options?.environment ?? process.env,
-              input.voiceNotifications,
+            environment: McpProviderSession.withAgentDeviceEnvironment(
+              withVoiceNotificationsEnv(
+                options?.environment ?? process.env,
+                input.voiceNotifications,
+              ),
+              mcpSession,
             ),
             childProcessSpawner,
             cwd,
@@ -2151,7 +2154,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: false },
       compaction: { type: "slash-command", command: "/compact" },
       startSession,
       sendTurn,

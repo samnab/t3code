@@ -42,6 +42,7 @@ function makeReadModel(input: {
         voiceNotifications: true,
         branch: null,
         worktreePath: null,
+        pullRequests: [],
         latestTurn: null,
         createdAt: NOW,
         updatedAt: NOW,

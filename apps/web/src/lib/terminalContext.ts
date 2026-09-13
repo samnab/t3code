@@ -1,7 +1,9 @@
 import { type ThreadId } from "@t3tools/contracts";
 import { trimThreadGoalWhitespace } from "@t3tools/shared/composerTrigger";
+import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
 
 import { extractTrailingElementContexts, type ParsedElementContextEntry } from "./elementContext";
+import { toKindScopedComposerContextId } from "./composerContextReferences";
 
 export interface TerminalContextSelection {
   terminalId: string;
@@ -98,6 +100,37 @@ export function formatTerminalContextLabel(selection: {
   lineEnd: number;
 }): string {
   return `${selection.terminalLabel} ${formatTerminalContextRange(selection)}`;
+}
+
+/** Legacy context shape used while migrating ordinal U+FFFC placeholders. */
+export interface TerminalContextReferenceSource {
+  id: string;
+  terminalLabel: string;
+  lineStart: number;
+  lineEnd: number;
+}
+
+/** The canonical inline link that stands for this context in the prompt. */
+export function formatTerminalContextReference(context: TerminalContextReferenceSource): string {
+  return formatComposerContextReference({
+    kind: "terminal",
+    contextId: toKindScopedComposerContextId("terminal", context.id),
+    label: formatTerminalContextLabel(context),
+  });
+}
+
+/** Binds legacy U+FFFC placeholders to contexts in array order; leftover placeholders vanish. */
+export function migrateLegacyTerminalContextPlaceholders(
+  prompt: string,
+  contexts: ReadonlyArray<TerminalContextReferenceSource>,
+): string {
+  if (!prompt.includes(INLINE_TERMINAL_CONTEXT_PLACEHOLDER)) return prompt;
+  let index = 0;
+  return prompt.replaceAll(INLINE_TERMINAL_CONTEXT_PLACEHOLDER, () => {
+    const context = contexts[index];
+    index += 1;
+    return context ? formatTerminalContextReference(context) : "";
+  });
 }
 
 export function formatInlineTerminalContextLabel(selection: {

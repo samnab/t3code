@@ -1,7 +1,8 @@
 import { derivePendingRequests } from "@t3tools/client-runtime/pending-requests";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  ApprovalRequestId,
   EventId,
   MessageId,
   ProjectId,
@@ -25,6 +26,21 @@ import {
   type ThreadFeedEntry,
   type WorkLogEntry,
 } from "./threadActivity";
+
+// Match Hermes: these ES2023 array methods are absent on mobile.
+beforeEach(() => {
+  const methods = ["toSorted", "toReversed"] as const;
+  const descriptors = methods.map((method) =>
+    Object.getOwnPropertyDescriptor(Array.prototype, method),
+  );
+  for (const method of methods) Reflect.deleteProperty(Array.prototype, method);
+  return () => {
+    for (const [index, method] of methods.entries()) {
+      const descriptor = descriptors[index];
+      if (descriptor) Reflect.defineProperty(Array.prototype, method, descriptor);
+    }
+  };
+});
 
 const singleSelectQuestion = {
   id: "runtime",
@@ -100,6 +116,7 @@ describe("pending user input answers", () => {
       {
         requestId: "interaction_1",
         createdAt: requested.createdAt,
+        dismissible: false,
         questions: [nativeQuestion, singleSelectQuestion],
       },
     ]);
@@ -257,6 +274,7 @@ function makeThread(
     voiceNotifications: true,
     branch: null,
     worktreePath: null,
+    pullRequests: [],
     latestTurn: null,
     createdAt: "2026-04-01T00:00:00.000Z",
     updatedAt: "2026-04-01T00:00:00.000Z",
@@ -656,8 +674,8 @@ describe("buildThreadFeed", () => {
     const [row] = group.activities;
     expect(row?.workEntry.detail).toBe(command);
     expect(row?.getFullDetail()).toBe(`${command}\n\n${command}`);
-    // Opening it would only repeat the command the row already shows.
-    expect(row?.canExpand).toBe(false);
+    expect(row?.canExpand).toBe(true);
+    expect(workEntryRowLabel(row!.workEntry, true)).toBe("Command");
   });
 
   it.each([
@@ -689,7 +707,7 @@ describe("buildThreadFeed", () => {
         payload: { detail: "Bash is unusable in this environment" },
       },
       label: "Bash is unusable in this environment",
-      canExpand: false,
+      canExpand: true,
     },
     {
       name: "a multi-line task report",
@@ -725,7 +743,7 @@ describe("buildThreadFeed", () => {
       label: "printf hello",
       canExpand: true,
     },
-  ])("only lets $name expand when the body adds something: $canExpand", (input) => {
+  ])("sets expansion availability for $name: $canExpand", (input) => {
     const thread = makeThread({
       id: ThreadId.make("thread-expand-rule"),
       projectId: ProjectId.make("project-1"),
@@ -745,6 +763,107 @@ describe("buildThreadFeed", () => {
     const [row] = group.activities;
     expect(workEntryRowLabel(row!.workEntry)).toBe(input.label);
     expect(row?.canExpand).toBe(input.canExpand);
+  });
+
+  it.each(["runtime.error", "runtime.warning"] as const)(
+    "shows and copies the message of %s without a duplicate expanded body",
+    (kind) => {
+      const message =
+        "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 5:21 AM.";
+      const thread = makeThread({
+        id: ThreadId.make("runtime-message"),
+        projectId: ProjectId.make("project-1"),
+        title: "Runtime message",
+        activities: [
+          makeActivity({
+            id: EventId.make("runtime-message"),
+            createdAt: "2026-09-01T00:00:00.000Z",
+            kind,
+            tone: "error",
+            summary: "Runtime error",
+            payload: { message },
+          }),
+        ],
+      });
+      const [group] = buildThreadFeed(thread);
+      expect(group?.type).toBe("activity-group");
+      if (group?.type !== "activity-group") return;
+      const row = group.activities[0]!;
+      expect(row.canExpand).toBe(true);
+      expect(workEntryRowLabel(row.workEntry, true)).toBe(message);
+      expect(row.getFullDetail()).toBeNull();
+      expect(row.getCopyText()).toBe(`Runtime error\n${message}`);
+    },
+  );
+
+  it.each([
+    {
+      message: "fallback message",
+      detail: "More specific detail",
+      expected: "More specific detail",
+    },
+    { message: "  ", expected: undefined },
+    { message: { error: "not a string" }, expected: undefined },
+  ])("preserves existing runtime details and ignores invalid messages: $message", (input) => {
+    const thread = makeThread({
+      id: ThreadId.make("runtime-detail"),
+      projectId: ProjectId.make("project-1"),
+      title: "Runtime detail",
+      activities: [
+        makeActivity({
+          id: EventId.make("runtime-detail"),
+          createdAt: "2026-09-01T00:00:00.000Z",
+          kind: "runtime.error",
+          tone: "error",
+          summary: "Runtime error",
+          payload: { message: input.message, detail: input.detail },
+        }),
+      ],
+    });
+    const [group] = buildThreadFeed(thread);
+    expect(group?.type).toBe("activity-group");
+    if (group?.type !== "activity-group") return;
+    expect(group.activities[0]?.workEntry.detail).toBe(input.expected);
+    expect(group.activities[0]?.canExpand).toBe(Boolean(input.expected));
+  });
+
+  it.each([
+    {
+      summary: "Runtime error",
+      kind: "runtime.error" as const,
+      detail:
+        "Request failed.\nThe service returned an unexpected response.\nRetry after checking the connection.",
+    },
+    {
+      summary: "Web search",
+      kind: "tool.completed" as const,
+      detail: "https://itanium-cxx-abi.github.io/cxx-abi/abi.html",
+      itemType: "web_search",
+    },
+  ])("expands the full $summary label once, retaining its formatting and copy text", (input) => {
+    const thread = makeThread({
+      id: ThreadId.make("expanded-label"),
+      projectId: ProjectId.make("project-1"),
+      title: "Expanded label",
+      activities: [
+        makeActivity({
+          id: EventId.make("expanded-label"),
+          createdAt: "2026-09-01T00:00:00.000Z",
+          kind: input.kind,
+          summary: input.summary,
+          payload: { detail: input.detail, itemType: input.itemType },
+        }),
+      ],
+    });
+    const [group] = buildThreadFeed(thread);
+    expect(group?.type).toBe("activity-group");
+    if (group?.type !== "activity-group") return;
+    const row = group.activities[0]!;
+    expect(row.canExpand).toBe(true);
+    expect(workEntryRowLabel(row.workEntry)).toBe(input.detail.replace(/\s+/g, " "));
+    expect(workEntryRowLabel(row.workEntry, true)).toBe(input.detail);
+    expect(row.getFullDetail()).toBeNull();
+    expect(row.getCopyText()).toBe(`${input.summary}\n${input.detail}`);
   });
 
   it("drops a truncated Claude echo of a long command", () => {
@@ -1154,6 +1273,11 @@ describe("buildThreadFeed", () => {
         },
       ],
     });
+    if (group?.type !== "activity-group") return;
+    const row = group.activities[0]!;
+    expect(row.canExpand).toBe(true);
+    expect(row.getFullDetail()).toBeNull();
+    expect(workEntryRowLabel(row.workEntry, true)).toBe(`${imagePath.slice(0, 177)}...`);
   });
 
   it("keeps MCP inputs available to expanded mobile work rows", () => {
@@ -1231,7 +1355,8 @@ describe("buildThreadFeed", () => {
       },
     });
     expect(group.activities[0]?.getFullDetail()).toContain('"query": "work log"');
-    expect(group.activities[0]?.getFullDetail()).toContain("repository.search");
+    expect(workEntryRowLabel(group.activities[0]!.workEntry, true)).toBe("repository.search");
+    expect(group.activities[0]?.getFullDetail()).not.toContain("repository.search");
   });
 
   it.each([
@@ -3512,5 +3637,200 @@ describe("subagent run metadata on the collapsed work-log row", () => {
       terminalReason: "native-completed",
       historyAvailability: "durable",
     });
+  });
+});
+
+it("accepts ready attachment-only answers while preserving selected options", () => {
+  const question = {
+    id: "q",
+    header: "Spec",
+    question: "Provide a specification",
+    options: [{ label: "Yes", description: "Approve" }],
+    multiSelect: false,
+  };
+  expect(buildPendingUserInputAnswers([question], { q: { attachmentCount: 1 } })).toEqual({
+    q: "",
+  });
+  expect(
+    buildPendingUserInputAnswers([question], {
+      q: { attachmentCount: 1, selectedOptionValues: ["Yes"] },
+    }),
+  ).toEqual({ q: "Yes" });
+  expect(
+    buildPendingUserInputAnswers([question], {
+      q: { attachmentCount: 1, attachmentsBlocked: true },
+    }),
+  ).toBeNull();
+  expect(
+    buildPendingUserInputAnswers([{ ...question, allowCustomAnswer: false }], {
+      q: { attachmentCount: 1 },
+    }),
+  ).toBeNull();
+});
+
+it("keeps attachment-only question answers expandable outside mobile work groups and turn folds", () => {
+  const turnId = TurnId.make("turn-answer");
+  const answer = {
+    requestId: ApprovalRequestId.make("question-request"),
+    answers: { q: "" },
+    questionTextById: { q: "Attach the specification" },
+    attachmentsByQuestionId: {
+      q: [
+        {
+          type: "file" as const,
+          id: "question-file",
+          name: "spec.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+        },
+      ],
+    },
+  };
+  const thread = makeThread({
+    id: ThreadId.make("thread-answer"),
+    projectId: ProjectId.make("project-answer"),
+    title: "Answer history",
+    latestTurn: {
+      turnId,
+      state: "completed",
+      requestedAt: "2026-09-08T00:00:00.000Z",
+      startedAt: "2026-09-08T00:00:00.000Z",
+      completedAt: "2026-09-08T00:00:04.000Z",
+      assistantMessageId: null,
+    },
+    activities: [
+      makeActivity({
+        id: EventId.make("tool-before-answer"),
+        createdAt: "2026-09-08T00:00:01.000Z",
+        kind: "tool.completed",
+        tone: "tool",
+        summary: "Read files",
+        turnId,
+        payload: { itemType: "command_execution", status: "completed" },
+      }),
+      makeActivity({
+        id: EventId.make("answer-submitted"),
+        createdAt: "2026-09-08T00:00:02.000Z",
+        kind: "user-input.answer-submitted",
+        summary: "Answered questions",
+        turnId,
+        payload: answer,
+      }),
+      makeActivity({
+        id: EventId.make("tool-after-answer"),
+        createdAt: "2026-09-08T00:00:03.000Z",
+        kind: "tool.completed",
+        tone: "tool",
+        summary: "Read files",
+        turnId,
+        payload: { itemType: "command_execution", status: "completed" },
+      }),
+    ],
+  });
+  const feed = buildThreadFeed(thread);
+  expect(feed).toHaveLength(3);
+  const group = feed[1];
+  expect(group?.type).toBe("activity-group");
+  if (group?.type !== "activity-group") return;
+  expect(group.activities[0]).toMatchObject({
+    canExpand: true,
+    workEntry: { questionAnswer: answer },
+  });
+  expect(group.activities[0]?.getFullDetail()).toBeNull();
+  const collapsed = deriveThreadFeedPresentation(feed, thread.latestTurn, new Set());
+  expect(collapsed.map((entry) => entry.type)).toEqual(["turn-fold", "activity-group"]);
+  expect(collapsed[1]).toBe(group);
+  const expanded = deriveThreadFeedPresentation(feed, thread.latestTurn, new Set([turnId]));
+  expect(expanded.map((entry) => entry.type)).toEqual([
+    "turn-fold",
+    "work-toggle",
+    "activity-group",
+    "work-toggle",
+  ]);
+  expect(expanded[2]).toBe(group);
+  const running = deriveThreadFeedPresentation(
+    feed,
+    { ...thread.latestTurn!, state: "running", completedAt: null },
+    new Set(),
+    new Set(),
+    "2026-09-08T00:00:00.000Z",
+  );
+  expect(running[0]?.type).toBe("work-toggle");
+  expect(running[1]).toBe(group);
+  expect(running[2]?.type).toBe("work-toggle");
+});
+
+it("folds requested, attachment answer, and resolved into the request-position row", () => {
+  const turnId = TurnId.make("turn-native-answer");
+  const requestId = ApprovalRequestId.make("native-question-request");
+  const answer = {
+    requestId,
+    answers: { q: "" },
+    questionTextById: { q: "Attach the specification" },
+    attachmentsByQuestionId: {
+      q: [
+        {
+          type: "file" as const,
+          id: "native-question-file",
+          name: "spec.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+        },
+      ],
+    },
+  };
+  const thread = makeThread({
+    id: ThreadId.make("thread-native-answer"),
+    projectId: ProjectId.make("project-native-answer"),
+    title: "Native answer history",
+    activities: [
+      makeActivity({
+        id: EventId.make("native-question-requested"),
+        createdAt: "2026-09-08T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        turnId,
+        payload: {
+          requestId,
+          questions: [
+            {
+              id: "q",
+              header: "Spec",
+              question: "Attach the specification",
+              options: [],
+              multiSelect: false,
+            },
+          ],
+        },
+      }),
+      makeActivity({
+        id: EventId.make("native-answer-submitted"),
+        createdAt: "2026-09-08T00:00:02.000Z",
+        kind: "user-input.answer-submitted",
+        summary: "Answered questions",
+        turnId,
+        payload: answer,
+      }),
+      makeActivity({
+        id: EventId.make("native-question-resolved"),
+        createdAt: "2026-09-08T00:00:03.000Z",
+        kind: "user-input.resolved",
+        summary: "User input submitted",
+        turnId,
+        payload: { requestId, answers: { q: "" } },
+      }),
+    ],
+  });
+
+  const answerRows = buildThreadFeed(thread).flatMap((entry) =>
+    entry.type === "activity-group"
+      ? entry.activities.filter((activity) => activity.workEntry.questionAnswer !== undefined)
+      : [],
+  );
+  expect(answerRows).toHaveLength(1);
+  expect(answerRows[0]).toMatchObject({
+    id: "native-question-requested",
+    createdAt: "2026-09-08T00:00:01.000Z",
+    workEntry: { questionAnswer: answer },
   });
 });

@@ -158,7 +158,7 @@ export interface ExperimentChange {
   readonly content: string;
 }
 
-export class ExperimentError extends Schema.TaggedErrorClass<ExperimentError>()("ExperimentError", {
+export class ExperimentError extends Schema.TaggedError<ExperimentError>()("ExperimentError", {
   code: Schema.Literals([
     "invalid_config",
     "unsafe_repository",

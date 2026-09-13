@@ -446,7 +446,9 @@ describe("CodexSessionRuntime collab integration", () => {
           yield* runtime.sendTurn({ input: "finish without child metadata" });
           const events = Array.from(yield* Fiber.join(eventsFiber));
           assert.isTrue(events.some((event) => event.method === "turn/completed"));
-          assert.equal(readRecordedRequests().length, 1);
+          // A failed lookup is retried in the background. The exact count by
+          // the time the parent completes depends on the Effect scheduler.
+          assert.isAtLeast(readRecordedRequests().length, 1);
 
           yield* runtime.close;
           NodeFS.rmSync(scriptPath, { force: true });

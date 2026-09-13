@@ -95,7 +95,7 @@ export interface OptimizerProbeDependencies {
   readonly nowMs: Effect.Effect<number>;
 }
 
-class HeadroomStatsProbeError extends Schema.TaggedErrorClass<HeadroomStatsProbeError>()(
+class HeadroomStatsProbeError extends Schema.TaggedError<HeadroomStatsProbeError>()(
   "HeadroomStatsProbeError",
   {},
 ) {}

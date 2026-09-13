@@ -2,7 +2,7 @@ import * as Schema from "effect/Schema";
 
 export type { ExperimentIdentity as ExperimentMcpIdentity } from "../experiments/Model.ts";
 
-export class ExperimentMcpError extends Schema.TaggedErrorClass<ExperimentMcpError>()(
+export class ExperimentMcpError extends Schema.TaggedError<ExperimentMcpError>()(
   "ExperimentMcpError",
   {
     code: Schema.Literals([

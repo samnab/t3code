@@ -14,7 +14,9 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
-  readonly capabilities?: ReadonlyArray<Exclude<McpInvocationContext.McpCapability, "experiment">>;
+  readonly capabilities?:
+    | ReadonlySet<Exclude<McpInvocationContext.McpCapability, "experiment">>
+    | ReadonlyArray<Exclude<McpInvocationContext.McpCapability, "experiment">>;
   readonly agentMessaging?: {
     readonly agentId: RuntimeTaskId;
     readonly parentThreadId: ThreadId;
@@ -84,7 +86,7 @@ export interface McpSessionRegistryOptions {
  *
  * The bound matters because `/mcp` is mounted outside the environment auth
  * stack and is reachable on whatever host the server binds to, so this token is
- * the only thing guarding the preview toolkit on a remote-reachable server.
+ * the only thing guarding the `t3-code` toolkits on a remote-reachable server.
  */
 const DEFAULT_LIVENESS_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
@@ -144,7 +146,10 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        capabilities: new Set(request.capabilities ?? ["preview"]),
+        capabilities: new Set<McpInvocationContext.McpCapability>([
+          ...(request.agentMessaging === undefined ? (["pull-requests"] as const) : []),
+          ...(request.capabilities ?? ["preview"]),
+        ]),
         ...(request.agentMessaging === undefined ? {} : { agentMessaging: request.agentMessaging }),
         issuedAt,
       };
@@ -161,6 +166,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerInstanceId: scope.providerInstanceId,
           endpoint: request.agentMessaging === undefined ? endpoint : `${endpoint}/agent`,
           authorizationHeader: `Bearer ${rawToken}`,
+          capabilities: scope.capabilities,
         },
       };
     },
@@ -203,6 +209,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         providerInstanceId: scope.providerInstanceId,
         endpoint: `${endpoint}/experiment`,
         authorizationHeader: `Bearer ${rawToken}`,
+        capabilities: scope.capabilities,
         experiment: {
           runId: request.runId,
           generation: request.generation,

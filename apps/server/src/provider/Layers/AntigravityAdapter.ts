@@ -234,6 +234,26 @@ function isInsideRoot(path: Path.Path, root: string, candidate: string): boolean
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+/** Resolves the existing prefix while preserving a suffix that has not been created yet. */
+const realPathWithMissingSuffix = Effect.fn("AntigravityAdapter.realPathWithMissingSuffix")(
+  function* (fileSystem: FileSystem.FileSystem, path: Path.Path, candidate: string) {
+    const suffix: Array<string> = [];
+    let current = candidate;
+    while (true) {
+      const real = yield* fileSystem.realPath(current).pipe(Effect.option);
+      if (Option.isSome(real)) {
+        return path.join(real.value, ...suffix.toReversed());
+      }
+      const parent = path.dirname(current);
+      if (parent === current) {
+        return candidate;
+      }
+      suffix.push(path.basename(current));
+      current = parent;
+    }
+  },
+);
+
 /** Resolves an agent-supplied path and rejects anything outside the session roots. */
 const resolveClientFilePath = Effect.fn("AntigravityAdapter.resolveClientFilePath")(
   function* (input: {
@@ -245,12 +265,10 @@ const resolveClientFilePath = Effect.fn("AntigravityAdapter.resolveClientFilePat
     const { path } = input;
     const resolved = path.resolve(input.requestPath);
     // Follow symlinks on the parent so a link out of the workspace cannot escape it.
-    const parent = yield* input.fileSystem
-      .realPath(path.dirname(resolved))
-      .pipe(Effect.orElseSucceed(() => path.dirname(resolved)));
+    const parent = yield* realPathWithMissingSuffix(input.fileSystem, path, path.dirname(resolved));
     const real = path.join(parent, path.basename(resolved));
     const roots = yield* Effect.forEach(input.allowedRoots, (root) =>
-      input.fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root)),
+      realPathWithMissingSuffix(input.fileSystem, path, root),
     );
     if (!roots.some((root) => isInsideRoot(path, root, real))) {
       return yield* EffectAcpErrors.AcpRequestError.invalidParams(
@@ -826,6 +844,9 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
                 cwd,
                 clientInfo: { name: "t3-code", version: "0.0.0" },
                 clientFileSystem: true,
+                ...(mcp?.agentDeviceEnvironment
+                  ? { agentDeviceEnvironment: mcp.agentDeviceEnvironment }
+                  : {}),
                 additionalDirectories: [serverConfig.attachmentsDir],
                 ...(Option.isSome(cursor) ? { resumeSessionId: cursor.value.sessionId } : {}),
                 mcpServers,

@@ -72,6 +72,8 @@ import Migration0057 from "./Migrations/057_ThreadExperiments.ts";
 import Migration0058 from "./Migrations/058_NativeChildRunOptions.ts";
 import Migration0059 from "./Migrations/059_NativeChildMessaging.ts";
 import Migration0060 from "./Migrations/060_NativeChildDeliveryBatches.ts";
+import Migration0061 from "./Migrations/061_ProjectionThreadPullRequests.ts";
+import Migration0062 from "./Migrations/062_ProjectionThreadMessageContext.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -83,7 +85,7 @@ import Migration0060 from "./Migrations/060_NativeChildDeliveryBatches.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  */
-export const migrationEntries = [
+const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],
@@ -144,11 +146,13 @@ export const migrationEntries = [
   [58, "NativeChildRunOptions", Migration0058],
   [59, "NativeChildMessaging", Migration0059],
   [60, "NativeChildDeliveryBatches", Migration0060],
+  [61, "ProjectionThreadPullRequests", Migration0061],
+  [62, "ProjectionThreadMessageContext", Migration0062],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
 
-export const makeMigrationLoader = (throughId?: number) =>
+const makeMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(
     Object.fromEntries(
       migrationEntries

@@ -113,6 +113,7 @@ describe("buildPiRpcLaunch", () => {
         providerInstanceId: ProviderInstanceId.make("pi"),
         endpoint: "http://127.0.0.1/mcp",
         authorizationHeader: "Bearer secret",
+        capabilities: new Set(["pull-requests", "delegation"] as const),
       },
     });
     expect(launch.args).toEqual(["--mode", "rpc", "--extension", "/cache/pi-t3-mcp-extension.ts"]);
@@ -138,6 +139,7 @@ describe("buildPiExperimentRpcLaunch", () => {
         providerInstanceId: ProviderInstanceId.make("pi"),
         endpoint: "http://127.0.0.1/mcp/experiment",
         authorizationHeader: "Bearer restricted-token",
+        capabilities: new Set(["experiment"] as const),
         experiment: { runId: "run-1", generation: 2 },
       },
     });

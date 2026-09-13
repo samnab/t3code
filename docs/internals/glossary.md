@@ -61,7 +61,7 @@ A short, durable, T3-owned statement of intent for a thread, set with `/goal` or
 
 #### Goal loop
 
-The drive state layered on a [Goal](#goal) that turns it from inert text into continuation turns: `ThreadGoalLoop` (state, mode, iterations, maxIterations, reason) in [the contracts][1]. State moves through `idle` → `running` (T3 or the provider is working the goal) → `paused` (user hold) / `blocked` (agent reported it cannot proceed) / `capped` (iteration ceiling, default 10) / `completed` (agent's own done signal). Mode is derived from the thread's provider, never chosen by the user: `t3` injects the goal into each provider turn and starts continuation turns from `GoalLoopReactor`, `native` binds the goal to the provider's own goal instead of driving turns — `NativeGoalReactor` sets and clears Codex's [execution goal](#execution-goal-codex-native) from the T3 goal, mirrors Codex's status back onto `state` through the server-only `sync` action, and re-derives `mode` from the bound session's real driver because the decider can only guess it from the instance id — and `unsupported` is reserved for a provider that can do neither and is not produced today. The `thread.goal.loop` command (pause/resume/continue/complete/block/reset, plus the server-only `sync`) drives transitions; see [decider.ts][8]. Only `GoalLoopReactor` starts T3 turns, and only for a `t3`-mode thread: at a turn boundary (`thread.turn-diff-completed`), on the boot sweep, or on a `thread.goal-loop-updated` event whose `resumed` flag is set. The decider sets that flag for `resume` and `reset` alone, so those two start the next turn immediately while a freshly set goal waits for the user's first message, and a `sync` never starts one. A resumed turn skips the last-reply scan, because that reply still carries the `<goal_blocked>` or `<goal_complete>` tag that stopped the loop. On a `native` thread the same resumed event instead makes `NativeGoalReactor` push the goal back to Codex as active.
+The drive state layered on a [Goal](#goal) that turns it from inert text into continuation turns: `ThreadGoalLoop` (state, mode, iterations, maxIterations, reason) in [the contracts][1]. State moves through `idle` → `running` (T3 or the provider is working the goal) → `paused` (user hold) / `blocked` (agent reported it cannot proceed) / `capped` (iteration ceiling, default 10) / `completed` (agent's own done signal). Mode is derived from the thread's provider, never chosen by the user: `t3` injects the goal into each provider turn and starts continuation turns from `GoalLoopReactor`, while `native` binds the goal to the provider's own goal and leaves continuation scheduling to that provider. `NativeGoalReactor` sets and clears Codex's [execution goal](#execution-goal-codex-native), mirrors its status into the loop, and re-derives the mode from the bound session's real driver. The `thread.goal.loop` command drives transitions; see [decider.ts][8]. Setting, resuming, or resetting a goal marks an idle loop to start work immediately. A resumed turn skips the last-reply scan because that reply may still carry the tag that stopped the loop. A server-only `sync` updates state without starting work.
 
 #### Execution goal (Codex-native)
 
@@ -195,6 +195,45 @@ once — live when connected, on the next connect otherwise — so setting it sw
 theme a user picks in Settings afterwards sticks until the next set; mobile keeps its own
 appearance settings. Naming a published [environment theme](#environment-theme) is how a desktop
 ships T3 Code already matching it.
+
+### Pull requests
+
+#### Pull request link
+
+A persisted thread association identified by host, repository, and number. Links can cross projects
+within an environment and carry a server-maintained snapshot.
+
+#### Pull request sync
+
+The reactor that refreshes each distinct linked review and discovers native stack layers.
+
+#### Current pull request
+
+The link used by single-review controls and older clients. Open work takes precedence; a completed
+single chain points at its top layer. Unrelated terminal links use the latest update.
+
+### Composer context
+
+#### Context record
+
+The typed payload behind a composer chip, keyed by `contextId` in `message.context.records`. It
+never holds attachment bytes.
+
+#### Context reference
+
+One occurrence of a record in message text, written as
+`[label](t3-context://v1/<kind>/<contextId>)`. Several references can share one record.
+
+#### Attachment binding
+
+The link from an image or file record to its server-owned attachment. Its attachment ID can change
+without changing `contextId`.
+
+#### Attachment inventory
+
+The ordered image records shown as thumbnails above the prose, including images with no inline
+references. See [composer context references](./composer-context-references.md) for the contract and
+lifecycle.
 
 ## Practical Shortcuts
 

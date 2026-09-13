@@ -537,11 +537,6 @@ function OptimizerEnvironmentSettings({
       <SettingsSection
         id="optimizer-status"
         title="Status"
-        description={
-          environment
-            ? `${environment.label} · probes run where this environment's server runs.`
-            : "Probes run where the selected environment's server runs."
-        }
         headerAction={
           <Button
             size="xs"
@@ -584,7 +579,6 @@ function OptimizerEnvironmentSettings({
       <SettingsSection
         id="optimizer-savings"
         title="Savings"
-        description="RTK and Headroom report their own environment-level counters. CBM has no token-savings telemetry."
       >
         <SavingsRows snapshot={statusQuery.data} environmentConnected={environmentConnected} />
       </SettingsSection>
@@ -592,7 +586,6 @@ function OptimizerEnvironmentSettings({
       <SettingsSection
         id="optimizer-savings-history"
         title="Savings history"
-        description="Headroom history uses host-reported rollups and remains scoped to this environment."
       >
         <SavingsHistoryRows
           snapshot={statusQuery.data}
@@ -603,7 +596,6 @@ function OptimizerEnvironmentSettings({
       <SettingsSection
         id="optimizer-project"
         title="Project attachments"
-        description="Choose which optimizers T3 attaches when a new provider session starts. All are off by default."
       >
         {environmentProjects.length === 0 ? (
           <SettingsRow
@@ -672,7 +664,6 @@ function OptimizerEnvironmentSettings({
       <SettingsSection
         id="optimizer-compatibility"
         title="Provider compatibility"
-        description="T3 only attaches an optimizer where the provider has a compatible hook, proxy, or MCP surface."
       >
         {OPTIMIZER_ORDER.map((id) => (
           <ProviderCompatibilityRow key={id} id={id} />
@@ -682,7 +673,6 @@ function OptimizerEnvironmentSettings({
       <SettingsSection
         id="optimizer-configuration"
         title="Configuration"
-        description="These settings are read on the selected environment. T3 does not install, start, or update optimizer tools."
       >
         <HeadroomProxySettingsRow
           key={environmentId}
@@ -744,7 +734,6 @@ export function OptimizersSettingsPanel() {
       <SettingsSection
         id="optimizers"
         title="Optimizers"
-        description="Bring your own RTK, Headroom, or Codebase Memory installation. T3 discovers tools on the environment that runs your provider sessions."
       >
         <SettingsRow
           title="Environment"
