@@ -360,6 +360,34 @@ export function sortActiveThreadsByOrderKey<
 }
 
 /**
+ * Active-block sort driven by the sidebar thread sort-order setting, shared by
+ * the web sidebar and mobile's Thread List v2. "created_at" (Default) is the
+ * order-key sort above. "updated_at" (Last updated) ignores those keys — so
+ * manual arrangement is neither displayed nor editable — and sorts
+ * newest-first by the user's last message, maxed with the creation/un-settle
+ * anchor so a freshly un-settled thread still surfaces.
+ */
+export function sortActiveThreadsBySortOrder<
+  T extends ThreadSortInput & {
+    readonly id: string;
+    readonly unsettledAt?: string | null | undefined;
+    readonly activeOrderKey?: string | null | undefined;
+    readonly environmentId?: string | undefined;
+  },
+>(threads: readonly T[], sortOrder: SidebarThreadSortOrder): T[] {
+  if (sortOrder === "created_at") return sortActiveThreadsByOrderKey(threads);
+  const recencyMs = (thread: T) =>
+    Math.max(
+      getThreadSortTimestamp(thread, "updated_at"),
+      toSortableTimestamp(thread.createdAt) ?? 0,
+      toSortableTimestamp(thread.unsettledAt ?? undefined) ?? 0,
+    );
+  return [...threads].sort(
+    (left, right) => recencyMs(right) - recencyMs(left) || left.id.localeCompare(right.id),
+  );
+}
+
+/**
  * planPinnedReorder specialized for mobile's Move up / Move down menu
  * actions: swap the moved thread with its displayed neighbor. Null when the
  * move falls off either end of the list. Same single-write-per-move

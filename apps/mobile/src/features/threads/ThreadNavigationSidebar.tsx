@@ -11,7 +11,11 @@ import {
 import { LegendList } from "@legendapp/list/react-native";
 import type { MenuAction } from "@react-native-menu/menu";
 import { useAtomValue } from "@effect/atom-react";
-import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
+import {
+  DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
+  type EnvironmentId,
+  resolveEnvironmentMachineKind,
+} from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LayoutChangeEvent } from "react-native";
 import { Platform, Pressable, StyleSheet, TextInput, View } from "react-native";
@@ -499,6 +503,7 @@ function ThreadNavigationSidebarPane(
           section,
           pendingOrder,
           now: new Date().toISOString(),
+          threadSortOrder: options.threadSortOrder,
           settlementEnvironmentIds,
           snoozeEnvironmentIds,
           queuedThreadKeys,
@@ -512,6 +517,7 @@ function ThreadNavigationSidebarPane(
     queuedThreadKeys,
     settlementEnvironmentIds,
     snoozeEnvironmentIds,
+    options.threadSortOrder,
     nowMinute,
     snoozeWakeTick,
   ]);
@@ -533,6 +539,7 @@ function ThreadNavigationSidebarPane(
       projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
       searchQuery: props.searchQuery,
       matchedThreadKeys,
+      threadSortOrder: options.threadSortOrder,
       settlementEnvironmentIds,
       snoozeEnvironmentIds,
       queuedThreadKeys,
@@ -551,6 +558,7 @@ function ThreadNavigationSidebarPane(
     settledShelfExpanded,
     props.selectedThreadKey,
     options.selectedEnvironmentId,
+    options.threadSortOrder,
     props.searchQuery,
     matchedThreadKeys,
     settledVisibleCount,
@@ -624,6 +632,9 @@ function ThreadNavigationSidebarPane(
     threadListV2Enabled,
     threadListV2Layout,
   ]);
+  // Web parity: under "Last updated" the active block is time-sorted, so its
+  // rows can no longer be moved or arranged; pinned moves are unchanged.
+  const activeMovesEnabled = options.threadSortOrder !== "updated_at";
   const listMenuActions = useMemo<MenuAction[]>(
     () => [
       {
@@ -667,11 +678,20 @@ function ThreadNavigationSidebarPane(
               ],
             },
           ] satisfies MenuAction[])),
-      // v2 lays the list out in fixed creation order — offering sort/group
-      // controls it silently ignores would be a lie. Environment still
-      // scopes the v2 partition, so it stays.
+      // V2 honors the thread sort (Default arrangement vs Last updated) but
+      // still lays projects out flat, so "Sort projects" remains legacy-only.
       ...(threadListV2Enabled
-        ? []
+        ? ([
+            {
+              id: "thread-sort",
+              title: "Sort threads",
+              subactions: THREAD_SORT_OPTIONS.map((option) => ({
+                id: `thread-sort:${option.value}`,
+                title: option.label,
+                state: options.threadSortOrder === option.value ? "on" : "off",
+              })),
+            },
+          ] satisfies MenuAction[])
         : ([
             {
               id: "project-sort",
@@ -939,7 +959,7 @@ function ThreadNavigationSidebarPane(
               reorderSupported={
                 item.item.pinned
                   ? pinReorderEnvironmentIds.has(thread.environmentId)
-                  : activeReorderEnvironmentIds.has(thread.environmentId)
+                  : activeMovesEnabled && activeReorderEnvironmentIds.has(thread.environmentId)
               }
               canMoveUp={pendingOrder === null && movePlanner(movedId, "up") !== null}
               canMoveDown={pendingOrder === null && movePlanner(movedId, "down") !== null}
@@ -1070,6 +1090,7 @@ function ThreadNavigationSidebarPane(
     },
     [
       materialYouStyleLayoutActive,
+      activeMovesEnabled,
       archiveThread,
       activeReorderEnvironmentIds,
       threadMovePlanners,
@@ -1114,10 +1135,12 @@ function ThreadNavigationSidebarPane(
       updateGroupDisplay,
     ],
   );
-  // v2 ignores the sort/group options, so only the environment filter can
-  // light the "customized" state while the beta is on.
+  // The filter icon lights for anything that reshapes the v2 list, including
+  // a non-default thread sort.
   const filterCustomized = threadListV2Enabled
-    ? options.selectedEnvironmentId !== null || selectedProjectKey !== null
+    ? options.selectedEnvironmentId !== null ||
+      selectedProjectKey !== null ||
+      options.threadSortOrder !== DEFAULT_SIDEBAR_THREAD_SORT_ORDER
     : hasCustomHomeListOptions({ ...options, selectedProjectKey });
   const filterIcon = filterCustomized
     ? "line.3.horizontal.decrease.circle.fill"

@@ -10,7 +10,7 @@ import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/c
 import type { AsyncResult } from "effect/unstable/reactivity";
 import {
   planPinnedReorder,
-  sortActiveThreadsByOrderKey,
+  sortActiveThreadsBySortOrder,
 } from "@t3tools/client-runtime/state/thread-sort";
 import {
   getThreadSortTimestamp,
@@ -877,27 +877,19 @@ function firstValidTimestamp(
 }
 
 // Sidebar's active-thread sort, driven by the sidebarThreadSortOrder client
-// setting. "created_at" (labeled "Default") is today's static list: the
-// client-runtime order-key sort with drag reordering. "updated_at" (labeled
-// "Last updated") ignores those keys and sorts newest-first by the user's
-// last message (getThreadSortTimestamp, shared with the command palette and
-// mobile), maxed with the creation/un-settle anchor so a freshly un-settled
-// thread still surfaces.
+// setting. The comparator lives in client-runtime (state/thread-sort) so web
+// and mobile compute the same order: "created_at" (labeled "Default") is the
+// order-key sort with drag reordering; "updated_at" (labeled "Last updated")
+// ignores those keys and sorts newest-first by the user's last message.
 export function sortThreadsForSidebar<
   T extends ThreadSortInput & {
     readonly id: string;
     readonly unsettledAt?: string | null | undefined;
+    readonly activeOrderKey?: string | null | undefined;
+    readonly environmentId?: string | undefined;
   },
 >(threads: readonly T[], sortOrder: SidebarThreadSortOrder = "created_at"): T[] {
-  if (sortOrder === "created_at") return sortActiveThreadsByOrderKey(threads);
-  const recencyMs = (thread: T) =>
-    Math.max(
-      getThreadSortTimestamp(thread, "updated_at"),
-      Math.max(firstValidTimestampMs(thread.createdAt), firstValidTimestampMs(thread.unsettledAt)),
-    );
-  return [...threads].toSorted(
-    (left, right) => recencyMs(right) - recencyMs(left) || left.id.localeCompare(right.id),
-  );
+  return sortActiveThreadsBySortOrder(threads, sortOrder);
 }
 
 // Pinned-reorder key math and the keyed sort live in client-runtime
