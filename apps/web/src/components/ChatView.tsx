@@ -289,6 +289,7 @@ import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { confirmTerminalClose, isTerminalCloseConfirmPending } from "../lib/terminalCloseConfirm";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
+import { runThreadGoalMutation } from "../lib/threadGoalMutation";
 import {
   preventRepeatedTerminalCloseShortcut,
   preventTerminalCloseShortcut,
@@ -1859,9 +1860,6 @@ export default function ChatView(props: ChatViewProps) {
   const sendInFlightRef = useRef(false);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   const feedbackUploadsInFlightRef = useRef(new Set<string>());
-  // Guards /goal metadata writes so a rapid Enter can never interleave a set
-  // with a clear.
-  const goalMetadataInFlightRef = useRef(false);
   const nextExperimentPreviewRequestIdRef = useRef(0);
   const experimentPreviewRequestRef = useRef<ThreadExperimentPreviewRequest | null>(null);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
@@ -3935,57 +3933,53 @@ export default function ChatView(props: ChatViewProps) {
       setComposerThreadSettings(composerDraftTarget, { goal: null });
       return;
     }
-    if (!activeServerThread || goalMetadataInFlightRef.current) return;
-    // The write slot is held for the whole sequence: a second delete or a
-    // concurrent /goal write must not interleave with the pause and
-    // interrupt that precede the clear.
-    goalMetadataInFlightRef.current = true;
+    if (!activeServerThread) return;
     const interruptInput = buildRunningThreadTurnInterruptInput(activeServerThread, phase);
-    try {
-      await deleteThreadGoalWork({
-        loop: activeServerThread.goalLoop ?? null,
-        pauseGoalLoop: pauseGoalLoopForLifecycle,
-        interruptActiveTurn: async () => {
-          if (!interruptInput) return true;
-          const result = await interruptThreadTurn({
-            environmentId: activeServerThread.environmentId,
-            input: interruptInput,
-          });
-          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-            const error = squashAtomCommandFailure(result);
-            setThreadError(
-              activeServerThread.id,
-              error instanceof Error ? error.message : "Failed to stop the current turn.",
-            );
-          }
-          // The clear still runs: removing the goal is the point of delete,
-          // and an uninterruptible turn merely finishes on its own.
-          return true;
-        },
-        clearGoal: async () => {
-          const result = await updateThreadMetadata({
-            environmentId: activeServerThread.environmentId,
-            input: { threadId: activeServerThread.id, goal: null },
-          });
-          if (result._tag === "Failure") {
-            if (!isAtomCommandInterrupted(result)) {
+    await runThreadGoalMutation(
+      scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
+      () =>
+        deleteThreadGoalWork({
+          loop: activeServerThread.goalLoop ?? null,
+          pauseGoalLoop: pauseGoalLoopForLifecycle,
+          interruptActiveTurn: async () => {
+            if (!interruptInput) return true;
+            const result = await interruptThreadTurn({
+              environmentId: activeServerThread.environmentId,
+              input: interruptInput,
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
               const error = squashAtomCommandFailure(result);
-              toastManager.add(
-                stackedThreadToast({
-                  type: "error",
-                  title: "Could not delete thread goal",
-                  description: error instanceof Error ? error.message : "An error occurred.",
-                }),
+              setThreadError(
+                activeServerThread.id,
+                error instanceof Error ? error.message : "Failed to stop the current turn.",
               );
             }
-            return false;
-          }
-          return true;
-        },
-      });
-    } finally {
-      goalMetadataInFlightRef.current = false;
-    }
+            // The clear still runs: removing the goal is the point of delete,
+            // and an uninterruptible turn merely finishes on its own.
+            return true;
+          },
+          clearGoal: async () => {
+            const result = await updateThreadMetadata({
+              environmentId: activeServerThread.environmentId,
+              input: { threadId: activeServerThread.id, goal: null },
+            });
+            if (result._tag === "Failure") {
+              if (!isAtomCommandInterrupted(result)) {
+                const error = squashAtomCommandFailure(result);
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title: "Could not delete thread goal",
+                    description: error instanceof Error ? error.message : "An error occurred.",
+                  }),
+                );
+              }
+              return false;
+            }
+            return true;
+          },
+        }),
+    );
   }, [
     activeServerThread,
     composerDraftTarget,
@@ -7499,13 +7493,19 @@ export default function ChatView(props: ChatViewProps) {
         }
         return;
       }
-      if (goalMetadataInFlightRef.current || !activeServerThread) return;
-      goalMetadataInFlightRef.current = true;
-      const result = await updateThreadMetadata({
-        environmentId: activeServerThread.environmentId,
-        input: { threadId: activeServerThread.id, goal: goalNextValue },
-      });
-      goalMetadataInFlightRef.current = false;
+      if (!activeServerThread) return;
+      const mutation = await runThreadGoalMutation(
+        scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
+        () =>
+          updateThreadMetadata({
+            environmentId: activeServerThread.environmentId,
+            input: { threadId: activeServerThread.id, goal: goalNextValue },
+          }),
+      );
+      // Keep the command in the composer when another surface owns the slot,
+      // so the user's replacement is still available to submit again.
+      if (mutation.status === "busy") return;
+      const result = mutation.value;
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);

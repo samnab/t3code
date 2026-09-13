@@ -253,8 +253,9 @@ says it is stuck, or you step in. This works the same way with every provider, i
 Codex's separate provider-native execution goals remain available through the
 [Codex execution-goal panel](./providers-codex.md#codex-execution-goals).
 
-The loop only changes between turns, never in the middle of one. Every control below therefore
-takes effect once the turn that is running ends. The goal pill shows the loop's state:
+Pause, resume, **Continue anyway**, and **Restart** change the loop between turns; they do not
+interrupt the turn already running. **Stop goal work** pauses the loop and interrupts that turn
+immediately. The goal pill shows the loop's state:
 
 - A running loop shows an iteration count, such as `3/10`.
 - **Paused** holds the loop without losing progress; select the pause button on the pill, or pause

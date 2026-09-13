@@ -21,6 +21,7 @@ import {
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
+import { runThreadGoalMutation } from "../lib/threadGoalMutation";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
@@ -163,6 +164,7 @@ export function useThreadActionMenu(input: {
           hasReloadableSession: thread.session !== null && thread.session.status !== "stopped",
           supports,
           executionGoal: readThreadSupportsExecutionGoal(threadRef),
+          goal: thread.goal ?? null,
           goalLoop: thread.goalLoop ?? null,
           snoozePresets,
         });
@@ -290,6 +292,19 @@ export function useThreadActionMenu(input: {
               }),
             );
             return;
+          case "continue-goal-loop":
+          case "restart-goal-loop":
+            await reportFailure(
+              action === "continue-goal-loop"
+                ? "Failed to continue goal loop"
+                : "Failed to restart goal loop",
+              () =>
+                setThreadGoalLoop({
+                  environmentId: threadRef.environmentId,
+                  input: { threadId: threadRef.threadId, action: "reset" },
+                }),
+            );
+            return;
           case "stop-goal-loop":
             // Pause the loop before interrupting, or the interrupted turn's
             // completion hands straight into the loop's next continuation.
@@ -326,48 +341,50 @@ export function useThreadActionMenu(input: {
             });
             return;
           case "delete-goal":
-            await deleteThreadGoalWork({
-              loop: thread.goalLoop ?? null,
-              pauseGoalLoop: async () => {
-                const result = await setThreadGoalLoop({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, action: "pause" },
-                });
-                if (result._tag === "Failure") {
-                  if (!isAtomCommandInterrupted(result)) {
-                    failureToast("Failed to pause goal loop", squashAtomCommandFailure(result));
+            await runThreadGoalMutation(threadRef, () =>
+              deleteThreadGoalWork({
+                loop: thread.goalLoop ?? null,
+                pauseGoalLoop: async () => {
+                  const result = await setThreadGoalLoop({
+                    environmentId: threadRef.environmentId,
+                    input: { threadId: threadRef.threadId, action: "pause" },
+                  });
+                  if (result._tag === "Failure") {
+                    if (!isAtomCommandInterrupted(result)) {
+                      failureToast("Failed to pause goal loop", squashAtomCommandFailure(result));
+                    }
+                    return false;
                   }
-                  return false;
-                }
-                return true;
-              },
-              interruptActiveTurn: async () => {
-                if (!thread.session?.activeTurnId) return true;
-                const result = await interruptThreadTurn({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, turnId: thread.session.activeTurnId },
-                });
-                // An interrupt failure still clears: removing the goal is
-                // the point; the turn merely finishes on its own.
-                if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                  failureToast("Failed to stop goal work", squashAtomCommandFailure(result));
-                }
-                return true;
-              },
-              clearGoal: async () => {
-                const result = await updateThreadMetadata({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, goal: null },
-                });
-                if (result._tag === "Failure") {
-                  if (!isAtomCommandInterrupted(result)) {
-                    failureToast("Failed to delete goal", squashAtomCommandFailure(result));
+                  return true;
+                },
+                interruptActiveTurn: async () => {
+                  if (!thread.session?.activeTurnId) return true;
+                  const result = await interruptThreadTurn({
+                    environmentId: threadRef.environmentId,
+                    input: { threadId: threadRef.threadId, turnId: thread.session.activeTurnId },
+                  });
+                  // An interrupt failure still clears: removing the goal is
+                  // the point; the turn merely finishes on its own.
+                  if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+                    failureToast("Failed to stop goal work", squashAtomCommandFailure(result));
                   }
-                  return false;
-                }
-                return true;
-              },
-            });
+                  return true;
+                },
+                clearGoal: async () => {
+                  const result = await updateThreadMetadata({
+                    environmentId: threadRef.environmentId,
+                    input: { threadId: threadRef.threadId, goal: null },
+                  });
+                  if (result._tag === "Failure") {
+                    if (!isAtomCommandInterrupted(result)) {
+                      failureToast("Failed to delete goal", squashAtomCommandFailure(result));
+                    }
+                    return false;
+                  }
+                  return true;
+                },
+              }),
+            );
             return;
           case "reload-agent": {
             const result = await reloadAgent({

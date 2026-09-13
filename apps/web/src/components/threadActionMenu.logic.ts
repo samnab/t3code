@@ -22,6 +22,8 @@ export type ThreadActionMenuId =
   | "execution-goal"
   | "pause-goal-loop"
   | "resume-goal-loop"
+  | "continue-goal-loop"
+  | "restart-goal-loop"
   | "stop-goal-loop"
   | "delete-goal"
   | "reload-agent"
@@ -52,6 +54,8 @@ export interface ThreadActionMenuState {
   };
   /** The thread's live session provider exposes native execution goals. */
   readonly executionGoal: boolean;
+  /** Saved T3 goal text, independent of whether a loop projection exists. */
+  readonly goal: string | null;
   /** Server-driven goal loop state, when the server and thread have one. */
   readonly goalLoop: ThreadGoalLoop | null;
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
@@ -123,14 +127,18 @@ export function buildThreadActionMenuItems(
       ? [{ id: "pause-goal-loop" as const, label: "Pause goal loop", icon: "pause" }]
       : isThreadGoalLoopActionAvailable(state.goalLoop, "resume")
         ? [{ id: "resume-goal-loop" as const, label: "Resume goal loop", icon: "play" }]
-        : []),
+        : isThreadGoalLoopActionAvailable(state.goalLoop, "continue")
+          ? [{ id: "continue-goal-loop" as const, label: "Continue anyway", icon: "refresh-cw" }]
+          : isThreadGoalLoopActionAvailable(state.goalLoop, "reset")
+            ? [{ id: "restart-goal-loop" as const, label: "Restart goal", icon: "refresh-cw" }]
+            : []),
     // Stop pauses the loop first and then interrupts the running turn, so it
     // is only offered while a turn is actually active; delete clears the
     // saved goal (stopping active goal work first).
     ...(state.goalLoop !== null && state.isRunning
       ? [{ id: "stop-goal-loop" as const, label: "Stop goal work", icon: "square" }]
       : []),
-    ...(state.goalLoop !== null
+    ...(state.goal !== null
       ? [
           {
             id: "delete-goal" as const,

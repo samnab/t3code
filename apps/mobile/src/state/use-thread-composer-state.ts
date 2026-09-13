@@ -90,6 +90,7 @@ import { removeThreadOutboxMessage } from "./thread-outbox-removal";
 import { dispatchingQueuedMessageIdAtom, useThreadOutboxMessages } from "./use-thread-outbox";
 import { threadEnvironment } from "./threads";
 import { resolveComposerThreadGoalCommand } from "./thread-goal-command";
+import { COMMAND_GOAL_WRITE, canClaimThreadGoalMetadataWrite } from "./thread-goal-metadata-write";
 import { useAtomCommand } from "./use-atom-command";
 import {
   composerAttachmentUploadBlockReason,
@@ -151,10 +152,6 @@ export function useThreadDraftForThread(input: {
     draftAttachments: draft.attachments,
   };
 }
-
-/** Marks the in-flight goal-metadata write slot as owned by the typed /goal
- * command write, which has no editor epoch (those start at 1). */
-const COMMAND_GOAL_WRITE = 0;
 
 export function useThreadComposerState() {
   const {
@@ -469,8 +466,7 @@ export function useThreadComposerState() {
       // supersedes it and the stale completion is ignored by epoch below.
       if (
         !state ||
-        goalMetadataInFlightRef.current === state.epoch ||
-        goalMetadataInFlightRef.current === COMMAND_GOAL_WRITE
+        !canClaimThreadGoalMetadataWrite(goalMetadataInFlightRef.current, state.epoch)
       ) {
         return;
       }
@@ -536,11 +532,9 @@ export function useThreadComposerState() {
   const clearThreadGoalFromEditor = useCallback(async () => {
     const state = threadGoalEditorState;
     if (!state || state.savedGoal === null || goalDeleteInFlightRef.current) return;
-    // An in-flight metadata save owns the write slot: clearing now would
-    // no-op inside writeThreadGoalFromEditor while the delete helper still
-    // reported success. The delete sequence's own clear runs with the slot
-    // free — saves refuse while it holds the slot.
-    if (goalMetadataInFlightRef.current !== null) return;
+    // A reopened editor may supersede an older editor save. The current
+    // editor's own save and a typed /goal command still keep ownership.
+    if (!canClaimThreadGoalMetadataWrite(goalMetadataInFlightRef.current, state.epoch)) return;
     const shell = selectedThreadShell;
     // Deleting a goal that is driving work must stop that work first: pause
     // the loop (so no continuation can start mid-sequence), interrupt the

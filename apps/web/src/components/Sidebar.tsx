@@ -102,6 +102,7 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../termina
 import { isMacPlatform } from "~/lib/utils";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
+import { runThreadGoalMutation } from "../lib/threadGoalMutation";
 import { readLocalApi } from "../localApi";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
@@ -4100,6 +4101,7 @@ export default function Sidebar() {
                 titleRegeneration: supportsTitleRegeneration,
               },
               executionGoal: readThreadSupportsExecutionGoal(threadRef),
+              goal: thread.goal ?? null,
               goalLoop: thread.goalLoop ?? null,
               snoozePresets,
             }),
@@ -4225,6 +4227,27 @@ export default function Sidebar() {
             }
             return;
           }
+          case "continue-goal-loop":
+          case "restart-goal-loop": {
+            const result = await setThreadGoalLoop({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, action: "reset" },
+            });
+            if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title:
+                    clicked.value === "continue-goal-loop"
+                      ? "Failed to continue goal loop"
+                      : "Failed to restart goal loop",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return;
+          }
           case "stop-goal-loop": {
             // Pause the loop before interrupting, or the interrupted turn's
             // completion hands straight into the loop's next continuation.
@@ -4279,72 +4302,76 @@ export default function Sidebar() {
             return;
           }
           case "delete-goal": {
-            await deleteThreadGoalWork({
-              loop: thread.goalLoop ?? null,
-              pauseGoalLoop: async () => {
-                const pauseResult = await setThreadGoalLoop({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, action: "pause" },
-                });
-                if (pauseResult._tag === "Failure") {
-                  if (!isAtomCommandInterrupted(pauseResult)) {
-                    const error = squashAtomCommandFailure(pauseResult);
+            await runThreadGoalMutation(threadRef, () =>
+              deleteThreadGoalWork({
+                loop: thread.goalLoop ?? null,
+                pauseGoalLoop: async () => {
+                  const pauseResult = await setThreadGoalLoop({
+                    environmentId: threadRef.environmentId,
+                    input: { threadId: threadRef.threadId, action: "pause" },
+                  });
+                  if (pauseResult._tag === "Failure") {
+                    if (!isAtomCommandInterrupted(pauseResult)) {
+                      const error = squashAtomCommandFailure(pauseResult);
+                      toastManager.add(
+                        stackedThreadToast({
+                          type: "error",
+                          title: "Failed to pause goal loop",
+                          description:
+                            error instanceof Error ? error.message : "An error occurred.",
+                        }),
+                      );
+                    }
+                    return false;
+                  }
+                  return true;
+                },
+                interruptActiveTurn: async () => {
+                  if (!thread.session?.activeTurnId) return true;
+                  const interruptResult = await interruptThreadTurn({
+                    environmentId: threadRef.environmentId,
+                    input: { threadId: threadRef.threadId, turnId: thread.session.activeTurnId },
+                  });
+                  // An interrupt failure still clears: removing the goal is
+                  // the point; the turn merely finishes on its own.
+                  if (
+                    interruptResult._tag === "Failure" &&
+                    !isAtomCommandInterrupted(interruptResult)
+                  ) {
+                    const error = squashAtomCommandFailure(interruptResult);
                     toastManager.add(
                       stackedThreadToast({
                         type: "error",
-                        title: "Failed to pause goal loop",
+                        title: "Failed to stop goal work",
                         description: error instanceof Error ? error.message : "An error occurred.",
                       }),
                     );
                   }
-                  return false;
-                }
-                return true;
-              },
-              interruptActiveTurn: async () => {
-                if (!thread.session?.activeTurnId) return true;
-                const interruptResult = await interruptThreadTurn({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, turnId: thread.session.activeTurnId },
-                });
-                // An interrupt failure still clears: removing the goal is
-                // the point; the turn merely finishes on its own.
-                if (
-                  interruptResult._tag === "Failure" &&
-                  !isAtomCommandInterrupted(interruptResult)
-                ) {
-                  const error = squashAtomCommandFailure(interruptResult);
-                  toastManager.add(
-                    stackedThreadToast({
-                      type: "error",
-                      title: "Failed to stop goal work",
-                      description: error instanceof Error ? error.message : "An error occurred.",
-                    }),
-                  );
-                }
-                return true;
-              },
-              clearGoal: async () => {
-                const clearResult = await updateThreadMetadata({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, goal: null },
-                });
-                if (clearResult._tag === "Failure") {
-                  if (!isAtomCommandInterrupted(clearResult)) {
-                    const error = squashAtomCommandFailure(clearResult);
-                    toastManager.add(
-                      stackedThreadToast({
-                        type: "error",
-                        title: "Failed to delete goal",
-                        description: error instanceof Error ? error.message : "An error occurred.",
-                      }),
-                    );
+                  return true;
+                },
+                clearGoal: async () => {
+                  const clearResult = await updateThreadMetadata({
+                    environmentId: threadRef.environmentId,
+                    input: { threadId: threadRef.threadId, goal: null },
+                  });
+                  if (clearResult._tag === "Failure") {
+                    if (!isAtomCommandInterrupted(clearResult)) {
+                      const error = squashAtomCommandFailure(clearResult);
+                      toastManager.add(
+                        stackedThreadToast({
+                          type: "error",
+                          title: "Failed to delete goal",
+                          description:
+                            error instanceof Error ? error.message : "An error occurred.",
+                        }),
+                      );
+                    }
+                    return false;
                   }
-                  return false;
-                }
-                return true;
-              },
-            });
+                  return true;
+                },
+              }),
+            );
             return;
           }
           case "reload-agent": {

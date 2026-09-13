@@ -13,6 +13,7 @@ const baseState: ThreadActionMenuState = {
   hasReloadableSession: true,
   supports: { settlement: true, snooze: true, pinning: true, titleRegeneration: true },
   executionGoal: false,
+  goal: null,
   goalLoop: null,
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
@@ -131,6 +132,52 @@ describe("buildThreadActionMenuItems", () => {
 
     expect(items).not.toContain("resume-goal-loop");
     expect(items).not.toContain("pause-goal-loop");
+    expect(items).not.toContain("continue-goal-loop");
+    expect(items).not.toContain("restart-goal-loop");
+  });
+
+  it("offers continue for a capped standard goal loop", () => {
+    const items = buildThreadActionMenuItems({
+      ...baseState,
+      goal: "Ship it",
+      goalLoop: {
+        kind: "standard",
+        state: "capped",
+        mode: "t3",
+        iterations: 10,
+        maxIterations: 10,
+        reason: null,
+        experiment: null,
+        updatedAt: "2026-09-07T02:00:00.000Z",
+      },
+    });
+
+    expect(items.find((item) => item.id === "continue-goal-loop")).toMatchObject({
+      label: "Continue anyway",
+    });
+    expect(items.map((item) => item.id)).not.toContain("restart-goal-loop");
+  });
+
+  it("offers restart for a completed standard goal loop", () => {
+    const items = buildThreadActionMenuItems({
+      ...baseState,
+      goal: "Ship it",
+      goalLoop: {
+        kind: "standard",
+        state: "completed",
+        mode: "t3",
+        iterations: 4,
+        maxIterations: 10,
+        reason: null,
+        experiment: null,
+        updatedAt: "2026-09-07T02:00:00.000Z",
+      },
+    });
+
+    expect(items.find((item) => item.id === "restart-goal-loop")).toMatchObject({
+      label: "Restart goal",
+    });
+    expect(items.map((item) => item.id)).not.toContain("continue-goal-loop");
   });
 
   it("offers stop only while a goal loop exists and a turn is running", () => {
@@ -155,7 +202,7 @@ describe("buildThreadActionMenuItems", () => {
     expect(ids({ ...baseState, isRunning: true })).not.toContain("stop-goal-loop");
   });
 
-  it("offers a destructive delete goal whenever a goal loop exists", () => {
+  it("offers a destructive delete goal whenever a goal is saved", () => {
     const runningLoop = {
       kind: "standard",
       state: "running",
@@ -166,10 +213,13 @@ describe("buildThreadActionMenuItems", () => {
       experiment: null,
       updatedAt: "2026-09-07T02:00:00.000Z",
     } as const;
-    const item = buildThreadActionMenuItems({ ...baseState, goalLoop: runningLoop }).find(
-      (candidate) => candidate.id === "delete-goal",
-    );
+    const item = buildThreadActionMenuItems({
+      ...baseState,
+      goal: "Ship it",
+      goalLoop: runningLoop,
+    }).find((candidate) => candidate.id === "delete-goal");
     expect(item).toMatchObject({ id: "delete-goal", destructive: true });
+    expect(ids({ ...baseState, goal: "Ship it" })).toContain("delete-goal");
     expect(ids(baseState)).not.toContain("delete-goal");
   });
 
