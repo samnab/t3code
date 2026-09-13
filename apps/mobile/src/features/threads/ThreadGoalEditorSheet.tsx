@@ -1,5 +1,6 @@
 import { THREAD_GOAL_MAX_CHARS, type ThreadGoalLoop } from "@t3tools/contracts";
 import {
+  type ThreadGoalLoopAction,
   threadGoalEditorCanSave,
   threadGoalEditorDraftError,
   type ThreadGoalEditorState,
@@ -32,11 +33,9 @@ export function ThreadGoalEditorSheet(props: {
   readonly onDraftChange: (text: string) => void;
   readonly onSave: () => void;
   readonly onClear: () => void;
-  readonly onGoalLoopAction: (action: "pause" | "resume" | "continue") => void;
+  readonly onGoalLoopAction: (action: ThreadGoalLoopAction) => void;
   /** Stop goal work (pause the loop, then interrupt the running turn). */
   readonly onStop?: (() => void) | undefined;
-  /** Restart a completed loop through a reset. */
-  readonly onRestart?: (() => void) | undefined;
   /** Whether a turn is actively running on this thread. */
   readonly threadActive?: boolean;
   readonly onClose: () => void;
@@ -176,7 +175,7 @@ export function ThreadGoalEditorSheet(props: {
                       () => props.onGoalLoopAction(loopAction),
                     )
                   : null}
-                {canRestart && props.onRestart ? actionButton("Restart", props.onRestart) : null}
+                {canRestart ? actionButton("Restart", () => props.onGoalLoopAction("reset")) : null}
                 {state.savedGoal !== null
                   ? actionButton(state.saving ? "Clearing…" : "Clear", props.onClear, {
                       disabled: state.saving,

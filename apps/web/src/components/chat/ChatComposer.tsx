@@ -1318,8 +1318,6 @@ const ComposerThreadGoalStrip = memo(function ComposerThreadGoalStrip(props: {
   goal: string;
   goalLoop: ThreadGoalLoop | null;
   pursuing: boolean;
-  /** Server threads get lifecycle actions; drafts keep the strip read-only. */
-  actionsAvailable: boolean;
   turnActive: boolean;
   onGoalLoopAction: (action: "pause" | "resume" | "continue" | "reset") => void;
   onEditGoal: () => void;
@@ -1354,66 +1352,66 @@ const ComposerThreadGoalStrip = memo(function ComposerThreadGoalStrip(props: {
                   {suffix !== null ? <span className="shrink-0 tabular-nums">{suffix}</span> : null}
                 </ComposerBanner.Content>
                 {/* Labeled lifecycle actions live here rather than in the
-                    crowded composer toolbar: the strip owns the goal context. */}
-                {props.actionsAvailable ? (
-                  <ComposerBanner.Actions>
-                    <Menu>
-                      <MenuTrigger
-                        render={
-                          <Button
-                            type="button"
-                            size="icon-xs"
-                            variant="ghost"
-                            aria-label="Goal actions"
-                            data-thread-goal-actions="true"
-                            className="text-muted-foreground"
-                          />
-                        }
-                      >
-                        <EllipsisIcon className="size-3.5" />
-                      </MenuTrigger>
-                      <MenuPopup align="end" {...composerFloatingLayerProps}>
-                        {pauseAction !== null ? (
-                          <MenuItem onClick={() => props.onGoalLoopAction(pauseAction)}>
-                            {pauseAction === "pause" ? (
-                              <PauseIcon aria-hidden />
-                            ) : (
-                              <PlayIcon aria-hidden />
-                            )}
-                            {pauseAction === "pause" ? "Pause goal loop" : "Resume goal loop"}
-                          </MenuItem>
-                        ) : null}
-                        {canContinue ? (
-                          <MenuItem onClick={() => props.onGoalLoopAction("continue")}>
-                            <RotateCcwIcon aria-hidden />
-                            Continue anyway
-                          </MenuItem>
-                        ) : null}
-                        {canReset ? (
-                          <MenuItem onClick={() => props.onGoalLoopAction("reset")}>
-                            <RotateCcwIcon aria-hidden />
-                            Restart goal
-                          </MenuItem>
-                        ) : null}
-                        {props.turnActive ? (
-                          <MenuItem onClick={props.onStopGoal}>
-                            <SquareIcon aria-hidden />
-                            Stop goal work
-                          </MenuItem>
-                        ) : null}
-                        <MenuSeparator />
-                        <MenuItem onClick={props.onEditGoal}>
-                          <PenLineIcon aria-hidden />
-                          Edit goal
+                    crowded composer toolbar: the strip owns the goal context.
+                    Loop controls appear only when a server loop exists; a
+                    draft strip offers just edit and the local delete. */}
+                <ComposerBanner.Actions>
+                  <Menu>
+                    <MenuTrigger
+                      render={
+                        <Button
+                          type="button"
+                          size="icon-xs"
+                          variant="ghost"
+                          aria-label="Goal actions"
+                          data-thread-goal-actions="true"
+                          className="text-muted-foreground"
+                        />
+                      }
+                    >
+                      <EllipsisIcon className="size-3.5" />
+                    </MenuTrigger>
+                    <MenuPopup align="end" {...composerFloatingLayerProps}>
+                      {pauseAction !== null ? (
+                        <MenuItem onClick={() => props.onGoalLoopAction(pauseAction)}>
+                          {pauseAction === "pause" ? (
+                            <PauseIcon aria-hidden />
+                          ) : (
+                            <PlayIcon aria-hidden />
+                          )}
+                          {pauseAction === "pause" ? "Pause goal loop" : "Resume goal loop"}
                         </MenuItem>
-                        <MenuItem variant="destructive" onClick={props.onDeleteGoal}>
-                          <Trash2Icon aria-hidden />
-                          Delete goal
+                      ) : null}
+                      {canContinue ? (
+                        <MenuItem onClick={() => props.onGoalLoopAction("continue")}>
+                          <RotateCcwIcon aria-hidden />
+                          Continue anyway
                         </MenuItem>
-                      </MenuPopup>
-                    </Menu>
-                  </ComposerBanner.Actions>
-                ) : null}
+                      ) : null}
+                      {canReset ? (
+                        <MenuItem onClick={() => props.onGoalLoopAction("reset")}>
+                          <RotateCcwIcon aria-hidden />
+                          Restart goal
+                        </MenuItem>
+                      ) : null}
+                      {props.turnActive ? (
+                        <MenuItem onClick={props.onStopGoal}>
+                          <SquareIcon aria-hidden />
+                          Stop goal work
+                        </MenuItem>
+                      ) : null}
+                      <MenuSeparator />
+                      <MenuItem onClick={props.onEditGoal}>
+                        <PenLineIcon aria-hidden />
+                        Edit goal
+                      </MenuItem>
+                      <MenuItem variant="destructive" onClick={props.onDeleteGoal}>
+                        <Trash2Icon aria-hidden />
+                        Delete goal
+                      </MenuItem>
+                    </MenuPopup>
+                  </Menu>
+                </ComposerBanner.Actions>
               </ComposerBanner.Row>
             }
           />
@@ -6376,7 +6374,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               goal={activeThreadGoal}
               goalLoop={threadGoalLoop}
               pursuing={threadGoalPursued}
-              actionsAvailable={isServerThread}
               turnActive={isServerThread && phase === "running"}
               onGoalLoopAction={onThreadGoalLoopAction}
               onEditGoal={() => {

@@ -8,6 +8,7 @@ import type { OptimizerAttachmentSnapshot } from "@t3tools/client-runtime/state/
 import {
   resolveThreadGoalDisplay,
   type ThreadGoalEditorState,
+  type ThreadGoalLoopAction,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
 import type {
   CodexFeedbackSubmission,
@@ -167,7 +168,7 @@ export interface ThreadDetailScreenProps {
   readonly onChangeGoalDraft: (text: string) => void;
   readonly onSaveGoalEditor: () => void;
   readonly onClearGoalEditor: () => void;
-  readonly onGoalLoopAction: (action: "pause" | "resume" | "continue") => void;
+  readonly onGoalLoopAction: (action: ThreadGoalLoopAction) => void;
   readonly experimentConfirmationState: ThreadExperimentConfirmationState | null;
   readonly onCancelExperimentConfirmation: () => void;
   readonly onConfirmExperiment: () => void;

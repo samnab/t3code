@@ -3926,58 +3926,74 @@ export default function ChatView(props: ChatViewProps) {
 
   // Goal delete: stop goal-driven work first (pause so no continuation can
   // start mid-sequence, interrupt the running turn), then clear the saved
-  // goal. The thread and its history stay untouched.
+  // goal. The thread and its history stay untouched. A draft goal never
+  // reaches the server — deleting it only clears the composer draft.
   const handleDeleteThreadGoal = useCallback(async () => {
+    if (isDraftGoalTarget) {
+      // Local only: the goal rides in the composer draft until the first
+      // send; deleting it never touches a server or the typed prompt.
+      setComposerThreadSettings(composerDraftTarget, { goal: null });
+      return;
+    }
     if (!activeServerThread || goalMetadataInFlightRef.current) return;
+    // The write slot is held for the whole sequence: a second delete or a
+    // concurrent /goal write must not interleave with the pause and
+    // interrupt that precede the clear.
+    goalMetadataInFlightRef.current = true;
     const interruptInput = buildRunningThreadTurnInterruptInput(activeServerThread, phase);
-    await deleteThreadGoalWork({
-      loop: activeServerThread.goalLoop ?? null,
-      pauseGoalLoop: pauseGoalLoopForLifecycle,
-      interruptActiveTurn: async () => {
-        if (!interruptInput) return true;
-        const result = await interruptThreadTurn({
-          environmentId: activeServerThread.environmentId,
-          input: interruptInput,
-        });
-        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
-          setThreadError(
-            activeServerThread.id,
-            error instanceof Error ? error.message : "Failed to stop the current turn.",
-          );
-        }
-        // The clear still runs: removing the goal is the point of delete,
-        // and an uninterruptible turn merely finishes on its own.
-        return true;
-      },
-      clearGoal: async () => {
-        goalMetadataInFlightRef.current = true;
-        const result = await updateThreadMetadata({
-          environmentId: activeServerThread.environmentId,
-          input: { threadId: activeServerThread.id, goal: null },
-        });
-        goalMetadataInFlightRef.current = false;
-        if (result._tag === "Failure") {
-          if (!isAtomCommandInterrupted(result)) {
+    try {
+      await deleteThreadGoalWork({
+        loop: activeServerThread.goalLoop ?? null,
+        pauseGoalLoop: pauseGoalLoopForLifecycle,
+        interruptActiveTurn: async () => {
+          if (!interruptInput) return true;
+          const result = await interruptThreadTurn({
+            environmentId: activeServerThread.environmentId,
+            input: interruptInput,
+          });
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
             const error = squashAtomCommandFailure(result);
-            toastManager.add(
-              stackedThreadToast({
-                type: "error",
-                title: "Could not delete thread goal",
-                description: error instanceof Error ? error.message : "An error occurred.",
-              }),
+            setThreadError(
+              activeServerThread.id,
+              error instanceof Error ? error.message : "Failed to stop the current turn.",
             );
           }
-          return false;
-        }
-        return true;
-      },
-    });
+          // The clear still runs: removing the goal is the point of delete,
+          // and an uninterruptible turn merely finishes on its own.
+          return true;
+        },
+        clearGoal: async () => {
+          const result = await updateThreadMetadata({
+            environmentId: activeServerThread.environmentId,
+            input: { threadId: activeServerThread.id, goal: null },
+          });
+          if (result._tag === "Failure") {
+            if (!isAtomCommandInterrupted(result)) {
+              const error = squashAtomCommandFailure(result);
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Could not delete thread goal",
+                  description: error instanceof Error ? error.message : "An error occurred.",
+                }),
+              );
+            }
+            return false;
+          }
+          return true;
+        },
+      });
+    } finally {
+      goalMetadataInFlightRef.current = false;
+    }
   }, [
     activeServerThread,
+    composerDraftTarget,
     interruptThreadTurn,
+    isDraftGoalTarget,
     pauseGoalLoopForLifecycle,
     phase,
+    setComposerThreadSettings,
     setThreadError,
     updateThreadMetadata,
   ]);

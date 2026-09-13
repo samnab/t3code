@@ -25,6 +25,7 @@ import {
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
 import { Alert, Platform, ScrollView, View } from "react-native";
+import * as Cause from "effect/Cause";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWorkspaceState } from "../../state/workspace";
 import { restoredNewTaskDraftKey } from "../../state/new-task-draft-key";
@@ -77,6 +78,8 @@ import { useSelectedThreadRequests } from "../../state/use-selected-thread-reque
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { threadEnvironment } from "../../state/threads";
+import { stopThreadGoalWork } from "@t3tools/client-runtime/state/threadGoalEditor";
+import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
@@ -516,6 +519,13 @@ function ThreadRouteContent(
   const handleOpenConnectionEditor = useCallback(() => {
     void navigation.navigate("Connections");
   }, [navigation]);
+  const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
+    reportFailure: false,
+  });
+  // The one stop handler every surface shares (composer buttons,
+  // pending-input card, goal sheet): a pause-able goal loop is disabled
+  // first so the interrupted turn cannot hand into its next continuation
+  // and restart the goal work on its own.
   const handleStopThread = useCallback(() => {
     if (
       !selectedThread ||
@@ -524,16 +534,38 @@ function ThreadRouteContent(
     ) {
       return;
     }
-    return interruptThreadTurn({
-      environmentId: selectedThread.environmentId,
-      input: {
-        threadId: selectedThread.id,
-        ...(selectedThread.session.activeTurnId
-          ? { turnId: selectedThread.session.activeTurnId }
-          : {}),
+    return stopThreadGoalWork({
+      loop: selectedThread.goalLoop ?? null,
+      pauseGoalLoop: async () => {
+        const result = await setThreadGoalLoop({
+          environmentId: selectedThread.environmentId,
+          input: { threadId: selectedThread.id, action: "pause" },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = Cause.squash(result.cause);
+            Alert.alert(
+              "Could not stop the goal",
+              error instanceof Error ? error.message : "Pausing the goal loop failed. Try again.",
+            );
+          }
+          return false;
+        }
+        return true;
+      },
+      interruptActiveTurn: async () => {
+        const activeTurnId = selectedThread.session?.activeTurnId;
+        const result = await interruptThreadTurn({
+          environmentId: selectedThread.environmentId,
+          input: {
+            threadId: selectedThread.id,
+            ...(activeTurnId ? { turnId: activeTurnId } : {}),
+          },
+        });
+        return result._tag === "Success";
       },
     });
-  }, [interruptThreadTurn, selectedThread]);
+  }, [interruptThreadTurn, selectedThread, setThreadGoalLoop]);
 
   const handleOpenTerminal = useCallback(
     (nextTerminalId?: string | null) => {

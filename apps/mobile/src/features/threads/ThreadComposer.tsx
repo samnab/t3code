@@ -3,10 +3,9 @@ import { useAtomValue } from "@effect/atom-react";
 import type { ExecutionGoalPanelState } from "@t3tools/client-runtime/state/executionGoalPanel";
 import {
   resolveThreadGoalDisplay,
-  stopThreadGoalWork,
   type ThreadGoalEditorState,
+  type ThreadGoalLoopAction,
 } from "@t3tools/client-runtime/state/threadGoalEditor";
-import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import type {
   EnvironmentId,
   MessageId,
@@ -35,7 +34,6 @@ import {
   type RefObject,
 } from "react";
 import { Alert, Keyboard, Platform, Pressable, View, type ViewStyle } from "react-native";
-import * as Cause from "effect/Cause";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
 import {
   composerAttachmentUploadBlockReason,
@@ -155,7 +153,7 @@ export interface ThreadComposerProps {
   readonly onChangeGoalDraft: (text: string) => void;
   readonly onSaveGoalEditor: () => void;
   readonly onClearGoalEditor: () => void;
-  readonly onGoalLoopAction: (action: "pause" | "resume" | "continue") => void;
+  readonly onGoalLoopAction: (action: ThreadGoalLoopAction) => void;
   readonly experimentConfirmationState: ThreadExperimentConfirmationState | null;
   readonly onCancelExperimentConfirmation: () => void;
   readonly onConfirmExperiment: () => void;
@@ -370,50 +368,6 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     !hasContent &&
     (props.selectedThread.session?.status === "running" ||
       props.selectedThread.session?.status === "starting");
-  const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
-    reportFailure: false,
-  });
-  // The generic stop shares the goal sequencing: a pause-able goal loop is
-  // disabled first so the interrupted turn cannot hand into its next
-  // continuation and restart the goal work on its own.
-  const stopThreadWork = useCallback(() => {
-    void stopThreadGoalWork({
-      loop: props.selectedThread.goalLoop ?? null,
-      pauseGoalLoop: async () => {
-        const result = await setThreadGoalLoop({
-          environmentId: props.environmentId,
-          input: { threadId: props.selectedThread.id, action: "pause" },
-        });
-        if (result._tag === "Failure") {
-          if (!isAtomCommandInterrupted(result)) {
-            const error = Cause.squash(result.cause);
-            Alert.alert(
-              "Could not stop the goal",
-              error instanceof Error ? error.message : "Pausing the goal loop failed. Try again.",
-            );
-          }
-          return false;
-        }
-        return true;
-      },
-      interruptActiveTurn: async () => {
-        props.onStopThread();
-        return true;
-      },
-    });
-  }, [
-    props.environmentId,
-    props.selectedThread.goalLoop,
-    props.selectedThread.id,
-    props.onStopThread,
-    setThreadGoalLoop,
-  ]);
-  const restartThreadGoal = useCallback(() => {
-    void setThreadGoalLoop({
-      environmentId: props.environmentId,
-      input: { threadId: props.selectedThread.id, action: "reset" },
-    });
-  }, [props.environmentId, props.selectedThread.id, setThreadGoalLoop]);
 
   const uploadStates = useAtomValue(composerAttachmentUploadsAtom);
   const attachmentsUploading =
@@ -982,7 +936,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     accessibilityLabel="Stop agent"
                     icon="stop.fill"
                     variant="danger"
-                    onPress={stopThreadWork}
+                    onPress={props.onStopThread}
                   />
                 ) : (
                   <ComposerActionButton
@@ -1137,7 +1091,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                       accessibilityLabel="Stop agent"
                       icon="stop.fill"
                       variant="danger"
-                      onPress={stopThreadWork}
+                      onPress={props.onStopThread}
                     />
                   ) : voicePresentation.showsSend ? (
                     <ComposerActionButton
@@ -1205,8 +1159,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           onSave={props.onSaveGoalEditor}
           onClear={props.onClearGoalEditor}
           onGoalLoopAction={props.onGoalLoopAction}
-          onStop={stopThreadWork}
-          onRestart={restartThreadGoal}
+          onStop={props.onStopThread}
           threadActive={showStopAction}
           onClose={props.onCloseGoalEditor}
         />
