@@ -18,6 +18,7 @@ import * as Stream from "effect/Stream";
 import { OrchestrationCommandInvariantError } from "./orchestration/Errors.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
+import { formatThreadGoalInjection } from "./orchestration/threadGoalProviderInput.ts";
 import {
   ProviderSessionDirectoryPersistenceError,
   ProviderSessionNotFoundError,
@@ -187,11 +188,20 @@ it.effect.each(
   "continues $recovery sessions with a $persistedTurn directory turn",
   ({ recovery, persistedTurn }) =>
     Effect.gen(function* () {
-      const codex = makeThread(
-        "thread-continue-codex",
-        "running",
-        TurnId.make("turn-continue-codex"),
-      );
+      const codex = {
+        ...makeThread("thread-continue-codex", "running", TurnId.make("turn-continue-codex")),
+        goal: "Finish the recovered goal",
+        goalLoop: {
+          kind: "standard" as const,
+          state: "running" as const,
+          mode: "t3" as const,
+          iterations: 3,
+          maxIterations: 10,
+          reason: null,
+          experiment: null,
+          updatedAt,
+        },
+      };
       const fallbackContinuationTurnId = TurnId.make("turn-continue-fallback");
       const fallback = makeThread(
         "thread-continue-fallback",
@@ -202,6 +212,7 @@ it.effect.each(
       const continuationSent = yield* Deferred.make<void>();
       const continuationCleared = yield* Deferred.make<void>();
       const sends: ProviderSendTurnInput[] = [];
+      const clearedGoals: ThreadId[] = [];
       const dispatched: OrchestrationCommand[] = [];
       const upserts: ProviderSessionDirectory.ProviderRuntimeBinding[] = [];
       const bindings = new Map<ThreadId, ProviderSessionDirectory.ProviderRuntimeBinding>(
@@ -254,6 +265,10 @@ it.effect.each(
               turnId: TurnId.make(`continued-${String(input.threadId)}`),
             };
           }),
+        clearExecutionGoal: ({ threadId }) =>
+          Effect.sync(() => {
+            clearedGoals.push(threadId);
+          }),
       };
 
       yield* runReconciliation({
@@ -304,13 +319,23 @@ it.effect.each(
       );
       yield* Deferred.await(continuationSent);
       yield* Deferred.await(continuationCleared);
+      assert.deepStrictEqual(clearedGoals, [codex.id]);
 
       assert.deepStrictEqual(
         sends.toSorted((left, right) =>
           String(left.threadId).localeCompare(String(right.threadId)),
         ),
         [
-          { threadId: codex.id, continuation: true, interactionMode: "default" },
+          {
+            threadId: codex.id,
+            continuation: true,
+            input: formatThreadGoalInjection({
+              goal: codex.goal,
+              iteration: codex.goalLoop.iterations,
+              maxIterations: codex.goalLoop.maxIterations,
+            }),
+            interactionMode: "default",
+          },
           {
             threadId: fallback.id,
             input: "Continue where you left off.",

@@ -94,6 +94,11 @@ export type NativeChildMessageInsertResult =
 
 type RepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
+export interface NativeChildParentWorkState {
+  readonly active: number;
+  readonly pendingDelivery: number;
+}
+
 export interface NativeChildRunRepositoryShape {
   readonly reserveRunNumber: (input: {
     readonly runId: RuntimeTaskId;
@@ -113,6 +118,9 @@ export interface NativeChildRunRepositoryShape {
     limit: number,
   ) => Effect.Effect<ReadonlyArray<NativeChildRun>, RepositoryError>;
   readonly listActive: () => Effect.Effect<ReadonlyArray<NativeChildRun>, RepositoryError>;
+  readonly getParentWorkState: (
+    parentThreadId: ThreadId,
+  ) => Effect.Effect<NativeChildParentWorkState, RepositoryError>;
   readonly listPendingDelivery: (
     parentThreadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<NativeChildRun>, RepositoryError>;

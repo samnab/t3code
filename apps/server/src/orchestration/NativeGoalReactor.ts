@@ -1,30 +1,19 @@
 /**
- * NativeGoalReactor — binds a T3 thread goal to Codex's own execution goal.
+ * NativeGoalReactor — keeps T3-owned and Codex-owned goals exclusive.
  *
- * In `native` mode (see `ThreadGoalLoop`) T3 does not drive continuation
- * turns; Codex does, from its own execution goal. This reactor is the two-way
- * binding between the two:
+ * Standard thread goals run through T3 for every provider. Before T3 takes a
+ * Codex goal over, this reactor clears any provider execution goal. It changes
+ * a persisted native loop to T3 mode only after that clear succeeds. A failed
+ * clear therefore leaves the old driver in charge.
  *
- * - **Push.** Setting the T3 goal sets the Codex execution goal to the same
- *   text; clearing it clears Codex's. A T3 pause sends `status: "paused"` and
- *   a resume sends `status: "active"` — Codex has no separate resume RPC.
- *   Activating a goal also sends one hidden, idle-only bootstrap turn. The
- *   turn wakes Codex after a goal is added; Codex owns every continuation after
- *   that first turn.
- * - **Mirror.** Codex's `thread/goal/updated` and `thread/goal/cleared`
- *   notifications arrive as `thread.goal.updated` runtime events and are
- *   written back onto `goalLoop.state` read-only, via the `sync` action. T3
- *   never resumes a goal Codex paused.
- * - **Mode.** The decider can only guess the mode from the thread's instance
- *   id, which is wrong for a custom Codex instance. Whenever this reactor
- *   sees the thread it re-derives the mode from the bound session's real
- *   driver and corrects it with the same `sync` action.
+ * Restricted experiments keep their existing native Codex goal binding and
+ * mirroring. Provider goal notifications for standard loops are never mirrored
+ * into T3 state. A non-null notification means Codex recreated a competing
+ * goal, so the reactor clears it and holds future T3 scheduling if that fails.
  *
- * The escape hatch matters more than the binding: if the Codex set/clear RPC
- * fails, the T3 goal change still stands and the failure is surfaced as a
- * thread activity. A user must never be stuck with a goal they cannot clear.
  * A thread with no live session is not a failure — the push simply waits for
- * `thread.session-set`.
+ * `thread.session-set`. A real deactivation failure leaves a legacy native
+ * loop untouched, or holds an already-T3 loop before it can schedule again.
  *
  * @module NativeGoalReactor
  */
@@ -32,7 +21,6 @@ import {
   CommandId,
   EventId,
   MessageId,
-  resolveThreadGoalLoopMode,
   type OrchestrationEvent,
   type OrchestrationThreadShell,
   type ProviderExecutionGoalStatus,
@@ -60,7 +48,6 @@ export const CODEX_CLEARED_REASON = "Codex cleared its execution goal";
 
 /** The one server-authored prompt that wakes a newly activated native goal. */
 export const NATIVE_GOAL_BOOTSTRAP_MESSAGE = "Continue working toward the thread goal.";
-
 /**
  * Codex's execution-goal status as a T3 loop state. `null` is Codex having
  * cleared a goal T3 still holds, which is a block, not a completion — the
@@ -138,12 +125,13 @@ export const make = Effect.gen(function* () {
       Effect.map((uuid) => CommandId.make(`server:${tag}:${threadId}:${uuid}`)),
     );
 
-  // Last state successfully pushed to Codex, per thread. Purely an echo
-  // guard: the mirror writes T3 state, which re-fires the push, which would
-  // otherwise re-send what Codex just told us.
-  // ponytail: in-memory, so a restart re-sends one redundant set. The set is
-  // idempotent, so a durable version buys nothing.
+  // Last native state successfully set or cleared per thread. Restarting
+  // repeats the idempotent RPC, which also makes cold-start takeover safe.
   const lastPushed = new Map<ThreadId, string>();
+  // Threads this process has observed with a T3-managed goal. This lets a
+  // later explicit goal clear clean up that native binding without touching
+  // an unrelated execution goal on an ordinary Codex thread.
+  const managedGoalThreads = new Set<ThreadId>();
 
   // A resumed marker is emitted with the goal-loop event, but that event can
   // arrive while the provider is still finishing a turn or before its session
@@ -187,10 +175,14 @@ export const make = Effect.gen(function* () {
     readonly state?: ThreadGoalLoopState;
     readonly mode?: "native" | "t3" | "unsupported";
     readonly reason?: string;
+    readonly takeover?: true;
   }) {
     yield* engine.dispatch({
       type: "thread.goal.loop",
-      commandId: yield* serverCommandId("goal-sync", input.threadId),
+      commandId: yield* serverCommandId(
+        input.takeover === true ? "native-goal-takeover" : "goal-sync",
+        input.threadId,
+      ),
       threadId: input.threadId,
       action: "sync",
       ...(input.state !== undefined ? { state: input.state } : {}),
@@ -254,37 +246,102 @@ export const make = Effect.gen(function* () {
       runtimeMode: thread.runtimeMode,
       interactionMode: thread.interactionMode,
       onlyIfIdle: true,
+      goalLoopGuard: { updatedAt: loop.updatedAt },
       createdAt,
     });
     startedBootstraps.set(thread.id, key);
     pendingBootstraps.delete(thread.id);
   });
 
-  /** Mode the thread's real driver implies, not the decider's instance-id guess. */
-  const derivedMode = (thread: OrchestrationThreadShell) =>
-    resolveThreadGoalLoopMode(thread.session?.providerName ?? thread.modelSelection.instanceId);
+  const isLiveCodex = (thread: OrchestrationThreadShell) =>
+    thread.session?.providerName === "codex" && thread.session.status !== "stopped";
+
+  /** Experiments retain native Codex execution goals; standard goals never do. */
+  const derivedMode = (thread: OrchestrationThreadShell) => {
+    const loop = thread.goalLoop;
+    if (loop?.kind !== "experiment") return "t3" as const;
+    if (thread.session?.providerName === "codex") return "native" as const;
+    if (thread.session != null && thread.session.status !== "stopped") return "t3" as const;
+    // Paused experiments intentionally stop their restricted provider
+    // session. Preserve the configured driver until a real replacement
+    // session proves otherwise.
+    return loop.mode;
+  };
+
+  const clearNativeGoal = Effect.fn("NativeGoalReactor.clearNativeGoal")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly failureSummary: string;
+  }) {
+    return yield* providerService.clearExecutionGoal({ threadId: input.threadId }).pipe(
+      Effect.as("cleared" as const),
+      Effect.catch((error) =>
+        error._tag === "ProviderSessionNotFoundError" ||
+        error._tag === "ProviderAdapterSessionNotFoundError"
+          ? Effect.succeed("unavailable" as const)
+          : appendFailureActivity({
+              threadId: input.threadId,
+              summary: input.failureSummary,
+              detail: error.message,
+            }).pipe(Effect.as("failed" as const)),
+      ),
+    );
+  });
 
   const push = Effect.fn("NativeGoalReactor.push")(function* (threadId: ThreadId) {
     const thread = Option.getOrUndefined(yield* snapshots.getThreadShellById(threadId));
     if (thread === undefined) return;
     const loop = thread.goalLoop;
-    if (loop == null) {
+    if (loop == null || thread.goal == null) {
       lastPushed.delete(threadId);
       pendingBootstraps.delete(threadId);
       startedBootstraps.delete(threadId);
+      if (managedGoalThreads.delete(threadId) && isLiveCodex(thread)) {
+        yield* clearNativeGoal({
+          threadId,
+          failureSummary: "Could not clear the Codex execution goal",
+        });
+      }
       return;
     }
+    managedGoalThreads.add(threadId);
     const mode = derivedMode(thread);
-    if (loop.mode !== mode) {
-      yield* dispatchSync({ threadId, mode });
-    }
-    if (mode !== "native") {
-      // A missing session may still become Codex when it is registered, so
-      // retain the wake for that transition. Once a live non-native driver is
-      // known, the T3 reactor owns this goal instead.
-      if (thread.session !== null) pendingBootstraps.delete(threadId);
+    if (loop.kind === "standard") {
+      pendingBootstraps.delete(threadId);
+      startedBootstraps.delete(threadId);
+      if (!isLiveCodex(thread)) {
+        // With no live Codex session there is no native driver to deactivate.
+        // Hand ownership to T3 now; ProviderCommandReactor repeats the clear
+        // after any future Codex session is created and before its first turn.
+        if (loop.mode !== "t3") {
+          yield* dispatchSync({ threadId, mode: "t3", takeover: true });
+        }
+        return;
+      }
+      const clearResult = yield* clearNativeGoal({
+        threadId,
+        failureSummary: "Could not deactivate the Codex execution goal",
+      });
+      if (clearResult !== "cleared") {
+        if (
+          clearResult === "failed" &&
+          loop.mode === "t3" &&
+          (loop.state === "idle" || loop.state === "running")
+        ) {
+          yield* dispatchSync({
+            threadId,
+            state: "blocked",
+            reason: "The Codex execution goal could not be deactivated",
+          });
+        }
+        return;
+      }
+      if (loop.mode !== "t3") {
+        yield* dispatchSync({ threadId, mode: "t3", takeover: true });
+      }
       return;
     }
+    if (loop.mode !== mode) yield* dispatchSync({ threadId, mode });
+    if (mode !== "native") return;
     // No live session yet: `thread.session-set` brings us back here.
     if (thread.session == null || thread.session.status === "stopped") return;
 
@@ -348,6 +405,38 @@ export const make = Effect.gen(function* () {
     const thread = Option.getOrUndefined(yield* snapshots.getThreadShellById(threadId));
     const loop = thread?.goalLoop;
     if (thread === undefined || loop == null || thread.goal == null) return;
+    if (loop.kind === "standard") {
+      if (status === null || !isLiveCodex(thread)) return;
+      const nativeGoal = yield* providerService.getExecutionGoal({ threadId }).pipe(
+        Effect.map((result) => result.goal),
+        Effect.catch((error) =>
+          error._tag === "ProviderSessionNotFoundError" ||
+          error._tag === "ProviderAdapterSessionNotFoundError"
+            ? Effect.succeed(null)
+            : appendFailureActivity({
+                threadId,
+                summary: "Could not verify the Codex execution goal",
+                detail: error.message,
+              }).pipe(Effect.as(null)),
+        ),
+      );
+      // Provider notifications can arrive after the native goal was already
+      // cleared. Confirm live state before treating one as a competing goal.
+      if (nativeGoal === null) return;
+      lastPushed.delete(threadId);
+      const clearResult = yield* clearNativeGoal({
+        threadId,
+        failureSummary: "Could not deactivate a competing Codex execution goal",
+      });
+      if (clearResult === "failed" && (loop.state === "idle" || loop.state === "running")) {
+        yield* dispatchSync({
+          threadId,
+          state: "blocked",
+          reason: "A competing Codex execution goal could not be deactivated",
+        });
+      }
+      return;
+    }
     if (derivedMode(thread) !== "native") return;
 
     const { state, reason } = mirrorState(status);
@@ -377,52 +466,81 @@ export const make = Effect.gen(function* () {
     ),
   );
 
+  // Session reconciliation finishes before reactor activation. Sweep the
+  // projection once so persisted native standard loops cannot wait forever
+  // for a lifecycle event that already happened.
+  const sweep = Effect.fn("NativeGoalReactor.sweep")(function* () {
+    const snapshot = yield* snapshots.getShellSnapshot();
+    yield* Effect.forEach(
+      snapshot.threads.filter((thread) => thread.goal != null && thread.goalLoop != null),
+      (thread) => worker.enqueue({ kind: "push", threadId: thread.id }),
+      { discard: true },
+    );
+  });
+
   const start: NativeGoalReactor["Service"]["start"] = Effect.fn("NativeGoalReactor.start")(
     function* () {
       yield* forkParked(
         Effect.gen(function* () {
+          // Subscribe before the snapshot sweep so goal/session events that
+          // race startup are buffered rather than lost between the two phases.
+          const domainEvents = yield* engine.subscribeDomainEvents;
           yield* Effect.forkChild(
-            Stream.runForEach(engine.streamDomainEvents, (event: OrchestrationEvent) =>
-              event.type === "thread.goal-loop-updated"
-                ? Effect.sync(() => {
-                    if (event.payload.resumed === true && event.payload.loop?.state === "idle") {
-                      pendingBootstraps.set(event.payload.threadId, event.eventId);
-                    } else if (
-                      event.payload.loop === null ||
-                      (event.payload.loop.state !== "idle" &&
-                        event.payload.loop.state !== "running")
-                    ) {
-                      pendingBootstraps.delete(event.payload.threadId);
-                    }
-                  }).pipe(
-                    Effect.andThen(
-                      worker.enqueue({ kind: "push", threadId: event.payload.threadId }),
-                    ),
-                  )
-                : event.type === "thread.meta-updated" ||
-                    event.type === "thread.session-set" ||
-                    event.type === "thread.turn-diff-completed" ||
-                    event.type === "thread.approval-response-requested" ||
-                    event.type === "thread.user-input-response-requested" ||
-                    event.type === "thread.proposed-plan-upserted" ||
-                    event.type === "thread.archived" ||
-                    event.type === "thread.settled" ||
-                    event.type === "thread.unsettled" ||
-                    event.type === "thread.snoozed" ||
-                    event.type === "thread.unsnoozed" ||
-                    event.type === "thread.reverted"
-                  ? worker.enqueue({ kind: "push", threadId: event.payload.threadId })
-                  : Effect.void,
+            Stream.runForEach(providerService.streamEvents, (event) =>
+              event.type === "thread.goal.updated"
+                ? worker.enqueue({
+                    kind: "mirror",
+                    threadId: event.threadId,
+                    status: event.payload.status,
+                  })
+                : Effect.void,
+            ),
+            { startImmediately: true },
+          );
+          yield* sweep().pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logWarning("native goal reactor boot sweep failed", {
+                    cause: Cause.pretty(cause),
+                  }),
             ),
           );
-          yield* Stream.runForEach(providerService.streamEvents, (event) =>
-            event.type === "thread.goal.updated"
-              ? worker.enqueue({
-                  kind: "mirror",
-                  threadId: event.threadId,
-                  status: event.payload.status,
-                })
-              : Effect.void,
+          yield* Stream.runForEach(domainEvents, (event: OrchestrationEvent) =>
+            event.type === "thread.goal-loop-updated"
+              ? Effect.sync(() => {
+                  if (event.payload.resumed === true && event.payload.loop?.state === "idle") {
+                    pendingBootstraps.set(event.payload.threadId, event.eventId);
+                  } else if (event.payload.loop === null) {
+                    // A null loop event is the durable evidence that a
+                    // previously managed thread goal was explicitly cleared.
+                    managedGoalThreads.add(event.payload.threadId);
+                    pendingBootstraps.delete(event.payload.threadId);
+                  } else if (
+                    event.payload.loop.state !== "idle" &&
+                    event.payload.loop.state !== "running"
+                  ) {
+                    pendingBootstraps.delete(event.payload.threadId);
+                  }
+                }).pipe(
+                  Effect.andThen(
+                    worker.enqueue({ kind: "push", threadId: event.payload.threadId }),
+                  ),
+                )
+              : event.type === "thread.meta-updated" ||
+                  event.type === "thread.session-set" ||
+                  event.type === "thread.turn-diff-completed" ||
+                  event.type === "thread.approval-response-requested" ||
+                  event.type === "thread.user-input-response-requested" ||
+                  event.type === "thread.proposed-plan-upserted" ||
+                  event.type === "thread.archived" ||
+                  event.type === "thread.settled" ||
+                  event.type === "thread.unsettled" ||
+                  event.type === "thread.snoozed" ||
+                  event.type === "thread.unsnoozed" ||
+                  event.type === "thread.reverted"
+                ? worker.enqueue({ kind: "push", threadId: event.payload.threadId })
+                : Effect.void,
           );
         }),
       );

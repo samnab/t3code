@@ -34,6 +34,10 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationReactor from "./orchestration/Services/OrchestrationReactor.ts";
+import {
+  getT3GoalInjection,
+  requiresCodexGoalDeactivation,
+} from "./orchestration/threadGoalProviderInput.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -708,12 +712,32 @@ export const reconcileProviderSessions = Effect.gen(function* () {
                 threadId: thread.id,
               });
             }
+            if (
+              requiresCodexGoalDeactivation(
+                { goal: thread.goal, goalLoop: thread.goalLoop },
+                binding.value.provider,
+              )
+            ) {
+              yield* providerService.clearExecutionGoal({ threadId: thread.id });
+            }
             const capabilities = yield* providerService.getCapabilities(providerInstanceId);
+            const goalInjection = getT3GoalInjection({
+              goal: thread.goal,
+              goalLoop: thread.goalLoop,
+            });
             yield* providerService.sendTurn({
               threadId: thread.id,
               ...(capabilities.promptlessTurnContinuation === true
-                ? { continuation: true }
-                : { input: SERVER_UPDATE_CONTINUATION_PROMPT }),
+                ? {
+                    continuation: true,
+                    ...(goalInjection === null ? {} : { input: goalInjection }),
+                  }
+                : {
+                    input:
+                      goalInjection === null
+                        ? SERVER_UPDATE_CONTINUATION_PROMPT
+                        : `${goalInjection}\n\n${SERVER_UPDATE_CONTINUATION_PROMPT}`,
+                  }),
               interactionMode: thread.interactionMode,
             });
           });

@@ -19,6 +19,7 @@ import {
   type ProviderSessionStartInput,
   type ProviderSendTurnInput,
   type RuntimeMode,
+  type ThreadGoalLoop,
 } from "@t3tools/contracts";
 import {
   Context,
@@ -46,6 +47,7 @@ import { ProjectionSubagentTranscriptStoreLive } from "../persistence/Layers/Pro
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import {
+  NativeChildDeliveryBatch,
   NativeChildRun,
   NativeChildRunRepository,
 } from "../persistence/Services/NativeChildRuns.ts";
@@ -102,6 +104,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
   secondChildDriver?: string,
   deliveryControl?: {
     idle: boolean;
+    goalLoop?: ThreadGoalLoop | null;
     outcomes?: Array<"success" | "accepted" | "busy" | "uncertain" | "uncertain-after-accept">;
     acceptedCommandIds?: Set<string>;
     attempts?: OrchestrationCommand[];
@@ -329,6 +332,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
         Effect.sync(() => ({
           runtimeMode: parentRuntimeMode,
           canStart: deliveryControl?.idle !== false,
+          goalLoop: deliveryControl?.goalLoop ?? null,
         })),
       dispatch: (command) =>
         Effect.suspend(
@@ -585,6 +589,7 @@ const makeDeliveryHarness = (
   repository: NativeChildRunRepository["Service"],
   deliveryControl: {
     idle: boolean;
+    goalLoop?: ThreadGoalLoop | null;
     outcomes?: Array<"success" | "accepted" | "busy" | "uncertain" | "uncertain-after-accept">;
     acceptedCommandIds?: Set<string>;
     attempts?: OrchestrationCommand[];
@@ -716,6 +721,91 @@ it.effect(
     ),
 );
 
+it.effect("delivers a held goal's pending child result once the goal resumes", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const repository = Context.get(repositoryContext, NativeChildRunRepository);
+      yield* seedTerminalRun(repository, {
+        runId: "held-goal-result",
+        agentId: "held-goal-agent",
+        status: "completed",
+        output: "Required result",
+      });
+      const pausedLoop: ThreadGoalLoop = {
+        kind: "standard",
+        state: "paused",
+        mode: "t3",
+        iterations: 2,
+        maxIterations: 10,
+        reason: null,
+        experiment: null,
+        updatedAt: now,
+      };
+      const deliveryControl: {
+        idle: boolean;
+        goalLoop: ThreadGoalLoop | null;
+      } = {
+        idle: false,
+        goalLoop: pausedLoop,
+      };
+      const h = yield* makeDeliveryHarness(repository, deliveryControl);
+      yield* Effect.gen(function* () {
+        yield* ChildRunService;
+        yield* Effect.yieldNow;
+        expect(h.commands.filter((command) => command.type === "thread.turn.start")).toEqual([]);
+
+        const resumedAt = "2026-09-06T00:01:00.000Z";
+        deliveryControl.idle = true;
+        deliveryControl.goalLoop = {
+          ...pausedLoop,
+          state: "idle",
+          updatedAt: resumedAt,
+        };
+        const resumedEvent: OrchestrationEvent = {
+          sequence: 2,
+          eventId: EventId.make("held-goal-resumed"),
+          aggregateKind: "thread",
+          aggregateId: parentId,
+          occurredAt: resumedAt,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          type: "thread.goal-loop-updated",
+          payload: {
+            threadId: parentId,
+            loop: deliveryControl.goalLoop,
+            resumed: true,
+          },
+        };
+        yield* PubSub.publish(h.domainEvents, resumedEvent);
+        yield* Effect.yieldNow;
+
+        const deliveries = h.commands.filter(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+            command.type === "thread.turn.start",
+        );
+        expect(deliveries).toHaveLength(1);
+        expect(deliveries[0]?.message.origin).toBe("subagent-delivery");
+        expect(deliveries[0]?.continuation).toBe(true);
+        expect(deliveries[0]?.goalLoopGuard).toEqual({ updatedAt: resumedAt });
+
+        yield* PubSub.publish(h.domainEvents, resumedEvent);
+        yield* Effect.yieldNow;
+        expect(h.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(
+          1,
+        );
+      }).pipe(Effect.provide(h.services));
+    }),
+  ),
+);
+
 it.effect("lets acknowledgement suppress a result after an idle-check dispatch race", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -808,6 +898,57 @@ it.effect("reuses durable batch identities across uncertain dispatch and service
       expect(
         (yield* repository.get(RuntimeTaskId.make("restart-delivery-run")))?.deliveryState,
       ).toBe("delivered");
+    }),
+  ),
+);
+
+it.effect("replays an accepted prepared delivery while the recovered parent is busy", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repositoryScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(repositoryScope, Exit.void));
+      const repositoryContext = yield* Layer.buildWithScope(
+        NativeChildRunRepositoryAuto,
+        repositoryScope,
+      );
+      const repository = Context.get(repositoryContext, NativeChildRunRepository);
+      yield* seedTerminalRun(repository, {
+        runId: "accepted-prepared-run",
+        agentId: "accepted-prepared-agent",
+        status: "completed",
+        output: "accepted before restart",
+      });
+      const commandId = "server:native-child-delivery:accepted-prepared-batch";
+      yield* repository.insertDeliveryBatch({
+        batch: NativeChildDeliveryBatch.make({
+          batchId: "accepted-prepared-batch",
+          parentThreadId: parentId,
+          runtimeMode: "full-access",
+          text: "Accepted child result",
+          commandId,
+          messageId: "native-child-delivery:accepted-prepared-batch",
+          state: "prepared",
+          createdAt: now,
+          updatedAt: now,
+        }),
+        runIds: [RuntimeTaskId.make("accepted-prepared-run")],
+      });
+      const attempts: OrchestrationCommand[] = [];
+      const h = yield* makeDeliveryHarness(repository, {
+        idle: false,
+        attempts,
+        acceptedCommandIds: new Set([commandId]),
+      });
+      yield* Effect.gen(function* () {
+        yield* ChildRunService;
+        yield* Effect.forEach([1, 2], () => Effect.yieldNow, { discard: true });
+        expect(attempts).toHaveLength(1);
+        expect(attempts[0]?.commandId).toBe(commandId);
+        expect(
+          (yield* repository.get(RuntimeTaskId.make("accepted-prepared-run")))?.deliveryState,
+        ).toBe("delivered");
+        expect(yield* repository.getOpenDeliveryBatch(parentId)).toBeNull();
+      }).pipe(Effect.provide(h.services));
     }),
   ),
 );

@@ -1,11 +1,9 @@
 import {
-  CheckpointRef,
   EventId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
-  TurnId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationSession,
@@ -147,10 +145,10 @@ function makeGoalActivatedEvent(): OrchestrationEvent {
   return makeGoalLoopUpdatedEvent("idle", true);
 }
 
-function makeTurnDiffCompletedEvent(): OrchestrationEvent {
+function makeGoalClearedEvent(): OrchestrationEvent {
   return {
-    sequence: 3,
-    eventId: EventId.make("event-turn-diff-completed"),
+    sequence: 2,
+    eventId: EventId.make("event-goal-loop-cleared"),
     aggregateKind: "thread",
     aggregateId: THREAD_ID,
     occurredAt: NOW,
@@ -158,17 +156,8 @@ function makeTurnDiffCompletedEvent(): OrchestrationEvent {
     causationEventId: null,
     correlationId: null,
     metadata: {},
-    type: "thread.turn-diff-completed",
-    payload: {
-      threadId: THREAD_ID,
-      turnId: TurnId.make("native-goal-turn"),
-      checkpointTurnCount: 1,
-      checkpointRef: CheckpointRef.make("refs/t3/checkpoints/native-goal-thread/1"),
-      status: "ready",
-      files: [],
-      assistantMessageId: null,
-      completedAt: NOW,
-    },
+    type: "thread.goal-loop-updated",
+    payload: { threadId: THREAD_ID, loop: null },
   };
 }
 
@@ -185,9 +174,11 @@ function makeCodexGoalEvent(status: ProviderExecutionGoalStatus | null): Provide
 
 interface HarnessOptions {
   readonly shell: OrchestrationThreadShell;
+  readonly sweepThreads?: ReadonlyArray<OrchestrationThreadShell>;
   /** Fails every set/clear with this error instead of succeeding. */
   readonly providerFailure?: ProviderValidationError | ProviderSessionNotFoundError;
   readonly providerFailures?: ReadonlyArray<ProviderAdapterSessionNotFoundError>;
+  readonly nativeGoalPresent?: boolean;
 }
 
 const makeHarness = Effect.fn("makeNativeGoalHarness")(function* (options: HarnessOptions) {
@@ -212,6 +203,13 @@ const makeHarness = Effect.fn("makeNativeGoalHarness")(function* (options: Harne
 
   const dependencies = Layer.mergeAll(
     Layer.mock(ProjectionSnapshotQuery)({
+      getShellSnapshot: () =>
+        Effect.succeed({
+          snapshotSequence: 1,
+          projects: [],
+          threads: options.sweepThreads ?? [],
+          updatedAt: NOW,
+        }),
       getThreadShellById: (threadId) =>
         Queue.offer(shellReads, threadId).pipe(
           Effect.andThen(Ref.get(shell)),
@@ -222,9 +220,25 @@ const makeHarness = Effect.fn("makeNativeGoalHarness")(function* (options: Harne
       readEvents: () => Stream.empty,
       dispatch,
       streamDomainEvents: Stream.fromQueue(events),
+      subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
       latestSequence: Effect.succeed(0),
     }),
     Layer.mock(ProviderService)({
+      getExecutionGoal: () =>
+        Effect.succeed({
+          goal:
+            options.nativeGoalPresent === false
+              ? null
+              : {
+                  threadId: THREAD_ID,
+                  objective: "Ship the login fix",
+                  status: "active" as const,
+                  tokensUsed: 0,
+                  timeUsedSeconds: 0,
+                  createdAt: NOW,
+                  updatedAt: NOW,
+                },
+        }),
       setExecutionGoal: (input) =>
         record(input).pipe(
           Effect.as({
@@ -333,76 +347,69 @@ describe("NativeGoalReactor", () => {
   const goalChanged = (fixture: { readonly events: Queue.Queue<OrchestrationEvent> }) =>
     Queue.offer(fixture.events, makeMetaUpdatedEvent());
 
-  it.effect("sets the Codex execution goal to the T3 goal text", () =>
+  it.effect("deactivates Codex before migrating a standard goal to T3", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { commands, goalCalls } = yield* run({ shell: makeShell(), signal: goalChanged });
-        assert.deepEqual(goalCalls, [
-          { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
-        ]);
-        assert.deepEqual(commands, []);
+        assert.deepEqual(goalCalls, ["clear"]);
+        assert.strictEqual(commands.length, 1);
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.goal.loop");
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+        assert.strictEqual(command.mode, "t3");
       }),
     ),
   );
 
-  it.effect("starts one idle-only Codex turn when a goal is activated", () =>
+  it.effect("migrates a persisted standard Codex goal during the startup sweep", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const shell = makeShell();
+        const fixture = yield* makeHarness({ shell, sweepThreads: [shell] });
+        yield* Effect.gen(function* () {
+          const reactor = yield* NativeGoalReactor.NativeGoalReactor;
+          yield* reactor.start();
+          yield* Deferred.succeed(fixture.activation, undefined);
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          assert.deepEqual(yield* Ref.get(fixture.goalCalls), ["clear"]);
+          const commands = yield* Ref.get(fixture.commands);
+          assert.strictEqual(commands.length, 1);
+          const command = commands[0]!;
+          assert.strictEqual(command.type, "thread.goal.loop");
+          if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+          assert.strictEqual(command.mode, "t3");
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("does not start a native bootstrap when a standard goal is activated", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { commands, goalCalls } = yield* run({
           shell: makeShell(),
           signal: (fixture) => Queue.offer(fixture.events, makeGoalActivatedEvent()),
         });
-        assert.deepEqual(goalCalls, [
-          { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
-        ]);
+        assert.deepEqual(goalCalls, ["clear"]);
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
-        assert.strictEqual(command.type, "thread.turn.start");
-        if (command.type !== "thread.turn.start") return;
-        assert.strictEqual(command.message.text, NativeGoalReactor.NATIVE_GOAL_BOOTSTRAP_MESSAGE);
-        assert.strictEqual(command.message.origin, "goal-continue");
-        assert.strictEqual(command.onlyIfIdle, true);
-        assert.strictEqual(command.continuation, undefined);
+        assert.strictEqual(command.type, "thread.goal.loop");
       }),
     ),
   );
 
-  it.effect("waits for a busy native turn before sending its bootstrap", () =>
+  it.effect("migrates a standard goal while its existing turn finishes", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const fixture = yield* makeHarness({
+        const { commands, goalCalls } = yield* run({
           shell: makeShell({ session: { ...makeSession(), status: "running" } }),
+          signal: (fixture) => Queue.offer(fixture.events, makeGoalActivatedEvent()),
         });
-        yield* Effect.gen(function* () {
-          const reactor = yield* NativeGoalReactor.NativeGoalReactor;
-          yield* reactor.start();
-          yield* Deferred.succeed(fixture.activation, undefined);
-
-          yield* Queue.offer(fixture.events, makeGoalActivatedEvent());
-          yield* Queue.take(fixture.shellReads);
-          yield* reactor.drain;
-          assert.deepEqual(yield* Ref.get(fixture.commands), []);
-
-          // Codex reports its active execution goal while the pre-existing
-          // turn is still running. The mirror's running loop state must not
-          // discard the activation wake.
-          yield* Queue.offer(fixture.runtimeEvents, makeCodexGoalEvent("active"));
-          yield* Queue.take(fixture.shellReads);
-          yield* reactor.drain;
-          yield* Queue.offer(fixture.events, makeGoalLoopUpdatedEvent("running"));
-          yield* Queue.take(fixture.shellReads);
-          yield* reactor.drain;
-
-          yield* Ref.set(fixture.shell, makeShell({ goalLoop: makeLoop({ state: "running" }) }));
-          yield* Queue.offer(fixture.events, makeTurnDiffCompletedEvent());
-          yield* Queue.take(fixture.shellReads);
-          yield* reactor.drain;
-
-          const commands = yield* Ref.get(fixture.commands);
-          assert.strictEqual(commands.length, 2);
-          assert.strictEqual(commands[0]?.type, "thread.goal.loop");
-          assert.strictEqual(commands[1]?.type, "thread.turn.start");
-        }).pipe(Effect.provide(fixture.layer));
+        assert.deepEqual(goalCalls, ["clear"]);
+        assert.strictEqual(commands.length, 1);
+        assert.strictEqual(commands[0]?.type, "thread.goal.loop");
       }),
     ),
   );
@@ -417,6 +424,24 @@ describe("NativeGoalReactor", () => {
         assert.deepEqual(goalCalls, [
           { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
         ]);
+      }),
+    ),
+  );
+
+  it.effect("guards a restricted experiment bootstrap by its goal generation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { commands, goalCalls } = yield* run({
+          shell: makeShell({ goalLoop: makeLoop({ kind: "experiment", state: "idle" }) }),
+          signal: (fixture) => Queue.offer(fixture.events, makeGoalActivatedEvent()),
+        });
+        assert.strictEqual(goalCalls.length, 1);
+        assert.strictEqual(commands.length, 1);
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.turn.start");
+        if (command.type !== "thread.turn.start") return;
+        assert.strictEqual(command.onlyIfIdle, true);
+        assert.deepEqual(command.goalLoopGuard, { updatedAt: NOW });
       }),
     ),
   );
@@ -452,28 +477,102 @@ describe("NativeGoalReactor", () => {
     ),
   );
 
-  it.effect("clears the Codex execution goal when the T3 goal is cleared", () =>
+  it.effect(
+    "leaves the separate Codex execution-goal escape hatch alone without a thread goal",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { commands, goalCalls } = yield* run({
+            shell: makeShell({ goal: null }),
+            signal: goalChanged,
+          });
+          assert.deepEqual(goalCalls, []);
+          assert.deepEqual(commands, []);
+        }),
+      ),
+  );
+
+  it.effect("clears a native goal previously managed by the T3 thread goal", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { goalCalls } = yield* run({
-          shell: makeShell({ goal: null }),
-          signal: goalChanged,
+        const fixture = yield* makeHarness({
+          shell: makeShell({ goalLoop: makeLoop({ kind: "experiment" }) }),
         });
-        assert.deepEqual(goalCalls, ["clear"]);
+        yield* Effect.gen(function* () {
+          const reactor = yield* NativeGoalReactor.NativeGoalReactor;
+          yield* reactor.start();
+          yield* Deferred.succeed(fixture.activation, undefined);
+
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+          yield* Ref.set(fixture.shell, makeShell({ goal: null, goalLoop: null }));
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          assert.deepEqual(yield* Ref.get(fixture.goalCalls), [
+            { threadId: THREAD_ID, objective: "Ship the login fix", status: "active" },
+            "clear",
+          ]);
+        }).pipe(Effect.provide(fixture.layer));
       }),
     ),
   );
 
-  it.effect("sends paused when the user paused the T3 loop", () =>
+  it.effect("preserves a paused standard state while taking ownership", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { goalCalls } = yield* run({
+        const { commands, goalCalls } = yield* run({
           shell: makeShell({ goalLoop: makeLoop({ state: "paused" }) }),
           signal: goalChanged,
         });
-        assert.deepEqual(goalCalls, [
-          { threadId: THREAD_ID, objective: "Ship the login fix", status: "paused" },
-        ]);
+        assert.deepEqual(goalCalls, ["clear"]);
+        assert.strictEqual(commands.length, 1);
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.goal.loop");
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+        assert.strictEqual(command.mode, "t3");
+        assert.strictEqual(command.state, undefined);
+      }),
+    ),
+  );
+
+  it.effect("leaves a legacy native loop in charge when deactivation fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { commands, goalCalls } = yield* run({
+          shell: makeShell(),
+          providerFailure: new ProviderValidationError({
+            operation: "ProviderService.clearExecutionGoal",
+            issue: "Method not found",
+          }),
+          signal: goalChanged,
+        });
+        assert.deepEqual(goalCalls, ["clear"]);
+        assert.strictEqual(commands.length, 1);
+        assert.strictEqual(commands[0]?.type, "thread.activity.append");
+      }),
+    ),
+  );
+
+  it.effect("blocks future T3 scheduling when deactivation fails after takeover", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { commands, goalCalls } = yield* run({
+          shell: makeShell({ goalLoop: makeLoop({ mode: "t3", state: "running" }) }),
+          providerFailure: new ProviderValidationError({
+            operation: "ProviderService.clearExecutionGoal",
+            issue: "Method not found",
+          }),
+          signal: goalChanged,
+        });
+        assert.deepEqual(goalCalls, ["clear"]);
+        assert.strictEqual(commands.length, 2);
+        const sync = commands[1]!;
+        assert.strictEqual(sync.type, "thread.goal.loop");
+        if (sync.type !== "thread.goal.loop" || sync.action !== "sync") return;
+        assert.strictEqual(sync.state, "blocked");
       }),
     ),
   );
@@ -518,6 +617,22 @@ describe("NativeGoalReactor", () => {
     ),
   );
 
+  it.effect("preserves native ownership while a paused Codex experiment is stopped", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { commands, goalCalls } = yield* run({
+          shell: makeShell({
+            goalLoop: makeLoop({ kind: "experiment", mode: "native", state: "paused" }),
+            session: { ...makeSession(), status: "stopped" },
+          }),
+          signal: goalChanged,
+        });
+        assert.deepEqual(commands, []);
+        assert.deepEqual(goalCalls, []);
+      }),
+    ),
+  );
+
   it.effect("touches nothing on a thread whose real driver is not Codex", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -530,7 +645,7 @@ describe("NativeGoalReactor", () => {
     ),
   );
 
-  it.effect("corrects a mode the decider guessed from a custom instance id", () =>
+  it.effect("keeps a custom Codex instance in T3 mode after deactivation", () =>
     Effect.scoped(
       Effect.gen(function* () {
         // A custom Codex instance id reads as `t3` to the decider; the bound
@@ -542,19 +657,45 @@ describe("NativeGoalReactor", () => {
           }),
           signal: goalChanged,
         });
-        assert.strictEqual(commands.length, 1);
-        const command = commands[0]!;
-        assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
-        assert.strictEqual(command.action, "sync");
-        assert.strictEqual(command.mode, "native");
-        // The corrected mode is native, so the push runs in the same pass.
-        assert.strictEqual(goalCalls.length, 1);
+        assert.deepEqual(goalCalls, ["clear"]);
+        assert.deepEqual(commands, []);
       }),
     ),
   );
 
-  it.effect("waits for a live session instead of reporting a failure", () =>
+  it.effect("deactivates the same goal again after the Codex session is replaced", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          shell: makeShell({ goalLoop: makeLoop({ mode: "t3" }) }),
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* NativeGoalReactor.NativeGoalReactor;
+          yield* reactor.start();
+          yield* Deferred.succeed(fixture.activation, undefined);
+
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          yield* Ref.set(
+            fixture.shell,
+            makeShell({
+              goalLoop: makeLoop({ mode: "t3" }),
+              session: { ...makeSession(), updatedAt: "2026-09-04T12:01:00.000Z" },
+            }),
+          );
+          yield* Queue.offer(fixture.events, makeMetaUpdatedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          assert.deepEqual(yield* Ref.get(fixture.goalCalls), ["clear", "clear"]);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("hands a legacy standard goal to T3 when no live session exists", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { commands, goalCalls } = yield* run({
@@ -562,7 +703,11 @@ describe("NativeGoalReactor", () => {
           signal: goalChanged,
         });
         assert.deepEqual(goalCalls, []);
-        assert.deepEqual(commands, []);
+        assert.strictEqual(commands.length, 1);
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.goal.loop");
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+        assert.strictEqual(command.mode, "t3");
       }),
     ),
   );
@@ -576,7 +721,7 @@ describe("NativeGoalReactor", () => {
             operation: "ProviderService.clearExecutionGoal",
             issue: "Method not found",
           }),
-          signal: goalChanged,
+          signal: (fixture) => Queue.offer(fixture.events, makeGoalClearedEvent()),
         });
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
@@ -589,20 +734,14 @@ describe("NativeGoalReactor", () => {
     ),
   );
 
-  it.effect("mirrors a Codex clear onto the loop as blocked", () =>
+  it.effect("ignores a stale Codex clear after standard-goal takeover", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { commands } = yield* run({
           shell: makeShell({ goalLoop: makeLoop({ state: "running" }) }),
           signal: (fixture) => Queue.offer(fixture.runtimeEvents, makeCodexGoalEvent(null)),
         });
-        assert.strictEqual(commands.length, 1);
-        const command = commands[0]!;
-        assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
-        assert.strictEqual(command.action, "sync");
-        assert.strictEqual(command.state, "blocked");
-        assert.strictEqual(command.reason, NativeGoalReactor.CODEX_CLEARED_REASON);
+        assert.deepEqual(commands, []);
       }),
     ),
   );
@@ -623,19 +762,28 @@ describe("NativeGoalReactor", () => {
     ),
   );
 
-  it.effect("mirrors a Codex pause without resuming it", () =>
+  it.effect("deactivates a competing native goal instead of mirroring it", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { commands, goalCalls } = yield* run({
           shell: makeShell({ goalLoop: makeLoop({ state: "running" }) }),
           signal: (fixture) => Queue.offer(fixture.runtimeEvents, makeCodexGoalEvent("paused")),
         });
-        assert.strictEqual(commands.length, 1);
-        const command = commands[0]!;
-        assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
-        assert.strictEqual(command.state, "paused");
-        // Mirroring is read-only: nothing goes back to Codex.
+        assert.deepEqual(commands, []);
+        assert.deepEqual(goalCalls, ["clear"]);
+      }),
+    ),
+  );
+
+  it.effect("ignores a delayed non-null notification after the native goal is gone", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { commands, goalCalls } = yield* run({
+          shell: makeShell({ goalLoop: makeLoop({ mode: "t3", state: "running" }) }),
+          nativeGoalPresent: false,
+          signal: (fixture) => Queue.offer(fixture.runtimeEvents, makeCodexGoalEvent("active")),
+        });
+        assert.deepEqual(commands, []);
         assert.deepEqual(goalCalls, []);
       }),
     ),
@@ -645,7 +793,7 @@ describe("NativeGoalReactor", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const { commands } = yield* run({
-          shell: makeShell({ goalLoop: makeLoop({ state: "paused" }) }),
+          shell: makeShell({ goalLoop: makeLoop({ kind: "experiment", state: "paused" }) }),
           signal: (fixture) => Queue.offer(fixture.runtimeEvents, makeCodexGoalEvent("paused")),
         });
         assert.deepEqual(commands, []);

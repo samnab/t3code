@@ -734,8 +734,8 @@ export const ThreadGoalLoopState = Schema.Literals([
 export type ThreadGoalLoopState = typeof ThreadGoalLoopState.Type;
 
 /**
- * How the goal is driven: `native` hands it to the provider's own execution
- * goal (Codex), `t3` injects it and starts continuation turns from the
+ * How the goal is driven: `native` hands it to a provider-owned execution
+ * goal (restricted Codex experiments), `t3` injects it and starts continuation turns from the
  * server, `unsupported` marks a provider that can do neither.
  */
 export const ThreadGoalLoopMode = Schema.Literals(["native", "t3", "unsupported"]);
@@ -750,18 +750,13 @@ export const THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS = 10;
 export const THREAD_GOAL_LOOP_MAX_ITERATIONS_CEILING = 50;
 
 /**
- * Mode is derived from the thread's provider, never chosen by the user:
- * Codex maps the goal onto its own execution goal, every other provider is
- * driven by T3.
- *
- * Accepts the provider driver kind, or the provider instance id when the
- * driver is not resolved yet — default instance ids are the driver slug
- * (see `defaultInstanceIdForDriver`), so a custom instance of the Codex
- * driver reads as `t3` until the reactor re-derives it with the real driver.
+ * Standard thread goals are provider-independent and always driven by T3.
+ * Restricted experiments may override the stored mode through the server-only
+ * goal-loop sync command.
  */
 export const resolveThreadGoalLoopMode = (
-  provider: string | null | undefined,
-): ThreadGoalLoopMode => (provider === "codex" ? "native" : "t3");
+  _provider: string | null | undefined,
+): ThreadGoalLoopMode => "t3";
 
 /** Thread-scoped drive state layered on {@link ThreadGoal}. */
 export const ThreadGoalLoop = Schema.Struct({
@@ -1359,6 +1354,10 @@ export const ThreadGoalLoopSyncCommand = Schema.Struct({
   kind: Schema.optional(ThreadGoalLoopKind),
   /** `sync` only: bounded public progress, or null to clear it. */
   experiment: Schema.optional(Schema.NullOr(ThreadExperimentSummary)),
+  /** Server-only compare-and-set guard for an automatic loop decision. */
+  goalLoopGuard: Schema.optional(Schema.Struct({ updatedAt: IsoDateTime })),
+  /** Server-only durable child-work guard, checked in the engine transaction. */
+  onlyIfNoRequiredChildren: Schema.optional(Schema.Literal(true)),
 });
 export type ThreadGoalLoopSyncCommand = typeof ThreadGoalLoopSyncCommand.Type;
 
@@ -1462,6 +1461,17 @@ export const ThreadTurnStartCommand = Schema.Struct({
   // queued start appeared first. This field is intentionally absent from the
   // client command schema.
   onlyIfIdle: Schema.optional(Schema.Literal(true)),
+  // Internal automation also pins the exact active goal generation it read.
+  // The decider checks this atomically with onlyIfIdle so pause, completion,
+  // replacement, or a cap cannot race an already queued automatic turn.
+  goalLoopGuard: Schema.optional(
+    Schema.Struct({
+      updatedAt: IsoDateTime,
+    }),
+  ),
+  // Generic goal continuations must not overtake child work created by the
+  // turn that just ended. Result-delivery turns intentionally omit this.
+  onlyIfNoRequiredChildren: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 

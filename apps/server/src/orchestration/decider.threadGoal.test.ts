@@ -357,8 +357,8 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
         expect(loopEvent.payload.resumed).toBe(true);
         expect(loopEvent.payload.loop).toMatchObject({
           state: "idle",
-          // The thread's provider instance is `codex`, so the loop is native.
-          mode: "native",
+          // Standard goals are driven by T3 for every provider.
+          mode: "t3",
           iterations: 0,
           maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
         });
@@ -733,6 +733,60 @@ it.layer(NodeServices.layer)("thread goal decider", (it) => {
       if (loopEvent?.type === "thread.goal-loop-updated") {
         expect(loopEvent.payload.loop).toMatchObject({ state: "capped" });
       }
+    }),
+  );
+
+  it.effect.each(["paused", "completed", "capped"] as const)(
+    "a guarded automatic turn cannot wake a %s goal",
+    (state) =>
+      Effect.gen(function* () {
+        const failure = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.turn.start",
+            commandId: CommandId.make(`cmd-loop-guarded-${state}`),
+            threadId: ThreadId.make("thread-1"),
+            message: {
+              messageId: MessageId.make(`message-loop-guarded-${state}`),
+              role: "user",
+              text: "automatic work",
+              attachments: [],
+            },
+            continuation: true,
+            onlyIfIdle: true,
+            goalLoopGuard: { updatedAt: UPDATED_AT },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: UPDATED_AT,
+          },
+          readModel: withLoop({ state, mode: "t3" }),
+        }).pipe(Effect.flip);
+        expect(failure._tag).toBe("OrchestrationCommandInvariantError");
+      }),
+  );
+
+  it.effect("a guarded automatic turn cannot cross goal generations", () =>
+    Effect.gen(function* () {
+      const failure = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-loop-stale-generation"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-loop-stale-generation"),
+            role: "user",
+            text: "automatic work",
+            attachments: [],
+          },
+          continuation: true,
+          onlyIfIdle: true,
+          goalLoopGuard: { updatedAt: "2025-12-31T23:59:59.000Z" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: UPDATED_AT,
+        },
+        readModel: withLoop({ state: "running", mode: "t3", updatedAt: UPDATED_AT }),
+      }).pipe(Effect.flip);
+      expect(failure._tag).toBe("OrchestrationCommandInvariantError");
     }),
   );
 

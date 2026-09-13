@@ -188,6 +188,7 @@ describe("ProviderCommandReactor", () => {
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly compactContextEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly clearExecutionGoalEffect?: () => Effect.Effect<void, ProviderServiceError>;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
@@ -277,6 +278,7 @@ describe("ProviderCommandReactor", () => {
         turnId: asTurnId("turn-1"),
       }),
     );
+    const clearExecutionGoal = vi.fn(() => input?.clearExecutionGoalEffect?.() ?? Effect.void);
     const compactThread = vi.fn((_: ThreadId) => input?.compactThreadEffect?.() ?? Effect.void);
     const interruptTurn = vi.fn((_: unknown) => input?.interruptTurnEffect?.() ?? Effect.void);
     const compactContext = vi.fn<ProviderServiceShape["compactContext"]>(
@@ -372,7 +374,7 @@ describe("ProviderCommandReactor", () => {
       getExecutionGoal: () => Effect.die("unused"),
       setExecutionGoal: () => Effect.die("unused"),
       pauseExecutionGoal: () => Effect.die("unused"),
-      clearExecutionGoal: () => Effect.die("unused"),
+      clearExecutionGoal,
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
@@ -624,6 +626,7 @@ describe("ProviderCommandReactor", () => {
       tryHandlePromptCommand,
       startSession,
       sendTurn,
+      clearExecutionGoal,
       compactThread,
       interruptTurn,
       respondToRequest,
@@ -1751,15 +1754,18 @@ describe("ProviderCommandReactor", () => {
   );
 
   // A T3-driven goal rides on the provider input only; the stored user
-  // message stays exactly what the user typed. Codex drives its goal
-  // natively, so it must never receive the injected copy.
+  // message stays exactly what the user typed.
   it.each([
     {
       label: "prefixes the provider input for a T3-driven goal",
       instanceId: "claude_openrouter",
       injected: true,
     },
-    { label: "leaves a natively driven goal alone", instanceId: "codex", injected: false },
+    {
+      label: "prefixes Codex after deactivating its native goal",
+      instanceId: "codex",
+      injected: true,
+    },
   ])("$label", async ({ instanceId, injected }) => {
     const harness = await createHarness({
       threadModelSelection: {
@@ -1803,11 +1809,70 @@ describe("ProviderCommandReactor", () => {
         })}\n\nhello reactor`
       : "hello reactor";
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: expectedInput });
+    if (instanceId === "codex") {
+      expect(harness.clearExecutionGoal).toHaveBeenCalledWith({
+        threadId: ThreadId.make("thread-1"),
+      });
+      expect(harness.clearExecutionGoal.mock.invocationCallOrder[0]).toBeLessThan(
+        harness.sendTurn.mock.invocationCallOrder[0]!,
+      );
+    } else {
+      expect(harness.clearExecutionGoal).not.toHaveBeenCalled();
+    }
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.messages.at(-1)?.text).toBe("hello reactor");
   });
+
+  effectIt.effect("fails closed when Codex goal deactivation fails before a turn", () =>
+    Effect.gen(function* () {
+      const failure = new ProviderAdapterRequestError({
+        provider: "codex",
+        method: "thread.goal.clear",
+        detail: "native goal clear failed",
+      });
+      const harness = yield* Effect.promise(() =>
+        createHarness({ clearExecutionGoalEffect: () => Effect.fail(failure) }),
+      );
+      yield* harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-goal-before-clear-failure"),
+        threadId: ThreadId.make("thread-1"),
+        goal: "Ship without competing drivers",
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-clear-failure"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-clear-failure"),
+          role: "user",
+          text: "continue",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Effect.promise(() =>
+        waitFor(async () => {
+          const readModel = await harness.readModel();
+          return (
+            readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.session
+              ?.status === "error"
+          );
+        }),
+      );
+      expect(harness.clearExecutionGoal).toHaveBeenCalledOnce();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      expect(
+        readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.session
+          ?.lastError,
+      ).toContain("native goal clear failed");
+    }),
+  );
 
   it("retries thread title generation after a transient failure", async () => {
     const harness = await createHarness();

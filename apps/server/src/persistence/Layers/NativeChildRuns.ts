@@ -73,6 +73,10 @@ const MessageIdInput = Schema.Struct({ parentThreadId: ThreadId, messageId: Sche
 const MessageIdRow = Schema.Struct({ messageId: Schema.String });
 const BatchIdInput = Schema.Struct({ batchId: Schema.String });
 const BatchCountRow = Schema.Struct({ count: Schema.Number });
+const ParentWorkStateRow = Schema.Struct({
+  active: Schema.Number,
+  pendingDelivery: Schema.Number,
+});
 
 function toRun(row: typeof NativeChildRunDbRow.Type): NativeChildRun {
   const { requestedOptions, ...rest } = row;
@@ -176,6 +180,19 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
     execute: () => sql`
       SELECT ${selectColumns} FROM native_child_runs
       WHERE status IN ('starting', 'running') ORDER BY created_at ASC
+    `,
+  });
+  const parentWorkStateRow = SqlSchema.findOne({
+    Request: Schema.Struct({ parentThreadId: ThreadId }),
+    Result: ParentWorkStateRow,
+    execute: ({ parentThreadId }) => sql`
+      SELECT
+        COUNT(CASE WHEN status IN ('starting', 'running') THEN 1 END) AS active,
+        COUNT(CASE
+          WHEN status IN ('completed', 'failed', 'cancelled') AND delivery_state = 'pending'
+          THEN 1 END
+        ) AS "pendingDelivery"
+      FROM native_child_runs WHERE parent_thread_id = ${parentThreadId}
     `,
   });
   const listPendingRows = SqlSchema.findAll({
@@ -506,6 +523,8 @@ export const makeNativeChildRunRepository = Effect.gen(function* () {
       mapped("NativeChildRunRepository.listActive", listActiveRows()).pipe(
         Effect.map((rows) => rows.map(toRun)),
       ),
+    getParentWorkState: (parentThreadId) =>
+      mapped("NativeChildRunRepository.getParentWorkState", parentWorkStateRow({ parentThreadId })),
     listPendingDelivery: (parentThreadId) =>
       mapped(
         "NativeChildRunRepository.listPendingDelivery",
@@ -622,6 +641,22 @@ const makeMemoryRepository = Effect.sync(() => {
       Effect.sync(() =>
         [...rows.values()].filter((run) => run.status === "starting" || run.status === "running"),
       ),
+    getParentWorkState: (parentThreadId) =>
+      Effect.sync(() => {
+        let active = 0;
+        let pendingDelivery = 0;
+        for (const run of rows.values()) {
+          if (run.parentThreadId !== parentThreadId) continue;
+          if (run.status === "starting" || run.status === "running") active += 1;
+          if (
+            (run.status === "completed" || run.status === "failed" || run.status === "cancelled") &&
+            run.deliveryState === "pending"
+          ) {
+            pendingDelivery += 1;
+          }
+        }
+        return { active, pendingDelivery };
+      }),
     listPendingDelivery: (parentThreadId) =>
       Effect.sync(() =>
         [...rows.values()].filter(

@@ -1,11 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import {
-  CommandId,
-  ProviderInstanceId,
-  resolveThreadGoalLoopMode,
-  ThreadId,
-} from "@t3tools/contracts";
+import { CommandId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -52,7 +47,10 @@ export function resolveExperimentGoalLoopMode(input: {
   readonly providerDriver: string | null | undefined;
   readonly providerInstanceId: string;
 }) {
-  return resolveThreadGoalLoopMode(input.providerDriver ?? input.providerInstanceId);
+  return input.providerDriver === "codex" ||
+    (input.providerDriver == null && input.providerInstanceId === "codex")
+    ? ("native" as const)
+    : ("t3" as const);
 }
 
 export const layer = Layer.effect(

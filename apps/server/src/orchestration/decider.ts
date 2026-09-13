@@ -1137,6 +1137,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       const occurredAt = yield* nowIso;
       const loop = thread.goalLoop ?? initialGoalLoop({ thread, updatedAt: occurredAt });
+      if (
+        command.action === "sync" &&
+        command.goalLoopGuard !== undefined &&
+        (thread.goalLoop == null ||
+          thread.goalLoop.updatedAt !== command.goalLoopGuard.updatedAt ||
+          (thread.goalLoop.state !== "idle" && thread.goalLoop.state !== "running"))
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} no longer has the active goal generation required by this automatic update`,
+        });
+      }
       // `resumed` marks actions that hand an idle loop to the reactor, which
       // starts the next turn on that alone. Goal metadata updates use the same
       // marker when they create or replace an active goal.
@@ -1494,6 +1506,23 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
             detail: `thread ${command.threadId} is not idle; skipping automatic turn start`,
+          });
+        }
+      }
+      if (command.goalLoopGuard !== undefined) {
+        const guardedLoop = targetThread.goalLoop;
+        if (
+          targetThread.goal == null ||
+          guardedLoop == null ||
+          (guardedLoop.state !== "idle" && guardedLoop.state !== "running") ||
+          guardedLoop.updatedAt !== command.goalLoopGuard.updatedAt ||
+          (guardedLoop.kind === "standard" && guardedLoop.mode !== "t3") ||
+          (command.continuation === true &&
+            (guardedLoop.mode !== "t3" || guardedLoop.iterations >= guardedLoop.maxIterations))
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `thread ${command.threadId} no longer has the active goal generation required by this automatic turn`,
           });
         }
       }

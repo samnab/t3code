@@ -15,6 +15,7 @@ import type {
   OrchestrationCommand,
   OrchestrationEvent,
   RuntimeMode,
+  ThreadGoalLoop,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -100,10 +101,12 @@ export interface OrchestrationEngineShape {
    */
   readonly latestSequence: Effect.Effect<number, never, never>;
 
-  /** Reads the current mode and advisory idle state for an automatic turn. */
-  readonly getAutomaticTurnState: (
-    threadId: ThreadId,
-  ) => Effect.Effect<{ readonly runtimeMode: RuntimeMode; readonly canStart: boolean } | null>;
+  /** Reads the current mode and authoritative eligibility state for an automatic turn. */
+  readonly getAutomaticTurnState: (threadId: ThreadId) => Effect.Effect<{
+    readonly runtimeMode: RuntimeMode;
+    readonly canStart: boolean;
+    readonly goalLoop?: ThreadGoalLoop | null;
+  } | null>;
 }
 
 /**

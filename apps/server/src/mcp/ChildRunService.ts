@@ -774,7 +774,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
   });
 
   const dispatchDeliveryBatchOnce = Effect.fn("ChildRunService.dispatchDeliveryBatchOnce")(
-    function* (delivery: NativeChildDeliveryBatchWithRuns) {
+    function* (delivery: NativeChildDeliveryBatchWithRuns, replayPrepared: boolean) {
       const { batch } = delivery;
       if (stoppedParents.has(batch.parentThreadId)) {
         yield* repository
@@ -784,6 +784,11 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
       }
       const parentState = yield* engine.getAutomaticTurnState(batch.parentThreadId);
       if (parentState === null) return "uncertain" as const;
+      // A prepared batch may already have committed its deterministic command
+      // before the process crashed. Replay it even while the parent appears
+      // busy so the command receipt can settle the batch without a duplicate
+      // turn. A genuinely new dispatch still uses the advisory idle check.
+      if (!parentState.canStart && !replayPrepared) return "busy" as const;
       const dispatchedAt = yield* nowIso;
       const outcome = yield* startup
         .enqueueCommand(
@@ -801,6 +806,12 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
             runtimeMode: parentState.runtimeMode,
             interactionMode: "default",
             onlyIfIdle: true,
+            ...(parentState.goalLoop == null
+              ? {}
+              : {
+                  goalLoopGuard: { updatedAt: parentState.goalLoop.updatedAt },
+                  ...(parentState.goalLoop.mode === "t3" ? { continuation: true as const } : {}),
+                }),
             createdAt: dispatchedAt,
           }),
         )
@@ -824,9 +835,10 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
 
   const dispatchDeliveryBatch = Effect.fn("ChildRunService.dispatchDeliveryBatch")(function* (
     delivery: NativeChildDeliveryBatchWithRuns,
+    replayPrepared = false,
   ) {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const outcome = yield* dispatchDeliveryBatchOnce(delivery);
+      const outcome = yield* dispatchDeliveryBatchOnce(delivery, replayPrepared);
       if (outcome !== "uncertain") return outcome;
       yield* Effect.yieldNow;
     }
@@ -839,7 +851,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
     const open = yield* repository
       .getOpenDeliveryBatch(parentThreadId)
       .pipe(Effect.mapError(persistenceError("Reading prepared child result delivery")));
-    if (open !== null) return yield* dispatchDeliveryBatch(open);
+    if (open !== null) return yield* dispatchDeliveryBatch(open, true);
     if (stoppedParents.has(parentThreadId)) return "suppressed" as const;
     const pending = yield* repository.listPendingDelivery(parentThreadId).pipe(
       Effect.map((runs) => runs.filter((run) => run.deliveryState === "pending")),
@@ -1847,7 +1859,10 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
       if (event.type === "thread.session-stop-requested") {
         return suppressParent(event.payload.threadId);
       }
-      return event.type === "thread.turn-diff-completed"
+      return event.type === "thread.turn-diff-completed" ||
+        (event.type === "thread.goal-loop-updated" &&
+          event.payload.loop != null &&
+          (event.payload.loop.state === "idle" || event.payload.loop.state === "running"))
         ? deliverPending(event.payload.threadId).pipe(Effect.catchCause(Effect.logWarning))
         : Effect.void;
     }),

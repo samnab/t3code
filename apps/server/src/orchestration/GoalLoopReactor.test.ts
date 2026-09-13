@@ -1,5 +1,6 @@
 import {
   CheckpointRef,
+  CommandId,
   EventId,
   MessageId,
   ProjectId,
@@ -25,6 +26,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
 import { ExperimentService } from "../experiments/ExperimentService.ts";
+import { NativeChildRunRepository } from "../persistence/Services/NativeChildRuns.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as GoalLoopReactor from "./GoalLoopReactor.ts";
 import {
@@ -188,6 +190,7 @@ function makeGoalLoopUpdatedEvent(input: {
   readonly resumed?: boolean;
   readonly threadId?: ThreadId;
   readonly key?: string;
+  readonly commandId?: CommandId;
 }): OrchestrationEvent {
   const threadId = input.threadId ?? THREAD_ID;
   return {
@@ -196,7 +199,7 @@ function makeGoalLoopUpdatedEvent(input: {
     aggregateKind: "thread",
     aggregateId: threadId,
     occurredAt: RESUMED_AT,
-    commandId: null,
+    commandId: input.commandId === undefined ? null : input.commandId,
     causationEventId: null,
     correlationId: null,
     metadata: {},
@@ -216,6 +219,7 @@ interface HarnessOptions {
   readonly sweepThreads?: ReadonlyArray<OrchestrationThreadShell>;
   readonly onDispatch?: (command: OrchestrationCommand) => Effect.Effect<void>;
   readonly experiment?: boolean;
+  readonly childWork?: { readonly active: number; readonly pendingDelivery: number };
 }
 
 const makeHarness = Effect.fn("makeGoalLoopHarness")(function* (options: HarnessOptions) {
@@ -263,10 +267,15 @@ const makeHarness = Effect.fn("makeGoalLoopHarness")(function* (options: Harness
       readEvents: () => Stream.empty,
       dispatch,
       streamDomainEvents: Stream.fromQueue(events),
+      subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
       latestSequence: Effect.succeed(0),
     }),
     Layer.succeed(ServerActivation, Deferred.await(activation)),
     RuntimeReceiptBusTest,
+    Layer.mock(NativeChildRunRepository)({
+      getParentWorkState: () =>
+        Effect.succeed(options.childWork ?? { active: 0, pendingDelivery: 0 }),
+    }),
     options.experiment
       ? Layer.mock(ExperimentService)({
           resume: () =>
@@ -298,7 +307,7 @@ const makeHarness = Effect.fn("makeGoalLoopHarness")(function* (options: Harness
     shellReads,
     commands,
     events,
-    layer: GoalLoopReactor.layer.pipe(Layer.provide(dependencies)),
+    layer: GoalLoopReactor.layerWithRepository.pipe(Layer.provide(dependencies)),
   };
 });
 
@@ -382,6 +391,9 @@ describe("GoalLoopReactor", () => {
         );
         assert.strictEqual(command.message.text, GoalLoopReactor.GOAL_CONTINUE_MESSAGE);
         assert.strictEqual(command.continuation, true);
+        assert.strictEqual(command.onlyIfIdle, true);
+        assert.deepEqual(command.goalLoopGuard, { updatedAt: NOW });
+        assert.strictEqual(command.onlyIfNoRequiredChildren, true);
         assert.strictEqual(command.runtimeMode, "full-access");
         assert.strictEqual(command.interactionMode, "default");
       }),
@@ -429,8 +441,9 @@ describe("GoalLoopReactor", () => {
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop") return;
-        assert.strictEqual(command.action, "complete");
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+        assert.strictEqual(command.action, "sync");
+        assert.strictEqual(command.state, "completed");
       }),
     ),
   );
@@ -445,9 +458,107 @@ describe("GoalLoopReactor", () => {
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop") return;
-        assert.strictEqual(command.action, "block");
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+        assert.strictEqual(command.action, "sync");
+        assert.strictEqual(command.state, "blocked");
         assert.strictEqual(command.reason, "I need the API key.");
+      }),
+    ),
+  );
+
+  it.effect("lets the final allowed turn complete before applying the iteration cap", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const commands = yield* dispatchesFor({
+          shell: makeShell({ goalLoop: makeLoop({ iterations: 10, maxIterations: 10 }) }),
+          messages: [makeAssistantMessage("Verified. <goal_complete>")],
+        });
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.goal.loop");
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+        assert.strictEqual(command.state, "completed");
+        assert.strictEqual(command.onlyIfNoRequiredChildren, true);
+      }),
+    ),
+  );
+
+  it.effect("caps an unfinished loop after its final allowed turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const commands = yield* dispatchesFor({
+          shell: makeShell({ goalLoop: makeLoop({ iterations: 10, maxIterations: 10 }) }),
+          messages: [makeAssistantMessage("There is more work to do.")],
+        });
+        const command = commands[0]!;
+        assert.strictEqual(command.type, "thread.goal.loop");
+        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+        assert.strictEqual(command.state, "capped");
+      }),
+    ),
+  );
+
+  it.effect("waits for active child work before accepting a completion tag", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const commands = yield* dispatchesFor({
+          shell: makeShell(),
+          messages: [makeAssistantMessage("Parent done. <goal_complete>")],
+          childWork: { active: 1, pendingDelivery: 0 },
+        });
+        assert.deepEqual(commands, []);
+      }),
+    ),
+  );
+
+  it.effect("gives pending child results priority over a generic continuation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const commands = yield* dispatchesFor({
+          shell: makeShell(),
+          messages: [makeAssistantMessage("Waiting for the child result.")],
+          childWork: { active: 0, pendingDelivery: 1 },
+        });
+        assert.deepEqual(commands, []);
+      }),
+    ),
+  );
+
+  it.effect("does not retain a resume wake past required child work and its result turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const childWork = { active: 1, pendingDelivery: 0 };
+        const resumedLoop = makeLoop({ state: "idle", updatedAt: RESUMED_AT });
+        const fixture = yield* makeHarness({
+          shell: makeShell({ goalLoop: resumedLoop }),
+          messages: [makeAssistantMessage("Child result verified. <goal_complete>")],
+          childWork,
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* GoalLoopReactor.GoalLoopReactor;
+          yield* runSignals({
+            reactor,
+            activation: fixture.activation,
+            shellReads: fixture.shellReads,
+            events: fixture.events,
+            signals: [
+              makeGoalLoopUpdatedEvent({ loop: resumedLoop, resumed: true }),
+              makeTurnDiffCompletedEvent(),
+            ],
+          });
+          childWork.active = 0;
+          // The second signal above was already processed while active; send
+          // the actual result-turn completion after the child barrier clears.
+          yield* Queue.offer(fixture.events, makeTurnDiffCompletedEvent());
+          yield* Queue.take(fixture.shellReads);
+          yield* reactor.drain;
+
+          const commands = yield* Ref.get(fixture.commands);
+          assert.strictEqual(commands.length, 1);
+          const command = commands[0]!;
+          assert.strictEqual(command.type, "thread.goal.loop");
+          if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+          assert.strictEqual(command.state, "completed");
+        }).pipe(Effect.provide(fixture.layer));
       }),
     ),
   );
@@ -470,8 +581,9 @@ describe("GoalLoopReactor", () => {
           assert.strictEqual(commands[0]!.type, "thread.turn.start");
           const second = commands[1]!;
           assert.strictEqual(second.type, "thread.goal.loop");
-          if (second.type !== "thread.goal.loop") return;
-          assert.strictEqual(second.action, "block");
+          if (second.type !== "thread.goal.loop" || second.action !== "sync") return;
+          assert.strictEqual(second.action, "sync");
+          assert.strictEqual(second.state, "blocked");
           assert.strictEqual(second.reason, "Agent produced no output on two continuations");
         }).pipe(Effect.provide(fixture.layer));
       }),
@@ -485,16 +597,11 @@ describe("GoalLoopReactor", () => {
     { label: "the loop is paused", shell: makeShell({ goalLoop: makeLoop({ state: "paused" }) }) },
     { label: "an approval is pending", shell: makeShell({ hasPendingApprovals: true }) },
     {
-      label: "the iteration budget is spent",
-      shell: makeShell({ goalLoop: makeLoop({ iterations: 10, maxIterations: 10 }) }),
-    },
-    {
-      // Stored mode still reads t3 (the decider only saw the instance id);
-      // the reactor re-derives it from the bound session's real driver.
-      label: "the provider drives the goal natively",
+      label: "a restricted experiment is driven natively",
       shell: makeShell({
         modelSelection: { instanceId: ProviderInstanceId.make("codex-work"), model: "gpt-5" },
         session: makeSession({ providerName: "codex", instanceId: "codex-work" }),
+        goalLoop: makeLoop({ kind: "experiment", mode: "native" }),
       }),
     },
     {
@@ -631,6 +738,26 @@ describe("GoalLoopReactor", () => {
         });
         assert.strictEqual(commands.length, 1);
         assert.strictEqual(commands[0]!.type, "thread.turn.start");
+      }),
+    ),
+  );
+
+  it.effect("wakes a migrated native loop only for the dedicated takeover sync", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const loop = makeLoop({ state: "running", mode: "t3" });
+        const commands = yield* dispatchesForSignals({
+          shell: makeShell({ goalLoop: loop }),
+          messages: [makeAssistantMessage("Recovered after takeover.")],
+          signals: [
+            makeGoalLoopUpdatedEvent({
+              loop,
+              commandId: CommandId.make("server:native-goal-takeover:goal-loop-thread:uuid"),
+            }),
+          ],
+        });
+        assert.strictEqual(commands.length, 1);
+        assert.strictEqual(commands[0]?.type, "thread.turn.start");
       }),
     ),
   );
@@ -774,6 +901,38 @@ describe("GoalLoopReactor", () => {
           assert.strictEqual(
             commands[0]!.commandId,
             `server:goal-continue:goal-loop-thread:boot:${NOW}`,
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("boot sweep restores an idle resume without scanning the stale reply", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const shell = makeShell({
+          goalLoop: makeLoop({ state: "idle", iterations: 0, updatedAt: RESUMED_AT }),
+        });
+        const fixture = yield* makeHarness({
+          shell,
+          messages: [makeAssistantMessage("Old goal stopped. <goal_blocked>old</goal_blocked>")],
+          sweepThreads: [shell],
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* GoalLoopReactor.GoalLoopReactor;
+          yield* runSignals({
+            reactor,
+            activation: fixture.activation,
+            shellReads: fixture.shellReads,
+            events: fixture.events,
+            sweepReads: 1,
+          });
+          const commands = yield* Ref.get(fixture.commands);
+          assert.strictEqual(commands.length, 1);
+          assert.strictEqual(commands[0]?.type, "thread.turn.start");
+          assert.strictEqual(
+            commands[0]?.commandId,
+            `server:goal-continue:goal-loop-thread:resume:${RESUMED_AT}`,
           );
         }).pipe(Effect.provide(fixture.layer));
       }),

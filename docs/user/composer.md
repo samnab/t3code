@@ -249,21 +249,21 @@ goal, which Codex itself tracks in a live session — see
 
 On servers that support it, setting a goal also starts a goal loop: T3 Code adds the goal to each
 turn it sends the agent and keeps starting follow-up turns until the agent reports the goal done,
-says it is stuck, or you step in. On a Codex thread the goal instead becomes Codex's own execution
-goal, and Codex drives the follow-up work — see
-[Codex](./providers-codex.md#thread-goals-map-onto-the-execution-goal).
+says it is stuck, or you step in. This works the same way with every provider, including Codex.
+Codex's separate provider-native execution goals remain available through the
+[Codex execution-goal panel](./providers-codex.md#codex-execution-goals).
 
 The loop only changes between turns, never in the middle of one. Every control below therefore
 takes effect once the turn that is running ends. The goal pill shows the loop's state:
 
 - A running loop shows an iteration count, such as `3/10`.
 - **Paused** holds the loop without losing progress; select the pause button on the pill, or pause
-  it from the thread's menu. The running turn finishes, and no new turn starts after it. Resume
-  clears the hold.
+  it from the thread's menu. The running turn and any children it already started may finish, but
+  no new turn starts after it. Their results stay pending until you resume.
 - **Blocked** means the agent reported it cannot continue; the pill's tooltip shows why. Resume
   clears the block.
 - **Capped** means the loop reached its 10-turn ceiling. Select **Continue anyway** on the pill to
-  set the count back to zero.
+  set the count back to zero. Pending child results are kept and delivered after you continue.
 - **Complete** means the agent reported the goal done.
 
 A newly set goal starts its first turn on its own when the thread is idle. If a turn is already
@@ -271,6 +271,12 @@ running, the goal starts as soon as that turn ends. A resume or a **Continue any
 the next turn on its own — you do not have to send a message — and the agent picks up from where the
 loop stopped rather than re-reading the reply that paused or blocked it. Clearing the goal with
 `/goal clear`, or the pill, stops the loop along with it.
+
+Children started through T3 Code are required work for that goal. The loop waits for them to
+finish, delivers their results before starting a general continuation, and only accepts completion
+after those results have been delivered. Automatically started result turns count toward the
+iteration ceiling. A completion reported by the final allowed turn still completes the goal
+instead of leaving it capped.
 
 You can send a `/goal` command while a turn is running — setting, editing, and clearing a goal are
 thread state, not messages to the agent, so the composer sends them instead of queueing them.

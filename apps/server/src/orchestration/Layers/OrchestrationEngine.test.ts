@@ -11,6 +11,8 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
+  RuntimeTaskId,
   ThreadId,
   TurnId,
   type OrchestrationCommand,
@@ -31,6 +33,11 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
+import { NativeChildRunRepositoryAuto } from "../../persistence/Layers/NativeChildRuns.ts";
+import {
+  NativeChildRun,
+  NativeChildRunRepository,
+} from "../../persistence/Services/NativeChildRuns.ts";
 import * as OrchestrationCommandReceipts from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import {
@@ -76,6 +83,7 @@ function makeOrchestrationLayer(
       Layer.provide(OrchestrationProjectionPipelineLive),
     ),
     OrchestrationProjectionSnapshotQueryLive,
+    NativeChildRunRepositoryAuto,
   ).pipe(
     Layer.provideMerge(ThreadBackgroundLiveness.layer),
     Layer.provide(ThreadPlanProgress.layer),
@@ -104,8 +112,10 @@ async function createOrchestrationSystem(
   );
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
+  const childRuns = await runtime.runPromise(Effect.service(NativeChildRunRepository));
   return {
     engine,
+    childRuns,
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     readThread: (threadId: ThreadId) =>
       runtime.runPromise(snapshotQuery.getThreadDetailById(threadId)),
@@ -130,6 +140,150 @@ const hasMetricSnapshot = (
   );
 
 describe("OrchestrationEngine", () => {
+  it("atomically blocks goal continuation and completion on durable required child work", async () => {
+    const system = await createOrchestrationSystem();
+    const projectId = ProjectId.make("goal-child-guard-project");
+    const threadId = ThreadId.make("goal-child-guard-thread");
+    const runId = RuntimeTaskId.make("goal-child-guard-run");
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("goal-child-guard-project-create"),
+          projectId,
+          title: "Goal child guard",
+          workspaceRoot: "/tmp/goal-child-guard",
+          createdAt: now(),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("goal-child-guard-thread-create"),
+          threadId,
+          projectId,
+          title: "Goal child guard",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("goal-child-guard-goal-set"),
+          threadId,
+          goal: "Finish after every child reports",
+        }),
+      );
+      const goalLoop = (await system.readThread(threadId)).pipe(Option.getOrThrow).goalLoop;
+      expect(goalLoop?.mode).toBe("t3");
+      if (goalLoop === null || goalLoop === undefined) throw new Error("missing goal loop");
+
+      const runNumber = await system.run(
+        system.childRuns.reserveRunNumber({
+          runId,
+          childThreadId: ThreadId.make("goal-child-guard-child"),
+          allocatedAt: now(),
+        }),
+      );
+      await system.run(
+        system.childRuns.insert(
+          NativeChildRun.make({
+            runId,
+            agentId: runId,
+            runNumber,
+            parentRunId: null,
+            parentThreadId: threadId,
+            childThreadId: ThreadId.make("goal-child-guard-child"),
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            provider: ProviderDriverKind.make("claudeAgent"),
+            model: "sonnet",
+            title: "Required child",
+            runtimeMode: "full-access",
+            cwd: "/tmp/goal-child-guard",
+            resumeCursor: null,
+            generation: 1,
+            status: "running",
+            output: "",
+            outputTruncated: false,
+            error: null,
+            deliveryState: "pending",
+            deliveryAttempt: 0,
+            createdAt: now(),
+            updatedAt: now(),
+          }),
+        ),
+      );
+
+      const continuationFailure = await system.run(
+        system.engine
+          .dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("goal-child-guard-continuation"),
+            threadId,
+            message: {
+              messageId: MessageId.make("goal-child-guard-continuation"),
+              role: "user",
+              text: "Continue working toward the thread goal.",
+              attachments: [],
+              origin: "goal-continue",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            continuation: true,
+            onlyIfIdle: true,
+            goalLoopGuard: { updatedAt: goalLoop.updatedAt },
+            onlyIfNoRequiredChildren: true,
+            createdAt: now(),
+          })
+          .pipe(Effect.flip),
+      );
+      expect(continuationFailure._tag).toBe("OrchestrationCommandInvariantError");
+
+      await system.run(
+        system.childRuns.markTerminal({
+          runId,
+          status: "completed",
+          output: "Child result",
+          outputTruncated: false,
+          error: null,
+          resumeCursor: null,
+          updatedAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      expect(await system.run(system.childRuns.getParentWorkState(threadId))).toEqual({
+        active: 0,
+        pendingDelivery: 1,
+      });
+      const completion = (commandId: string) =>
+        system.engine.dispatch({
+          type: "thread.goal.loop",
+          commandId: CommandId.make(commandId),
+          threadId,
+          action: "sync",
+          state: "completed",
+          goalLoopGuard: { updatedAt: goalLoop.updatedAt },
+          onlyIfNoRequiredChildren: true,
+        });
+      const completionFailure = await system.run(
+        completion("goal-child-guard-complete-blocked").pipe(Effect.flip),
+      );
+      expect(completionFailure._tag).toBe("OrchestrationCommandInvariantError");
+
+      await system.run(system.childRuns.markDelivered(runId));
+      await system.run(completion("goal-child-guard-complete"));
+      expect((await system.readThread(threadId)).pipe(Option.getOrThrow).goalLoop?.state).toBe(
+        "completed",
+      );
+    } finally {
+      await system.dispose();
+    }
+  });
+
   it.each(["running", "stopped"] as const)(
     "sends async answers with a %s session and rejects old duplicate replies",
     async (status) => {

@@ -29,10 +29,10 @@
 import {
   CommandId,
   MessageId,
-  resolveThreadGoalLoopMode,
   type OrchestrationEvent,
   type OrchestrationThread,
   type OrchestrationThreadShell,
+  type ThreadGoalLoop,
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
@@ -48,6 +48,8 @@ import * as Stream from "effect/Stream";
 
 import { forkParked } from "../serverActivation.ts";
 import { ExperimentService } from "../experiments/ExperimentService.ts";
+import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
+import { NativeChildRunRepository } from "../persistence/Services/NativeChildRuns.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "./Services/RuntimeReceiptBus.ts";
@@ -89,21 +91,17 @@ export function scanGoalSignal(text: string): GoalSignal | null {
 }
 
 /**
- * Whether the loop may be driven at all right now. Mode is re-derived from
- * the bound session's real driver rather than trusted from the stored loop,
- * which the decider could only guess from the instance id.
+ * Whether the loop may be evaluated right now. The iteration ceiling is
+ * checked after the ended turn's status tag, so the final allowed turn may
+ * still complete the goal.
  */
-export function canDriveGoalLoop(thread: OrchestrationThreadShell): boolean {
+export function canDriveGoalLoop(
+  thread: OrchestrationThreadShell,
+): thread is OrchestrationThreadShell & { readonly goalLoop: ThreadGoalLoop } {
   const loop = thread.goalLoop;
   if (thread.goal == null || loop == null) return false;
   if (loop.state !== "running" && loop.state !== "idle") return false;
-  if (
-    resolveThreadGoalLoopMode(thread.session?.providerName ?? thread.modelSelection.instanceId) !==
-    "t3"
-  ) {
-    return false;
-  }
-  if (loop.iterations >= loop.maxIterations) return false;
+  if (loop.mode !== "t3") return false;
   const status = thread.session?.status;
   if (status === "running" || status === "starting") return false;
   if (
@@ -151,6 +149,7 @@ export const make = Effect.gen(function* () {
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const receipts = yield* RuntimeReceiptBus;
   const experiments = yield* Effect.serviceOption(ExperimentService);
+  const childRuns = yield* NativeChildRunRepository;
 
   // Consecutive continuations that produced no assistant text, per thread.
   // ponytail: in-memory, so a server restart forgives one empty turn. The
@@ -169,9 +168,7 @@ export const make = Effect.gen(function* () {
       thread.goal != null &&
       loop != null &&
       (loop.state === "idle" || loop.state === "running") &&
-      resolveThreadGoalLoopMode(
-        thread.session?.providerName ?? thread.modelSelection.instanceId,
-      ) === "t3" &&
+      loop.mode === "t3" &&
       loop.iterations < loop.maxIterations &&
       thread.archivedAt == null &&
       thread.settledOverride !== "settled" &&
@@ -182,15 +179,26 @@ export const make = Effect.gen(function* () {
   const dispatchLoopAction = Effect.fn("GoalLoopReactor.dispatchLoopAction")(function* (input: {
     readonly threadId: ThreadId;
     readonly turnKey: string;
-    readonly action: "complete" | "block";
+    readonly action: "complete" | "block" | "continue";
+    readonly loopUpdatedAt: string;
+    readonly maxIterations: number;
+    readonly allowPendingChildren?: boolean;
     readonly reason?: string;
   }) {
     yield* engine.dispatch({
       type: "thread.goal.loop",
       commandId: CommandId.make(`server:goal-${input.action}:${input.threadId}:${input.turnKey}`),
       threadId: input.threadId,
-      action: input.action,
-      ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      action: "sync",
+      state:
+        input.action === "complete" ? "completed" : input.action === "block" ? "blocked" : "capped",
+      ...(input.action === "continue"
+        ? { reason: `Reached ${input.maxIterations} iterations.` }
+        : input.reason === undefined
+          ? {}
+          : { reason: input.reason }),
+      goalLoopGuard: { updatedAt: input.loopUpdatedAt },
+      ...(input.allowPendingChildren === true ? {} : { onlyIfNoRequiredChildren: true as const }),
     });
   });
 
@@ -219,6 +227,9 @@ export const make = Effect.gen(function* () {
       runtimeMode: thread.runtimeMode,
       interactionMode: thread.interactionMode,
       continuation: true,
+      onlyIfIdle: true,
+      goalLoopGuard: { updatedAt: loop.updatedAt },
+      onlyIfNoRequiredChildren: true,
       createdAt,
     });
     yield* receipts.publish({
@@ -241,7 +252,9 @@ export const make = Effect.gen(function* () {
       if (!canRetainResume(thread)) pendingResumes.delete(signal.threadId);
       return;
     }
-    if (thread.goalLoop?.kind === "experiment") {
+    const loop = thread.goalLoop;
+    if (loop == null) return;
+    if (loop.kind === "experiment") {
       if (Option.isNone(experiments)) {
         pendingResumes.delete(signal.threadId);
         return;
@@ -251,6 +264,30 @@ export const make = Effect.gen(function* () {
         pendingResumes.delete(signal.threadId);
         return;
       }
+    }
+    const childWork = yield* childRuns.getParentWorkState(signal.threadId);
+    if (childWork.active > 0) {
+      // The child result owns the next parent turn. The explicit wake has
+      // been consumed by waiting for that required work, and retaining it
+      // would outrank the result turn's completion tag later.
+      pendingResumes.delete(signal.threadId);
+      return;
+    }
+    if (childWork.pendingDelivery > 0) {
+      pendingResumes.delete(signal.threadId);
+      // Delivery owns the next automatic turn. At the ceiling it stays
+      // durable until the user resets the goal budget.
+      if (loop.iterations >= loop.maxIterations) {
+        yield* dispatchLoopAction({
+          threadId: signal.threadId,
+          turnKey: `cap:${loop.updatedAt}`,
+          action: "continue",
+          loopUpdatedAt: loop.updatedAt,
+          maxIterations: loop.maxIterations,
+          allowPendingChildren: true,
+        });
+      }
+      return;
     }
     if (resumedAt !== undefined) {
       // Explicit user intent, so it outranks the error-session hold below.
@@ -280,6 +317,8 @@ export const make = Effect.gen(function* () {
         threadId: signal.threadId,
         turnKey,
         action: "complete",
+        loopUpdatedAt: loop.updatedAt,
+        maxIterations: loop.maxIterations,
       });
     }
     if (signalTag?.kind === "blocked") {
@@ -288,7 +327,20 @@ export const make = Effect.gen(function* () {
         threadId: signal.threadId,
         turnKey,
         action: "block",
+        loopUpdatedAt: loop.updatedAt,
+        maxIterations: loop.maxIterations,
         reason: signalTag.reason,
+      });
+    }
+
+    if (loop.iterations >= loop.maxIterations) {
+      emptyRuns.delete(signal.threadId);
+      return yield* dispatchLoopAction({
+        threadId: signal.threadId,
+        turnKey,
+        action: "continue",
+        loopUpdatedAt: loop.updatedAt,
+        maxIterations: loop.maxIterations,
       });
     }
 
@@ -301,6 +353,8 @@ export const make = Effect.gen(function* () {
           threadId: signal.threadId,
           turnKey,
           action: "block",
+          loopUpdatedAt: loop.updatedAt,
+          maxIterations: loop.maxIterations,
           reason: EMPTY_OUTPUT_REASON,
         });
       }
@@ -325,17 +379,25 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  // A restart drops the in-flight turn but not the persisted `running` loop,
-  // so sweep once at boot: every stale running loop either continues or
-  // settles here, and none is left wedged waiting for an event that already
-  // fired.
+  // A restart can lose either the end-of-turn event for a running loop or the
+  // resumed event for an idle loop. Sweep both. An idle loop represents fresh
+  // user intent, so do not re-read the previous goal generation's final tag.
   const sweep = Effect.fn("GoalLoopReactor.sweep")(function* () {
     const snapshot = yield* snapshots.getShellSnapshot();
     yield* Effect.forEach(
       snapshot.threads.filter(
-        (thread) => thread.goalLoop?.state === "running" && canDriveGoalLoop(thread),
+        (thread) =>
+          (thread.goalLoop?.state === "idle" || thread.goalLoop?.state === "running") &&
+          canDriveGoalLoop(thread),
       ),
-      (thread) => worker.enqueue({ threadId: thread.id, turnId: null }),
+      (thread) => {
+        const loop = thread.goalLoop;
+        return worker.enqueue({
+          threadId: thread.id,
+          turnId: null,
+          ...(loop?.state === "idle" ? { resumedAt: loop.updatedAt } : {}),
+        });
+      },
       { discard: true },
     );
   });
@@ -344,6 +406,10 @@ export const make = Effect.gen(function* () {
     function* () {
       yield* forkParked(
         Effect.gen(function* () {
+          // Acquire the subscription before reading the snapshot. A native
+          // takeover may commit while this sweep runs; the buffered event is
+          // then the recovery wake for a loop the snapshot still called native.
+          const domainEvents = yield* engine.subscribeDomainEvents;
           yield* sweep().pipe(
             Effect.catchCause((cause) =>
               Cause.hasInterruptsOnly(cause)
@@ -353,11 +419,20 @@ export const make = Effect.gen(function* () {
                   }),
             ),
           );
-          yield* Stream.runForEach(engine.streamDomainEvents, (event: OrchestrationEvent) => {
+          yield* Stream.runForEach(domainEvents, (event: OrchestrationEvent) => {
             if (event.type === "thread.turn-diff-completed") {
               return worker.enqueue({
                 threadId: event.payload.threadId,
                 turnId: event.payload.turnId,
+              });
+            }
+            if (
+              event.type === "thread.activity-appended" &&
+              event.payload.activity.kind === "task.completed"
+            ) {
+              return worker.enqueue({
+                threadId: event.payload.threadId,
+                turnId: null,
               });
             }
             // Goal activation, resume, and "continue anyway" have no turn to
@@ -373,6 +448,21 @@ export const make = Effect.gen(function* () {
                   })
                 : Effect.void;
             }
+            // A persisted standard Codex loop changes from native to T3 only
+            // after NativeGoalReactor has safely handed it over. Its dedicated
+            // takeover command is a recovery wake because our boot sweep may
+            // already have skipped the legacy native projection.
+            if (
+              event.type === "thread.goal-loop-updated" &&
+              event.commandId?.startsWith("server:native-goal-takeover:") === true
+            ) {
+              const loop = event.payload.loop;
+              return loop !== null &&
+                loop.mode === "t3" &&
+                (loop.state === "idle" || loop.state === "running")
+                ? worker.enqueue({ threadId: event.payload.threadId, turnId: null })
+                : Effect.void;
+            }
             if (event.type === "thread.session-set" && pendingResumes.has(event.payload.threadId)) {
               return worker.enqueue({ threadId: event.payload.threadId, turnId: null });
             }
@@ -386,4 +476,6 @@ export const make = Effect.gen(function* () {
   return { start, drain: worker.drain } satisfies GoalLoopReactor["Service"];
 });
 
-export const layer = Layer.effect(GoalLoopReactor, make);
+export const layerWithRepository = Layer.effect(GoalLoopReactor, make);
+
+export const layer = layerWithRepository.pipe(Layer.provide(NativeChildRunRepositoryAuto));

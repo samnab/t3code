@@ -32,6 +32,8 @@ import {
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
+import { NativeChildRunRepositoryAuto } from "../../persistence/Layers/NativeChildRuns.ts";
+import { NativeChildRunRepository } from "../../persistence/Services/NativeChildRuns.ts";
 import {
   isOrchestrationCommandRejection,
   OrchestrationCommandIdConflictError,
@@ -85,6 +87,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const eventStore = yield* OrchestrationEventStore;
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
+  const nativeChildRuns = yield* NativeChildRunRepository;
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
@@ -273,6 +276,20 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         const committedCommand = yield* sql
           .withTransaction(
             Effect.gen(function* () {
+              if (
+                "onlyIfNoRequiredChildren" in envelope.command &&
+                envelope.command.onlyIfNoRequiredChildren === true
+              ) {
+                const childWork = yield* nativeChildRuns.getParentWorkState(
+                  envelope.command.threadId,
+                );
+                if (childWork.active > 0 || childWork.pendingDelivery > 0) {
+                  return yield* new OrchestrationCommandInvariantError({
+                    commandType: envelope.command.type,
+                    detail: `thread ${envelope.command.threadId} has required child work outstanding`,
+                  });
+                }
+              }
               const committedEvents: OrchestrationEvent[] = [];
               const attachmentCleanups: Effect.Effect<void>[] = [];
               let nextCommandReadModel = commandReadModel;
@@ -467,12 +484,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     getAutomaticTurnState: (threadId) =>
       Effect.gen(function* () {
         const thread = commandReadModel.threads.find((candidate) => candidate.id === threadId);
-        return thread === undefined
-          ? null
-          : {
-              runtimeMode: thread.runtimeMode,
-              canStart: canStartThreadTurnIfIdle(thread, yield* nowIso),
-            };
+        if (thread === undefined) return null;
+        const goalLoop = thread.goalLoop ?? null;
+        const goalAllowsAutomaticTurn =
+          goalLoop === null ||
+          ((goalLoop.state === "idle" || goalLoop.state === "running") &&
+            (goalLoop.kind === "experiment"
+              ? goalLoop.mode === "native" || goalLoop.iterations < goalLoop.maxIterations
+              : goalLoop.mode === "t3" && goalLoop.iterations < goalLoop.maxIterations));
+        return {
+          runtimeMode: thread.runtimeMode,
+          canStart: goalAllowsAutomaticTurn && canStartThreadTurnIfIdle(thread, yield* nowIso),
+          goalLoop,
+        };
       }),
   } satisfies OrchestrationEngineShape;
 });
@@ -480,4 +504,4 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 export const OrchestrationEngineLive = Layer.effect(
   OrchestrationEngineService,
   makeOrchestrationEngine,
-);
+).pipe(Layer.provide(NativeChildRunRepositoryAuto));

@@ -13,6 +13,10 @@ describe("experiment goal-loop mode", () => {
       "native",
     );
     assert.strictEqual(
+      resolveExperimentGoalLoopMode({ providerDriver: null, providerInstanceId: "codex" }),
+      "native",
+    );
+    assert.strictEqual(
       resolveExperimentGoalLoopMode({
         providerDriver: "claudeAgent",
         providerInstanceId: "claude",
