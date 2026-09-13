@@ -11,9 +11,9 @@ import * as Schema from "effect/Schema";
 
 import {
   claudeSettingsRouteThroughHeadroom,
-  detectHeadroomRouting,
   inspectCodexHeadroomRouting,
   isHeadroomProxyUrl,
+  resolveHeadroomSessionRouting,
 } from "./HeadroomRouting.ts";
 
 const decodeSettings = Schema.decodeSync(ServerSettings);
@@ -66,117 +66,143 @@ model_provider = "other"
     });
   });
 
-  it.effect(
-    "uses the selected Claude instance home and lets its environment override settings",
-    () =>
-      Effect.gen(function* () {
-        const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "headroom-claude-"));
-        try {
-          NodeFS.writeFileSync(
-            NodePath.join(home, "settings.json"),
-            '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:6767"}}',
-          );
-          const settings = decodeSettings({
-            providerInstances: {
-              claude_work: {
-                driver: "claudeAgent",
-                environment: [
-                  {
-                    name: "ANTHROPIC_BASE_URL",
-                    value: "https://gateway.example.test",
-                    sensitive: false,
-                  },
-                ],
-                config: { homePath: home },
-              },
-            },
-          });
+  it.effect("builds process-local launch settings for first-party Codex and Claude", () =>
+    Effect.gen(function* () {
+      const codexHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "headroom-codex-"));
+      const claudeHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "headroom-claude-"));
+      try {
+        const settings = decodeSettings({
+          headroomProxyUrl: "http://127.0.0.1:8787",
+          providerInstances: {
+            codex_work: { driver: "codex", config: { homePath: codexHome } },
+            claude_work: { driver: "claudeAgent", config: { homePath: claudeHome } },
+          },
+        });
 
-          expect(
-            yield* detectHeadroomRouting({
-              provider: claude,
-              providerInstanceId: ProviderInstanceId.make("claude_work"),
-              settings,
-              environment: {},
-            }),
-          ).toBe(false);
-        } finally {
-          NodeFS.rmSync(home, { recursive: true, force: true });
-        }
-      }).pipe(Effect.provide(NodeServices.layer)),
+        expect(
+          yield* resolveHeadroomSessionRouting({
+            provider: codex,
+            providerInstanceId: ProviderInstanceId.make("codex_work"),
+            settings,
+            environment: {},
+          }),
+        ).toEqual({
+          environment: {
+            HEADROOM_ACTIVE: "1",
+            HEADROOM_PROXY_URL: "http://127.0.0.1:8787",
+            OPENAI_BASE_URL: "http://127.0.0.1:8787/v1",
+          },
+          codexAppServerArgs: ["-c", 'openai_base_url="http://127.0.0.1:8787/v1"'],
+        });
+        expect(
+          yield* resolveHeadroomSessionRouting({
+            provider: claude,
+            providerInstanceId: ProviderInstanceId.make("claude_work"),
+            settings,
+            environment: {},
+          }),
+        ).toEqual({
+          environment: {
+            HEADROOM_ACTIVE: "1",
+            HEADROOM_PROXY_URL: "http://127.0.0.1:8787",
+            ANTHROPIC_BASE_URL: "http://127.0.0.1:8787",
+          },
+        });
+      } finally {
+        NodeFS.rmSync(codexHome, { recursive: true, force: true });
+        NodeFS.rmSync(claudeHome, { recursive: true, force: true });
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("uses the selected Codex instance home and accepts the managed provider route", () =>
+  it.effect("leaves explicit custom upstreams and cloud Claude sessions unchanged", () =>
+    Effect.gen(function* () {
+      const codexHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "headroom-codex-"));
+      const claudeHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "headroom-claude-"));
+      try {
+        NodeFS.writeFileSync(
+          NodePath.join(codexHome, "config.toml"),
+          [
+            'model_provider = "gateway"',
+            "[model_providers.gateway]",
+            'base_url = "https://gateway.example.test/v1"',
+          ].join("\n"),
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(claudeHome, "settings.json"),
+          '{"env":{"ANTHROPIC_BASE_URL":"https://gateway.example.test"}}',
+        );
+        const settings = decodeSettings({
+          providerInstances: {
+            codex_work: { driver: "codex", config: { homePath: codexHome } },
+            claude_work: { driver: "claudeAgent", config: { homePath: claudeHome } },
+          },
+        });
+        expect(
+          yield* resolveHeadroomSessionRouting({
+            provider: codex,
+            providerInstanceId: ProviderInstanceId.make("codex_work"),
+            settings,
+            environment: {},
+          }),
+        ).toBeUndefined();
+        expect(
+          yield* resolveHeadroomSessionRouting({
+            provider: claude,
+            providerInstanceId: ProviderInstanceId.make("claude_work"),
+            settings,
+            environment: {},
+          }),
+        ).toBeUndefined();
+        expect(
+          yield* resolveHeadroomSessionRouting({
+            provider: claude,
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            settings,
+            environment: { CLAUDE_CODE_USE_BEDROCK: "1" },
+          }),
+        ).toBeUndefined();
+      } finally {
+        NodeFS.rmSync(codexHome, { recursive: true, force: true });
+        NodeFS.rmSync(claudeHome, { recursive: true, force: true });
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("preserves an existing matching Codex Headroom provider route", () =>
     Effect.gen(function* () {
       const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "headroom-codex-"));
       try {
         NodeFS.writeFileSync(
           NodePath.join(home, "config.toml"),
           [
-            "# --- Headroom init provider ---",
             'model_provider = "headroom"',
-            'openai_base_url = "http://127.0.0.1:6767/v1"',
             "[model_providers.headroom]",
             'base_url = "http://127.0.0.1:6767/v1"',
-            "# --- end Headroom init provider ---",
           ].join("\n"),
         );
         const settings = decodeSettings({
           providerInstances: {
-            codex_work: {
-              driver: "codex",
-              config: { homePath: home },
-            },
+            codex_work: { driver: "codex", config: { homePath: home } },
           },
         });
 
         expect(
-          yield* detectHeadroomRouting({
+          yield* resolveHeadroomSessionRouting({
             provider: codex,
             providerInstanceId: ProviderInstanceId.make("codex_work"),
             settings,
             environment: {},
           }),
-        ).toBe(true);
+        ).toEqual({
+          environment: {
+            HEADROOM_ACTIVE: "1",
+            HEADROOM_PROXY_URL: "http://127.0.0.1:6767",
+          },
+        });
       } finally {
         NodeFS.rmSync(home, { recursive: true, force: true });
       }
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("accepts an effective ambient Codex base URL without a managed config block", () =>
-    Effect.gen(function* () {
-      const settings = decodeSettings({});
-      expect(
-        yield* detectHeadroomRouting({
-          provider: codex,
-          providerInstanceId: ProviderInstanceId.make("codex"),
-          settings,
-          environment: { OPENAI_BASE_URL: "http://127.0.0.1:6767/v1" },
-        }),
-      ).toBe(true);
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("matches provider routing against the configured Headroom origin", () =>
-    Effect.gen(function* () {
-      const settings = decodeSettings({ headroomProxyUrl: "http://127.0.0.1:8787" });
-      expect(
-        yield* detectHeadroomRouting({
-          provider: claude,
-          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-          settings,
-          environment: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8787" },
-        }),
-      ).toBe(true);
-      expect(
-        yield* detectHeadroomRouting({
-          provider: claude,
-          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-          settings,
-          environment: { ANTHROPIC_BASE_URL: "http://127.0.0.1:6767" },
-        }),
-      ).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

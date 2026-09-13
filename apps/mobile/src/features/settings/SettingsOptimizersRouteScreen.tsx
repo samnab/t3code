@@ -58,11 +58,11 @@ const OPTIMIZER_META: Readonly<
   },
   headroom: {
     label: "Headroom",
-    description: "Local proxy detection",
-    mode: "Detected proxy",
+    description: "Routes supported new sessions through a local proxy",
+    mode: "Session routing",
     installUrl: "https://extraheadroom.com",
-    supportedProviders: "Claude Code and Codex when routed through Headroom",
-    unsupportedProviders: "Other providers are not routed through Headroom by T3",
+    supportedProviders: "First-party Claude Code and Codex sessions",
+    unsupportedProviders: "Cloud and custom upstreams stay unchanged",
   },
   cbm: {
     label: "Codebase Memory",
@@ -457,8 +457,8 @@ function HeadroomProxySettings({
           <Text className="text-base font-t3-medium text-foreground">Headroom proxy URL</Text>
           <Text className="text-sm leading-normal text-foreground-muted">
             The HTTP loopback origin where this environment can reach an existing Headroom proxy.
-            Use the base origin, such as http://127.0.0.1:8787; /v1 is not needed. T3 only detects
-            and measures it and never starts or configures Headroom.
+            Use the base origin, such as http://127.0.0.1:8787; /v1 is not needed. Enabled projects
+            route supported new sessions through it. T3 never starts, stops, or configures Headroom.
           </Text>
         </View>
         <TextInput
@@ -768,7 +768,7 @@ export function SettingsOptimizersRouteScreen() {
                           label={OPTIMIZER_META[id].label}
                           subtitle={
                             id === "headroom"
-                              ? "Selects proxy use; never starts or stops Headroom"
+                              ? "Routes supported new sessions; never starts or stops Headroom"
                               : id === "cbm"
                                 ? "Adds project-scoped MCP tools; no token savings"
                                 : "Filters supported CLI output for this project"

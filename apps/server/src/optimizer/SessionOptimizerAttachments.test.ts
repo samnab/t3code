@@ -65,10 +65,14 @@ describe("SessionOptimizerAttachments", () => {
     const first = {
       projectId: ProjectId.make("project-restarted"),
       cwd: "/repo/restarted",
-      configured: ["rtk", "cbm"] as const,
-      attached: ["rtk", "cbm"] as const,
-      ready: ["rtk"] as const,
+      configured: ["rtk", "headroom", "cbm"] as const,
+      attached: ["rtk", "headroom", "cbm"] as const,
+      ready: ["rtk", "headroom"] as const,
       rtk: { command: "rtk" as const },
+      headroom: {
+        environment: { OPENAI_BASE_URL: "http://127.0.0.1:6767/v1" },
+        codexAppServerArgs: ["-c", 'openai_base_url="http://127.0.0.1:6767/v1"'],
+      },
       cbm: {
         command: "codebase-memory-mcp",
         args: [],
@@ -85,11 +89,14 @@ describe("SessionOptimizerAttachments", () => {
     expect(isCurrentSessionOptimizerAttachments(threadId, first)).toBe(false);
     removeSessionOptimizerAttachment(threadId, "cbm");
     expect(readSessionOptimizerAttachments(threadId)).toMatchObject({
-      configured: ["rtk", "cbm"],
+      configured: ["rtk", "headroom", "cbm"],
       attached: [],
       ready: [],
     });
     expect(readSessionOptimizerAttachments(threadId)).not.toHaveProperty("cbm");
+
+    removeSessionOptimizerAttachment(threadId, "headroom");
+    expect(readSessionOptimizerAttachments(threadId)).not.toHaveProperty("headroom");
 
     clearSessionOptimizerAttachments(threadId);
   });

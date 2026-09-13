@@ -21,20 +21,21 @@ it as environment-level, so it is not a per-project total.
 
 ## Headroom
 
-[Get Headroom](https://extraheadroom.com) on the provider environment. T3 detects Headroom's
-local proxy and reports the running state and savings when its client configuration routes through
-that proxy. The project toggle records whether T3 should use the integration for the next session;
-it never starts, stops, or edits Headroom.
+[Get Headroom](https://extraheadroom.com) on the provider environment. T3 detects Headroom's local
+proxy and reports its running state and savings. When Headroom is enabled for a project, T3 routes
+supported new sessions through a healthy proxy using session-only launch settings. Turning it off
+stops T3 from adding those settings to later sessions; existing provider routes remain unchanged.
+T3 never starts, stops, or edits Headroom.
 
-Headroom support in v1 is limited to Claude Code and Codex sessions routed through Headroom. Its
-savings are environment-level counters.
+Headroom support in v1 covers first-party Claude Code and Codex sessions. T3 leaves cloud modes and
+custom upstreams unchanged and preserves recognized provider configurations that already select
+Headroom. Its savings are environment-level counters.
 
 Set the proxy URL in the selected environment's **Settings → Optimizers → Configuration** section.
 Enter the base HTTP loopback origin, without a `/v1` path. T3 defaults to
 `http://127.0.0.1:6767`; if your opt-in shell alias starts Headroom on port 8787, use
-`http://127.0.0.1:8787`. This setting only tells T3 where to detect and measure an existing proxy;
-it does not start Headroom or route provider traffic. Shell aliases are process-local, so they do
-not automatically apply to provider sessions launched by T3.
+`http://127.0.0.1:8787`. T3 uses this address to check the existing proxy and route supported
+sessions for enabled projects. It does not start Headroom or change provider configuration files.
 
 ## Codebase Memory
 

@@ -2366,6 +2366,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           options?.environment ?? process.env,
           input.voiceNotifications,
         );
+        if (optimizerAttachments?.headroom) {
+          Object.assign(sessionEnvironment, optimizerAttachments.headroom.environment);
+        }
         if (isExperiment) {
           delete sessionEnvironment.CODEX_HOME;
           delete sessionEnvironment.T3CODE_CODEX_LAUNCH_ARGS;
@@ -2442,6 +2445,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(optimizerAttachments?.cbm
             ? buildCodexCbmAppServerArgs(optimizerAttachments.cbm)
             : []),
+          ...(optimizerAttachments?.headroom?.codexAppServerArgs ?? []),
         ];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,

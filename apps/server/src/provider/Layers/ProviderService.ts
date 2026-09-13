@@ -95,7 +95,7 @@ import * as ProjectionSnapshotQuery from "../../orchestration/Services/Projectio
 import { preflightExperimentProvider } from "../ExperimentProviderSupport.ts";
 import { CbmIndexService } from "../../optimizer/CbmIndexService.ts";
 import { OptimizerProbeService } from "../../optimizer/OptimizerProbeService.ts";
-import { detectHeadroomRouting } from "../../optimizer/HeadroomRouting.ts";
+import { resolveHeadroomSessionRouting } from "../../optimizer/HeadroomRouting.ts";
 import { isSupportedRtkVersion } from "../../optimizer/RtkRewrite.ts";
 import {
   clearAllSessionOptimizerAttachments,
@@ -1066,20 +1066,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         rtkStatus?.installed === true &&
         isSupportedRtkVersion(rtkStatus.version) &&
         (provider === "claudeAgent" || provider === "codex");
-      const headroomAttached =
+      const headroom =
         projectSettings.headroom &&
         headroomStatus?.installed === true &&
         headroomStatus.running === true &&
-        (provider === "claudeAgent" || provider === "codex") &&
-        (yield* detectHeadroomRouting({
-          provider: input.provider,
-          providerInstanceId: input.providerInstanceId,
-          settings,
-          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-        }).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, pathService),
-        ));
+        (provider === "claudeAgent" || provider === "codex")
+          ? yield* resolveHeadroomSessionRouting({
+              provider: input.provider,
+              providerInstanceId: input.providerInstanceId,
+              settings,
+              cwd,
+            }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, pathService),
+            )
+          : undefined;
+      const headroomAttached = headroom !== undefined;
       const cbmAttached =
         projectSettings.cbm &&
         cbmStatus?.installed === true &&
@@ -1103,6 +1105,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           attached,
           ready,
           ...(rtkAttached ? { rtk: { command: "rtk" } } : {}),
+          ...(headroom === undefined ? {} : { headroom }),
           ...(cbmAttached
             ? {
                 cbm: {

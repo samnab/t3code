@@ -416,6 +416,58 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("applies Headroom routing only to the attached query launch", () => {
+    const harness = makeHarness({ environment: { EXISTING: "kept" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const routedThread = ThreadId.make("thread-claude-headroom");
+      const directThread = ThreadId.make("thread-claude-direct");
+      setSessionOptimizerAttachments(routedThread, {
+        projectId: ProjectId.make("project-headroom"),
+        cwd: "/repo/headroom",
+        configured: ["headroom"],
+        attached: ["headroom"],
+        ready: ["headroom"],
+        headroom: {
+          environment: {
+            HEADROOM_ACTIVE: "1",
+            HEADROOM_PROXY_URL: "http://127.0.0.1:8787",
+            ANTHROPIC_BASE_URL: "http://127.0.0.1:8787",
+          },
+        },
+      });
+
+      yield* adapter
+        .startSession({
+          threadId: routedThread,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.ensuring(Effect.sync(() => clearSessionOptimizerAttachments(routedThread))));
+      const routedEnvironment = harness.getLastCreateQueryInput()?.options.env;
+      yield* adapter.startSession({
+        threadId: directThread,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      assert.deepEqual(routedEnvironment, {
+        EXISTING: "kept",
+        T3_VOICE_NOTIFICATIONS: "1",
+        HEADROOM_ACTIVE: "1",
+        HEADROOM_PROXY_URL: "http://127.0.0.1:8787",
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:8787",
+      });
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.env, {
+        EXISTING: "kept",
+        T3_VOICE_NOTIFICATIONS: "1",
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("retains Claude session startup causes without exposing their messages", () => {
     const cause = new Error("credential material that must remain in the cause chain");
     const layer = Layer.effect(

@@ -62,9 +62,9 @@ const OPTIMIZER_META: Readonly<
   },
   headroom: {
     label: "Headroom",
-    description: "Detects Headroom's local proxy and reports its savings.",
-    mode: "Detected proxy",
-    supportedProviders: "Claude Code and Codex when their configs route via Headroom",
+    description: "Routes supported new sessions through an existing local proxy.",
+    mode: "Session routing",
+    supportedProviders: "First-party Claude Code and Codex sessions",
   },
   cbm: {
     label: "Codebase Memory",
@@ -401,7 +401,7 @@ function HeadroomProxySettingsRow({
   return (
     <SettingsRow
       title="Headroom proxy URL"
-      description="The HTTP loopback origin where this environment can reach an existing Headroom proxy. Use the base origin, such as http://127.0.0.1:8787; /v1 is not needed. T3 only detects and measures it and never starts or configures Headroom."
+      description="The HTTP loopback origin where this environment can reach an existing Headroom proxy. Use the base origin, such as http://127.0.0.1:8787; /v1 is not needed. Enabled projects route supported new sessions through it. T3 never starts, stops, or configures Headroom."
       status={error ? <span className="text-destructive">{error}</span> : undefined}
       resetAction={
         proxyUrl !== DEFAULT_HEADROOM_PROXY_URL ? (
@@ -576,27 +576,18 @@ function OptimizerEnvironmentSettings({
         )}
       </SettingsSection>
 
-      <SettingsSection
-        id="optimizer-savings"
-        title="Savings"
-      >
+      <SettingsSection id="optimizer-savings" title="Savings">
         <SavingsRows snapshot={statusQuery.data} environmentConnected={environmentConnected} />
       </SettingsSection>
 
-      <SettingsSection
-        id="optimizer-savings-history"
-        title="Savings history"
-      >
+      <SettingsSection id="optimizer-savings-history" title="Savings history">
         <SavingsHistoryRows
           snapshot={statusQuery.data}
           environmentConnected={environmentConnected}
         />
       </SettingsSection>
 
-      <SettingsSection
-        id="optimizer-project"
-        title="Project attachments"
-      >
+      <SettingsSection id="optimizer-project" title="Project attachments">
         {environmentProjects.length === 0 ? (
           <SettingsRow
             title="No projects on this environment"
@@ -638,7 +629,7 @@ function OptimizerEnvironmentSettings({
                 title={OPTIMIZER_META[id].label}
                 description={
                   id === "headroom"
-                    ? "T3 detects the local Headroom proxy; this switch never starts or stops it."
+                    ? "Routes supported new sessions through the existing healthy proxy; never starts or stops Headroom."
                     : id === "cbm"
                       ? "Adds CBM as a project-scoped MCP server for supported providers."
                       : "Adds RTK's shell filtering at the provider attachment layer."
@@ -661,19 +652,13 @@ function OptimizerEnvironmentSettings({
         )}
       </SettingsSection>
 
-      <SettingsSection
-        id="optimizer-compatibility"
-        title="Provider compatibility"
-      >
+      <SettingsSection id="optimizer-compatibility" title="Provider compatibility">
         {OPTIMIZER_ORDER.map((id) => (
           <ProviderCompatibilityRow key={id} id={id} />
         ))}
       </SettingsSection>
 
-      <SettingsSection
-        id="optimizer-configuration"
-        title="Configuration"
-      >
+      <SettingsSection id="optimizer-configuration" title="Configuration">
         <HeadroomProxySettingsRow
           key={environmentId}
           environmentId={environmentId}
@@ -731,10 +716,7 @@ export function OptimizersSettingsPanel() {
 
   return (
     <SettingsPageContainer width="wide">
-      <SettingsSection
-        id="optimizers"
-        title="Optimizers"
-      >
+      <SettingsSection id="optimizers" title="Optimizers">
         <SettingsRow
           title="Environment"
           description="Status, savings, and project attachments below belong to this environment."

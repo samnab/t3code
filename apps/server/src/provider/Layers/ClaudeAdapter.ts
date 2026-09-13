@@ -4809,7 +4809,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
         env: McpProviderSession.withAgentDeviceEnvironment(
-          withVoiceNotificationsEnv(claudeEnvironment, input.voiceNotifications),
+          withVoiceNotificationsEnv(
+            {
+              ...claudeEnvironment,
+              ...optimizerAttachments?.headroom?.environment,
+            },
+            input.voiceNotifications,
+          ),
           mcpSession,
         ),
         additionalDirectories,

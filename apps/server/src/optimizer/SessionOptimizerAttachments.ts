@@ -13,6 +13,11 @@ export interface SessionCbmAttachment {
   readonly env: Readonly<Record<string, string>>;
 }
 
+export interface SessionHeadroomAttachment {
+  readonly environment: Readonly<Record<string, string>>;
+  readonly codexAppServerArgs?: ReadonlyArray<string>;
+}
+
 export interface SessionOptimizerAttachmentDescriptor {
   readonly projectId: ProjectId;
   readonly cwd: string;
@@ -20,6 +25,7 @@ export interface SessionOptimizerAttachmentDescriptor {
   readonly attached: ReadonlyArray<OptimizerId>;
   readonly ready: ReadonlyArray<OptimizerId>;
   readonly rtk?: SessionRtkAttachment;
+  readonly headroom?: SessionHeadroomAttachment;
   readonly cbm?: SessionCbmAttachment;
   readonly cbmIndexCompletion?: Effect.Effect<CbmProjectIndexStatus>;
 }
@@ -69,6 +75,12 @@ export function removeSessionOptimizerAttachment(threadId: ThreadId, optimizer: 
     const { cbm: removed, cbmIndexCompletion: removedIndex, ...remaining } = current;
     void removed;
     void removedIndex;
+    attachmentsByThread.set(threadId, { ...remaining, attached, ready });
+    return;
+  }
+  if (optimizer === "headroom") {
+    const { headroom: removed, ...remaining } = current;
+    void removed;
     attachmentsByThread.set(threadId, { ...remaining, attached, ready });
     return;
   }

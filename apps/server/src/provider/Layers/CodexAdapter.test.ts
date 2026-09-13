@@ -719,6 +719,79 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("applies Headroom routing only to the attached session launch", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({ launchArgs: "--enable responses_websockets" });
+        return yield* makeCodexAdapter(codexConfig, {
+          environment: { EXISTING: "kept" },
+          makeRuntime: runtimeFactory.factory,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const routedThread = asThreadId("sess-headroom-routed");
+      const directThread = asThreadId("sess-headroom-direct");
+      setSessionOptimizerAttachments(routedThread, {
+        projectId: ProjectId.make("project-headroom"),
+        cwd: "/repo/headroom",
+        configured: ["headroom"],
+        attached: ["headroom"],
+        ready: ["headroom"],
+        headroom: {
+          environment: {
+            HEADROOM_ACTIVE: "1",
+            HEADROOM_PROXY_URL: "http://127.0.0.1:8787",
+            OPENAI_BASE_URL: "http://127.0.0.1:8787/v1",
+          },
+          codexAppServerArgs: ["-c", 'openai_base_url="http://127.0.0.1:8787/v1"'],
+        },
+      });
+
+      yield* adapter
+        .startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId: routedThread,
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.ensuring(Effect.sync(() => clearSessionOptimizerAttachments(routedThread))));
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: directThread,
+        runtimeMode: "full-access",
+      });
+
+      const routed = runtimeFactory.factory.mock.calls[0]?.[0];
+      const direct = runtimeFactory.factory.mock.calls[1]?.[0];
+      NodeAssert.ok(routed !== undefined && direct !== undefined);
+      NodeAssert.deepStrictEqual(routed.environment, {
+        EXISTING: "kept",
+        T3_VOICE_NOTIFICATIONS: "1",
+        HEADROOM_ACTIVE: "1",
+        HEADROOM_PROXY_URL: "http://127.0.0.1:8787",
+        OPENAI_BASE_URL: "http://127.0.0.1:8787/v1",
+      });
+      NodeAssert.deepStrictEqual(routed.appServerArgs, [
+        "-c",
+        'openai_base_url="http://127.0.0.1:8787/v1"',
+      ]);
+      NodeAssert.deepStrictEqual(direct.environment, {
+        EXISTING: "kept",
+        T3_VOICE_NOTIFICATIONS: "1",
+      });
+      NodeAssert.equal(direct.appServerArgs, undefined);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("maps codex model options for the adapter's bound custom instance id", () => {
     const customInstanceId = ProviderInstanceId.make("codex_personal");
     const customRuntimeFactory = makeRuntimeFactory();

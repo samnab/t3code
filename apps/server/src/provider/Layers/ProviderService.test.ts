@@ -5246,7 +5246,7 @@ describe("agent browser access", () => {
     optimizerRuntime?: {
       readonly rtkVersion?: string;
       readonly dropCbmDuringStart?: boolean;
-      readonly headroomRoute?: "config" | "environment" | "unmatched";
+      readonly headroomRoute?: "direct" | "config" | "environment" | "unmatched";
       readonly headroomRunning?: boolean;
     },
     options?: { readonly withoutOrchestration?: boolean },
@@ -5578,7 +5578,7 @@ describe("agent browser access", () => {
         asThreadId("thread-project-optimizers"),
         undefined,
         { rtk: true, headroom: true, cbm: true },
-        { headroomRoute: "config" },
+        { headroomRoute: "direct" },
       );
 
       assert.deepEqual(attachment?.configured, ["rtk", "headroom", "cbm"]);
@@ -5586,6 +5586,14 @@ describe("agent browser access", () => {
       assert.deepEqual(attachment?.ready, ["rtk", "headroom"]);
       assert.equal(typeof attachment?.cwd, "string");
       if (attachment === undefined) return;
+      assert.deepEqual(attachment.headroom, {
+        environment: {
+          HEADROOM_ACTIVE: "1",
+          HEADROOM_PROXY_URL: "http://127.0.0.1:6767",
+          OPENAI_BASE_URL: "http://127.0.0.1:6767/v1",
+        },
+        codexAppServerArgs: ["-c", 'openai_base_url="http://127.0.0.1:6767/v1"'],
+      });
       assert.deepEqual(attachment.cbm?.env, { CBM_ALLOWED_ROOT: attachment.cwd });
       assert.equal(attachment.cbm?.command, "codebase-memory-mcp");
       assert.deepEqual(indexCalls, [{ projectId, cwd: attachment.cwd }]);
@@ -5623,6 +5631,39 @@ describe("agent browser access", () => {
       assert.deepEqual(attachment?.configured, ["headroom"]);
       assert.deepEqual(attachment?.attached, []);
       assert.deepEqual(attachment?.ready, []);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not attach Headroom while its configured proxy is unhealthy", () =>
+    Effect.gen(function* () {
+      const { attachment } = yield* startSessionWith(
+        false,
+        asThreadId("thread-headroom-stopped"),
+        undefined,
+        { rtk: false, headroom: true, cbm: false },
+        { headroomRoute: "direct", headroomRunning: false },
+      );
+
+      assert.deepEqual(attachment?.configured, ["headroom"]);
+      assert.deepEqual(attachment?.attached, []);
+      assert.equal(attachment?.headroom, undefined);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("does not prepare Headroom routing when the project toggle is off", () =>
+    Effect.gen(function* () {
+      const { attachment, probeRefreshes } = yield* startSessionWith(
+        false,
+        asThreadId("thread-headroom-disabled"),
+        undefined,
+        { rtk: false, headroom: false, cbm: false },
+        { headroomRoute: "direct" },
+      );
+
+      assert.deepEqual(attachment?.configured, []);
+      assert.deepEqual(attachment?.attached, []);
+      assert.equal(attachment?.headroom, undefined);
+      assert.deepEqual(probeRefreshes, []);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

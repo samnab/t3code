@@ -9,6 +9,7 @@ import {
   type ProviderInstanceId,
   type ServerSettings,
 } from "@t3tools/contracts";
+import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -21,6 +22,7 @@ import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
+const encodeJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.String));
 const decodeClaudeRoutingSettings = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Struct({
@@ -40,12 +42,17 @@ interface ProviderRoutingConfig {
   readonly environment: NodeJS.ProcessEnv;
 }
 
-export interface DetectHeadroomRoutingInput {
+export interface HeadroomSessionRoutingInput {
   readonly provider: ProviderDriverKind;
   readonly providerInstanceId: ProviderInstanceId;
   readonly settings: Pick<ServerSettings, "headroomProxyUrl" | "providerInstances" | "providers">;
   readonly cwd?: string;
   readonly environment?: NodeJS.ProcessEnv;
+}
+
+export interface HeadroomSessionRouting {
+  readonly environment: Readonly<Record<string, string>>;
+  readonly codexAppServerArgs?: ReadonlyArray<string>;
 }
 
 function isHeadroomRoutableProvider(
@@ -125,7 +132,7 @@ export function inspectCodexHeadroomRouting(contents: string): CodexHeadroomRout
 }
 
 function resolveProviderRoutingConfig(
-  input: DetectHeadroomRoutingInput & { readonly provider: HeadroomRoutableProvider },
+  input: HeadroomSessionRoutingInput & { readonly provider: HeadroomRoutableProvider },
 ): ProviderRoutingConfig | undefined {
   const explicit = input.settings.providerInstances[input.providerInstanceId];
   if (explicit !== undefined) {
@@ -160,23 +167,84 @@ function environmentHomePath(
 const readOptional = (fileSystem: FileSystem.FileSystem, filePath: string) =>
   fileSystem.readFileString(filePath).pipe(Effect.option);
 
-/** Inspect only the config and base URL fields that decide whether this provider reaches Headroom. */
-export const detectHeadroomRouting = Effect.fn("HeadroomRouting.detect")(function* (
-  input: DetectHeadroomRoutingInput,
-): Effect.fn.Return<boolean, never, FileSystem.FileSystem | Path.Path> {
-  if (!isHeadroomRoutableProvider(input.provider)) return false;
+const codexLaunchOverride = (launchArgs: string, key: string): string | undefined => {
+  const args = tokenizeCliArgs(launchArgs);
+  let value: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
+    const override =
+      argument?.startsWith("--config=") === true || argument?.startsWith("-c=") === true
+        ? argument.slice(argument.indexOf("=") + 1)
+        : argument === "--config" || argument === "-c"
+          ? args[++index]
+          : undefined;
+    if (override === undefined) continue;
+    const separator = override.indexOf("=");
+    if (separator === -1 || override.slice(0, separator).trim() !== key) continue;
+    value = override
+      .slice(separator + 1)
+      .trim()
+      .replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, "$1$2");
+  }
+  return value;
+};
+
+const selectsCodexProfile = (launchArgs: string): boolean =>
+  tokenizeCliArgs(launchArgs).some(
+    (argument) =>
+      argument === "--profile" || argument === "-p" || argument.startsWith("--profile="),
+  );
+
+function inspectCodexDefaultProfile(contents: string): string | undefined {
+  let section = "";
+  let profile: string | undefined;
+  const profileProviders = new Map<string, string>();
+  for (const line of contents.split(/\r?\n/)) {
+    const table = /^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$/.exec(line);
+    if (table !== null) {
+      section = table[1]?.trim() ?? "";
+      continue;
+    }
+    if (section === "") {
+      profile = stringAssignment(line, "profile") ?? profile;
+      continue;
+    }
+    const profileSection = /^profiles\.([A-Za-z0-9_-]+)$/.exec(section);
+    const provider = stringAssignment(line, "model_provider");
+    if (profileSection?.[1] !== undefined && provider !== undefined) {
+      profileProviders.set(profileSection[1], provider);
+    }
+  }
+  return profile === undefined ? undefined : profileProviders.get(profile);
+}
+
+const headroomEnvironment = (proxyUrl: string): Readonly<Record<string, string>> => ({
+  HEADROOM_ACTIVE: "1",
+  HEADROOM_PROXY_URL: proxyUrl,
+});
+
+/** Build process-local launch settings without changing provider identity or persistent config. */
+export const resolveHeadroomSessionRouting = Effect.fn("HeadroomRouting.resolveSession")(function* (
+  input: HeadroomSessionRoutingInput,
+): Effect.fn.Return<HeadroomSessionRouting | undefined, never, FileSystem.FileSystem | Path.Path> {
+  if (!isHeadroomRoutableProvider(input.provider)) return undefined;
+  const proxyUrl = normalizeHeadroomProxyUrl(input.settings.headroomProxyUrl);
+  if (proxyUrl === null) return undefined;
   const resolved = resolveProviderRoutingConfig({ ...input, provider: input.provider });
-  if (resolved === undefined) return false;
+  if (resolved === undefined) return undefined;
 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
   if (input.provider === "claudeAgent") {
     const config = decodeClaudeSettings(resolved.config);
-    if (Option.isNone(config)) return false;
-    const environmentBaseUrl = resolved.environment.ANTHROPIC_BASE_URL;
-    if (environmentBaseUrl !== undefined) {
-      return isHeadroomProxyUrl(environmentBaseUrl, "claudeAgent", input.settings.headroomProxyUrl);
+    if (Option.isNone(config)) return undefined;
+    if (
+      resolved.environment.CLAUDE_CODE_USE_BEDROCK ||
+      resolved.environment.CLAUDE_CODE_USE_VERTEX ||
+      resolved.environment.CLAUDE_CODE_USE_FOUNDRY
+    ) {
+      return undefined;
     }
     const configuredHome = config.value.homePath.trim();
     const configDir =
@@ -185,29 +253,65 @@ export const detectHeadroomRouting = Effect.fn("HeadroomRouting.detect")(functio
         : (environmentHomePath(path, resolved.environment.CLAUDE_CONFIG_DIR, input.cwd) ??
           path.join(NodeOS.homedir(), ".claude"));
     const contents = yield* readOptional(fileSystem, path.join(configDir, "settings.json"));
-    return (
-      Option.isSome(contents) &&
-      claudeSettingsRouteThroughHeadroom(contents.value, input.settings.headroomProxyUrl)
-    );
+    const settingsRoute = Option.flatMap(contents, decodeClaudeRoutingSettings);
+    const explicitBaseUrl =
+      resolved.environment.ANTHROPIC_BASE_URL ??
+      (Option.isSome(settingsRoute) ? settingsRoute.value.env?.ANTHROPIC_BASE_URL : undefined);
+    if (
+      explicitBaseUrl !== undefined &&
+      !isHeadroomProxyUrl(explicitBaseUrl, "claudeAgent", proxyUrl)
+    ) {
+      return undefined;
+    }
+    return {
+      environment: {
+        ...headroomEnvironment(proxyUrl),
+        ANTHROPIC_BASE_URL: proxyUrl,
+      },
+    };
   }
 
   const config = decodeCodexSettings(resolved.config);
-  if (Option.isNone(config)) return false;
+  if (Option.isNone(config)) return undefined;
+  const launchArgs =
+    resolved.environment.T3CODE_CODEX_LAUNCH_ARGS?.trim() || config.value.launchArgs.trim();
+  if (selectsCodexProfile(launchArgs)) return undefined;
   const layout = yield* resolveCodexHomeLayout(config.value);
   const configDir =
     layout.effectiveHomePath ??
     environmentHomePath(path, resolved.environment.CODEX_HOME, input.cwd) ??
     layout.sharedHomePath;
   const contents = yield* readOptional(fileSystem, path.join(configDir, "config.toml"));
-  const inspected = inspectCodexHeadroomRouting(Option.getOrElse(contents, () => ""));
+  const configContents = Option.getOrElse(contents, () => "");
+  const inspected = inspectCodexHeadroomRouting(configContents);
+  const modelProvider =
+    codexLaunchOverride(launchArgs, "model_provider") ??
+    inspectCodexDefaultProfile(configContents) ??
+    inspected.modelProvider ??
+    "openai";
 
-  if (inspected.modelProvider === "headroom") {
-    return isHeadroomProxyUrl(inspected.headroomBaseUrl, "codex", input.settings.headroomProxyUrl);
+  if (modelProvider === "headroom") {
+    const overriddenBaseUrl = codexLaunchOverride(launchArgs, "model_providers.headroom.base_url");
+    return isHeadroomProxyUrl(overriddenBaseUrl ?? inspected.headroomBaseUrl, "codex", proxyUrl)
+      ? { environment: headroomEnvironment(proxyUrl) }
+      : undefined;
   }
-  if (inspected.modelProvider !== undefined && inspected.modelProvider !== "openai") return false;
+  if (modelProvider !== "openai") return undefined;
 
-  const environmentBaseUrl = resolved.environment.OPENAI_BASE_URL;
-  return environmentBaseUrl !== undefined
-    ? isHeadroomProxyUrl(environmentBaseUrl, "codex", input.settings.headroomProxyUrl)
-    : isHeadroomProxyUrl(inspected.openAiBaseUrl, "codex", input.settings.headroomProxyUrl);
+  const explicitBaseUrls = [
+    resolved.environment.OPENAI_BASE_URL,
+    codexLaunchOverride(launchArgs, "openai_base_url"),
+    inspected.openAiBaseUrl,
+  ].filter((value): value is string => value !== undefined);
+  if (explicitBaseUrls.some((value) => !isHeadroomProxyUrl(value, "codex", proxyUrl))) {
+    return undefined;
+  }
+  const baseUrl = `${proxyUrl}/v1`;
+  return {
+    environment: {
+      ...headroomEnvironment(proxyUrl),
+      OPENAI_BASE_URL: baseUrl,
+    },
+    codexAppServerArgs: ["-c", `openai_base_url=${encodeJsonString(baseUrl)}`],
+  };
 });
