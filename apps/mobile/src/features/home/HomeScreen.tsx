@@ -663,6 +663,7 @@ export function HomeScreen(props: HomeScreenProps) {
           section,
           pendingOrder,
           now: new Date().toISOString(),
+          threadSortOrder: props.threadSortOrder,
           settlementEnvironmentIds,
           snoozeEnvironmentIds,
           queuedThreadKeys,
@@ -672,6 +673,7 @@ export function HomeScreen(props: HomeScreenProps) {
   }, [
     serverConfigs,
     props.threads,
+    props.threadSortOrder,
     pendingOrder,
     queuedThreadKeys,
     settlementEnvironmentIds,
@@ -699,6 +701,7 @@ export function HomeScreen(props: HomeScreenProps) {
       projectRefs: v2ScopedProjectGroup === null ? null : v2ScopedProjectGroup.projectRefs,
       searchQuery: props.searchQuery,
       matchedThreadKeys,
+      threadSortOrder: props.threadSortOrder,
       settlementEnvironmentIds,
       snoozeEnvironmentIds,
       queuedThreadKeys,
@@ -720,6 +723,7 @@ export function HomeScreen(props: HomeScreenProps) {
     snoozeEnvironmentIds,
     props.searchQuery,
     props.selectedEnvironmentId,
+    props.threadSortOrder,
     props.threads,
     matchedThreadKeys,
     threadListV2Enabled,
@@ -775,6 +779,9 @@ export function HomeScreen(props: HomeScreenProps) {
     [settledShelfExpanded, snoozedShelfExpanded, threadListV2Layout, v2PendingTasks],
   );
 
+  // Web parity: under "Last updated" the active block is time-sorted, so its
+  // rows can no longer be moved or arranged; pinned moves are unchanged.
+  const activeMovesEnabled = props.threadSortOrder !== "updated_at";
   const renderV2Item = useCallback(
     ({ item, index }: { readonly item: ThreadListV2ListItem; readonly index: number }) => {
       const nextItem = threadListV2Items[index + 1];
@@ -871,7 +878,7 @@ export function HomeScreen(props: HomeScreenProps) {
           reorderSupported={
             item.item.pinned
               ? pinReorderEnvironmentIds.has(thread.environmentId)
-              : activeReorderEnvironmentIds.has(thread.environmentId)
+              : activeMovesEnabled && activeReorderEnvironmentIds.has(thread.environmentId)
           }
           canMoveUp={pendingOrder === null && movePlanner(movedId, "up") !== null}
           canMoveDown={pendingOrder === null && movePlanner(movedId, "down") !== null}
@@ -888,6 +895,7 @@ export function HomeScreen(props: HomeScreenProps) {
     },
     [
       handleDeleteThread,
+      activeMovesEnabled,
       activeReorderEnvironmentIds,
       threadMovePlanners,
       pendingOrder,

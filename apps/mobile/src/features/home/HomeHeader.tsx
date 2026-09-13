@@ -1,5 +1,6 @@
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import type { EnvironmentId, SidebarThreadSortOrder } from "@t3tools/contracts";
+import { DEFAULT_SIDEBAR_THREAD_SORT_ORDER } from "@t3tools/contracts";
 import type { MenuAction } from "@react-native-menu/menu";
 import Constants from "expo-constants";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
@@ -32,6 +33,7 @@ import {
   hasCustomHomeListOptions,
   PROJECT_SORT_OPTIONS,
   THREAD_SORT_OPTIONS,
+  THREAD_SORT_OPTIONS_V2,
 } from "./home-list-options";
 
 export type HomeHeaderEnvironment = HomeListFilterMenuEnvironment;
@@ -70,12 +72,14 @@ function AndroidHomeHeader(props: HomeHeaderProps) {
   const { materialYouStyleLayoutActive } = useAppearancePreferences();
   const insets = useSafeAreaInsets();
   const stageLabel = resolveMobileStageLabel(Constants.expoConfig?.extra?.appVariant);
-  // Thread List v2 lays the list out in fixed creation order, so the
-  // sort/group filter controls would be silently ignored — hide them and
-  // key the "customized" icon state off the environment filter alone.
+  // Thread List v2 sorts threads like the web sidebar but never sorts or
+  // groups projects, so "Sort projects" stays legacy-only; the customized
+  // icon lights for a non-default thread sort too.
   const threadListV2Enabled = useThreadListV2Enabled();
   const hasCustomListOptions = threadListV2Enabled
-    ? props.selectedEnvironmentId !== null || props.selectedProjectKey !== null
+    ? props.selectedEnvironmentId !== null ||
+      props.selectedProjectKey !== null ||
+      props.threadSortOrder !== DEFAULT_SIDEBAR_THREAD_SORT_ORDER
     : hasCustomHomeListOptions(props);
   const menuActions = useMemo<MenuAction[]>(
     () => [
@@ -115,8 +119,20 @@ function AndroidHomeHeader(props: HomeHeaderProps) {
               ],
             },
           ] satisfies MenuAction[])),
+      // V2 honors the thread sort (Default arrangement vs Last updated) but
+      // still lays projects out flat, so "Sort projects" remains legacy-only.
       ...(threadListV2Enabled
-        ? []
+        ? ([
+            {
+              id: "thread-sort",
+              title: "Sort threads",
+              subactions: THREAD_SORT_OPTIONS_V2.map((option) => ({
+                id: `thread-sort:${option.value}`,
+                title: option.label,
+                state: checkedMenuState(props.threadSortOrder === option.value),
+              })),
+            },
+          ] satisfies MenuAction[])
         : ([
             {
               id: "project-sort",
@@ -321,12 +337,14 @@ function AndroidHomeHeader(props: HomeHeaderProps) {
 function IosHomeHeader(props: HomeHeaderProps) {
   const searchBarRef = useRef<SearchBarCommands>(null);
   const iconColor = useUniwindTheme()["--color-icon"];
-  // Thread List v2 lays the list out in fixed creation order, so the
-  // sort/group filter controls would be silently ignored — hide them and
-  // key the "customized" icon state off the environment filter alone.
+  // Thread List v2 sorts threads like the web sidebar but never sorts or
+  // groups projects, so "Sort projects" stays legacy-only; the customized
+  // icon lights for a non-default thread sort too.
   const threadListV2Enabled = useThreadListV2Enabled();
   const hasCustomListOptions = threadListV2Enabled
-    ? props.selectedEnvironmentId !== null || props.selectedProjectKey !== null
+    ? props.selectedEnvironmentId !== null ||
+      props.selectedProjectKey !== null ||
+      props.threadSortOrder !== DEFAULT_SIDEBAR_THREAD_SORT_ORDER
     : hasCustomHomeListOptions(props);
   const focusSearch = useCallback(() => {
     searchBarRef.current?.focus();
@@ -335,7 +353,8 @@ function IosHomeHeader(props: HomeHeaderProps) {
   useHardwareKeyboardCommand("focusSearch", focusSearch);
   const filterMenu = buildHomeListFilterMenu({
     ...props,
-    listOrganization: !threadListV2Enabled,
+    projectSort: !threadListV2Enabled,
+    threadSortOptions: threadListV2Enabled ? THREAD_SORT_OPTIONS_V2 : THREAD_SORT_OPTIONS,
   });
 
   return (
@@ -468,10 +487,10 @@ function IosHomeHeader(props: HomeHeaderProps) {
               </NativeHeaderToolbar.Menu>
             )}
 
-            {threadListV2Enabled ? null : (
-              <NativeHeaderToolbar.Menu title="Sort threads">
-                <NativeHeaderToolbar.Label>Sort threads</NativeHeaderToolbar.Label>
-                {THREAD_SORT_OPTIONS.map((option) => (
+            <NativeHeaderToolbar.Menu title="Sort threads">
+              <NativeHeaderToolbar.Label>Sort threads</NativeHeaderToolbar.Label>
+              {(threadListV2Enabled ? THREAD_SORT_OPTIONS_V2 : THREAD_SORT_OPTIONS).map(
+                (option) => (
                   <NativeHeaderToolbar.MenuAction
                     key={option.value}
                     isOn={props.threadSortOrder === option.value}
@@ -479,9 +498,9 @@ function IosHomeHeader(props: HomeHeaderProps) {
                   >
                     <NativeHeaderToolbar.Label>{option.label}</NativeHeaderToolbar.Label>
                   </NativeHeaderToolbar.MenuAction>
-                ))}
-              </NativeHeaderToolbar.Menu>
-            )}
+                ),
+              )}
+            </NativeHeaderToolbar.Menu>
           </NativeHeaderToolbar.Menu>
           <NativeHeaderToolbar.Spacer flexible />
           <NativeHeaderToolbar.Button

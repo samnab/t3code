@@ -46,6 +46,7 @@ import {
   hasCustomHomeListOptions,
   PROJECT_SORT_OPTIONS,
   THREAD_SORT_OPTIONS,
+  THREAD_SORT_OPTIONS_V2,
   useHomeListOptions,
 } from "../home/home-list-options";
 import { buildHomeListFilterMenu } from "../home/home-list-filter-menu";
@@ -685,7 +686,7 @@ function ThreadNavigationSidebarPane(
             {
               id: "thread-sort",
               title: "Sort threads",
-              subactions: THREAD_SORT_OPTIONS.map((option) => ({
+              subactions: THREAD_SORT_OPTIONS_V2.map((option) => ({
                 id: `thread-sort:${option.value}`,
                 title: option.label,
                 state: options.threadSortOrder === option.value ? "on" : "off",
@@ -1154,11 +1155,12 @@ function ThreadNavigationSidebarPane(
         selectedProjectKey,
         projectSortOrder: options.projectSortOrder,
         threadSortOrder: options.threadSortOrder,
+        projectSort: !threadListV2Enabled,
+        threadSortOptions: threadListV2Enabled ? THREAD_SORT_OPTIONS_V2 : THREAD_SORT_OPTIONS,
         onEnvironmentChange: setSelectedEnvironmentId,
         onProjectChange: setSelectedProjectKey,
         onProjectSortOrderChange: setProjectSortOrder,
         onThreadSortOrderChange: setThreadSortOrder,
-        listOrganization: !threadListV2Enabled,
       }),
     [
       environments,

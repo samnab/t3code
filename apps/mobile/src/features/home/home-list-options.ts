@@ -47,6 +47,17 @@ export const THREAD_SORT_OPTIONS: ReadonlyArray<{
   { value: "created_at", label: "Created at" },
 ];
 
+/** Thread List v2 reads like the web v2 sidebar: the saved arrangement is
+    simply the default, so its menu uses the web's labels. Legacy lists keep
+    the explicit created-at label above. */
+export const THREAD_SORT_OPTIONS_V2: ReadonlyArray<{
+  readonly value: SidebarThreadSortOrder;
+  readonly label: string;
+}> = [
+  { value: "created_at", label: "Default" },
+  { value: "updated_at", label: "Last updated" },
+];
+
 function defaultHomeListOptions(): HomeListOptions {
   return {
     selectedEnvironmentId: null,

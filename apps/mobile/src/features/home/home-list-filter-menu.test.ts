@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { THREAD_SORT_OPTIONS_V2 } from "./home-list-options";
 import { buildHomeListFilterMenu } from "./home-list-filter-menu";
 
 describe("buildHomeListFilterMenu", () => {
@@ -39,5 +40,34 @@ describe("buildHomeListFilterMenu", () => {
     projectMenu.items[2]?.onPress();
     expect(onProjectChange).toHaveBeenNthCalledWith(1, null);
     expect(onProjectChange).toHaveBeenNthCalledWith(2, "environment-1:project-2");
+  });
+
+  it("with v2 flags, hides Sort projects and labels Sort threads like the web sidebar", () => {
+    const menu = buildHomeListFilterMenu({
+      environments: [],
+      projects: [],
+      selectedEnvironmentId: null,
+      selectedProjectKey: null,
+      projectSortOrder: "updated_at",
+      threadSortOrder: "created_at",
+      projectSort: false,
+      threadSortOptions: THREAD_SORT_OPTIONS_V2,
+      onEnvironmentChange: vi.fn(),
+      onProjectChange: vi.fn(),
+      onProjectSortOrderChange: vi.fn(),
+      onThreadSortOrderChange: vi.fn(),
+    });
+
+    expect(menu.items.some((item) => item.title === "Sort projects")).toBe(false);
+    const threadMenu = menu.items.find(
+      (item) => item.type === "submenu" && item.title === "Sort threads",
+    );
+    expect(threadMenu).toMatchObject({
+      type: "submenu",
+      items: [
+        { title: "Default", state: "on" },
+        { title: "Last updated", state: "off" },
+      ],
+    });
   });
 });
