@@ -1202,12 +1202,12 @@ const GOAL_LOOP_TONE_CLASSNAME: Record<ReturnType<typeof describeGoalLoop>["tone
 };
 
 /**
- * Thread-goal shortcut in the composer controls: the entry point when no
- * goal is set, and an active pill (icon + truncated goal, full text in the
- * tooltip) once one exists. Both toggle goal mode: the chat input turns into
- * the goal editor and send writes the goal instead of a message. When the
- * server drives a goal loop, the pill also shows its state and iteration
- * count, and offers pause/resume/continue-anyway next to it.
+ * Thread-goal shortcut in the composer controls: an icon-only button that
+ * shows loop state through color alone (the goal text and iteration count
+ * live in the strip above the composer and in this button's tooltip and
+ * aria-label). Toggles goal mode: the chat input turns into the goal editor
+ * and send writes the goal instead of a message. When the server drives a
+ * goal loop, pause/resume/continue-anyway appear next to it.
  */
 const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props: {
   goal: string | null;
@@ -1218,7 +1218,7 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
   onGoalLoopAction: (action: "pause" | "resume" | "continue" | "reset") => void;
   shortcutLabel: string | null;
 }) {
-  const { tone, tooltip, suffix, pauseAction, canContinue } = describeGoalLoop(props.goalLoop);
+  const { tone, tooltip, pauseAction, canContinue } = describeGoalLoop(props.goalLoop);
   const goalTooltip =
     (tooltip ?? props.goal ?? "Set a goal for this thread") +
     (props.shortcutLabel ? ` · ${props.shortcutLabel}` : "");
@@ -1253,12 +1253,6 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
           }
         >
           <ComposerControlIcon icon={TargetArrowIcon} className="text-current opacity-100" />
-          {props.goal !== null ? (
-            <span className="min-w-0 max-w-28 truncate sm:max-w-44">{props.goal}</span>
-          ) : null}
-          {suffix !== null ? (
-            <span className="shrink-0 tabular-nums text-current opacity-80">{suffix}</span>
-          ) : null}
         </TooltipTrigger>
         <TooltipPopup side="top">{goalTooltip}</TooltipPopup>
       </Tooltip>
