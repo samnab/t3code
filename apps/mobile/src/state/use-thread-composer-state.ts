@@ -521,13 +521,26 @@ export function useThreadComposerState() {
   );
 
   const saveThreadGoalFromEditor = useCallback(() => {
-    if (!threadGoalEditorState || !threadGoalEditorCanSave(threadGoalEditorState)) return;
+    if (
+      !threadGoalEditorState ||
+      !threadGoalEditorCanSave(threadGoalEditorState) ||
+      // A delete in flight owns the goal write slot: a save racing it could
+      // land between the delete's pause/interrupt and its clear.
+      goalDeleteInFlightRef.current
+    ) {
+      return;
+    }
     void writeThreadGoalFromEditor(threadGoalEditorState.draft);
   }, [threadGoalEditorState, writeThreadGoalFromEditor]);
 
   const clearThreadGoalFromEditor = useCallback(async () => {
     const state = threadGoalEditorState;
     if (!state || state.savedGoal === null || goalDeleteInFlightRef.current) return;
+    // An in-flight metadata save owns the write slot: clearing now would
+    // no-op inside writeThreadGoalFromEditor while the delete helper still
+    // reported success. The delete sequence's own clear runs with the slot
+    // free — saves refuse while it holds the slot.
+    if (goalMetadataInFlightRef.current !== null) return;
     const shell = selectedThreadShell;
     // Deleting a goal that is driving work must stop that work first: pause
     // the loop (so no continuation can start mid-sequence), interrupt the
@@ -588,6 +601,7 @@ export function useThreadComposerState() {
   }, [
     threadGoalEditorState,
     selectedThreadShell,
+    // eslint-disable-next-line react/memo-dependencies -- read only inside closures handed to deleteThreadGoalWork, which the compiler cannot see through; dropping it would let the pause run stale.
     setThreadGoalLoop,
     interruptThreadTurn,
     writeThreadGoalFromEditor,
