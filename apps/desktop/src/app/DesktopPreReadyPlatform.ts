@@ -10,7 +10,7 @@ import * as Electron from "electron";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
-import { resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
+import { readDesktopForkStageLabel, resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
 import { renderUrlHandlerDesktopEntry } from "./DesktopLinuxUrlHandler.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 
@@ -74,6 +74,9 @@ export const make = Effect.gen(function* () {
             displayName: resolveDesktopAppBranding({
               isDevelopment: linux.isDevelopment,
               appVersion: Electron.app.getVersion(),
+              isFork:
+                Electron.app.isPackaged &&
+                readDesktopForkStageLabel(NodePath.join(Electron.app.getAppPath(), "package.json")),
             }).displayName,
             execTarget: process.env.APPIMAGE?.trim() || process.execPath,
             scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),

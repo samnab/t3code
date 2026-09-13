@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - fork stage label must read synchronously before app ready, see readForkStageLabel below.
+// @effect-diagnostics nodeBuiltinImport:off - fork stage label must read synchronously before app ready, see readDesktopForkStageLabel below.
 import type {
   DesktopAppBranding,
   DesktopAppStageLabel,
@@ -11,7 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import { readFileSync } from "node:fs";
+import * as NodeFS from "node:fs";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
@@ -152,9 +152,9 @@ function resolveDesktopRuntimeInfo(input: {
 // Synchronous so Electron's `ready` event cannot fire (and so the Clerk
 // bridge's protocol.registerSchemesAsPrivileged, which must run before
 // `ready`, is never raced) while this awaits an async read.
-function readForkStageLabel(packageJsonPath: string): boolean {
+export function readDesktopForkStageLabel(packageJsonPath: string): boolean {
   try {
-    const raw = readFileSync(packageJsonPath, "utf8");
+    const raw = NodeFS.readFileSync(packageJsonPath, "utf8");
     return (JSON.parse(raw) as { t3codeStageLabel?: unknown }).t3codeStageLabel === "Fork";
   } catch {
     return false;
@@ -192,7 +192,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
   // scripts/build-desktop-artifact.ts (T3CODE_DESKTOP_STAGE_LABEL) for fork
   // builds that want their own visible branding, distinct from an official
   // Alpha/Nightly install.
-  const isFork = input.isPackaged ? readForkStageLabel(path.join(appRoot, "package.json")) : false;
+  const isFork = input.isPackaged
+    ? readDesktopForkStageLabel(path.join(appRoot, "package.json"))
+    : false;
   const branding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,

@@ -1,4 +1,8 @@
-import * as NodePath from "@effect/platform-node/NodePath";
+// @effect-diagnostics nodeBuiltinImport:off - the fork-stage regression needs a real package.json fixture.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as PlatformNodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -29,7 +33,7 @@ const makeEnvironmentLayer = (
     ...overrides,
   }).pipe(
     Layer.provide(
-      Layer.mergeAll(NodeServices.layer, NodePath.layerPosix, DesktopConfig.layerTest(env)),
+      Layer.mergeAll(NodeServices.layer, PlatformNodePath.layerPosix, DesktopConfig.layerTest(env)),
     ),
   );
 
@@ -40,6 +44,37 @@ const makeEnvironment = (
   DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  it("uses the packaged stage stamp for fork branding", () => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-desktop-env-"));
+    const packageJsonPath = NodePath.join(directory, "package.json");
+
+    try {
+      NodeFS.writeFileSync(packageJsonPath, JSON.stringify({ t3codeStageLabel: "Fork" }));
+      assert.equal(DesktopEnvironment.readDesktopForkStageLabel(packageJsonPath), true);
+      assert.equal(
+        DesktopEnvironment.resolveDesktopAppBranding({
+          isDevelopment: false,
+          appVersion: "0.0.22",
+          isFork: true,
+        }).stageLabel,
+        "Fork",
+      );
+
+      NodeFS.writeFileSync(packageJsonPath, "{}");
+      assert.equal(DesktopEnvironment.readDesktopForkStageLabel(packageJsonPath), false);
+      assert.equal(
+        DesktopEnvironment.resolveDesktopAppBranding({
+          isDevelopment: false,
+          appVersion: "0.0.22",
+          isFork: false,
+        }).stageLabel,
+        "Alpha",
+      );
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true });
+    }
+  });
+
   it.effect("derives state paths and development identity inside Effect", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(
