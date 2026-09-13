@@ -29,6 +29,7 @@ import {
   ProviderValidationError,
 } from "../provider/Errors.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDirectory.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as NativeGoalReactor from "./NativeGoalReactor.ts";
 import {
@@ -179,6 +180,7 @@ interface HarnessOptions {
   readonly providerFailure?: ProviderValidationError | ProviderSessionNotFoundError;
   readonly providerFailures?: ReadonlyArray<ProviderAdapterSessionNotFoundError>;
   readonly nativeGoalPresent?: boolean;
+  readonly providerBindingPresent?: boolean;
 }
 
 const makeHarness = Effect.fn("makeNativeGoalHarness")(function* (options: HarnessOptions) {
@@ -255,6 +257,18 @@ const makeHarness = Effect.fn("makeNativeGoalHarness")(function* (options: Harne
         ),
       clearExecutionGoal: () => record("clear"),
       streamEvents: Stream.fromQueue(runtimeEvents),
+    }),
+    Layer.mock(ProviderSessionDirectory)({
+      getBinding: () =>
+        Effect.succeed(
+          options.providerBindingPresent === false
+            ? Option.none()
+            : Option.some({
+                threadId: THREAD_ID,
+                provider: ProviderDriverKind.make("codex"),
+                providerInstanceId: ProviderInstanceId.make("codex"),
+              }),
+        ),
     }),
     Layer.succeed(ServerActivation, Deferred.await(activation)),
     Layer.succeed(Crypto.Crypto, testCrypto),
@@ -396,6 +410,27 @@ describe("NativeGoalReactor", () => {
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
+      }),
+    ),
+  );
+
+  it.effect("defers deactivation until a fresh Codex thread has a provider binding", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { commands, goalCalls } = yield* run({
+          shell: makeShell({
+            goalLoop: makeLoop({ mode: "t3" }),
+            session: { ...makeSession(), status: "starting" },
+          }),
+          providerBindingPresent: false,
+          providerFailure: new ProviderValidationError({
+            operation: "ProviderService.clearExecutionGoal",
+            issue: `Cannot route thread '${THREAD_ID}' because no persisted provider binding exists.`,
+          }),
+          signal: (fixture) => Queue.offer(fixture.events, makeGoalActivatedEvent()),
+        });
+        assert.deepEqual(goalCalls, []);
+        assert.deepEqual(commands, []);
       }),
     ),
   );

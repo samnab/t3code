@@ -39,6 +39,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import { ProviderService } from "../provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDirectory.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./Services/ProjectionSnapshotQuery.ts";
@@ -118,6 +119,7 @@ export const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const providerSessions = yield* ProviderSessionDirectory;
   const crypto = yield* Crypto.Crypto;
 
   const serverCommandId = (tag: string, threadId: ThreadId) =>
@@ -272,6 +274,8 @@ export const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly failureSummary: string;
   }) {
+    const binding = Option.getOrUndefined(yield* providerSessions.getBinding(input.threadId));
+    if (binding === undefined || binding.provider !== "codex") return "unavailable" as const;
     return yield* providerService.clearExecutionGoal({ threadId: input.threadId }).pipe(
       Effect.as("cleared" as const),
       Effect.catch((error) =>
