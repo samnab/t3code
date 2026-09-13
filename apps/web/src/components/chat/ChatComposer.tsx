@@ -6566,8 +6566,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               turnActive={isServerThread && phase === "running"}
               onGoalLoopAction={onThreadGoalLoopAction}
               onEditGoal={() => {
-                setGoalMode(true);
-                composerEditorRef.current?.focusAtEnd();
+                // Stage the saved objective in the input itself: the whole-prompt
+                // replacement runs through the synchronized
+                // applyPromptReplacement path (prompt store, cursor, deferred
+                // focus) — a bare setPrompt plus focusAtEnd would re-emit the
+                // editor's stale snapshot and wipe the staged goal. Goal mode
+                // makes the next send write the goal instead of a chat turn;
+                // multiline objectives survive because the replacement is
+                // plain text, exactly as saved.
+                const applied = applyPromptReplacement(
+                  0,
+                  promptRef.current.length,
+                  activeThreadGoal,
+                );
+                if (applied) {
+                  setGoalMode(true);
+                  if (isComposerCollapsedMobile) {
+                    // The expanded editor is hidden at phone widths; its
+                    // scheduled focus cannot expand the composer alone.
+                    expandMobileComposer();
+                  }
+                }
               }}
               onStopGoal={onStopThreadGoal}
               onDeleteGoal={onDeleteThreadGoal}
