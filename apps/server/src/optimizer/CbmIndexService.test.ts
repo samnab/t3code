@@ -85,8 +85,8 @@ describe("CbmIndexService", () => {
 
       const commands = yield* Ref.get(inputs);
       expect(commands.map((input) => input.args)).toEqual([
-        ["cli", "--quiet", "index_repository", "--repo-path", "/repo"],
-        ["cli", "--quiet", "list_projects", "--format", "json", "--detail", "stats"],
+        ["cli", "index_repository", "--repo-path", "/repo"],
+        ["cli", "list_projects", "--include-details", "true"],
       ]);
       expect(commands[0]?.env).toEqual({ CBM_ALLOWED_ROOT: "/repo" });
     }),
