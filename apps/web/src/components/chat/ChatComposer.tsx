@@ -1221,7 +1221,8 @@ const GOAL_LOOP_TONE_CLASSNAME: Record<ReturnType<typeof describeGoalLoop>["tone
  * live in the strip above the composer and in this button's tooltip and
  * aria-label). Toggles goal mode: the chat input turns into the goal editor
  * and send writes the goal instead of a message. When the server drives a
- * goal loop, pause/resume/continue-anyway appear next to it.
+ * goal loop, pause and continue-anyway appear next to it; resume stays in
+ * the goal strip's actions menu above the composer.
  */
 const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props: {
   goal: string | null;
@@ -1270,26 +1271,21 @@ const ComposerThreadGoalControl = memo(function ComposerThreadGoalControl(props:
         </TooltipTrigger>
         <TooltipPopup side="top">{goalTooltip}</TooltipPopup>
       </Tooltip>
-      {props.goalLoop !== null && pauseAction !== null ? (
+      {props.goalLoop !== null && pauseAction === "pause" ? (
         <Tooltip>
           <TooltipTrigger
             render={
               <ComposerControl
                 type="button"
-                aria-label={pauseAction === "pause" ? "Pause goal loop" : "Resume goal loop"}
+                aria-label="Pause goal loop"
                 className="shrink-0 text-secondary-label hover:text-foreground"
-                onClick={() => props.onGoalLoopAction(pauseAction)}
+                onClick={() => props.onGoalLoopAction("pause")}
               />
             }
           >
-            <ComposerControlIcon
-              icon={pauseAction === "pause" ? PauseIcon : PlayIcon}
-              className="text-current opacity-100"
-            />
+            <ComposerControlIcon icon={PauseIcon} className="text-current opacity-100" />
           </TooltipTrigger>
-          <TooltipPopup side="top">
-            {pauseAction === "pause" ? "Pause goal loop" : "Resume goal loop"}
-          </TooltipPopup>
+          <TooltipPopup side="top">Pause goal loop</TooltipPopup>
         </Tooltip>
       ) : null}
       {tone === "capped" && canContinue ? (
