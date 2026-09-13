@@ -263,7 +263,7 @@ function SavingsHistoryRows({ snapshot }: { readonly snapshot: OptimizerStatusSn
   return (
     <>
       {[...history]
-        .toSorted((left, right) => right.timestamp.localeCompare(left.timestamp))
+        .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
         .slice(0, 8)
         .map((point) => (
           <View
