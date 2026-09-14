@@ -90,6 +90,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { runRtkPreToolUseHook } from "../../optimizer/RtkRewrite.ts";
+import { RTK_CLAUDE_SESSION_INSTRUCTIONS } from "../../optimizer/RtkSessionInstructions.ts";
 import {
   CBM_MCP_SERVER_NAME,
   readSessionOptimizerAttachments,
@@ -4757,6 +4758,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
       };
       const rtkCommand = optimizerAttachments?.rtk?.command;
+      // The RTK prompt rides the same attachment gate as the Bash hook below,
+      // so T3 never injects guidance without its hook or the reverse.
+      const systemPromptAppend = rtkCommand
+        ? `${buildRuntimeInstructions({ harness: "Claude Code" })}\n\n${RTK_CLAUDE_SESSION_INSTRUCTIONS}`
+        : buildRuntimeInstructions({ harness: "Claude Code" });
       const rtkHook = rtkCommand
         ? async (hookInput: HookInput): Promise<HookJSONOutput> => {
             if (hookInput.hook_event_name !== "PreToolUse") return {};
@@ -4787,7 +4793,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           type: "preset",
           preset: "claude_code",
           // Model and effort can change after this session-level prompt is set.
-          append: buildRuntimeInstructions({ harness: "Claude Code" }),
+          append: systemPromptAppend,
         },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is

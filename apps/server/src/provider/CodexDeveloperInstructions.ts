@@ -1,4 +1,5 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
+import { RTK_CODEX_SESSION_INSTRUCTIONS } from "../optimizer/RtkSessionInstructions.ts";
 import { buildRuntimeInstructions } from "./RuntimeInstructions.ts";
 
 const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
@@ -43,16 +44,12 @@ const browserToolInstructions = (availability: boolean | T3CodeToolAvailability)
   }`;
 };
 
-const RTK_DEVELOPER_INSTRUCTIONS = `<rtk_instructions>
-## RTK shell output filtering
-
-Prefix supported shell commands with \`rtk\`, for example \`rtk git status\`, \`rtk npm test\`, or \`rtk ls src/\`. Keep the prefix on each command in a chain. RTK leaves unsupported commands unchanged and preserves the wrapped command's exit code.
-
-Treat condensed output as the complete result. Use \`rtk proxy <command>\` only when condensed output is unusable. Use \`RTK_DISABLED=1 <command>\` to bypass RTK for one command.
-</rtk_instructions>`;
-
+/**
+ * The full pinned upstream text is injected verbatim when the session attached
+ * RTK; the tags mark the block boundary in the developer message.
+ */
 const rtkInstructions = (rtkEnabled: boolean): string =>
-  rtkEnabled ? RTK_DEVELOPER_INSTRUCTIONS : "";
+  rtkEnabled ? `<rtk_instructions>\n${RTK_CODEX_SESSION_INSTRUCTIONS}</rtk_instructions>` : "";
 
 const codexPlanModeDeveloperInstructions = (
   browserToolsAvailable: boolean | T3CodeToolAvailability,
@@ -217,7 +214,7 @@ export function buildCodexDeveloperInstructions(
    * setting, so the prompt cannot claim tools the turn doesn't have.
    */
   browserToolsAvailable: boolean | T3CodeToolAvailability = true,
-  /** Whether this session attached RTK command guidance. */
+  /** Whether this session attached RTK and should receive its full guidance. */
   rtkEnabled = false,
 ): string {
   const base =

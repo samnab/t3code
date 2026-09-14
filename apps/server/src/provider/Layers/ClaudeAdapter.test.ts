@@ -410,6 +410,17 @@ describe("ClaudeAdapterLive", () => {
       });
       assert.equal(queryOptions?.hooks?.PreToolUse?.[0]?.matcher, "Bash");
       assert.equal(queryOptions?.hooks?.PreToolUse?.[0]?.hooks.length, 1);
+      const systemPrompt = queryOptions?.systemPrompt;
+      const append =
+        typeof systemPrompt === "object" &&
+        !Array.isArray(systemPrompt) &&
+        systemPrompt.type === "preset"
+          ? (systemPrompt.append ?? "")
+          : "";
+      // The full pinned guidance rides the same attachment gate as the hook.
+      assert.match(append, /## Golden Rule/);
+      assert.match(append, /rtk git add \. && rtk git commit/);
+      assert.match(append, /rtk proxy <cmd>/);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -523,6 +534,8 @@ describe("ClaudeAdapterLive", () => {
         preset: "claude_code",
         append: buildRuntimeInstructions({ harness: "Claude Code" }),
       });
+      // Without an RTK attachment T3 adds neither its guidance nor its hook.
+      assert.equal(createInput?.options.hooks, undefined);
       assert.equal(createInput?.options.permissionMode, "bypassPermissions");
       assert.equal(createInput?.options.allowDangerouslySkipPermissions, true);
     }).pipe(

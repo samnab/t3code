@@ -12,9 +12,12 @@ Memory index health. It also lets you choose a project and toggle its optimizer 
 ## RTK
 
 [Install RTK](https://github.com/rtk-ai/rtk) on the environment that runs your provider. RTK is a
-CLI wrapper that filters shell output. T3 attaches its supported provider integration when RTK is
-enabled for a project. v1 supports Claude Code through its hook surface and Codex through
-instructions; other providers show as unsupported.
+CLI wrapper that filters shell output. When RTK is enabled for a project and installed at a
+supported version, the next provider session receives RTK's full guidance as part of that session:
+Claude Code also gets T3's in-memory command-rewrite hook, while Codex is guided by instructions
+alone. The toggle applies to new, restarted, and resumed sessions; an already-running session keeps
+the behavior it started with, and disabling it never removes a hook or instructions you installed
+yourself with `rtk init`. Other providers are unsupported by this integration.
 
 RTK's gain counter comes from its environment-wide history database. The **Savings** panel labels
 it as environment-level, so it is not a per-project total.

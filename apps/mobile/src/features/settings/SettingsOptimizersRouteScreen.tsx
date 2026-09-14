@@ -53,8 +53,9 @@ const OPTIMIZER_META: Readonly<
     description: "Shell output filtering",
     mode: "CLI wrapper",
     installUrl: "https://github.com/rtk-ai/rtk",
-    supportedProviders: "Claude Code (hook) and Codex (instructions)",
-    unsupportedProviders: "Cursor, Grok, external OpenCode, Antigravity, and Pi",
+    supportedProviders:
+      "Claude Code (hook and session instructions) and Codex (session instructions)",
+    unsupportedProviders: "Cursor, Grok, all OpenCode modes, Antigravity, and Pi",
   },
   headroom: {
     label: "Headroom",
@@ -771,7 +772,7 @@ export function SettingsOptimizersRouteScreen() {
                               ? "Routes supported new sessions; never starts or stops Headroom"
                               : id === "cbm"
                                 ? "Adds project-scoped MCP tools; no token savings"
-                                : "Filters supported CLI output for this project"
+                                : "Filters supported CLI output starting with the next provider session"
                           }
                           value={enabled}
                           disabled={

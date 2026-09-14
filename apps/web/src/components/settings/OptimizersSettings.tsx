@@ -58,7 +58,8 @@ const OPTIMIZER_META: Readonly<
     label: "RTK",
     description: "Reduces shell output before it reaches an agent.",
     mode: "CLI wrapper",
-    supportedProviders: "Claude Code (hook) and Codex (instructions)",
+    supportedProviders:
+      "Claude Code (hook and session instructions) and Codex (session instructions)",
   },
   headroom: {
     label: "Headroom",
@@ -119,7 +120,7 @@ function ProviderCompatibilityRow({ id }: { readonly id: OptimizerId }) {
   const meta = OPTIMIZER_META[id];
   const unsupported =
     id === "rtk"
-      ? "Cursor, Grok, external OpenCode, Antigravity, and Pi are not supported"
+      ? "Cursor, Grok, all OpenCode modes, Antigravity, and Pi are not supported"
       : id === "cbm"
         ? "Managed OpenCode is supported; external OpenCode and Pi are not supported in v1"
         : "Other providers are not routed through Headroom by T3";
@@ -632,7 +633,7 @@ function OptimizerEnvironmentSettings({
                     ? "Routes supported new sessions through the existing healthy proxy; never starts or stops Headroom."
                     : id === "cbm"
                       ? "Adds CBM as a project-scoped MCP server for supported providers."
-                      : "Adds RTK's shell filtering at the provider attachment layer."
+                      : "Adds RTK's shell output filtering to the next provider session."
                 }
                 status={
                   selectedProjectSettings?.[id] === true ? "Enabled for the next session" : "Off"
