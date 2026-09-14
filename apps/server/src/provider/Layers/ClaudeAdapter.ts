@@ -90,7 +90,10 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { runRtkPreToolUseHook } from "../../optimizer/RtkRewrite.ts";
-import { RTK_CLAUDE_SESSION_INSTRUCTIONS } from "../../optimizer/RtkSessionInstructions.ts";
+import {
+  RTK_CLAUDE_SESSION_INSTRUCTIONS,
+  RTK_SESSION_PREFACE,
+} from "../../optimizer/RtkSessionInstructions.ts";
 import {
   CBM_MCP_SERVER_NAME,
   readSessionOptimizerAttachments,
@@ -4759,9 +4762,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
       const rtkCommand = optimizerAttachments?.rtk?.command;
       // The RTK prompt rides the same attachment gate as the Bash hook below,
-      // so T3 never injects guidance without its hook or the reverse.
+      // so T3 never injects guidance without its hook or the reverse. The T3
+      // preface keeps the session from acting on the pinned text's persistent
+      // setup suggestions (`rtk init`).
       const systemPromptAppend = rtkCommand
-        ? `${buildRuntimeInstructions({ harness: "Claude Code" })}\n\n${RTK_CLAUDE_SESSION_INSTRUCTIONS}`
+        ? `${buildRuntimeInstructions({ harness: "Claude Code" })}\n\n${RTK_SESSION_PREFACE}\n${RTK_CLAUDE_SESSION_INSTRUCTIONS}`
         : buildRuntimeInstructions({ harness: "Claude Code" });
       const rtkHook = rtkCommand
         ? async (hookInput: HookInput): Promise<HookJSONOutput> => {

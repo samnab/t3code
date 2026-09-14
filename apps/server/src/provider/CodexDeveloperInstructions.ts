@@ -1,5 +1,8 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
-import { RTK_CODEX_SESSION_INSTRUCTIONS } from "../optimizer/RtkSessionInstructions.ts";
+import {
+  RTK_CODEX_SESSION_INSTRUCTIONS,
+  RTK_SESSION_PREFACE,
+} from "../optimizer/RtkSessionInstructions.ts";
 import { buildRuntimeInstructions } from "./RuntimeInstructions.ts";
 
 const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
@@ -45,11 +48,14 @@ const browserToolInstructions = (availability: boolean | T3CodeToolAvailability)
 };
 
 /**
- * The full pinned upstream text is injected verbatim when the session attached
- * RTK; the tags mark the block boundary in the developer message.
+ * The T3 session-only preface plus the full pinned upstream text are injected
+ * verbatim when the session attached RTK; the tags mark the block boundary in
+ * the developer message.
  */
 const rtkInstructions = (rtkEnabled: boolean): string =>
-  rtkEnabled ? `<rtk_instructions>\n${RTK_CODEX_SESSION_INSTRUCTIONS}</rtk_instructions>` : "";
+  rtkEnabled
+    ? `<rtk_instructions>\n${RTK_SESSION_PREFACE}\n${RTK_CODEX_SESSION_INSTRUCTIONS}</rtk_instructions>`
+    : "";
 
 const codexPlanModeDeveloperInstructions = (
   browserToolsAvailable: boolean | T3CodeToolAvailability,

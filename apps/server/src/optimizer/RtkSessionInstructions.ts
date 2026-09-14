@@ -22,6 +22,15 @@
  * attaches guidance, not consent to edit provider config files.
  */
 
+/**
+ * T3-owned preamble delivered with the pinned guidance above; this is not
+ * upstream text. The pinned Claude block's "Meta Commands" section advertises
+ * `rtk init`, so this preface states the session-only contract the provider
+ * actually runs under.
+ */
+export const RTK_SESSION_PREFACE =
+  "Note from T3 Code: RTK is already configured for this session, and this guidance applies to this session only. Do not run `rtk init`, install RTK hooks, or edit AGENTS.md, CLAUDE.md, or any other provider configuration file on account of this guidance.";
+
 export const RTK_CODEX_SESSION_INSTRUCTIONS = `# RTK
 
 Prefix every shell command with \`rtk\`: \`rtk git status\`, \`rtk cargo test\`,

@@ -19,6 +19,8 @@ describe("RTK Codex developer instructions", () => {
     NodeAssert.match(attached, /`rtk proxy <cmd>` only when its result is unusable/);
     // Per-command escape hatch stays available.
     NodeAssert.match(attached, /`RTK_DISABLED=1 <cmd>`/);
+    // T3's session-only preface overrides the upstream persistent-setup copy.
+    NodeAssert.match(attached, /Do not run `rtk init`/);
   });
 
   it("injects no RTK policy without an RTK attachment", () => {

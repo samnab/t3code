@@ -421,6 +421,8 @@ describe("ClaudeAdapterLive", () => {
       assert.match(append, /## Golden Rule/);
       assert.match(append, /rtk git add \. && rtk git commit/);
       assert.match(append, /rtk proxy <cmd>/);
+      // T3's session-only preface overrides the upstream persistent-setup copy.
+      assert.match(append, /Do not run `rtk init`/);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
