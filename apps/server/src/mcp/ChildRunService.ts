@@ -1,6 +1,8 @@
 import * as NodeCrypto from "node:crypto";
 import {
   CommandId,
+  DelegationCandidate,
+  DelegationTierId,
   EventId,
   MessageId,
   ProviderDriverKind,
@@ -15,6 +17,7 @@ import {
   isToolLifecycleItemType,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import {
   Context,
@@ -54,22 +57,36 @@ import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterReg
 import { ProviderInstanceRegistry } from "../provider/Services/ProviderInstanceRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as McpProviderSession from "./McpProviderSession.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
+import {
+  type DelegationCandidateAvailability,
+  type DelegationCandidateEvaluation,
+  evaluateCandidate,
+  resolveTier,
+} from "./delegationTiers.ts";
 
 export class ChildRunError extends Schema.TaggedError<ChildRunError>()("ChildRunError", {
   message: Schema.String,
 }) {}
 
 export const ChildRunSpawnInput = Schema.Struct({
-  providerInstanceId: ProviderInstanceId,
-  model: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  model: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  tier: Schema.optional(DelegationTierId),
   options: Schema.optionalKey(ProviderOptionSelections),
   prompt: TrimmedNonEmptyString.check(Schema.isMaxLength(100_000)),
   title: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
 });
 export type ChildRunSpawnInput = typeof ChildRunSpawnInput.Type;
+
+/** A spawn input whose target is known: both fields set explicitly or a tier resolved to a candidate. */
+type ResolvedChildRunSpawnInput = Omit<ChildRunSpawnInput, "providerInstanceId" | "model"> & {
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly model: string;
+};
 
 export const ChildRunSendInput = Schema.Struct({
   runId: RuntimeTaskId,
@@ -89,6 +106,7 @@ export const ChildRunResult = Schema.Struct({
   output: Schema.String,
   outputTruncated: Schema.Boolean,
   error: Schema.optional(Schema.String),
+  resolvedFromTier: Schema.optional(DelegationTierId),
 });
 export type ChildRunResult = typeof ChildRunResult.Type;
 
@@ -165,6 +183,19 @@ export const ChildRunCapabilities = Schema.Struct({
   maxConcurrentPerParent: Schema.Number,
   persistence: Schema.Literal("durable"),
   completionDelivery: Schema.Literal("automatic-or-result"),
+  tiers: Schema.Array(
+    Schema.Struct({
+      tier: DelegationTierId,
+      candidates: Schema.Array(
+        Schema.Struct({
+          ...DelegationCandidate.fields,
+          headroomPercent: Schema.optional(Schema.Number),
+          eligible: Schema.Boolean,
+          reason: Schema.optional(Schema.String),
+        }),
+      ),
+    }),
+  ),
 });
 
 interface ActiveRun {
@@ -429,6 +460,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
   const engine = yield* OrchestrationEngineService;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const startup = yield* ServerRuntimeStartup;
+  const serverSettings = yield* ServerSettingsService;
   const serviceScope = yield* Scope.Scope;
   const spawnMutex = yield* Semaphore.make(1);
   const activeByRun = new Map<RuntimeTaskId, ActiveRun>();
@@ -1193,7 +1225,7 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
     function* (
       scope: McpInvocationScope,
       session: Pick<ProviderSession, "cwd" | "runtimeMode">,
-      input: ChildRunSpawnInput,
+      input: ResolvedChildRunSpawnInput,
       parentRunId: RuntimeTaskId | null,
       resumeCursor: unknown | null,
       generation: number,
@@ -1958,10 +1990,71 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
       }),
   } satisfies ProviderSubagentControlPlaneShape<never>;
 
+  // Tier candidates share one availability/usage memo per resolution pass so
+  // a candidate listed in several tiers costs one snapshot fetch.
+  const tierCandidateAvailability = Effect.fn("ChildRunService.tierCandidateAvailability")(
+    function* (
+      runtimeMode: ProviderSession["runtimeMode"],
+      memo: Map<ProviderInstanceId, DelegationCandidateAvailability>,
+      providerInstanceId: ProviderInstanceId,
+    ) {
+      const memoized = memo.get(providerInstanceId);
+      if (memoized !== undefined) return memoized;
+      const info = yield* registry.getInstanceInfo(providerInstanceId).pipe(Effect.option);
+      let availability: DelegationCandidateAvailability;
+      if (info._tag === "None") {
+        availability = {
+          instanceAvailable: false,
+          reason: "Provider instance is not configured.",
+          usageLimits: undefined,
+        };
+      } else {
+        const driverAvailability = providerAvailability(info.value.driverKind, runtimeMode);
+        const instance = yield* providerInstances.getInstance(providerInstanceId);
+        const snapshot = instance === undefined ? undefined : yield* instance.snapshot.getSnapshot;
+        const reason = info.value.enabled
+          ? driverAvailability.reason
+          : ("Provider instance is disabled." as const);
+        availability = {
+          instanceAvailable: info.value.enabled && driverAvailability.available,
+          ...(reason === undefined ? {} : { reason }),
+          usageLimits: snapshot?.usageLimits,
+        };
+      }
+      memo.set(providerInstanceId, availability);
+      return availability;
+    },
+  );
+
+  const evaluateTier = Effect.fn("ChildRunService.evaluateTier")(function* (
+    settings: ServerSettings,
+    runtimeMode: ProviderSession["runtimeMode"],
+    tier: DelegationTierId,
+    memo: Map<ProviderInstanceId, DelegationCandidateAvailability>,
+  ) {
+    const candidates = settings.delegationTiers[tier];
+    const evaluated: Array<{
+      readonly candidate: DelegationCandidate;
+      readonly evaluation: DelegationCandidateEvaluation;
+    }> = [];
+    for (const candidate of candidates) {
+      const availability = yield* tierCandidateAvailability(
+        runtimeMode,
+        memo,
+        candidate.providerInstanceId,
+      );
+      evaluated.push({ candidate, evaluation: evaluateCandidate(candidate, availability) });
+    }
+    return { candidates, evaluated };
+  });
+
   return ChildRunService.of({
     controlPlane,
     capabilities: Effect.fn("ChildRunService.capabilities")(function* (scope) {
       const session = yield* parent(scope);
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(() => new ChildRunError({ message: "Reading server settings failed." })),
+      );
       const instances = yield* registry.listInstances();
       const targetProviders: Array<(typeof ChildRunCapabilities.Type)["providers"][number]> = [];
       for (const id of instances) {
@@ -1986,6 +2079,22 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
       }
       const available =
         session.cwd !== undefined && targetProviders.some((candidate) => candidate.available);
+      const tierMemo = new Map<ProviderInstanceId, DelegationCandidateAvailability>();
+      const tiers: Array<(typeof ChildRunCapabilities.Type)["tiers"][number]> = [];
+      for (const tier of ["small", "medium", "large"] as const) {
+        const { evaluated } = yield* evaluateTier(settings, session.runtimeMode, tier, tierMemo);
+        tiers.push({
+          tier,
+          candidates: evaluated.map(({ candidate, evaluation }) => ({
+            ...candidate,
+            eligible: evaluation.eligible,
+            ...(evaluation.headroomPercent === undefined
+              ? {}
+              : { headroomPercent: evaluation.headroomPercent }),
+            ...(evaluation.reason === undefined ? {} : { reason: evaluation.reason }),
+          })),
+        });
+      }
       return {
         available,
         ...(available
@@ -2000,13 +2109,89 @@ const makeWithOptions = Effect.fn("ChildRunService.make")(function* (mcpHooks: C
         maxConcurrentPerParent: MAX_PER_PARENT,
         persistence: "durable",
         completionDelivery: "automatic-or-result",
+        tiers,
       };
     }),
     spawn: Effect.fn("ChildRunService.spawn")(function* (scope, input) {
       const session = yield* parent(scope);
       parentProviderByThread.set(scope.threadId, scope.providerInstanceId);
       stoppedParents.delete(scope.threadId);
-      return yield* start(scope, session, input, null, null, 1, null);
+      // Explicit provider and model win over a tier; the tier only resolves
+      // when the caller did not name a full target.
+      if (input.providerInstanceId !== undefined && input.model !== undefined) {
+        return yield* start(
+          scope,
+          session,
+          {
+            tier: input.tier,
+            prompt: input.prompt,
+            title: input.title,
+            providerInstanceId: input.providerInstanceId,
+            model: input.model,
+            ...(input.options === undefined ? {} : { options: input.options }),
+          },
+          null,
+          null,
+          1,
+          null,
+        );
+      }
+      if (input.tier === undefined) {
+        return yield* new ChildRunError({
+          message: "Provide either a delegation tier or both providerInstanceId and model.",
+        });
+      }
+      const tier = input.tier;
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(() => new ChildRunError({ message: "Reading server settings failed." })),
+      );
+      const memo = new Map<ProviderInstanceId, DelegationCandidateAvailability>();
+      const { candidates, evaluated } = yield* evaluateTier(
+        settings,
+        session.runtimeMode,
+        tier,
+        memo,
+      );
+      const evaluationByCandidate = new Map(
+        evaluated.map((entry) => [entry.candidate, entry.evaluation] as const),
+      );
+      const resolved = resolveTier(
+        candidates,
+        (candidate) => evaluationByCandidate.get(candidate) ?? { eligible: false },
+      );
+      if (resolved === undefined) {
+        const reasons =
+          candidates.length === 0
+            ? "no candidates configured"
+            : evaluated
+                .map(
+                  (entry) =>
+                    `${entry.candidate.providerInstanceId}/${entry.candidate.model}: ${
+                      entry.evaluation.reason ?? "unavailable"
+                    }`,
+                )
+                .join("; ");
+        return yield* new ChildRunError({
+          message: `Delegation tier "${tier}" has no eligible provider (${reasons}).`,
+        });
+      }
+      const result = yield* start(
+        scope,
+        session,
+        {
+          tier,
+          prompt: input.prompt,
+          title: input.title,
+          providerInstanceId: resolved.providerInstanceId,
+          model: resolved.model,
+          ...(resolved.options === undefined ? {} : { options: resolved.options }),
+        },
+        null,
+        null,
+        1,
+        null,
+      );
+      return { ...result, resolvedFromTier: tier };
     }),
     send: Effect.fn("ChildRunService.send")(function* (scope, input) {
       const run = yield* readOwned(scope, input.runId);

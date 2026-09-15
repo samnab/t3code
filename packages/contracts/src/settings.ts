@@ -1080,6 +1080,32 @@ export const ProjectSettingsOverrides = Schema.Struct({
 } satisfies Record<ProjectScopedServerSettingKey, unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
+export const DelegationTierId = Schema.Literals(["small", "medium", "large"]);
+export type DelegationTierId = typeof DelegationTierId.Type;
+
+export const DelegationCandidate = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  options: Schema.optional(ProviderOptionSelections),
+  /** Skip this candidate when the provider's remaining usage is below this percent. Omit to only skip on unavailability. */
+  minHeadroomPercent: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  ),
+});
+export type DelegationCandidate = typeof DelegationCandidate.Type;
+
+/**
+ * Ordered child-agent candidates per delegation tier. `subagent_spawn` with a
+ * `tier` resolves the first candidate whose provider is available and whose
+ * subscription usage has enough headroom.
+ */
+export const DelegationTiers = Schema.Struct({
+  small: Schema.Array(DelegationCandidate).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  medium: Schema.Array(DelegationCandidate).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  large: Schema.Array(DelegationCandidate).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type DelegationTiers = typeof DelegationTiers.Type;
+
 export const ServerSettings = Schema.Struct({
   // Legacy token-by-token assistant output. Deliberately a fresh key (was
   // `enableAssistantStreaming`): decoding drops the old key, so everyone,
@@ -1265,6 +1291,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  delegationTiers: DelegationTiers.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ small: [], medium: [], large: [] })),
+  ),
   // Keyed by a user-chosen id so a source keeps its rows across edits. Entries
   // this build cannot decode round-trip untouched, as provider instances do.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
@@ -1523,6 +1552,9 @@ export const ServerSettingsPatch = Schema.Struct({
       antigravity: Schema.optionalKey(AntigravitySettingsPatch),
     }),
   ),
+  // Whole-map replacement per tier: a client sends the tier's full candidate
+  // list, mirroring how the settings UI edits ordered lists.
+  delegationTiers: Schema.optionalKey(DelegationTiers),
   // Whole-map replacement for the new instance config. Patching individual
   // entries is intentionally out of scope: the map is small, and partial
   // patches risk leaving driver-specific config in a half-merged state.

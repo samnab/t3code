@@ -6,6 +6,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderOptionDescriptor,
+  type ServerProviderUsageLimits,
   RuntimeItemId,
   RuntimeTaskId,
   SubagentRunEvidence,
@@ -61,6 +62,7 @@ import type { ProviderAdapterShape } from "../provider/Services/ProviderAdapter.
 import { ProviderAdapterRegistry } from "../provider/Services/ProviderAdapterRegistry.ts";
 import { ProviderInstanceRegistry } from "../provider/Services/ProviderInstanceRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import {
   ChildRunResult,
@@ -113,6 +115,8 @@ const makeHarness = Effect.fn("makeHarness")(function* (
     readonly store: ProjectionSubagentTranscriptStore["Service"];
     readonly projectActivity?: (command: OrchestrationCommand) => Effect.Effect<void>;
   },
+  settingsOverrides: Parameters<typeof ServerSettings.layerTest>[0] = {},
+  childUsageLimits?: ServerProviderUsageLimits,
 ) {
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const domainEvents = yield* PubSub.unbounded<OrchestrationEvent>();
@@ -303,6 +307,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
               ],
               slashCommands: [],
               skills: [],
+              ...(childUsageLimits === undefined ? {} : { usageLimits: childUsageLimits }),
             } satisfies ServerProvider),
             refresh: Effect.die("unused"),
             streamChanges: Stream.empty,
@@ -451,6 +456,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
         transcriptControl?.store ?? noopTranscriptStore,
       ),
     ),
+    Layer.provide(ServerSettings.layerTest(settingsOverrides)),
   );
   return {
     scope,
@@ -1573,6 +1579,192 @@ it.effect("validates, reports, and preserves fixed child model options", () =>
       expect((yield* service.result(h.scope, followup.runId, 30_000)).requestedOptions).toEqual(
         input.options,
       );
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+const childUsageLimits = (usedPercent: number): ServerProviderUsageLimits => ({
+  checkedAt: now,
+  windows: [{ id: "five_hour", kind: "session", label: "Five hours", usedPercent }],
+});
+
+it.effect("spawns through a delegation tier and reports the resolved tier", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      true,
+      false,
+      undefined,
+      false,
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      {
+        delegationTiers: {
+          small: [],
+          medium: [
+            {
+              providerInstanceId: ProviderInstanceId.make("child-provider"),
+              model: "native-model",
+            },
+          ],
+          large: [],
+        },
+      },
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const run = yield* service.spawn(h.scope, {
+        tier: "medium",
+        title: "Investigate",
+        prompt: "Do the task",
+      });
+      expect((yield* decodeChildRunResult(run)).resolvedFromTier).toBe("medium");
+      expect(run.providerInstanceId).toBe(h.input.providerInstanceId);
+      expect(h.starts[0]?.modelSelection).toEqual({
+        instanceId: h.input.providerInstanceId,
+        model: "native-model",
+      });
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("prefers explicit provider and model over a configured tier", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      true,
+      false,
+      undefined,
+      false,
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      {
+        delegationTiers: {
+          small: [],
+          medium: [{ providerInstanceId: ProviderInstanceId.make("missing-instance"), model: "m" }],
+          large: [],
+        },
+      },
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const run = yield* service.spawn(h.scope, { ...h.input, tier: "medium" });
+      expect(run.resolvedFromTier).toBeUndefined();
+      expect(run.providerInstanceId).toBe(h.input.providerInstanceId);
+      expect(h.starts[0]?.modelSelection).toEqual({
+        instanceId: h.input.providerInstanceId,
+        model: h.input.model,
+      });
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("fails tier spawn naming the tier and per-candidate reasons", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      true,
+      false,
+      undefined,
+      false,
+      false,
+      [],
+      "cursor",
+      undefined,
+      undefined,
+      {
+        delegationTiers: {
+          small: [],
+          large: [],
+          medium: [
+            {
+              providerInstanceId: ProviderInstanceId.make("second-child-provider"),
+              model: "second-native-model",
+            },
+            {
+              providerInstanceId: ProviderInstanceId.make("child-provider"),
+              model: "native-model",
+              minHeadroomPercent: 50,
+            },
+          ],
+        },
+      },
+      childUsageLimits(90),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const failure = yield* service
+        .spawn(h.scope, { tier: "medium", title: "Investigate", prompt: "Do the task" })
+        .pipe(Effect.flip);
+      expect(failure.message).toContain('tier "medium"');
+      expect(failure.message).toContain("no native delegation adapter");
+      expect(failure.message).toContain("usage headroom 10% is below the required 50%");
+      expect(h.starts).toHaveLength(0);
+    }).pipe(Effect.provide(h.services));
+  }),
+);
+
+it.effect("reports delegation tiers with headroom and eligibility in capabilities", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness(
+      "codex",
+      "claudeAgent",
+      "full-access",
+      true,
+      false,
+      undefined,
+      false,
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      {
+        delegationTiers: {
+          small: [],
+          large: [],
+          medium: [
+            {
+              providerInstanceId: ProviderInstanceId.make("child-provider"),
+              model: "native-model",
+              minHeadroomPercent: 20,
+            },
+          ],
+        },
+      },
+      childUsageLimits(60),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ChildRunService;
+      const capabilities = yield* service.capabilities(h.scope);
+      expect(capabilities.tiers).toEqual([
+        { tier: "small", candidates: [] },
+        {
+          tier: "medium",
+          candidates: [
+            {
+              providerInstanceId: h.input.providerInstanceId,
+              model: "native-model",
+              minHeadroomPercent: 20,
+              headroomPercent: 40,
+              eligible: true,
+            },
+          ],
+        },
+        { tier: "large", candidates: [] },
+      ]);
     }).pipe(Effect.provide(h.services));
   }),
 );
