@@ -625,6 +625,20 @@ export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
   return completedAt > lastVisitedAt;
 }
 
+// The sidebar hides the Done badge behind Working/Monitoring while background
+// agents outlive the turn. ChatView stamps a thread visit with this value —
+// not raw latestTurn.completedAt — so opening the thread during that window
+// cannot consume a completion the sidebar has not surfaced yet; the badge
+// lands when the row finally flips ready. Null means nothing to stamp now.
+export function resolveSeenCompletionAt(
+  thread: SidebarThreadStatusInput & Pick<SidebarThreadSummary, "latestTurn">,
+): string | null {
+  const completedAt = thread.latestTurn?.completedAt;
+  if (!completedAt) return null;
+  const status = resolveSidebarThreadStatus(thread);
+  return status === "working" || status === "monitoring" ? null : completedAt;
+}
+
 export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
   if (target === null) return true;
   return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);

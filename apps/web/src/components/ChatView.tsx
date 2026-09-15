@@ -377,6 +377,7 @@ import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayo
 import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
+import { resolveSeenCompletionAt } from "./Sidebar.logic";
 import {
   type EnvironmentOption,
   resolveEffectiveEnvMode,
@@ -2231,20 +2232,18 @@ export default function ChatView(props: ChatViewProps) {
   // stamped at the turn's completion time — not now/updatedAt — so it clears
   // exactly the completion the user is looking at: a wake or completion that
   // lands later still gets its signal (markThreadVisited never moves the
-  // timestamp backwards).
+  // timestamp backwards). The stamp reads the thread shell (the merged detail
+  // thread carries no backgroundLiveness) and only lands once the sidebar
+  // would show Done: while background agents keep the row working/monitoring,
+  // the completion stays unseen so the badge survives until the row flips
+  // ready, even if the user is viewing the thread the whole time.
   useEffect(() => {
-    const completedAt = serverThread?.latestTurn?.completedAt;
-    if (!serverThread?.id || !completedAt) return;
-    markThreadVisited(
-      scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
-      completedAt,
-    );
-  }, [
-    markThreadVisited,
-    serverThread?.environmentId,
-    serverThread?.id,
-    serverThread?.latestTurn?.completedAt,
-  ]);
+    const shell = routeServerThreadShell;
+    if (!shell) return;
+    const completedAt = resolveSeenCompletionAt(shell);
+    if (!completedAt) return;
+    markThreadVisited(scopedThreadKey(scopeThreadRef(shell.environmentId, shell.id)), completedAt);
+  }, [markThreadVisited, routeServerThreadShell]);
   useEffect(() => {
     setMountedTerminalThreadKeys((currentThreadIds) => {
       const nextThreadIds = reconcileMountedTerminalThreadIds({

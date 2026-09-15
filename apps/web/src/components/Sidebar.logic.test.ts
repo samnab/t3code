@@ -24,6 +24,7 @@ import {
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
   resolveThreadRowClassName,
+  resolveSeenCompletionAt,
   resolveSidebarThreadStatus,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
@@ -349,6 +350,52 @@ describe("hasUnseenCompletion", () => {
         session: null,
       }),
     ).toBe(false);
+  });
+});
+
+describe("resolveSeenCompletionAt", () => {
+  const session = {
+    threadId: ThreadId.make("thread-1"),
+    status: "ready" as const,
+    providerName: "Codex",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    runtimeMode: DEFAULT_RUNTIME_MODE,
+    activeTurnId: "turn-1" as never,
+    lastError: null,
+    updatedAt: "2026-03-09T10:00:00.000Z",
+  };
+  const idle = {
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    session,
+    goalLoop: null,
+  };
+
+  it("withholds a completed turn while background agents keep the row receded", () => {
+    expect(
+      resolveSeenCompletionAt({
+        ...idle,
+        backgroundLiveness: "working",
+        latestTurn: makeLatestTurn(),
+      }),
+    ).toBeNull();
+    expect(
+      resolveSeenCompletionAt({
+        ...idle,
+        backgroundLiveness: "monitoring",
+        latestTurn: makeLatestTurn(),
+      }),
+    ).toBeNull();
+  });
+
+  it("releases the completed turn once the row reads ready", () => {
+    expect(
+      resolveSeenCompletionAt({
+        ...idle,
+        backgroundLiveness: null,
+        latestTurn: makeLatestTurn(),
+      }),
+    ).toBe("2026-03-09T10:05:00.000Z");
   });
 });
 
