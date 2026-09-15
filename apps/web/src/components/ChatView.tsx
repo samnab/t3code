@@ -2236,7 +2236,7 @@ export default function ChatView(props: ChatViewProps) {
   // thread carries no backgroundLiveness) and only lands once the sidebar
   // would show Done: while background agents keep the row working/monitoring,
   // the completion stays unseen so the badge survives until the row flips
-  // ready, even if the user is viewing the thread the whole time.
+  // ready; the stamp then lands only if the thread is still open.
   useEffect(() => {
     const shell = routeServerThreadShell;
     if (!shell) return;
