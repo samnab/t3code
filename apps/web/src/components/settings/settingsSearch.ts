@@ -19,6 +19,7 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/connections"
   | "/settings/optimizers"
+  | "/settings/delegation"
   | "/settings/archived";
 
 /**
@@ -81,6 +82,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/source-control": "Source Control",
   "/settings/connections": "Connections",
   "/settings/optimizers": "Optimizers",
+  "/settings/delegation": "Delegation",
   "/settings/archived": "Archive",
 };
 
@@ -461,6 +463,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "delegation",
+    title: "Delegation",
+    to: "/settings/delegation",
+    searchTerms: [
+      "delegation subagent tiers priority fallback usage headroom child agents routing",
+    ],
+  },
+  {
     id: "usage-providers",
     title: "Usage providers",
     to: "/settings/providers",
@@ -727,6 +737,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/providers": null,
   "/settings/integrations": null,
   "/settings/optimizers": null,
+  "/settings/delegation": null,
   "/settings/source-control": "environment-defaults",
   "/settings/connections": "connections",
   "/settings/archived": "project-defaults",
