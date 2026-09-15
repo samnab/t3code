@@ -43,3 +43,8 @@ node_modules/
 
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/
+
+# Local agent state and stray build output in the repo root.
+.pi/
+/bin.mjs
+/caches/
