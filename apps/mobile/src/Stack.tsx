@@ -61,6 +61,7 @@ import {
   SettingsOpenSourceLicenseRouteScreen,
   SettingsOpenSourceLicensesRouteScreen,
 } from "./features/settings/SettingsOpenSourceLicensesRouteScreen";
+import { SettingsDelegationRouteScreen } from "./features/settings/SettingsDelegationRouteScreen";
 import { SettingsProjectGroupingRouteScreen } from "./features/settings/SettingsProjectGroupingRouteScreen";
 import { SettingsOptimizersRouteScreen } from "./features/settings/SettingsOptimizersRouteScreen";
 import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
@@ -198,6 +199,13 @@ const SettingsContentStack = createNativeStackNavigator({
       linking: "optimizers",
       options: {
         title: "Optimizers",
+      },
+    }),
+    SettingsDelegation: createNativeStackScreen({
+      screen: SettingsDelegationRouteScreen,
+      linking: "delegation",
+      options: {
+        title: "Delegation",
       },
     }),
     SettingsClientStorage: createNativeStackScreen({
