@@ -521,9 +521,19 @@ export const ProviderRegistryLive = Layer.effect(
       },
     );
 
+    // An explicit refresh drops cached workspace snapshots so the composer
+    // re-requests a cwd scan. Periodic probes arrive via `streamChanges` and
+    // keep them, since a cwd scan spawns a provider process per workspace.
     const refreshOneSource = Effect.fn("refreshOneSource")(function* (
       providerSource: ProviderSnapshotSource,
     ) {
+      yield* Ref.update(providersRef, (providers) =>
+        providers.map((provider) => {
+          if (provider.instanceId !== providerSource.instanceId) return provider;
+          const { workspaceSnapshots: _workspaceSnapshots, ...machineProvider } = provider;
+          return machineProvider;
+        }),
+      );
       return yield* providerSource.refresh.pipe(
         Effect.flatMap((nextProvider) =>
           correlateSnapshotWithSource(providerSource, nextProvider).pipe(

@@ -1579,6 +1579,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
             assert.strictEqual(yield* Ref.get(snapshotCalls), 2);
 
+            // An explicit machine refresh (Settings > Providers) drops the
+            // cached workspace snapshot so the next cwd request rescans.
+            const refreshed = yield* registry.refresh();
+            assert.strictEqual(refreshed[0]?.workspaceSnapshots, undefined);
+            yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
+            assert.strictEqual(yield* Ref.get(snapshotCalls), 3);
+            assert.deepStrictEqual(
+              (yield* registry.getProviders)[0]?.workspaceSnapshots?.[0]?.skills,
+              scopedProvider.skills,
+            );
+
             yield* Ref.set(instancesRef, [rebuiltInstance]);
             yield* PubSub.publish(registryChanges, undefined);
             let rebuilt = yield* registry.getProviders;
