@@ -36,6 +36,7 @@ const readModelWithThread = Effect.gen(function* () {
       workspaceRoot: "/tmp/project",
       defaultModelSelection: null,
       scripts: [],
+      schedules: [],
       createdAt,
       updatedAt: createdAt,
     },
