@@ -3458,11 +3458,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       case "status":
+        // `/compact` returns its result immediately and the CLI compacts
+        // afterwards, so the status: null that ends compaction can arrive with
+        // no turn in flight. Reporting "running" there leaves the session stuck
+        // working with nothing to finish it.
         yield* offerRuntimeEvent({
           ...base,
           type: "session.state.changed",
           payload: {
-            state: message.status === "compacting" ? "waiting" : "running",
+            state:
+              message.status === "compacting"
+                ? "waiting"
+                : message.status === null && !context.turnState
+                  ? "ready"
+                  : "running",
             reason: `status:${message.status ?? "active"}`,
             detail: message,
           },
