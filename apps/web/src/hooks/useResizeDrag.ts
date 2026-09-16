@@ -1,4 +1,4 @@
-import { type PointerEvent, useCallback, useEffect, useRef } from "react";
+import { type PointerEvent, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 interface ResizeSession {
   width: number;
@@ -12,6 +12,7 @@ interface ResizeSession {
 /** Shared pointer lifecycle for side panels, including interrupted and sub-frame drags. */
 export function useResizeDrag<T extends HTMLElement>(
   start: (event: PointerEvent<T>) => ResizeSession | null,
+  resetKey?: string,
 ) {
   const drag = useRef<{
     session: ResizeSession;
@@ -55,6 +56,14 @@ export function useResizeDrag<T extends HTMLElement>(
     },
     [flush],
   );
+
+  const previousResetKey = useRef(resetKey);
+  useLayoutEffect(() => {
+    if (previousResetKey.current !== resetKey) {
+      finish(false);
+      previousResetKey.current = resetKey;
+    }
+  }, [finish, resetKey]);
 
   useEffect(() => {
     const onBlur = () => finish();

@@ -521,6 +521,7 @@ function deriveWorkLogEntries(
     // Keep the request row as the stable chronological anchor and consume its
     // separate resolution into that row once an answer is available.
     if (activity.kind === "user-input.resolved" && history !== undefined) continue;
+    // Mobile has no setup card, so a failed setup surfaces as an error row.
     if (activity.tone !== "error" && isWorktreeSetupActivity(activity.kind)) continue;
     if (activity.kind === "tool.started") continue;
     const payload =
