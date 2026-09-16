@@ -932,18 +932,22 @@ export { pinOrderKeyBetween, planPinnedReorder } from "@t3tools/client-runtime/s
 export { sortPinnedThreadsByOrderKey as sortPinnedThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
 
 /**
- * Search the already-ordered sidebar thread collection by title or linked PR.
- * Keeping the input order means lifecycle ordering (active, snoozed, settled)
- * remains stable while the user narrows the list.
+ * Search the already-ordered sidebar thread collection by title, linked PR, or
+ * project name. Keeping the input order means lifecycle ordering (active,
+ * snoozed, settled) remains stable while the user narrows the list.
  */
 export function searchSidebarThreads<
   T extends { readonly title: string } & Parameters<typeof threadPullRequestSearchTerms>[0],
->(threads: readonly T[], query: string): T[] {
+>(
+  threads: readonly T[],
+  query: string,
+  projectNameFor: (thread: T) => string | undefined = () => undefined,
+): T[] {
   const normalizedQuery = query.trim().toLowerCase();
   if (normalizedQuery.length === 0) return [];
   return threads.filter((thread) =>
-    [thread.title, ...threadPullRequestSearchTerms(thread)].some((term) =>
-      term.toLowerCase().includes(normalizedQuery),
+    [thread.title, projectNameFor(thread) ?? "", ...threadPullRequestSearchTerms(thread)].some(
+      (term) => term.toLowerCase().includes(normalizedQuery),
     ),
   );
 }

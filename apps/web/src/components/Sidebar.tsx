@@ -2711,8 +2711,11 @@ export default function Sidebar() {
     [activeThreads, pinnedThreads, settledThreads, snoozedThreads],
   );
   const threadSearchResults = useMemo(
-    () => searchSidebarThreads(searchableThreads, threadSearchQuery),
-    [searchableThreads, threadSearchQuery],
+    () =>
+      searchSidebarThreads(searchableThreads, threadSearchQuery, (thread) =>
+        projectDisplayNameByKey.get(`${thread.environmentId}:${thread.projectId}`),
+      ),
+    [projectDisplayNameByKey, searchableThreads, threadSearchQuery],
   );
   const threadSearchResultOrderKey = threadSearchResults
     .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))

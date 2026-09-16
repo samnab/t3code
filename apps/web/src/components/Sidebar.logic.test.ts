@@ -873,8 +873,11 @@ describe("searchSidebarThreads", () => {
     expect(searchSidebarThreads(threads, "work")).toEqual([threads[0], threads[2]]);
   });
 
-  it("does not match project metadata", () => {
-    expect(searchSidebarThreads(threads, "workspace")).toEqual([threads[0]]);
+  it("matches project names when a resolver is given", () => {
+    expect(searchSidebarThreads(threads, "workspace", (thread) => thread.project)).toEqual([
+      threads[0],
+      threads[1],
+    ]);
   });
 
   it("returns no results for an empty query", () => {
