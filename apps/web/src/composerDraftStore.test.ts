@@ -2184,7 +2184,7 @@ describe("composerDraftStore modelSelection", () => {
       threadRef,
       providerModelOptions({
         codex: { fastMode: true },
-        claudeAgent: { effort: "max" },
+        claudeAgent: { fastMode: true },
       }),
     );
 
@@ -2192,12 +2192,35 @@ describe("composerDraftStore modelSelection", () => {
 
     const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
     expect(draft?.modelSelectionByProvider[CLAUDE_AGENT_INSTANCE]).toEqual(
-      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "max" }),
+      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { fastMode: true }),
     );
     expect(draft?.modelSelectionByProvider[CODEX_INSTANCE]?.options).toEqual(
       createModelSelection(CODEX_INSTANCE, "gpt-5.4", toSelections({ fastMode: true })).options,
     );
     expect(draft?.activeProvider).toBe("claudeAgent");
+  });
+
+  it("drops the effort option when the model changes so the new model's default applies", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setModelSelection(
+      threadRef,
+      modelSelection(CODEX_DRIVER, "gpt-5.4", { reasoningEffort: "xhigh", fastMode: true }),
+    );
+    store.setModelSelection(threadRef, modelSelection(CODEX_DRIVER, "gpt-5.3-codex"));
+
+    expect(
+      draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[CODEX_INSTANCE],
+    ).toEqual(modelSelection(CODEX_DRIVER, "gpt-5.3-codex", { fastMode: true }));
+
+    store.setStickyModelSelection(
+      modelSelection(CODEX_DRIVER, "gpt-5.4", { reasoningEffort: "xhigh", fastMode: true }),
+    );
+    store.setStickyModelSelection(modelSelection(CODEX_DRIVER, "gpt-5.3-codex"));
+
+    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider[CODEX_INSTANCE]).toEqual(
+      modelSelection(CODEX_DRIVER, "gpt-5.3-codex", { fastMode: true }),
+    );
   });
 
   it("creates the first sticky snapshot from provider option changes", () => {
