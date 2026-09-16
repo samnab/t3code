@@ -6,6 +6,7 @@ import {
   type ProjectScheduleWeekday,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/models";
 import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
@@ -13,27 +14,28 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { createModelSelection } from "@t3tools/shared/model";
 import { useNavigate } from "@tanstack/react-router";
-import { PlusIcon, Trash2Icon } from "lucide-react";
+import { CalendarClockIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { type FormEvent, useState } from "react";
 
-import { cn, newMessageId, newThreadId, randomUUID } from "../../lib/utils";
-import { getCustomModelOptionsByInstance } from "../../modelSelection";
+import { cn, newMessageId, newThreadId, randomUUID } from "../lib/utils";
+import { getCustomModelOptionsByInstance } from "../modelSelection";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   resolveDefaultProviderModelSelection,
   sortProviderInstanceEntries,
   type ProviderInstanceEntry,
-} from "../../providerInstances";
-import { useEnvironments } from "../../state/environments";
-import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
-import { projectEnvironment } from "../../state/projects";
-import { threadEnvironment } from "../../state/threads";
-import { useAtomCommand } from "../../state/use-atom-command";
-import { DEFAULT_RUNTIME_MODE } from "../../types";
-import { ProviderModelPicker } from "../chat/ProviderModelPicker";
-import { type ModelEsque } from "../chat/providerIconUtils";
-import { Button } from "../ui/button";
+} from "../providerInstances";
+import { useEnvironmentSettings } from "../hooks/useSettings";
+import { useEnvironments } from "../state/environments";
+import { EMPTY_SERVER_PROVIDERS } from "../state/server";
+import { projectEnvironment } from "../state/projects";
+import { threadEnvironment } from "../state/threads";
+import { useAtomCommand } from "../state/use-atom-command";
+import { DEFAULT_RUNTIME_MODE } from "../types";
+import { ProviderModelPicker } from "./chat/ProviderModelPicker";
+import { type ModelEsque } from "./chat/providerIconUtils";
+import { Button } from "./ui/button";
 import {
   Dialog,
   DialogDescription,
@@ -42,23 +44,21 @@ import {
   DialogPanel,
   DialogPopup,
   DialogTitle,
-} from "../ui/dialog";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
-import { stackedThreadToast, toastManager } from "../ui/toast";
-import { Switch } from "../ui/switch";
-import { Textarea } from "../ui/textarea";
-import { useSettingsScope } from "./SettingsScopeContext";
-import { SETTINGS_PICKER_TRIGGER_CLASSNAME, SettingsRow, SettingsSection } from "./settingsLayout";
-import { useScopedSettings } from "./useScopedSettings";
+} from "./ui/dialog";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
+import { stackedThreadToast, toastManager } from "./ui/toast";
+import { Switch } from "./ui/switch";
+import { Textarea } from "./ui/textarea";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 const WEEKDAY_LABELS: readonly string[] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const WEEKDAYS: readonly ProjectScheduleWeekday[] = [0, 1, 2, 3, 4, 5, 6];
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /** Short human cadence label for a schedule row, e.g. "Weekly Mon, Wed at 18:00". */
-export function scheduleCadenceLabel(cadence: ProjectScheduleCadence): string {
+function scheduleCadenceLabel(cadence: ProjectScheduleCadence): string {
   if (cadence.kind === "hourly") return "Hourly at :" + String(cadence.minute).padStart(2, "0");
   if (cadence.kind === "daily") return "Daily at " + cadence.time;
   const days = [...cadence.weekdays]
@@ -86,12 +86,12 @@ type ScheduleEditor =
   | { kind: "closed" };
 
 /**
- * Edit the recurring prompts of the project the settings scope points at.
- * Schedules are stored on the project record per environment (like scripts),
- * so every edit replaces the list via project.meta.update.
+ * Header control for the recurring prompts of one project: a calendar icon
+ * that opens the schedules dialog. Schedules are stored on the project record
+ * per environment (like scripts), so every edit replaces the list via
+ * project.meta.update.
  */
-export function ProjectSchedulesSection() {
-  const { scope, targets, target } = useSettingsScope();
+export default function ProjectSchedulesControl({ project }: { project: EnvironmentProject }) {
   const { environments } = useEnvironments();
   const navigate = useNavigate();
   const updateProject = useAtomCommand(projectEnvironment.update, { reportFailure: false });
@@ -99,28 +99,18 @@ export function ProjectSchedulesSection() {
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
 
+  const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
   const [editor, setEditor] = useState<ScheduleEditor>({ kind: "closed" });
 
-  // Schedules live on one physical project per environment; edit the copy on
-  // the representative target rather than fanning out, because each server
-  // fires its own list and duplicating would run the prompt once per machine.
-  const member =
-    target?.projectId != null
-      ? (scope.members.find(
-          (candidate) =>
-            candidate.environmentId === target.environmentId && candidate.id === target.projectId,
-        ) ?? null)
-      : null;
-  const schedules = member?.schedules ?? [];
+  const schedules = project.schedules;
 
-  const representativeEnvironment =
-    target != null
-      ? environments.find((entry) => entry.environmentId === target.environmentId)
-      : undefined;
+  const representativeEnvironment = environments.find(
+    (entry) => entry.environmentId === project.environmentId,
+  );
   const providers = representativeEnvironment?.serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS;
-  const settings = useScopedSettings();
+  const settings = useEnvironmentSettings(project.environmentId);
   const defaultModelSelection = resolveDefaultProviderModelSelection(
     providers,
     settings.defaultModelSelection,
@@ -137,11 +127,11 @@ export function ProjectSchedulesSection() {
   const modelsAvailable = instanceEntries.length > 0 && defaultModelSelection !== null;
 
   async function save(next: readonly ProjectSchedule[]): Promise<boolean> {
-    if (member === null || saving) return false;
+    if (saving) return false;
     setSaving(true);
     const result = await updateProject({
-      environmentId: member.environmentId,
-      input: { projectId: member.id, schedules: [...next] },
+      environmentId: project.environmentId,
+      input: { projectId: project.id, schedules: [...next] },
     });
     setSaving(false);
     if (result._tag === "Failure") {
@@ -155,15 +145,15 @@ export function ProjectSchedulesSection() {
   // a thread in the project and start its first turn with the schedule prompt
   // and model, then follow the new thread.
   async function runNow(schedule: ProjectSchedule): Promise<void> {
-    if (member === null || runningId !== null) return;
+    if (runningId !== null) return;
     setRunningId(schedule.id);
     const threadId = newThreadId();
     const createdAt = new Date().toISOString();
     const createResult = await createThread({
-      environmentId: member.environmentId,
+      environmentId: project.environmentId,
       input: {
         threadId,
-        projectId: member.id,
+        projectId: project.id,
         title: schedule.name,
         modelSelection: schedule.modelSelection,
         runtimeMode: DEFAULT_RUNTIME_MODE,
@@ -178,7 +168,7 @@ export function ProjectSchedulesSection() {
       failure = createResult;
     } else {
       const startResult = await startThreadTurn({
-        environmentId: member.environmentId,
+        environmentId: project.environmentId,
         input: {
           threadId,
           message: {
@@ -197,7 +187,7 @@ export function ProjectSchedulesSection() {
       if (startResult._tag === "Failure") {
         failure = startResult;
         const cleanup = await deleteThread({
-          environmentId: member.environmentId,
+          environmentId: project.environmentId,
           input: { threadId },
         });
         if (cleanup._tag === "Failure" && !isAtomCommandInterrupted(cleanup)) {
@@ -212,105 +202,129 @@ export function ProjectSchedulesSection() {
       }
       return;
     }
+    setOpen(false);
     await navigate({
       to: "/$environmentId/$threadId",
-      params: { environmentId: member.environmentId, threadId },
+      params: { environmentId: project.environmentId, threadId },
     });
   }
 
-  const disabled = saving || member === null;
+  const disabled = saving;
 
   return (
-    <SettingsSection
-      id="project-schedules"
-      title="Schedules"
-      headerAction={
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={disabled || !modelsAvailable}
-          onClick={() => setEditor({ kind: "add" })}
+    <>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant="outline"
+              aria-label="Schedules"
+              // The tooltip wrapper replaces data-slot="button", so themed
+              // toolbar styling needs its own hook.
+              data-toolbar-control=""
+              onClick={() => setOpen(true)}
+            />
+          }
         >
-          <PlusIcon className="size-3.5" />
-          Add schedule
-        </Button>
-      }
-    >
-      {targets.length > 1 ? (
-        <SettingsRow
-          title="Multiple environments selected"
-          description={
-            "Schedules are stored per environment; these edit the " +
-            (target?.label ?? "representative") +
-            " copy."
-          }
-        />
-      ) : null}
-      {schedules.length === 0 ? (
-        <p className="px-3 py-2 text-sm text-muted-foreground sm:px-4">No schedules yet.</p>
-      ) : null}
-      {schedules.map((schedule) => (
-        <SettingsRow
-          key={schedule.id}
-          className="group py-2"
-          title={
-            <span className="flex min-w-0 items-center gap-2">
-              <span className="min-w-0 truncate">{schedule.name}</span>
-              {!schedule.enabled ? (
-                <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-[11px] font-normal text-muted-foreground">
-                  paused
-                </span>
-              ) : null}
-            </span>
-          }
-          description={scheduleCadenceLabel(schedule.cadence)}
-          control={
-            <div className="flex items-center gap-1.5">
-              <Switch
-                checked={schedule.enabled}
-                disabled={disabled}
-                aria-label={"Enable " + schedule.name}
-                onCheckedChange={(checked) => {
-                  void save(
-                    schedules.map((entry) =>
-                      entry.id === schedule.id ? { ...entry, enabled: Boolean(checked) } : entry,
-                    ),
-                  );
-                }}
-              />
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={disabled}
-                aria-label={"Edit " + schedule.name}
-                onClick={() => setEditor({ kind: "edit", schedule })}
-              >
-                Edit
-              </Button>
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={disabled || runningId !== null}
-                onClick={() => void runNow(schedule)}
-              >
-                {runningId === schedule.id ? "Starting…" : "Run now"}
-              </Button>
-              <Button
-                size="icon-xs"
-                variant="ghost"
-                className="shrink-0 text-muted-foreground"
-                disabled={disabled}
-                aria-label={"Delete " + schedule.name}
-                onClick={() => {
-                  void save(schedules.filter((entry) => entry.id !== schedule.id));
-                }}
-              >
-                <Trash2Icon className="size-3.5" />
-              </Button>
-            </div>
-          }
-        />
-      ))}
+          <CalendarClockIcon className="size-4" />
+        </TooltipTrigger>
+        <TooltipPopup side="top">Schedules</TooltipPopup>
+      </Tooltip>
+      <Dialog
+        open={open}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setOpen(false);
+        }}
+      >
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>Schedules</DialogTitle>
+            <DialogDescription>{project.title}</DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            {schedules.length === 0 ? (
+              <p className="py-2 text-sm text-muted-foreground">No schedules yet.</p>
+            ) : (
+              <div className="divide-y divide-border/60">
+                {schedules.map((schedule) => (
+                  <div key={schedule.id} className="flex items-center justify-between gap-3 py-2">
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-2 text-sm">
+                        <span className="min-w-0 truncate">{schedule.name}</span>
+                        {!schedule.enabled ? (
+                          <span className="shrink-0 rounded-sm border border-border/60 px-1.5 py-px text-[11px] font-normal text-muted-foreground">
+                            paused
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {scheduleCadenceLabel(schedule.cadence)}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <Switch
+                        checked={schedule.enabled}
+                        disabled={disabled}
+                        aria-label={"Enable " + schedule.name}
+                        onCheckedChange={(checked) => {
+                          void save(
+                            schedules.map((entry) =>
+                              entry.id === schedule.id
+                                ? { ...entry, enabled: Boolean(checked) }
+                                : entry,
+                            ),
+                          );
+                        }}
+                      />
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={disabled}
+                        aria-label={"Edit " + schedule.name}
+                        onClick={() => setEditor({ kind: "edit", schedule })}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={disabled || runningId !== null}
+                        onClick={() => void runNow(schedule)}
+                      >
+                        {runningId === schedule.id ? "Starting…" : "Run now"}
+                      </Button>
+                      <Button
+                        size="icon-xs"
+                        variant="ghost"
+                        className="shrink-0 text-muted-foreground"
+                        disabled={disabled}
+                        aria-label={"Delete " + schedule.name}
+                        onClick={() => {
+                          void save(schedules.filter((entry) => entry.id !== schedule.id));
+                        }}
+                      >
+                        <Trash2Icon className="size-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </DialogPanel>
+          <DialogFooter className="dark:border-transparent dark:bg-transparent">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={disabled || !modelsAvailable}
+              onClick={() => setEditor({ kind: "add" })}
+            >
+              <PlusIcon className="size-3.5" />
+              Add schedule
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
       {editor.kind !== "closed" ? (
         <ProjectScheduleEditorDialog
           key={editor.kind === "edit" ? editor.schedule.id : "add"}
@@ -329,7 +343,7 @@ export function ProjectSchedulesSection() {
           onClose={() => setEditor({ kind: "closed" })}
         />
       ) : null}
-    </SettingsSection>
+    </>
   );
 }
 
@@ -560,7 +574,7 @@ function ProjectScheduleEditorDialog({
                     instanceEntries={instanceEntries}
                     modelOptionsByInstance={modelOptionsByInstance}
                     triggerVariant="outline"
-                    triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                    triggerClassName="w-full max-w-none"
                     triggerAriaLabel="Schedule model"
                     onInstanceModelChange={(instanceId, nextModel) =>
                       setModel(createModelSelection(instanceId, nextModel))
