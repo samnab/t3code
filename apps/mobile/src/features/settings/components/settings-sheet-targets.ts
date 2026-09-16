@@ -5,6 +5,7 @@ export type SettingsSheetTarget =
   | "SettingsProjectGrouping"
   | "SettingsOptimizers"
   | "SettingsDelegation"
+  | "SettingsSchedules"
   | "SettingsClientStorage"
   | "SettingsDiagnostics"
   | "SettingsOpenSourceLicenses"

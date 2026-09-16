@@ -1547,9 +1547,11 @@ function renderFeedEntry(
       const label =
         message.origin === "goal-continue"
           ? "Goal loop continued"
-          : header
-            ? `Subagent result · ${header.title} (${header.provider}/${header.model}, ${header.status})`
-            : "Subagent result";
+          : message.origin === "schedule"
+            ? "Scheduled"
+            : header
+              ? `Subagent result · ${header.title} (${header.provider}/${header.model}, ${header.status})`
+              : "Subagent result";
       const body = header ? header.body : message.text;
       return (
         <Animated.View
