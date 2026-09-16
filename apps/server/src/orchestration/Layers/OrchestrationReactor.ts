@@ -13,6 +13,7 @@ import * as GoalLoopReactor from "../GoalLoopReactor.ts";
 import * as NativeGoalReactor from "../NativeGoalReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
 import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
+import * as ScheduleReactor from "../ScheduleReactor.ts";
 import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 
@@ -25,6 +26,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const goalLoopReactor = yield* GoalLoopReactor.GoalLoopReactor;
   const nativeGoalReactor = yield* NativeGoalReactor.NativeGoalReactor;
   const pullRequestSyncReactor = yield* PullRequestSyncReactor.PullRequestSyncReactor;
+  const scheduleReactor = yield* ScheduleReactor.ScheduleReactor;
   const threadPullRequestReactor = yield* ThreadPullRequestReactor.ThreadPullRequestReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
 
@@ -38,6 +40,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* goalLoopReactor.start();
     yield* nativeGoalReactor.start();
     yield* pullRequestSyncReactor.start();
+    yield* scheduleReactor.start();
     yield* agentAwarenessRelay.start();
   });
 

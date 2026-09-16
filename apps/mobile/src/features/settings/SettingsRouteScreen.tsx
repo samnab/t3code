@@ -600,6 +600,7 @@ function GeneralSettingsSection() {
       <SettingsRow icon="folder" label="Project Grouping" target="SettingsProjectGrouping" />
       <SettingsRow icon="bolt.horizontal.circle" label="Optimizers" target="SettingsOptimizers" />
       <SettingsRow icon="square.3.layers.3d" label="Delegation" target="SettingsDelegation" />
+      <SettingsRow icon="clock" label="Schedules" target="SettingsSchedules" />
       {Platform.OS === "ios" ? (
         <SettingsRow icon="keyboard" label="Keyboard" target="SettingsKeyboard" />
       ) : null}

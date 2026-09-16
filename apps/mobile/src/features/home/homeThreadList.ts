@@ -264,6 +264,7 @@ export function buildHomeThreadGroups(input: {
             repositoryIdentity: null,
             defaultModelSelection: null,
             scripts: [],
+            schedules: [],
             createdAt: pendingTask.createdAt,
             updatedAt: pendingTask.createdAt,
           },

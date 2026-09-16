@@ -65,6 +65,7 @@ describe("applyThreadDetailEvent", () => {
           repositoryIdentity: null,
           defaultModelSelection: null,
           scripts: [],
+          schedules: [],
           createdAt: "2026-04-01T01:00:00.000Z",
           updatedAt: "2026-04-01T01:00:00.000Z",
           deletedAt: null,

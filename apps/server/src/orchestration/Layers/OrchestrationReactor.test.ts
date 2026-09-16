@@ -13,6 +13,7 @@ import * as GoalLoopReactor from "../GoalLoopReactor.ts";
 import * as NativeGoalReactor from "../NativeGoalReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
 import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
+import * as ScheduleReactor from "../ScheduleReactor.ts";
 import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
@@ -116,6 +117,15 @@ describe("OrchestrationReactor", () => {
           }),
         ),
         Layer.provideMerge(
+          Layer.succeed(ScheduleReactor.ScheduleReactor, {
+            start: () => {
+              started.push("schedule-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
           Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
             publishThread: () => Effect.void,
             start: () => {
@@ -141,6 +151,7 @@ describe("OrchestrationReactor", () => {
       "goal-loop-reactor",
       "native-goal-reactor",
       "pull-request-sync-reactor",
+      "schedule-reactor",
       "agent-awareness-relay",
     ]);
 

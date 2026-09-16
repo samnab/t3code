@@ -70,6 +70,7 @@ import * as GoalLoopReactor from "../src/orchestration/GoalLoopReactor.ts";
 import * as NativeGoalReactor from "../src/orchestration/NativeGoalReactor.ts";
 import * as ThreadSettlementReactor from "../src/orchestration/ThreadSettlementReactor.ts";
 import * as PullRequestSyncReactor from "../src/orchestration/PullRequestSyncReactor.ts";
+import * as ScheduleReactor from "../src/orchestration/ScheduleReactor.ts";
 import * as ThreadPullRequestReactor from "../src/orchestration/ThreadPullRequestReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -424,6 +425,12 @@ export const makeOrchestrationIntegrationHarness = (
           start: () => Effect.void,
           drain: Effect.void,
           requestSync: () => Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(ScheduleReactor.ScheduleReactor, {
+          start: () => Effect.void,
+          drain: Effect.void,
         }),
       ),
       Layer.provideMerge(

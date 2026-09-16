@@ -318,6 +318,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           faviconPath: null,
           projectIcon: null,
           scripts: [],
+          schedules: [],
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -340,6 +341,33 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               commandType: command.type,
               detail: `Script ID '${script.id}' must be 1-${MAX_SCRIPT_ID_LENGTH} lowercase letters, digits or hyphens, starting with a letter or digit.`,
             });
+          }
+        }
+      }
+      if (command.schedules !== undefined) {
+        const scheduleIds: Set<string> = new Set();
+        for (const schedule of command.schedules) {
+          if (scheduleIds.has(schedule.id)) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Schedule ID '${schedule.id}' appears more than once in a project.`,
+            });
+          }
+          scheduleIds.add(schedule.id);
+          if (schedule.cadence.kind === "weekly") {
+            const weekdays = new Set(schedule.cadence.weekdays);
+            if (weekdays.size === 0) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: `Schedule '${schedule.id}' must list at least one weekday.`,
+              });
+            }
+            if (weekdays.size !== schedule.cadence.weekdays.length) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: `Schedule '${schedule.id}' must not repeat weekdays.`,
+              });
+            }
           }
         }
       }
@@ -374,7 +402,38 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.faviconPath !== undefined ? { faviconPath: command.faviconPath } : {}),
           ...(command.projectIcon !== undefined ? { projectIcon: command.projectIcon } : {}),
           ...(command.scripts !== undefined ? { scripts: command.scripts } : {}),
+          ...(command.schedules !== undefined ? { schedules: command.schedules } : {}),
           updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "project.schedule.mark-fired": {
+      const project = yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      const schedule = project.schedules.find((entry) => entry.id === command.scheduleId);
+      if (schedule === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Schedule '${command.scheduleId}' does not exist on project '${command.projectId}'.`,
+        });
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: command.firedAt,
+          commandId: command.commandId,
+        })),
+        type: "project.schedule-fired" as const,
+        payload: {
+          projectId: command.projectId,
+          scheduleId: command.scheduleId,
+          threadId: command.threadId,
+          firedAt: command.firedAt,
         },
       };
     }

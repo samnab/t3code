@@ -126,6 +126,7 @@ const project = {
   },
   defaultModelSelection: null,
   scripts: [],
+  schedules: [],
   createdAt: NOW,
   updatedAt: NOW,
 } satisfies OrchestrationProjectShell;

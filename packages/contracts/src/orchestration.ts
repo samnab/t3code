@@ -433,6 +433,49 @@ export const ProjectScript = Schema.Struct({
 });
 export type ProjectScript = typeof ProjectScript.Type;
 
+// Recurring scheduled prompts stored on the project like `scripts`. The
+// cadence is expressed in the timeZone of the schedule so it fires at the
+// same local time across DST changes.
+export const ProjectScheduleTime = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^([01]\d|2[0-3]):[0-5]\d$/),
+);
+export type ProjectScheduleTime = typeof ProjectScheduleTime.Type;
+
+export const ProjectScheduleMinute = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(59),
+);
+export type ProjectScheduleMinute = typeof ProjectScheduleMinute.Type;
+
+// 0 = Sunday.
+export const ProjectScheduleWeekday = Schema.Literals([0, 1, 2, 3, 4, 5, 6]);
+export type ProjectScheduleWeekday = typeof ProjectScheduleWeekday.Type;
+
+export const ProjectScheduleCadence = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("hourly"), minute: ProjectScheduleMinute }),
+  Schema.Struct({ kind: Schema.Literal("daily"), time: ProjectScheduleTime }),
+  Schema.Struct({
+    kind: Schema.Literal("weekly"),
+    weekdays: Schema.Array(ProjectScheduleWeekday),
+    time: ProjectScheduleTime,
+  }),
+]);
+export type ProjectScheduleCadence = typeof ProjectScheduleCadence.Type;
+
+export const ProjectSchedule = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  prompt: TrimmedNonEmptyString,
+  cadence: ProjectScheduleCadence,
+  /** IANA time zone the cadence is expressed in, e.g. "America/Toronto". Set by the creating client. */
+  timeZone: TrimmedNonEmptyString,
+  modelSelection: ModelSelection,
+  enabled: Schema.Boolean,
+  /** Last time the server fired this schedule. Null until first fire. */
+  lastFiredAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+});
+export type ProjectSchedule = typeof ProjectSchedule.Type;
+
 export const ProjectFaviconPath = TrimmedNonEmptyString.check(
   Schema.isMaxLength(1024),
   Schema.isPattern(/\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i),
@@ -528,6 +571,7 @@ export const OrchestrationProject = Schema.Struct({
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   projectIcon: Schema.optional(Schema.NullOr(ProjectIconOverride)),
   scripts: Schema.Array(ProjectScript),
+  schedules: Schema.Array(ProjectSchedule).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -541,7 +585,11 @@ export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 // than the user typing it, so clients can render it distinctly (e.g. a
 // subagent result card) instead of as the user's own words. Absent means an
 // ordinary user- or provider-authored message.
-export const OrchestrationMessageOrigin = Schema.Literals(["subagent-delivery", "goal-continue"]);
+export const OrchestrationMessageOrigin = Schema.Literals([
+  "subagent-delivery",
+  "goal-continue",
+  "schedule",
+]);
 export type OrchestrationMessageOrigin = typeof OrchestrationMessageOrigin.Type;
 
 export const OrchestrationMessage = Schema.Struct({
@@ -989,6 +1037,7 @@ export const OrchestrationProjectShell = Schema.Struct({
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   projectIcon: Schema.optional(Schema.NullOr(ProjectIconOverride)),
   scripts: Schema.Array(ProjectScript),
+  schedules: Schema.Array(ProjectSchedule).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1229,6 +1278,8 @@ const ProjectMetaUpdateCommand = Schema.Struct({
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   projectIcon: Schema.optional(Schema.NullOr(ProjectIconOverride)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+  // Absent = leave unchanged.
+  schedules: Schema.optional(Schema.Array(ProjectSchedule)),
 });
 
 const ProjectDeleteCommand = Schema.Struct({
@@ -1849,8 +1900,20 @@ const ThreadPullRequestLinkSyncCommand = Schema.Struct({
   stack: Schema.NullOr(ThreadPullRequestStack),
 });
 
+// Server-internal: the scheduler reactor reports a fired schedule so the
+// event log records the fire and the projection stores lastFiredAt.
+const ProjectScheduleMarkFiredCommand = Schema.Struct({
+  type: Schema.Literal("project.schedule.mark-fired"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  scheduleId: TrimmedNonEmptyString,
+  threadId: ThreadId,
+  firedAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadGoalLoopSyncCommand,
+  ProjectScheduleMarkFiredCommand,
   ThreadAutoSettleCommand,
   ThreadPullRequestSyncCommand,
   ThreadPullRequestLinkSyncCommand,
@@ -1880,6 +1943,7 @@ export type OrchestrationCommand = typeof OrchestrationCommand.Type;
 export const OrchestrationEventType = Schema.Literals([
   "project.created",
   "project.meta-updated",
+  "project.schedule-fired",
   "project.deleted",
   "thread.created",
   "thread.deleted",
@@ -1930,6 +1994,8 @@ export const ProjectCreatedPayload = Schema.Struct({
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   projectIcon: Schema.optional(Schema.NullOr(ProjectIconOverride)),
   scripts: Schema.Array(ProjectScript),
+  // Decoding default so persisted events from older servers still decode.
+  schedules: Schema.Array(ProjectSchedule).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1945,7 +2011,16 @@ export const ProjectMetaUpdatedPayload = Schema.Struct({
   faviconPath: Schema.optional(Schema.NullOr(ProjectFaviconPath)),
   projectIcon: Schema.optional(Schema.NullOr(ProjectIconOverride)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+  // Absent = leave unchanged.
+  schedules: Schema.optional(Schema.Array(ProjectSchedule)),
   updatedAt: IsoDateTime,
+});
+
+export const ProjectScheduleFiredPayload = Schema.Struct({
+  projectId: ProjectId,
+  scheduleId: TrimmedNonEmptyString,
+  threadId: ThreadId,
+  firedAt: IsoDateTime,
 });
 
 export const ProjectDeletedPayload = Schema.Struct({
@@ -2272,6 +2347,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.meta-updated"),
     payload: ProjectMetaUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("project.schedule-fired"),
+    payload: ProjectScheduleFiredPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

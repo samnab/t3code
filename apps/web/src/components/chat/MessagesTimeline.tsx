@@ -2083,9 +2083,11 @@ function OriginMessageTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
   const label =
     row.message.origin === "goal-continue"
       ? "Goal loop continued"
-      : parsedHeader
-        ? `Subagent result: ${parsedHeader.title} (${parsedHeader.provider}/${parsedHeader.model}, ${parsedHeader.status})`
-        : "Subagent result";
+      : row.message.origin === "schedule"
+        ? "Scheduled"
+        : parsedHeader
+          ? `Subagent result: ${parsedHeader.title} (${parsedHeader.provider}/${parsedHeader.model}, ${parsedHeader.status})`
+          : "Subagent result";
   const canCollapse = shouldCollapseUserMessage(bodyText);
   const isCollapsed = canCollapse && !expanded;
 
