@@ -28,6 +28,7 @@ import { isTrailingDoubleClick } from "../Sidebar.logic";
 import { type DraftId } from "~/composerDraftStore";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
+import ProjectSchedulesControl from "../ProjectSchedulesControl";
 import ProjectScriptsControl, {
   type NewProjectScriptInput,
   type ProjectScriptActionResult,
@@ -464,6 +465,7 @@ export const ChatHeader = memo(function ChatHeader({
         {optimizerAttachment ? (
           <CurrentOptimizerIndicator attachment={optimizerAttachment} />
         ) : null}
+        {activeProject ? <ProjectSchedulesControl project={activeProject} /> : null}
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}
