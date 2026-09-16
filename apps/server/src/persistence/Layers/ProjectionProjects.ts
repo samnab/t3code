@@ -6,7 +6,12 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
-import { ModelSelection, ProjectIconOverride, ProjectScript } from "@t3tools/contracts";
+import {
+  ModelSelection,
+  ProjectIconOverride,
+  ProjectSchedule,
+  ProjectScript,
+} from "@t3tools/contracts";
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
   DeleteProjectionProjectInput,
@@ -22,6 +27,7 @@ const ProjectionProjectDbRow = ProjectionProject.mapFields(
     autoPull: Schema.Number,
     projectIcon: Schema.NullOr(Schema.fromJsonString(ProjectIconOverride)),
     scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
+    schedules: Schema.fromJsonString(Schema.Array(ProjectSchedule)),
   }),
 );
 type ProjectionProjectDbRow = typeof ProjectionProjectDbRow.Type;
@@ -43,6 +49,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           favicon_path,
           project_icon_json,
           scripts_json,
+          schedules_json,
           created_at,
           updated_at,
           deleted_at
@@ -57,6 +64,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           ${row.faviconPath ?? null},
           ${row.projectIcon ? JSON.stringify(row.projectIcon) : null},
           ${JSON.stringify(row.scripts)},
+          ${JSON.stringify(row.schedules)},
           ${row.createdAt},
           ${row.updatedAt},
           ${row.deletedAt}
@@ -71,6 +79,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           favicon_path = excluded.favicon_path,
           project_icon_json = excluded.project_icon_json,
           scripts_json = excluded.scripts_json,
+          schedules_json = excluded.schedules_json,
           created_at = excluded.created_at,
           updated_at = excluded.updated_at,
           deleted_at = excluded.deleted_at
@@ -92,6 +101,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           favicon_path AS "faviconPath",
           project_icon_json AS "projectIcon",
           scripts_json AS "scripts",
+          schedules_json AS "schedules",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           deleted_at AS "deletedAt"
@@ -115,6 +125,7 @@ const makeProjectionProjectRepository = Effect.gen(function* () {
           favicon_path AS "faviconPath",
           project_icon_json AS "projectIcon",
           scripts_json AS "scripts",
+          schedules_json AS "schedules",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           deleted_at AS "deletedAt"

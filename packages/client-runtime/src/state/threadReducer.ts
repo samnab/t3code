@@ -106,6 +106,7 @@ export function applyThreadDetailEvent(
     // ── Project events (irrelevant to thread detail) ────────────────
     case "project.created":
     case "project.meta-updated":
+    case "project.schedule-fired":
     case "project.deleted":
       return { kind: "unchanged" };
 

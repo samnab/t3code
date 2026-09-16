@@ -324,6 +324,7 @@ const makeDefaultOrchestrationReadModel = () => {
         workspaceRoot: "/tmp/default-project",
         defaultModelSelection,
         scripts: [],
+        schedules: [],
         createdAt: now,
         updatedAt: now,
         deletedAt: null,
@@ -5464,6 +5465,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         workspaceRoot,
         defaultModelSelection: null,
         scripts: [],
+        schedules: [],
         createdAt: "2026-08-31T12:00:00.000Z",
         updatedAt: "2026-08-31T12:00:00.000Z",
       } as const;
@@ -8178,6 +8180,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             workspaceRoot: "/tmp/project-a",
             defaultModelSelection,
             scripts: [],
+            schedules: [],
             createdAt: now,
             updatedAt: now,
             deletedAt: null,

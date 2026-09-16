@@ -30,6 +30,7 @@ import {
   ProjectCreatedPayload,
   ProjectDeletedPayload,
   ProjectMetaUpdatedPayload,
+  ProjectScheduleFiredPayload,
   ThreadActivityAppendedPayload,
   ThreadArchivedPayload,
   ThreadCreatedPayload,
@@ -341,6 +342,7 @@ export function projectEvent(
             faviconPath: payload.faviconPath ?? null,
             projectIcon: payload.projectIcon ?? null,
             scripts: payload.scripts,
+            schedules: payload.schedules,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
             deletedAt: null,
@@ -383,7 +385,27 @@ export function projectEvent(
                     ? { projectIcon: payload.projectIcon }
                     : {}),
                   ...(payload.scripts !== undefined ? { scripts: payload.scripts } : {}),
+                  ...(payload.schedules !== undefined ? { schedules: payload.schedules } : {}),
                   updatedAt: payload.updatedAt,
+                }
+              : project,
+          ),
+        })),
+      );
+
+    case "project.schedule-fired":
+      return decodeForEvent(ProjectScheduleFiredPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          projects: nextBase.projects.map((project) =>
+            project.id === payload.projectId
+              ? {
+                  ...project,
+                  schedules: project.schedules.map((schedule) =>
+                    schedule.id === payload.scheduleId
+                      ? { ...schedule, lastFiredAt: payload.firedAt }
+                      : schedule,
+                  ),
                 }
               : project,
           ),

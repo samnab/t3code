@@ -111,6 +111,10 @@
       "types": "./src/projectScripts.ts",
       "import": "./src/projectScripts.ts"
     },
+    "./projectSchedules": {
+      "types": "./src/projectSchedules.ts",
+      "import": "./src/projectSchedules.ts"
+    },
     "./projectSettings": {
       "types": "./src/projectSettings.ts",
       "import": "./src/projectSettings.ts"

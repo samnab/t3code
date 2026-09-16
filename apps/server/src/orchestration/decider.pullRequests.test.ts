@@ -60,6 +60,7 @@ function makeReadModel(pullRequests: ReadonlyArray<ThreadPullRequestLink>): Orch
         workspaceRoot: "/repo",
         defaultModelSelection: null,
         scripts: [],
+        schedules: [],
         createdAt: NOW,
         updatedAt: NOW,
         deletedAt: null,

@@ -556,6 +556,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             faviconPath: event.payload.faviconPath ?? null,
             projectIcon: event.payload.projectIcon ?? null,
             scripts: event.payload.scripts,
+            schedules: event.payload.schedules,
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
             deletedAt: null,
@@ -589,7 +590,23 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               ? { projectIcon: event.payload.projectIcon }
               : {}),
             ...(event.payload.scripts !== undefined ? { scripts: event.payload.scripts } : {}),
+            ...(event.payload.schedules !== undefined ? { schedules: event.payload.schedules } : {}),
             updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "project.schedule-fired": {
+          const { projectId, scheduleId, firedAt } = event.payload;
+          const existingRow = yield* projectionProjectRepository.getById({ projectId });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionProjectRepository.upsert({
+            ...existingRow.value,
+            schedules: existingRow.value.schedules.map((schedule) =>
+              schedule.id === scheduleId ? { ...schedule, lastFiredAt: firedAt } : schedule,
+            ),
           });
           return;
         }

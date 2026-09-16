@@ -132,6 +132,7 @@ describe("orchestration projector", () => {
               workspaceRoot: "/repo",
               defaultModelSelection: null,
               scripts: [],
+              schedules: [],
               createdAt: now,
               updatedAt: now,
               deletedAt: null,
