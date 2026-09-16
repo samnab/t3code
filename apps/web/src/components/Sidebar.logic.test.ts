@@ -45,6 +45,7 @@ import {
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
   shouldCreateNewThreadInCurrentProject,
+  shouldNavigateAfterThreadPark,
   THREAD_JUMP_HINT_SHOW_DELAY_MS,
   type SidebarListItem,
   type SidebarListMarker,
@@ -872,8 +873,11 @@ describe("searchSidebarThreads", () => {
     expect(searchSidebarThreads(threads, "work")).toEqual([threads[0], threads[2]]);
   });
 
-  it("does not match project metadata", () => {
-    expect(searchSidebarThreads(threads, "workspace")).toEqual([threads[0]]);
+  it("matches project names when a resolver is given", () => {
+    expect(searchSidebarThreads(threads, "workspace", (thread) => thread.project)).toEqual([
+      threads[0],
+      threads[1],
+    ]);
   });
 
   it("returns no results for an empty query", () => {
@@ -2583,4 +2587,45 @@ describe("resolveSidebarDropVerb", () => {
     expect(resolveSidebarDropVerb("active", null)).toBeNull();
     expect(resolveSidebarDropVerb("active", "snoozed")).toBeNull();
   });
+});
+
+describe("navigation after parking a thread", () => {
+  it.each([
+    ["settle", "settled", null, "thread", true],
+    ["settle", "active", null, "thread", false],
+    ["settle", "settled", null, "other-thread", false],
+    ["snooze", null, "2099-01-01T00:00:00.000Z", "thread", true],
+    ["snooze", null, null, "thread", false],
+    ["snooze", null, "2026-09-12T09:00:00.000Z", "thread", false],
+    ["snooze", null, "2099-01-01T00:00:00.000Z", "thread", false, true],
+    ["snooze", null, "2099-01-01T00:00:00.000Z", "other-thread", false],
+  ] as const)(
+    "%s with state %s / %s on %s navigates: %s",
+    (
+      action,
+      settledOverride,
+      snoozedUntil,
+      currentThreadKey,
+      expected,
+      hasPendingApprovals: boolean = false,
+    ) => {
+      expect(
+        shouldNavigateAfterThreadPark({
+          threadKey: "thread",
+          currentThreadKey,
+          action,
+          now: "2026-09-12T10:00:00.000Z",
+          thread: {
+            settledOverride,
+            snoozedUntil,
+            snoozedAt: null,
+            session: null,
+            latestTurn: null,
+            hasPendingApprovals,
+            hasPendingUserInput: false,
+          },
+        }),
+      ).toBe(expected);
+    },
+  );
 });

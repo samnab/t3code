@@ -519,20 +519,35 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         }),
       );
 
-      it.effect("returns unavailable when codex is missing", () =>
+      it.effect.each([
+        "codex",
+        "/Applications/Custom App.app/Contents/Resources/codex",
+        "C:\\Tools\\codex.exe",
+      ])("explains how to configure a Codex executable that cannot start: %s", (binaryPath) =>
         Effect.gen(function* () {
-          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
-            Effect.fail(
+          const settings = { ...defaultCodexSettings, binaryPath };
+          const status = yield* checkCodexProviderStatus(settings, (input) => {
+            assert.strictEqual(input.binaryPath, binaryPath);
+            return Effect.fail(
               new CodexErrors.CodexAppServerSpawnError({
-                command: "codex app-server",
-                cause: new Error("spawn codex ENOENT"),
+                command: `${binaryPath} app-server`,
+                cause: new Error("spawn ENOENT"),
               }),
-            ),
-          );
+            );
+          });
           assert.strictEqual(status.status, "error");
           assert.strictEqual(status.installed, false);
           assert.strictEqual(status.auth.status, "unknown");
-          assert.strictEqual(status.message, "Codex CLI (`codex`) was not found on PATH.");
+          assert.include(status.message, binaryPath);
+          assert.include(
+            status.message,
+            "Settings → Providers → Codex → Binary path on the server",
+          );
+          assert.strictEqual(
+            status.message?.includes("Installing ChatGPT or Codex desktop"),
+            binaryPath === "codex",
+          );
+          assert.strictEqual(settings.binaryPath, binaryPath);
         }),
       );
 
@@ -1564,6 +1579,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
             assert.strictEqual(yield* Ref.get(snapshotCalls), 2);
 
+            // An explicit machine refresh (Settings > Providers) drops the
+            // cached workspace snapshot so the next cwd request rescans.
+            const refreshed = yield* registry.refresh();
+            assert.strictEqual(refreshed[0]?.workspaceSnapshots, undefined);
+            yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
+            assert.strictEqual(yield* Ref.get(snapshotCalls), 3);
+            assert.deepStrictEqual(
+              (yield* registry.getProviders)[0]?.workspaceSnapshots?.[0]?.skills,
+              scopedProvider.skills,
+            );
+
             yield* Ref.set(instancesRef, [rebuiltInstance]);
             yield* PubSub.publish(registryChanges, undefined);
             let rebuilt = yield* registry.getProviders;
@@ -2337,10 +2363,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               "Real Codex probe against a missing binary should surface as 'error' in the aggregator",
             );
             assert.strictEqual(codexPersonal?.installed, false);
-            assert.strictEqual(
-              codexPersonal?.message,
-              "Codex CLI (`codex`) was not found on PATH.",
-            );
+            assert.include(codexPersonal?.message, missingBinary);
+            assert.include(codexPersonal?.message, "Settings → Providers → Codex → Binary path");
           }).pipe(Effect.provide(runtimeServices));
         }),
       );

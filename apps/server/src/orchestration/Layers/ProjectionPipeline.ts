@@ -590,7 +590,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               ? { projectIcon: event.payload.projectIcon }
               : {}),
             ...(event.payload.scripts !== undefined ? { scripts: event.payload.scripts } : {}),
-            ...(event.payload.schedules !== undefined ? { schedules: event.payload.schedules } : {}),
+            ...(event.payload.schedules !== undefined
+              ? { schedules: event.payload.schedules }
+              : {}),
             updatedAt: event.payload.updatedAt,
           });
           return;
@@ -874,6 +876,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.activeOrderKey !== undefined
               ? { activeOrderKey: event.payload.activeOrderKey }
+              : {}),
+            ...(event.payload.titleState !== undefined
+              ? { titleState: event.payload.titleState }
               : {}),
             ...(event.payload.titleRegeneration !== undefined
               ? {

@@ -827,6 +827,25 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
  * slice — adding a new field to the interface (e.g. `reviewComments`) only
  * has to be reflected here, not in every stub.
  */
+// Effort is a per-model choice with a per-model default, so a model switch
+// drops it and the new model's default applies. Every other option
+// (Fast/Normal, context window, agent) is a user preference that survives.
+const MODEL_SCOPED_OPTION_IDS: ReadonlySet<string> = new Set([
+  "reasoningEffort",
+  "effort",
+  "variant",
+]);
+
+function carryOptionsAcrossModelChange(
+  current: ModelSelection | undefined,
+  nextModel: string,
+): ModelSelection["options"] {
+  if (!current?.options || current.model === nextModel) {
+    return current?.options;
+  }
+  return current.options.filter((option) => !MODEL_SCOPED_OPTION_IDS.has(option.id));
+}
+
 function createEmptyThreadDraft(): ComposerThreadDraftState {
   return {
     prompt: "",
@@ -2973,7 +2992,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextSelection =
               normalized.options !== undefined
                 ? normalized
-                : createModelSelection(normalized.instanceId, normalized.model, current?.options);
+                : createModelSelection(
+                    normalized.instanceId,
+                    normalized.model,
+                    carryOptionsAcrossModelChange(current, normalized.model),
+                  );
             const nextMap: Partial<Record<ProviderInstanceId, ModelSelection>> = {
               ...state.stickyModelSelectionByProvider,
               [normalized.instanceId]: nextSelection,
@@ -3114,7 +3137,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 nextMap[normalized.instanceId] = createModelSelection(
                   normalized.instanceId,
                   normalized.model,
-                  current?.options,
+                  carryOptionsAcrossModelChange(current, normalized.model),
                 );
               }
             }
@@ -4343,6 +4366,23 @@ export function markPromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {
       draftStore.markDraftThreadPromoting(DraftId.make(draftId), threadRef);
     }
   }
+}
+
+export function restoreFailedBackgroundDraftThread(
+  draftId: DraftId,
+  draftThread: DraftThreadState,
+  threadId: ThreadId,
+): void {
+  useComposerDraftStore.setState((state) => ({
+    draftThreadsByThreadKey: {
+      ...state.draftThreadsByThreadKey,
+      [draftId]: {
+        ...draftThread,
+        threadId,
+        promotedTo: null,
+      },
+    },
+  }));
 }
 
 export function finalizePromotedDraftThreadByRef(threadRef: ScopedThreadRef): void {

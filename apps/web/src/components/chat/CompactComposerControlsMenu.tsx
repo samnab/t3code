@@ -10,7 +10,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
-import { composerFloatingLayerProps } from "./composerEventScope";
+import { useComposerMenuProps } from "./composerEventScope";
 import { useComposerMenuState } from "./useComposerMenuState";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
@@ -31,6 +31,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onVoiceNotificationsChange: (enabled: boolean) => void;
 }) {
+  const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
   const [open, setOpen] = useComposerMenuState(props.hidden);
 
@@ -43,6 +44,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             variant="ghost"
             className={size === "xs" ? "shrink-0" : "shrink-0 px-2"}
             aria-label="More composer controls"
+            data-composer-shortcut={
+              props.traitsMenuContent ? "composer.mode composer.effort" : "composer.mode"
+            }
           />
         }
       >
