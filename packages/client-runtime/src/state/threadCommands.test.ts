@@ -38,6 +38,7 @@ const SNAPSHOT: OrchestrationShellSnapshot = {
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
       runtimeMode: "full-access",
       interactionMode: "default",
+      voiceNotifications: true,
       branch: null,
       worktreePath: null,
       latestTurn: null,

@@ -2073,6 +2073,7 @@ it.effect("encodes compatible icons inside snapshots and client commands", () =>
       workspaceRoot: "/tmp/monogram",
       defaultModelSelection: null,
       scripts: [],
+      schedules: [],
       projectIcon,
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",

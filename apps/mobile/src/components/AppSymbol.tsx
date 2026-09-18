@@ -53,6 +53,7 @@ import IconEye from "@tabler/icons-react-native/IconEye";
 import IconFileText from "@tabler/icons-react-native/IconFileText";
 import IconFilter from "@tabler/icons-react-native/IconFilter";
 import IconFilterFilled from "@tabler/icons-react-native/IconFilterFilled";
+import IconFlag from "@tabler/icons-react-native/IconFlag";
 import IconFolder from "@tabler/icons-react-native/IconFolder";
 import IconFolderOpen from "@tabler/icons-react-native/IconFolderOpen";
 import IconFolderPlus from "@tabler/icons-react-native/IconFolderPlus";
@@ -79,12 +80,14 @@ import IconPencil from "@tabler/icons-react-native/IconPencil";
 import IconPhoto from "@tabler/icons-react-native/IconPhoto";
 import IconPin from "@tabler/icons-react-native/IconPin";
 import IconPinnedOff from "@tabler/icons-react-native/IconPinnedOff";
+import IconPlayerPause from "@tabler/icons-react-native/IconPlayerPause";
 import IconPlayerPlay from "@tabler/icons-react-native/IconPlayerPlay";
 import IconPlayerStopFilled from "@tabler/icons-react-native/IconPlayerStopFilled";
 import IconPlus from "@tabler/icons-react-native/IconPlus";
 import IconQrcode from "@tabler/icons-react-native/IconQrcode";
 import IconRefresh from "@tabler/icons-react-native/IconRefresh";
 import IconSearch from "@tabler/icons-react-native/IconSearch";
+import IconSelector from "@tabler/icons-react-native/IconSelector";
 import IconServer from "@tabler/icons-react-native/IconServer";
 import IconSettings from "@tabler/icons-react-native/IconSettings";
 import IconSparkles from "@tabler/icons-react-native/IconSparkles";
@@ -147,6 +150,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "chevron.left.forwardslash.chevron.right": IconCode,
   "chevron.right": IconChevronRight,
   "chevron.up": IconChevronUp,
+  "chevron.up.chevron.down": IconSelector,
   desktopcomputer: IconDeviceDesktop,
   "doc.on.doc": IconCopy,
   "doc.text": IconFileText,
@@ -156,6 +160,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "exclamationmark.triangle": IconAlertTriangle,
   "exclamationmark.circle": IconAlertCircle,
   eye: IconEye,
+  flag: IconFlag,
   folder: IconFolder,
   "folder.badge.plus": IconFolderPlus,
   "folder.fill": IconFolder,
@@ -171,6 +176,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "line.3.horizontal.decrease": IconFilter,
   "line.3.horizontal.decrease.circle": IconFilter,
   "line.3.horizontal.decrease.circle.fill": IconFilterFilled,
+  message: IconMessage,
   // Tabler has no Apple desktops; the closest silhouettes stand in on Android.
   macmini: IconServer,
   macstudio: IconDeviceDesktop,
@@ -179,6 +185,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   paintbrush: IconPalette,
   pencil: IconPencil,
   "person.crop.circle": IconUserCircle,
+  pause: IconPlayerPause,
   photo: IconPhoto,
   pin: IconPin,
   "pin.slash": IconPinnedOff,
