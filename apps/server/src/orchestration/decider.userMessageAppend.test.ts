@@ -59,6 +59,7 @@ const readModelWithThread = Effect.gen(function* () {
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
       runtimeMode: "full-access",
       interactionMode: "default",
+      voiceNotifications: true,
       branch: null,
       worktreePath: null,
       createdAt,
