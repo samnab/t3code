@@ -162,6 +162,17 @@ export function buildThreadActionMenuItems(
         ]
       : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
+    ...(state.projectFilter
+      ? [
+          {
+            id: "filter-by-project" as const,
+            label: state.projectFilter.isActive
+              ? "Show all projects"
+              : `Filter by ${state.projectFilter.label}`,
+            icon: "folder-tree",
+          },
+        ]
+      : []),
     // Codex-owned live session state; always named in full so it can never
     // read as the T3 thread goal above the composer.
     ...(state.executionGoal
@@ -181,17 +192,6 @@ export function buildThreadActionMenuItems(
             icon: "refresh-cw",
             disabled: state.isRunning,
             separatorBefore: true,
-          },
-        ]
-      : []),
-    ...(state.projectFilter
-      ? [
-          {
-            id: "filter-by-project" as const,
-            label: state.projectFilter.isActive
-              ? "Show all projects"
-              : `Filter by ${state.projectFilter.label}`,
-            icon: "folder-tree",
           },
         ]
       : []),
