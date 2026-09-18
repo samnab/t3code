@@ -898,7 +898,7 @@ describe("searchSidebarThreads", () => {
   });
 
   it("appends content-only matches after every title match", () => {
-    expect(searchSidebarThreads(threads, "work", contentKeys("thread-2"))).toEqual([
+    expect(searchSidebarThreads(threads, "work", undefined, contentKeys("thread-2"))).toEqual([
       threads[0],
       threads[2],
       threads[1],
@@ -906,17 +906,16 @@ describe("searchSidebarThreads", () => {
   });
 
   it("lists a thread matching both title and content once", () => {
-    expect(searchSidebarThreads(threads, "work", contentKeys("thread-1"))).toEqual([
+    expect(searchSidebarThreads(threads, "work", undefined, contentKeys("thread-1"))).toEqual([
       threads[0],
       threads[2],
     ]);
   });
 
   it("ignores content matches for threads outside the sidebar collection", () => {
-    expect(searchSidebarThreads(threads, "work", contentKeys("thread-missing"))).toEqual([
-      threads[0],
-      threads[2],
-    ]);
+    expect(searchSidebarThreads(threads, "work", undefined, contentKeys("thread-missing"))).toEqual(
+      [threads[0], threads[2]],
+    );
   });
 });
 
