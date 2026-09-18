@@ -7684,7 +7684,15 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
 
-  const onSend = async (
+  // Send now on a queued row must never no-op silently: every gate that keeps
+  // the message in the queue says why.
+  const notifyQueuedSendBlocked = (reason: string) => {
+    toastManager.add(
+      stackedThreadToast({ type: "warning", title: "Message stayed queued", description: reason }),
+    );
+  };
+
+  const sendComposerMessage = async (
     e?: { preventDefault: () => void },
     submissionIntent: ComposerSubmissionIntent = "foreground",
     directAnnotation?: {
@@ -7724,9 +7732,11 @@ export default function ChatView(props: ChatViewProps) {
         }),
       );
     };
+    // A queued message steers the turn that is already running, so an
+    // unacknowledged local dispatch is not a reason to hold it back.
     if (
       !activeThread ||
-      isSendBusy ||
+      (isSendBusy && !queuedMessage) ||
       isConnecting ||
       isRevertingCheckpoint ||
       !clientSettingsHydrated ||
@@ -7735,6 +7745,13 @@ export default function ChatView(props: ChatViewProps) {
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
       notifyDirectAnnotationAttached();
+      if (queuedMessage) {
+        notifyQueuedSendBlocked(
+          sendInFlightRef.current
+            ? "Another message is still being sent. Try again in a moment."
+            : "The thread is still loading. Try again in a moment.",
+        );
+      }
       return;
     }
     if (needsLoadBalancing) {
@@ -8116,6 +8133,9 @@ export default function ChatView(props: ChatViewProps) {
     }
     if (!sendCtx.providerAvailable) {
       notifyDirectAnnotationAttached();
+      if (queuedMessage) {
+        notifyQueuedSendBlocked("The selected provider is unavailable. Check provider settings.");
+      }
       return;
     }
     const feedbackCommand =
@@ -9280,6 +9300,30 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
 
+  // A throw anywhere past the in-flight mark would leave sendInFlightRef set
+  // for the life of the view and silently block every later queued send in
+  // every thread, so a failed send always releases it and hands a queued
+  // message back to the head of its queue.
+  const onSend: typeof sendComposerMessage = async (...args) => {
+    try {
+      await sendComposerMessage(...args);
+    } catch (error) {
+      sendInFlightRef.current = false;
+      resetLocalDispatch();
+      const queuedMessage = args[4];
+      if (queuedMessage && activeThreadKey) {
+        useQueuedMessageStore.getState().holdAtFront(activeThreadKey, queuedMessage);
+      }
+      if (activeThread) {
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to send message.",
+        );
+      }
+      console.error("[chat] send failed", error);
+    }
+  };
+
   // Sends the oldest queued message once it is due: a tool call finished
   // after it was queued, or the turn ended. Only one leaves per boundary; the
   // take inside onSend re-anchors the rest.
@@ -9330,7 +9374,11 @@ export default function ChatView(props: ChatViewProps) {
   queuedMessageActionsRef.current = {
     steer: (id) => {
       const message = queuedMessages.find((entry) => entry.id === id);
-      if (!message || sendInFlightRef.current || queueBlockedByPendingRequest) return;
+      if (!message) return;
+      if (queueBlockedByPendingRequest) {
+        notifyQueuedSendBlocked("Answer the pending approval or question first.");
+        return;
+      }
       void onSend(undefined, message.submissionIntent, undefined, undefined, message);
     },
     remove: (id) => {
