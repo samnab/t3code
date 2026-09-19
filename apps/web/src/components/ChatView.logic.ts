@@ -4,7 +4,6 @@ import {
   type AssetCreateUrlResult,
   type ChatFileAttachment,
   type EnvironmentId,
-  isProviderDriverKind,
   type MessageId,
   type ModelSelection,
   type PreviewAnnotationPayload,
@@ -604,54 +603,31 @@ export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "sessi
 export function resolveComposerProviderSelection(input: {
   entries: ReadonlyArray<ProviderInstanceEntry>;
   candidateInstanceIds: ReadonlyArray<ProviderInstanceId | null | undefined>;
-  lockedProvider: ProviderDriverKind | null;
-  lockedInstanceId: ProviderInstanceId | null | undefined;
 }) {
   const requestedInstanceId = input.candidateInstanceIds.find(
     (candidate) => candidate != null && candidate !== NO_PROVIDER_MODEL_SELECTION.instanceId,
   );
   const requestedDriverKind =
-    input.lockedProvider ??
     input.entries.find((entry) => entry.instanceId === requestedInstanceId)?.driverKind ??
     input.entries[0]?.driverKind ??
     ProviderDriverKind.make("unconfigured");
-  const lockedContinuationGroupKey = input.lockedProvider
-    ? (input.entries.find((entry) => entry.instanceId === input.lockedInstanceId)
-        ?.continuationGroupKey ?? null)
-    : null;
-  // Missing metadata must not move Antigravity history into another Google profile.
-  const requiresExactInstance =
-    input.lockedProvider === "antigravity" &&
-    input.lockedInstanceId != null &&
-    lockedContinuationGroupKey === null;
-  const compatibleEntries = input.entries.filter(
-    (entry) =>
-      (!input.lockedProvider || entry.driverKind === input.lockedProvider) &&
-      (!lockedContinuationGroupKey || entry.continuationGroupKey === lockedContinuationGroupKey) &&
-      (!requiresExactInstance || entry.instanceId === input.lockedInstanceId),
-  );
   const selectedProviderEntry =
     input.candidateInstanceIds
       .map((candidate) =>
-        compatibleEntries.find(
+        input.entries.find(
           (entry) => entry.instanceId === candidate && entry.enabled && entry.isAvailable,
         ),
       )
       .find((entry) => entry !== undefined) ??
     resolveSelectableProviderInstanceEntry(
-      compatibleEntries.filter((entry) => entry.driverKind === requestedDriverKind),
+      input.entries.filter((entry) => entry.driverKind === requestedDriverKind),
       undefined,
     ) ??
-    resolveSelectableProviderInstanceEntry(compatibleEntries, undefined);
-  const unavailableProviderInstanceId = selectedProviderEntry
-    ? undefined
-    : input.lockedProvider
-      ? (input.lockedInstanceId ?? requestedInstanceId)
-      : requestedInstanceId;
+    resolveSelectableProviderInstanceEntry(input.entries, undefined);
+  const unavailableProviderInstanceId = selectedProviderEntry ? undefined : requestedInstanceId;
   return {
     selectedProviderEntry,
     requestedDriverKind,
-    lockedContinuationGroupKey,
     unavailableProviderInstanceId,
   };
 }
@@ -1116,36 +1092,6 @@ export function threadShellHasStarted(
     shell &&
     (shell.latestTurn !== null || shell.latestUserMessageAt !== null || shell.session !== null),
   );
-}
-
-// Imported history has no session until its first prompt. Resolve its instance
-// through the environment's provider catalog before locking to a driver.
-export function deriveLockedProvider(input: {
-  thread: Thread | null | undefined;
-  selectedProvider: string | null;
-  threadProvider: string | null;
-  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>;
-}): ProviderDriverKind | null {
-  if (!threadHasStarted(input.thread)) {
-    return null;
-  }
-  const sessionProvider = input.thread?.session?.providerName ?? null;
-  if (sessionProvider && isProviderDriverKind(sessionProvider)) {
-    return sessionProvider;
-  }
-  // Preserve the existing lock while an instance is missing from the catalog;
-  // a started thread must not silently fall back to a different driver.
-  const threadProvider =
-    input.providers.find((provider) => provider.instanceId === input.threadProvider)?.driver ??
-    input.threadProvider;
-  const selectedProvider =
-    input.providers.find((provider) => provider.instanceId === input.selectedProvider)?.driver ??
-    input.selectedProvider;
-  const narrowedThreadProvider =
-    threadProvider && isProviderDriverKind(threadProvider) ? threadProvider : null;
-  const narrowedSelectedProvider =
-    selectedProvider && isProviderDriverKind(selectedProvider) ? selectedProvider : null;
-  return narrowedThreadProvider ?? narrowedSelectedProvider ?? null;
 }
 
 export function getStartedThreadModelChangeBlockReason(input: {

@@ -34,7 +34,7 @@ function claudeProvider(input: {
 describe("hasAvailableCompactionProvider", () => {
   const originalInstanceId = ProviderInstanceId.make("claude_original");
 
-  it("rejects a fallback in a different locked continuation group", () => {
+  it("falls back to any enabled instance of the driver when the selected instance is disabled", () => {
     const providers = deriveProviderInstanceEntries([
       claudeProvider({
         instanceId: originalInstanceId,
@@ -52,30 +52,6 @@ describe("hasAvailableCompactionProvider", () => {
         providers,
         driverKind: ProviderDriverKind.make("claudeAgent"),
         instanceId: originalInstanceId,
-        lockedInstanceId: originalInstanceId,
-      }),
-    ).toBe(false);
-  });
-
-  it("accepts an enabled fallback in the locked continuation group", () => {
-    const providers = deriveProviderInstanceEntries([
-      claudeProvider({
-        instanceId: originalInstanceId,
-        continuationGroupKey: "claude:home:/original",
-        enabled: false,
-      }),
-      claudeProvider({
-        instanceId: "claude_fallback",
-        continuationGroupKey: "claude:home:/original",
-      }),
-    ]);
-
-    expect(
-      hasAvailableCompactionProvider({
-        providers,
-        driverKind: ProviderDriverKind.make("claudeAgent"),
-        instanceId: originalInstanceId,
-        lockedInstanceId: originalInstanceId,
       }),
     ).toBe(true);
   });
