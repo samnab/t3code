@@ -125,6 +125,13 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
         issue: "providerInstanceId is required for provider session runtime bindings.",
       });
     }
+    // Native resume cursors are not interchangeable: once the binding moves to
+    // a different provider instance, an omitted cursor must reset the stored
+    // one instead of carrying the previous instance's cursor forward.
+    const instanceChanged =
+      providerChanged ||
+      (existingRuntime?.providerInstanceId != null &&
+        existingRuntime.providerInstanceId !== providerInstanceId);
     yield* repository
       .upsert(
         {
@@ -142,7 +149,9 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
           resumeCursor:
             binding.resumeCursor !== undefined
               ? binding.resumeCursor
-              : (existingRuntime?.resumeCursor ?? null),
+              : instanceChanged
+                ? null
+                : (existingRuntime?.resumeCursor ?? null),
           runtimePayload: mergeRuntimePayload(
             existingRuntime?.runtimePayload ?? null,
             binding.runtimePayload,

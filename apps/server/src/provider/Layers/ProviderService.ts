@@ -1666,9 +1666,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        // An explicit `resumeCursor: null` marks a deliberate cold start (a
+        // provider handoff): the caller has decided the thread will not resume
+        // the previous native conversation, so compatibility need not be
+        // validated. Every other instance switch keeps the guard: a caller
+        // that supplies a cursor, or one that specifies nothing while a
+        // persisted binding for another instance still holds resume state.
         if (
           persistedBinding?.provider === resolvedProvider &&
           persistedBinding.providerInstanceId !== resolvedInstanceId &&
+          input.resumeCursor !== null &&
           (input.resumeCursor != null || persistedBinding.resumeCursor != null)
         ) {
           const previousInstanceId = yield* requireBindingInstanceId(

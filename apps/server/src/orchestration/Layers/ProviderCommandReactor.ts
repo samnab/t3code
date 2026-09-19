@@ -7,6 +7,7 @@ import {
   type ModelSelection,
   type OptimizerId,
   type OrchestrationEvent,
+  type OrchestrationMessage,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
@@ -73,6 +74,7 @@ import {
   type SessionOptimizerAttachmentDescriptor,
 } from "../../optimizer/SessionOptimizerAttachments.ts";
 import { getT3GoalInjection, requiresCodexGoalDeactivation } from "../threadGoalProviderInput.ts";
+import { buildProviderHandoffTranscript } from "../providerHandoff.ts";
 
 export { formatThreadGoalInjection } from "../threadGoalProviderInput.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
@@ -728,29 +730,27 @@ const make = Effect.gen(function* () {
         requestedModelSelection,
       });
     }
-    if (
+    // Provider CLIs cannot resume each other's native sessions. An instance
+    // change keeps native resume only when both instances share a driver and
+    // continuation identity; every other switch is a handoff: a cold session
+    // for the new instance, with the transcript so far prepended to the next
+    // turn instead of a resume cursor.
+    const instanceSwitchRequested =
       thread.session !== null &&
       requestedModelSelection !== undefined &&
-      requestedModelSelection.instanceId !== currentInstanceId
-    ) {
-      if (currentInfo.driverKind !== desiredInfo.driverKind) {
-        return yield* new ProviderAdapterRequestError({
-          provider: preferredProvider,
-          method: "thread.turn.start",
-          detail: `Thread '${threadId}' is bound to driver '${currentInfo.driverKind}' and cannot switch to '${desiredInfo.driverKind}'.`,
-        });
-      }
-      if (
-        currentInfo.continuationIdentity.continuationKey !==
-        desiredInfo.continuationIdentity.continuationKey
-      ) {
-        return yield* new ProviderAdapterRequestError({
-          provider: preferredProvider,
-          method: "thread.turn.start",
-          detail: `Thread '${threadId}' cannot switch from instance '${currentInstanceId}' to '${desiredInstanceId}' because their provider resume state is incompatible.`,
-        });
-      }
-    }
+      requestedModelSelection.instanceId !== currentInstanceId;
+    const canResumeNatively =
+      currentInfo.driverKind === desiredInfo.driverKind &&
+      currentInfo.continuationIdentity.continuationKey ===
+        desiredInfo.continuationIdentity.continuationKey;
+    const handoff = instanceSwitchRequested && !canResumeNatively;
+    const logHandoff = Effect.logInfo("provider command reactor handing off provider session", {
+      threadId,
+      currentProvider: currentInfo.driverKind,
+      currentInstanceId,
+      desiredProvider: preferredProvider,
+      desiredInstanceId,
+    });
     const project = yield* resolveProject(thread.projectId);
     const effectiveCwd = resolveThreadWorkspaceCwd({
       thread,
@@ -866,12 +866,13 @@ const make = Effect.gen(function* () {
         !shouldRestartForModelSelectionChange
       ) {
         yield* refreshWorkspaceSnapshot;
-        return existingSessionThreadId;
+        return { sessionThreadId: existingSessionThreadId, handoff: false };
       }
 
-      const resumeCursor = shouldRestartForModelChange
-        ? undefined
-        : (activeSession?.resumeCursor ?? undefined);
+      const resumeCursor =
+        shouldRestartForModelChange || handoff
+          ? undefined
+          : (activeSession?.resumeCursor ?? undefined);
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
         existingSessionThreadId,
@@ -891,9 +892,12 @@ const make = Effect.gen(function* () {
         shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,
       });
-      const restartedSession = yield* startProviderSession(
-        resumeCursor !== undefined ? { resumeCursor } : undefined,
-      );
+      if (handoff) {
+        yield* logHandoff;
+      }
+      const restartedSession = yield* startProviderSession({
+        resumeCursor: handoff ? null : resumeCursor,
+      });
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
         previousSessionId: existingSessionThreadId,
@@ -903,16 +907,23 @@ const make = Effect.gen(function* () {
         cwd: restartedSession.cwd,
       });
       yield* bindSessionToThread(restartedSession);
-      return restartedSession.threadId;
+      return { sessionThreadId: restartedSession.threadId, handoff };
     }
 
-    const startedSession = yield* startProviderSession(undefined);
+    if (handoff) {
+      yield* logHandoff;
+    }
+    const startedSession = yield* startProviderSession(
+      handoff ? { resumeCursor: null } : undefined,
+    );
     yield* bindSessionToThread(startedSession);
-    return startedSession.threadId;
+    return { sessionThreadId: startedSession.threadId, handoff };
   });
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    /** The message this turn sends; already projected, so a handoff transcript must skip it. */
+    readonly messageId: OrchestrationMessage["id"];
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
@@ -925,7 +936,7 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
-    yield* ensureSessionForThread(input.threadId, input.createdAt, {
+    const ensured = yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       pendingTurnStart: true,
     });
@@ -935,11 +946,25 @@ const make = Effect.gen(function* () {
     // A T3-driven goal rides on every turn's provider input, user-sent or
     // continuation, so resuming a paused loop still shows the agent its goal.
     // Native experiment loops carry the goal in Codex's own execution goal,
-    // so they must not get a second copy here.
+    // so they must not get a second copy here. A provider handoff prepends
+    // the transcript so the cold session knows what came before it.
     const goalLoop = thread.goalLoop;
     const goalInjection = getT3GoalInjection({ goal: thread.goal, goalLoop });
+    const handoffTranscript = ensured.handoff
+      ? buildProviderHandoffTranscript(
+          ((yield* resolveThreadDetail(input.threadId))?.messages ?? []).filter(
+            (message) => message.id !== input.messageId,
+          ),
+        )
+      : null;
+    const inputPrefix = [
+      ...(goalInjection !== null ? [goalInjection] : []),
+      ...(handoffTranscript !== null ? [handoffTranscript] : []),
+    ];
     const normalizedInput = toNonEmptyProviderInput(
-      goalInjection === null ? input.messageText : `${goalInjection}\n\n${input.messageText}`,
+      inputPrefix.length > 0
+        ? `${inputPrefix.join("\n\n")}\n\n${input.messageText}`
+        : input.messageText,
     );
     const normalizedAttachments = input.attachments ?? [];
     const activeSession = yield* providerService
@@ -1600,6 +1625,7 @@ const make = Effect.gen(function* () {
     }
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      messageId: message.id,
       messageText: projectComposerContextForProvider({
         text: message.text,
         records: message.context?.records ?? [],

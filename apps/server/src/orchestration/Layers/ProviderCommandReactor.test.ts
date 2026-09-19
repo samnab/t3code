@@ -3741,7 +3741,7 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("full-access");
   });
 
-  it("rejects provider changes after a thread is already bound to a session provider", async () => {
+  it("starts a cold handoff session when the thread switches provider mid-conversation", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -3764,6 +3764,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "first" });
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -3786,36 +3787,64 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
     await waitFor(async () => {
       const readModel = await harness.readModel();
       const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-      return (
-        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
-        false
-      );
+      return thread?.session?.providerName === "claudeAgent";
     });
 
-    expect(harness.startSession.mock.calls.length).toBe(1);
-    expect(harness.sendTurn.mock.calls.length).toBe(1);
     expect(harness.stopSession.mock.calls.length).toBe(0);
+    const handoffStart = harness.startSession.mock.calls[1]?.[1] as Record<string, unknown>;
+    expect(handoffStart).toMatchObject({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+    });
+    // Claude cannot resume the codex session, so the restart must be cold.
+    expect(handoffStart.resumeCursor).toBeNull();
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
-    expect(thread?.session?.providerName).toBe("codex");
+    expect(thread?.session?.providerName).toBe("claudeAgent");
+    expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("claudeAgent"));
     expect(thread?.session?.runtimeMode).toBe("approval-required");
     expect(
-      thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
-    ).toMatchObject({
-      payload: {
-        detail: expect.stringContaining("cannot switch to 'claudeAgent'"),
-      },
-    });
+      thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toBe(false);
+
+    const handoffTurn = harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string };
+    expect(handoffTurn.input?.startsWith("<provider_handoff>")).toBe(true);
+    expect(handoffTurn.input).toContain("[user]\nfirst");
+    expect(handoffTurn.input?.endsWith("second")).toBe(true);
+    // The message being sent is already projected; it must not be replayed in the transcript.
+    expect(handoffTurn.input).not.toContain("[user]\nsecond");
   });
 
-  it("rejects cross-driver provider changes after the existing thread session has stopped", async () => {
+  it("starts a cold handoff session after the existing thread session has stopped", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-stopped-provider-switch-1"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-stopped-provider-switch-1"),
+          role: "user",
+          text: "first",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -3857,26 +3886,34 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
     await waitFor(async () => {
       const readModel = await harness.readModel();
       const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-      return (
-        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
-        false
-      );
+      return thread?.session?.providerName === "claudeAgent";
     });
 
-    expect(harness.startSession.mock.calls.length).toBe(0);
-    expect(harness.sendTurn.mock.calls.length).toBe(0);
+    const handoffStart = harness.startSession.mock.calls[1]?.[1] as Record<string, unknown>;
+    expect(handoffStart).toMatchObject({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+    });
+    // The stopped codex session cannot be resumed by claude: cold start.
+    expect(handoffStart.resumeCursor).toBeNull();
+
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session?.providerName).toBe("claudeAgent");
+    expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("claudeAgent"));
     expect(
-      thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
-    ).toMatchObject({
-      payload: {
-        detail: expect.stringContaining("cannot switch to 'claudeAgent'"),
-      },
-    });
+      thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toBe(false);
+
+    const handoffTurn = harness.sendTurn.mock.calls[1]?.[0] as { readonly input?: string };
+    expect(handoffTurn.input?.startsWith("<provider_handoff>")).toBe(true);
+    expect(handoffTurn.input).toContain("[user]\nfirst");
+    expect(handoffTurn.input?.endsWith("continue with claude")).toBe(true);
   });
 
   it("reacts to thread.turn.interrupt-requested by calling provider interrupt", async () => {
