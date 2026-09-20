@@ -12,9 +12,9 @@ describe("needsWorkspaceBasenameLookup", () => {
     expect(needsWorkspaceBasenameLookup("Makefile")).toBe(true);
   });
 
-  it("leaves anything with a directory alone", () => {
-    expect(needsWorkspaceBasenameLookup("apps/web/src/components/ChatView.tsx")).toBe(false);
-    expect(needsWorkspaceBasenameLookup("apps\\web\\ChatView.tsx")).toBe(false);
+  it("flags relative paths too, since the agent's cwd may not be the root", () => {
+    expect(needsWorkspaceBasenameLookup("apps/web/src/components/ChatView.tsx")).toBe(true);
+    expect(needsWorkspaceBasenameLookup("apps\\web\\ChatView.tsx")).toBe(true);
     expect(needsWorkspaceBasenameLookup("   ")).toBe(false);
   });
 });
@@ -29,6 +29,34 @@ describe("pickWorkspaceBasenameMatch", () => {
     expect(pickWorkspaceBasenameMatch("ChatView.tsx", entries)).toBe(
       "apps/web/src/components/ChatView.tsx",
     );
+  });
+
+  // The agent wrote the path from inside `2027-Forecast/`, so the lexical
+  // resolution against the workspace root pointed at a file that does not exist.
+  it("resolves a relative path written from a subdirectory by suffix", () => {
+    expect(
+      pickWorkspaceBasenameMatch("analysis/forecast/LCL_FY2027_forecast.xlsx", [
+        { path: "2027-Forecast/analysis/forecast/LCL_FY2027_forecast.xlsx", kind: "file" },
+        { path: "2027-Forecast/analysis/forecast/~$LCL_FY2027_forecast.xlsx", kind: "file" },
+      ]),
+    ).toBe("2027-Forecast/analysis/forecast/LCL_FY2027_forecast.xlsx");
+  });
+
+  it("prefers the exact relative path over a deeper suffix match", () => {
+    expect(
+      pickWorkspaceBasenameMatch("docs/summaries/README.md", [
+        { path: "ML_Forecasting/docs/summaries/README.md", kind: "file" },
+        { path: "docs/summaries/README.md", kind: "file" },
+      ]),
+    ).toBe("docs/summaries/README.md");
+  });
+
+  it("does not match a partial directory name", () => {
+    expect(
+      pickWorkspaceBasenameMatch("forecast/x.xlsx", [
+        { path: "old-forecast/x.xlsx", kind: "file" },
+      ]),
+    ).toBeNull();
   });
 
   it("ignores directories", () => {

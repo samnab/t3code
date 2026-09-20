@@ -18,31 +18,42 @@ export interface WorkspaceEntryCandidate {
   readonly kind: "file" | "directory";
 }
 
-function basenameOfPath(path: string): string {
-  const separatorIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return separatorIndex >= 0 ? path.slice(separatorIndex + 1) : path;
+function normalizeSeparators(path: string): string {
+  return path.replaceAll("\\", "/");
 }
 
+/**
+ * Agents write paths relative to wherever they happened to be working
+ * (`analysis/forecast/x.xlsx` from inside `2027-Forecast/`), so any relative
+ * path is worth checking against the index, not just a bare filename.
+ */
 export function needsWorkspaceBasenameLookup(relativePath: string): boolean {
-  const trimmed = relativePath.trim();
-  return trimmed.length > 0 && !trimmed.includes("/") && !trimmed.includes("\\");
+  return relativePath.trim().length > 0;
 }
 
+/**
+ * Picks the indexed file for a workspace-relative path: the exact path, else
+ * the index's best-ranked file whose path ends with it (a bare name matches
+ * on basename).
+ */
 export function pickWorkspaceBasenameMatch(
-  basename: string,
+  relativePath: string,
   entries: ReadonlyArray<WorkspaceEntryCandidate>,
 ): string | null {
-  const target = basename.trim();
+  const target = normalizeSeparators(relativePath.trim()).replace(/^\.?\//, "");
   if (!target) return null;
   const files = entries.filter((entry) => entry.kind === "file");
-  const exact = files.find((entry) => basenameOfPath(entry.path) === target);
+  const endsWith = (path: string, suffix: string) => path === suffix || path.endsWith(`/${suffix}`);
+  const exact = files.find((entry) => normalizeSeparators(entry.path) === target);
   if (exact) return exact.path;
+  const suffix = files.find((entry) => endsWith(normalizeSeparators(entry.path), target));
+  if (suffix) return suffix.path;
   // Folded matching covers casing that drifted from disk, but `FOO.ts` against
   // both `Foo.ts` and `foo.ts` has no right answer, so it resolves to nothing
   // rather than opening whichever the index ranked first.
   const folded = target.toLowerCase();
-  const foldedMatches = files.filter(
-    (entry) => basenameOfPath(entry.path).toLowerCase() === folded,
+  const foldedMatches = files.filter((entry) =>
+    endsWith(normalizeSeparators(entry.path).toLowerCase(), folded),
   );
   return foldedMatches.length === 1 ? (foldedMatches[0]?.path ?? null) : null;
 }
