@@ -475,6 +475,7 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
     "role",
     "model",
     "effort",
+    "fastMode",
     "toolUseId",
     "parentAgentId",
     "workflowName",

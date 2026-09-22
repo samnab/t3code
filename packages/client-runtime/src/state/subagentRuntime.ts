@@ -71,6 +71,7 @@ export interface RuntimeSubagent {
   readonly role: string | null;
   readonly model: string | null;
   readonly effort: string | null;
+  readonly fastMode: boolean;
   readonly status: RuntimeSubagentStatus;
   readonly activationCount: number;
   readonly usage: SubagentUsage | null;
@@ -244,6 +245,7 @@ interface MutableAgent {
   role: string | null;
   model: string | null;
   effort: string | null;
+  fastMode: boolean;
   status: RuntimeSubagentStatus;
   activationCount: number;
   usage: SubagentUsage | null;
@@ -332,6 +334,7 @@ function getOrCreate(
     role: asString(payload.role) ?? null,
     model: asString(payload.model) ?? null,
     effort: asString(payload.effort) ?? null,
+    fastMode: payload.fastMode === true,
     status: "pending",
     activationCount: 0,
     usage: null,
@@ -371,6 +374,7 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): vo
   if (model) agent.model = model;
   const effort = asString(payload.effort);
   if (effort) agent.effort = effort;
+  if (payload.fastMode === true) agent.fastMode = true;
   const parentAgentId = asString(payload.parentAgentId);
   if (parentAgentId) {
     agent.parentAgentId = parentAgentId;
@@ -870,6 +874,7 @@ function runtimeSubagentFromInventory(run: OrchestrationSubagentRun): RuntimeSub
     role: run.harness ?? run.runtimeFamily,
     model: run.model,
     effort: run.effort,
+    fastMode: run.fastMode === true,
     status,
     activationCount: 1,
     usage: null,

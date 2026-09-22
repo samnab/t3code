@@ -1446,6 +1446,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         activityTrimmedString(payload, "title") ?? activityTrimmedString(payload, "detail");
       const model = activityTrimmedString(payload, "model");
       const effort = activityTrimmedString(payload, "effort");
+      const fastMode = payload.fastMode === true ? true : null;
       const summary =
         activity.kind === "task.started"
           ? null
@@ -1465,6 +1466,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           providerInstanceId: evidence.providerInstanceId ?? null,
           model,
           effort,
+          fastMode,
           title,
           summary,
           status: evidence.status,
@@ -1512,6 +1514,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         title,
         model,
         effort,
+        fastMode,
         summary,
         updatedAt: activity.createdAt,
         eventSequence: event.sequence,

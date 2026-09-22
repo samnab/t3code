@@ -651,6 +651,49 @@ describe("model and effort attribution", () => {
     expect(completedAgent.effort).toBe("high");
   });
 
+  it("carries fastMode from a start row and from an inventory run", () => {
+    const started = fold([
+      activity("task.started", { taskId: "task-fast", title: "Quick pass", fastMode: true }),
+      // Absent on later rows: never downgrades a known fast run.
+      activity("task.progress", { taskId: "task-fast" }),
+    ]);
+    expect(started[0]!.fastMode).toBe(true);
+
+    const plain = fold([activity("task.started", { taskId: "task-slow", title: "Slow pass" })]);
+    expect(plain[0]!.fastMode).toBe(false);
+
+    const runId = RuntimeTaskId.make("inventory-fast-run");
+    const reconciled = reconcileSubagentInventory(
+      [
+        {
+          runId,
+          runNumber: 9,
+          threadId: ThreadId.make("thread-inventory-fast"),
+          parentRunId: null,
+          runtimeFamily: "t3-native",
+          harness: "claudeAgent",
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: null,
+          model: "claude-sonnet",
+          effort: null,
+          fastMode: true,
+          title: "Inventory fast",
+          summary: null,
+          status: "done",
+          terminalReason: "native-completed",
+          controlAvailability: "read-only",
+          historyAvailability: "summary-only",
+          capabilities: { steer: false, cancel: false, resume: false },
+          createdAt: "2026-08-01T10:00:00.000Z",
+          updatedAt: "2026-08-01T10:05:00.000Z",
+          terminalAt: "2026-08-01T10:05:00.000Z",
+        },
+      ],
+      [],
+    );
+    expect(reconciled[0]).toMatchObject({ id: runId, fastMode: true });
+  });
+
   it("formatSubagentModelLabel compacts ids and appends effort", () => {
     expect(formatSubagentModelLabel("claude-sonnet-5[1m]", "high")).toBe("sonnet-5[1m] · high");
     expect(formatSubagentModelLabel("claude-opus-4-20250514", null)).toBe("opus-4");
@@ -972,6 +1015,7 @@ describe("reconcileSubagentInventory", () => {
           providerInstanceId: ProviderInstanceId.make("claude-native"),
           model: "claude-sonnet",
           effort: null,
+          fastMode: null,
           title: "Cross-provider research",
           summary: null,
           status: "active",
@@ -1010,6 +1054,7 @@ describe("reconcileSubagentInventory", () => {
         providerInstanceId: null,
         model: null,
         effort: null,
+        fastMode: null,
         title: "Map auth",
         summary: null,
         status: "active",
@@ -1032,6 +1077,7 @@ describe("reconcileSubagentInventory", () => {
         providerInstanceId: null,
         model: null,
         effort: null,
+        fastMode: null,
         title: "Older run",
         summary: "Server restarted",
         status: "interrupted",
@@ -1094,6 +1140,7 @@ describe("reconcileSubagentInventory", () => {
         providerInstanceId: null,
         model: "claude-sonnet",
         effort: null,
+        fastMode: null,
         title: "Retained usage",
         summary: null,
         status: "active",
@@ -1141,6 +1188,7 @@ describe("reconcileSubagentInventory", () => {
         providerInstanceId: null,
         model: "claude-sonnet",
         effort: null,
+        fastMode: null,
         title: "Retained resumed",
         summary: null,
         status: "active",

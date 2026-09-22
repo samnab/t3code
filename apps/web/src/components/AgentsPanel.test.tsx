@@ -24,6 +24,7 @@ function agent(overrides: Partial<RuntimeSubagent> = {}): RuntimeSubagent {
     role: null,
     model: "test-model",
     effort: "high",
+    fastMode: false,
     status: "completed",
     activationCount: 1,
     usage: null,

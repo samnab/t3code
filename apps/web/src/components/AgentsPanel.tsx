@@ -27,7 +27,17 @@ import {
   formatAverageOutputTokensPerSecond,
 } from "@t3tools/client-runtime/state/tokenThroughput";
 import { RuntimeTaskId, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
-import { ArrowLeft, Bot, Braces, Check, ChevronDown, ChevronRight, Send, X } from "lucide-react";
+import {
+  ArrowLeft,
+  Bot,
+  Braces,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Send,
+  X,
+  ZapIcon,
+} from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
@@ -498,6 +508,9 @@ function AgentRow({
       </span>
       <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
         {metadata.join(" · ")}
+        {agent.fastMode ? (
+          <ZapIcon aria-label="Fast mode" className="ml-1 inline size-3 text-muted-foreground" />
+        ) : null}
         <AgentOutputRate agent={agent} separated={metadata.length > 0} />
       </span>
       <span className="sr-only">{statusLabel}</span>

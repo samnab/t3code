@@ -55,6 +55,7 @@ export const UpdateProjectionSubagentRunInput = Schema.Struct({
   title: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   effort: Schema.NullOr(Schema.String),
+  fastMode: Schema.NullOr(Schema.Boolean),
   summary: Schema.NullOr(Schema.String),
   updatedAt: IsoDateTime,
   eventSequence: NonNegativeInt,

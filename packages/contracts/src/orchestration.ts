@@ -771,6 +771,7 @@ export const OrchestrationSubagentRun = Schema.Struct({
   providerInstanceId: Schema.NullOr(ProviderInstanceId),
   model: Schema.NullOr(TrimmedNonEmptyString),
   effort: Schema.NullOr(TrimmedNonEmptyString),
+  fastMode: Schema.NullOr(Schema.Boolean),
   title: Schema.NullOr(TrimmedNonEmptyString),
   summary: Schema.NullOr(TrimmedNonEmptyString),
   status: SubagentRunStatus,

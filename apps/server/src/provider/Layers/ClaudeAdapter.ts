@@ -393,6 +393,8 @@ interface ClaudeTaskAgentState {
    * assistant snapshots (authoritative API model). */
   model: string | undefined;
   effort: string | undefined;
+  /** Launch fact: fast mode was on when this task started. */
+  fastMode: boolean;
 }
 
 /**
@@ -434,6 +436,10 @@ interface ClaudeSessionContext {
   /** Effective effort for the session's turns; subagents without an explicit
    * effort override inherit this. */
   currentEffort: string | undefined;
+  /** Fast mode is fixed at session start (the SDK takes it in query settings
+   * and exposes no mid-session setter), so unlike effort this never
+   * refreshes at turn start; subagents inherit it as a launch fact. */
+  currentFastMode: boolean;
   resumeSessionId: string | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
@@ -1384,6 +1390,7 @@ function taskLinkageFor(
     ...(agent.subagentType ? { role: agent.subagentType } : {}),
     ...(agent.model ? { model: agent.model } : {}),
     ...(agent.effort ? { effort: agent.effort } : {}),
+    ...(agent.fastMode ? { fastMode: true } : {}),
     ...(agent.toolUseId ? { toolUseId: agent.toolUseId } : {}),
     ...(agent.workflowName ? { workflowName: agent.workflowName } : {}),
     ...(agent.runHandles ? { runHandles: agent.runHandles } : {}),
@@ -3326,6 +3333,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             owningAgentId: existing?.owningAgentId,
             model: existing?.model,
             effort: existing?.effort,
+            fastMode: existing?.fastMode ?? false,
           });
         }
       }
@@ -3783,6 +3791,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           owningAgentId,
           model,
           effort,
+          fastMode: context.currentFastMode,
         });
         context.liveTaskIds.add(message.task_id);
         yield* offerRuntimeEvent({
@@ -3797,6 +3806,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(message.subagent_type ? { role: message.subagent_type } : {}),
             ...(model ? { model } : {}),
             ...(effort ? { effort } : {}),
+            ...(context.currentFastMode ? { fastMode: true } : {}),
             ...(message.tool_use_id ? { toolUseId: message.tool_use_id } : {}),
             ...(message.workflow_name ? { workflowName: message.workflow_name } : {}),
           },
@@ -5148,6 +5158,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         basePermissionMode: permissionMode,
         currentApiModelId: apiModelId,
         currentEffort: effectiveEffort ?? undefined,
+        currentFastMode: fastMode,
         resumeSessionId: sessionId,
         pendingApprovals,
         pendingUserInputs,

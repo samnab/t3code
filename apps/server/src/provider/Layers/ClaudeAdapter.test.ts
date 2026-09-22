@@ -4038,7 +4038,10 @@ describe("ClaudeAdapterLive", () => {
         modelSelection: createModelSelection(
           ProviderInstanceId.make("claudeAgent"),
           SYNTHETIC_CLAUDE_CAPABLE_MODEL,
-          [{ id: "effort", value: "max" }],
+          [
+            { id: "effort", value: "max" },
+            { id: "fastMode", value: true },
+          ],
         ),
         runtimeMode: "full-access",
       });
@@ -4088,6 +4091,7 @@ describe("ClaudeAdapterLive", () => {
       if (started?.type === "task.started") {
         assert.equal(started.payload.model, SYNTHETIC_CLAUDE_CAPABLE_MODEL);
         assert.equal(started.payload.effort, "max");
+        assert.equal(started.payload.fastMode, true);
       }
       const progress = taskEvents[1];
       assert.equal(progress?.type, "task.progress");
