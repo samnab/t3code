@@ -1086,6 +1086,7 @@ function mapCollabAgentEvent(
   const title = knownName ?? agentThreadId;
   const model = typeof payload.model === "string" ? payload.model.trim() : "";
   const effort = typeof payload.effort === "string" ? payload.effort.trim() : "";
+  const fastMode = payload.fastMode === true;
   // Identity repeated on every status patch so rows are self-describing when
   // the start row ages out of activity retention (review finding: a
   // reconstructed agent had a UUID name and no role/path).
@@ -1094,6 +1095,7 @@ function mapCollabAgentEvent(
     ...(knownName ? { title: knownName } : {}),
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
+    ...(fastMode ? { fastMode: true } : {}),
     ...(agentPath ? { agentPath } : {}),
     timelineBypass: true,
   } as const;

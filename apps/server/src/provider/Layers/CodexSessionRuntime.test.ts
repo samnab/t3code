@@ -1,16 +1,24 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import { it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
+import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 import {
   CODEX_EXPERIMENT_MCP_SERVER_NAME,
@@ -23,6 +31,7 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   formatCodexExperimentMcpInventoryMismatch,
+  makeCodexSessionRuntime,
   makeMemoryConsolidationNotificationFilter,
   matchesCodexExperimentMcpInventory,
   openCodexThread,
@@ -1351,5 +1360,116 @@ describe("openCodexThread", () => {
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
     }),
+  );
+});
+
+describe("CodexSessionRuntime collab child fast-mode metadata", () => {
+  const ROOT = wireFixture.rootThreadId;
+  const [CHILD_A, CHILD_B] = wireFixture.childThreadIds as [string, string];
+  // Private script path: the integration suite writes its own
+  // .collab-script.json, and vitest runs files in parallel workers.
+  const scriptPath = NodePath.join(
+    import.meta.dirname,
+    "../testFixtures/.collab-fastmode-script.json",
+  );
+  const peerPath = NodePath.join(
+    import.meta.dirname,
+    `../testFixtures/codexCollabMockPeer.${HostProcessPlatform.defaultValue() === "win32" ? "cmd" : "sh"}`,
+  );
+
+  const capturedActivityStarted = wireFixture.notifications.find((entry) => {
+    const item = (entry.params as { item?: { type?: string; kind?: string } }).item;
+    return item?.type === "subAgentActivity" && item.kind === "started";
+  });
+
+  function childRegistration(childId: string, agentPath: string) {
+    NodeAssert.ok(capturedActivityStarted !== undefined);
+    return {
+      ...capturedActivityStarted,
+      params: {
+        ...capturedActivityStarted.params,
+        item: { ...capturedActivityStarted.params.item, agentThreadId: childId, agentPath },
+      },
+    };
+  }
+
+  function childSettings(threadId: string, serviceTier: string) {
+    return {
+      method: "thread/settings/updated",
+      params: {
+        threadId,
+        threadSettings: {
+          approvalPolicy: "on-request",
+          approvalsReviewer: "auto_review",
+          collaborationMode: { mode: "default", settings: { model: "gpt-5.6-luna" } },
+          cwd: "/workspace/repo",
+          effort: "high",
+          model: "gpt-5.6-luna",
+          modelProvider: "openai",
+          sandboxPolicy: { type: "dangerFullAccess" },
+          serviceTier,
+        },
+      },
+    };
+  }
+
+  const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+  it.effect("reports child service tier as fast mode only for non-default tiers", () =>
+    Effect.gen(function* () {
+      NodeFS.writeFileSync(
+        scriptPath,
+        encodeJson({
+          rootThreadId: ROOT,
+          notifications: [
+            childRegistration(CHILD_A, "/root/model-check"),
+            childSettings(CHILD_A, "priority"),
+            childRegistration(CHILD_B, "/root/research"),
+            childSettings(CHILD_B, "default"),
+          ],
+        }),
+        "utf8",
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(scriptPath, { force: true })),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-collab-fast-mode"),
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const eventsFiber = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.method === "turn/completed"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "spawn two children" });
+      const metadataEvents = Array.from(yield* Fiber.join(eventsFiber)).filter(
+        (event) => event.method === "collabAgent/metadataUpdated",
+      );
+      const fast = metadataEvents.find(
+        (event) =>
+          (event.payload as Record<string, unknown>).agentThreadId === CHILD_A &&
+          "fastMode" in (event.payload as Record<string, unknown>),
+      );
+      NodeAssert.ok(fast !== undefined, "priority-tier child must report fast mode");
+      NodeAssert.equal((fast?.payload as Record<string, unknown>).fastMode, true);
+
+      const standard = metadataEvents.filter(
+        (event) => (event.payload as Record<string, unknown>).agentThreadId === CHILD_B,
+      );
+      NodeAssert.ok(standard.length > 0, "default-tier child must still report metadata");
+      NodeAssert.ok(
+        standard.every((event) => !("fastMode" in (event.payload as Record<string, unknown>))),
+        "default-tier child must not report fast mode",
+      );
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

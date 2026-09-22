@@ -1408,6 +1408,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             agentPath: "/root/model-check",
             model: " gpt-5.6-sol ",
             effort: " high ",
+            fastMode: true,
             ...extra,
           },
         });
@@ -1447,6 +1448,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         const payload = event.payload as Record<string, unknown>;
         NodeAssert.equal(payload.model, "gpt-5.6-sol");
         NodeAssert.equal(payload.effort, "high");
+        NodeAssert.equal(payload.fastMode, true);
       }
 
       const metadataPayload = events[8]?.payload as Record<string, unknown>;
@@ -1455,6 +1457,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       NodeAssert.equal("status" in blankMetadataPayload, false);
       NodeAssert.equal("model" in blankMetadataPayload, false);
       NodeAssert.equal("effort" in blankMetadataPayload, false);
+      NodeAssert.equal("fastMode" in blankMetadataPayload, false);
     }),
   );
 

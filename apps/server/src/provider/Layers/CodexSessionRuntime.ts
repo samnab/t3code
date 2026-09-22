@@ -1133,6 +1133,7 @@ interface CollabChildAgentState {
 interface CollabChildMetadataState {
   readonly model: string | undefined;
   readonly effort: string | undefined;
+  readonly serviceTier: string | undefined;
   readonly lookupStarted: boolean;
   readonly closed: boolean;
 }
@@ -1148,6 +1149,7 @@ function collabChildIdentity(
     ...(child.agentPath ? { agentPath: child.agentPath } : {}),
     ...(metadata?.model ? { model: metadata.model } : {}),
     ...(metadata?.effort ? { effort: metadata.effort } : {}),
+    ...(isFastServiceTier(metadata?.serviceTier) ? { fastMode: true } : {}),
   };
 }
 
@@ -1157,6 +1159,11 @@ function nonEmptyMetadataValue(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Any tier other than "default" (Codex's standard tier id) is a fast tier. */
+function isFastServiceTier(tier: string | undefined): boolean {
+  return tier !== undefined && tier !== "default";
 }
 
 function readThreadSpawnSource(thread: { readonly source: unknown }):
@@ -1584,13 +1591,18 @@ export const makeCodexSessionRuntime = (
 
     const updateCollabChildMetadata = (
       agentThreadId: string,
-      update: { readonly model?: string; readonly effort?: string },
+      update: {
+        readonly model?: string;
+        readonly effort?: string;
+        readonly serviceTier?: string;
+      },
       overwriteKnown: boolean,
     ) =>
       Ref.modify(collabChildMetadataRef, (current) => {
         const previous = current.get(agentThreadId) ?? {
           model: undefined,
           effort: undefined,
+          serviceTier: undefined,
           lookupStarted: false,
           closed: false,
         };
@@ -1598,12 +1610,19 @@ export const makeCodexSessionRuntime = (
           update.model && (overwriteKnown || !previous.model) ? update.model : previous.model;
         const effort =
           update.effort && (overwriteKnown || !previous.effort) ? update.effort : previous.effort;
-        const changed = model !== previous.model || effort !== previous.effort;
+        const serviceTier =
+          update.serviceTier && (overwriteKnown || !previous.serviceTier)
+            ? update.serviceTier
+            : previous.serviceTier;
+        const changed =
+          model !== previous.model ||
+          effort !== previous.effort ||
+          serviceTier !== previous.serviceTier;
         if (!changed) {
           return [false, current] as const;
         }
         const next = new Map(current);
-        next.set(agentThreadId, { ...previous, model, effort });
+        next.set(agentThreadId, { ...previous, model, effort, serviceTier });
         return [true, next] as const;
       });
 
@@ -1612,6 +1631,7 @@ export const makeCodexSessionRuntime = (
         const previous = current.get(agentThreadId) ?? {
           model: undefined,
           effort: undefined,
+          serviceTier: undefined,
           lookupStarted: false,
           closed: false,
         };
@@ -1658,6 +1678,7 @@ export const makeCodexSessionRuntime = (
         const previous = current.get(agentThreadId) ?? {
           model: undefined,
           effort: undefined,
+          serviceTier: undefined,
           lookupStarted: false,
           closed: false,
         };
@@ -1886,11 +1907,16 @@ export const makeCodexSessionRuntime = (
             notification.method === "thread/settings/updated"
               ? nonEmptyMetadataValue(notification.params.threadSettings.effort)
               : undefined;
+          const serviceTier =
+            notification.method === "thread/settings/updated"
+              ? nonEmptyMetadataValue(notification.params.threadSettings.serviceTier)
+              : undefined;
           const changed = yield* updateCollabChildMetadata(
             providerConversationId,
             {
               ...(model ? { model } : {}),
               ...(effort ? { effort } : {}),
+              ...(serviceTier ? { serviceTier } : {}),
             },
             true,
           );
