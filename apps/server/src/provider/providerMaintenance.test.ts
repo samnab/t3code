@@ -226,7 +226,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       latestVersion: "2.1.117",
       updateCommand: null,
       canUpdate: false,
-      message: "Install the update now or review provider settings.",
+      message: null,
     });
   });
 

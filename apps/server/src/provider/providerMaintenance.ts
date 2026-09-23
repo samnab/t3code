@@ -26,7 +26,6 @@ const LATEST_VERSION_CACHE_TTL_MS = 60 * 60 * 1_000;
 const LATEST_VERSION_TIMEOUT_MS = 4_000;
 const HOMEBREW_INFO_TIMEOUT_MS = 10_000;
 const HOMEBREW_INFO_MAX_BYTES = 256 * 1_024;
-const PROVIDER_UPDATE_ACTION_TOAST_MESSAGE = "Install the update now or review provider settings.";
 
 /**
  * Ownership is re-derived from the executable this often. Installs do not
@@ -598,10 +597,8 @@ function deriveVersionAdvisory(input: {
     return { status: "unknown", message: null };
   }
   if (compareSemverVersions(input.currentVersion, input.latestVersion) < 0) {
-    return {
-      status: "behind_latest",
-      message: PROVIDER_UPDATE_ACTION_TOAST_MESSAGE,
-    };
+    // Clients word the prompt themselves; they know whether a one-click update exists.
+    return { status: "behind_latest", message: null };
   }
   return { status: "current", message: null };
 }
