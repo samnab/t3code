@@ -2668,7 +2668,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
 ) {
-  const appIdOverride = yield* Config.string("T3CODE_DESKTOP_APP_ID").pipe(Config.option);
+  const appIdOverride = yield* Config.String("T3CODE_DESKTOP_APP_ID").pipe(Config.option);
   const buildConfig: Record<string, unknown> = {
     appId: resolveDesktopAppId(Option.getOrUndefined(appIdOverride)),
     productName: resolveDesktopProductName(version),
