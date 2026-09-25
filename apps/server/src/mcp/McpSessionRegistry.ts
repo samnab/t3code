@@ -295,7 +295,7 @@ export const issueActiveMcpCredential = (
     ? activeMcpSessionRegistry
         .revokeThread(request.threadId)
         .pipe(Effect.andThen(activeMcpSessionRegistry.issue(request)))
-    : Effect.sync((): McpIssuedCredential | undefined => undefined);
+    : Effect.undefined;
 
 export const issueActiveExperimentMcpCredential = (
   request: ExperimentMcpCredentialRequest,

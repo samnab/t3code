@@ -98,6 +98,7 @@ describe("orchestration projector", () => {
         updatedAt: now,
         archivedAt: null,
         activeOrderKey: null,
+        autoSettleDisabledAt: null,
         settledOverride: null,
         settledAt: null,
         unsettledAt: null,

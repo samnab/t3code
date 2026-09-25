@@ -20,6 +20,7 @@ import { useKeyboardChatComposerInset, useKeyboardScrollToEnd } from "@legendapp
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import type { LegendListRef } from "@legendapp/list/react-native";
 import { HeaderHeightContext } from "@react-navigation/elements";
+import { useNavigation } from "@react-navigation/native";
 import type {
   ApprovalRequestId,
   EnvironmentId,
@@ -78,11 +79,16 @@ import { SymbolView } from "../../components/AppSymbol";
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
 import type { StatusTone } from "../../components/StatusPill";
 import type { DraftComposerAttachment } from "../../lib/composerImages";
+import { RenderErrorBoundary, RenderFailureView } from "../../components/RenderErrorBoundary";
 import { CHAT_CONTENT_MAX_WIDTH, type LayoutVariant } from "../../lib/layout";
 import { IOS_NAV_BAR_HEIGHT } from "../../lib/layoutMetrics";
 import { editPendingThreadMessage } from "../../state/edit-pending-thread-message";
+import { deviceEnvironment } from "../../state/device";
+import { useEnvironmentQuery } from "../../state/query";
+import { threadDevicePreviews } from "../devices/threadDevicePreviews";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import { useDelayedStatus } from "../../lib/useDelayedStatus";
 import type {
   PendingApproval,
   PendingUserInput,
@@ -347,6 +353,21 @@ function CurrentOptimizerIndicator({
 }
 
 export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: ThreadDetailScreenProps) {
+  const navigation = useNavigation();
+  const deviceState = useEnvironmentQuery(
+    deviceEnvironment.state({ environmentId: props.environmentId, input: {} }),
+  );
+  const devicePreviews = useMemo(
+    () => threadDevicePreviews(deviceState.data, props.selectedThread.id),
+    [deviceState.data, props.selectedThread.id],
+  );
+  const openDevicePreview = useCallback(() => {
+    Keyboard.dismiss();
+    navigation.navigate("ThreadDevicePreview", {
+      environmentId: props.environmentId,
+      threadId: props.selectedThread.id,
+    });
+  }, [navigation, props.environmentId, props.selectedThread.id]);
   const insets = useSafeAreaInsets();
   const isKeyboardVisible = useKeyboardState((state) => state.isVisible);
   const liveKeyboardHeight = useKeyboardState((state) => state.height);
@@ -422,7 +443,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   // The raw sync status enters "synchronizing" on every full fetch, cached or
   // not. Whether messages are already on screen decides the pill label: no
   // data yet → "Loading messages", cached data reconciling → "Syncing".
-  const threadSyncLabel = (() => {
+  const realThreadSyncLabel = (() => {
     switch (props.threadSyncStatus) {
       case "empty":
       case "cached":
@@ -435,6 +456,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
         return null;
     }
   })();
+  // Opening a running thread resyncs for a few frames. The pill shows the
+  // sync label only when the sync lasts, so it does not flash before the timer.
+  const threadSyncLabel = useDelayedStatus(selectedThreadKey, realThreadSyncLabel);
   // One floating pill above the composer: it reads the connection phase while
   // disconnected, the sync state while messages load, then the working timer
   // once the feed is settled.
@@ -478,6 +502,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   // stable when reconnecting hands off to syncing and then to a running turn.
   const showFloatingStatus =
     showWorkingControl ||
+    devicePreviews.length > 0 ||
     props.connectionStateLabel !== "connected" ||
     props.queuedMessages.length > 0 ||
     props.selectedThreadFeed.some(
@@ -966,40 +991,52 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           {props.currentOptimizerAttachment ? (
             <CurrentOptimizerIndicator attachment={props.currentOptimizerAttachment} />
           ) : null}
-          <ThreadFeed
+          <RenderErrorBoundary
             key={selectedThreadKey}
-            environmentId={props.environmentId}
-            threadId={props.selectedThread.id}
-            workspaceRoot={props.threadCwd}
-            feed={props.selectedThreadFeed}
-            worktreeSetup={props.worktreeSetup}
-            setupWorkingStartedAt={props.setupWorkingStartedAt}
-            queuedMessages={props.queuedMessages}
-            dispatchingMessageId={props.dispatchingMessageId}
-            onEditPendingMessage={handleEditPendingMessage}
-            contentPresentation={props.contentPresentation}
-            agentLabel={agentLabel}
-            latestTurn={props.selectedThread.latestTurn}
-            turnOutputUsage={props.turnOutputUsage ?? null}
-            activeWorkStartedAt={props.activeWorkStartedAt}
-            listRef={listRef}
-            freeze={freeze}
-            anchorMessageId={anchorMessageId}
-            submittedMessageId={submittedMessageId}
-            contentInsetEndAdjustment={combinedContentInsetEndAdjustment}
-            contentTopInset={0}
-            contentBottomInset={
-              estimatedOverlayHeight + (showFloatingStatus ? FLOATING_WORKING_CONTROL_COVERAGE : 0)
-            }
-            contentMaxWidth={contentMaxWidth}
-            layoutVariant={layoutVariant}
-            usesAutomaticContentInsets={props.usesAutomaticContentInsets}
-            onHeaderMaterialVisibilityChange={props.onHeaderMaterialVisibilityChange}
-            onEndFollowEnabledChange={setEndFollowEnabled}
-            skills={selectedProviderSkills}
-            onUseArtifactTemplate={handleUseArtifactTemplate}
-            loadEarlier={props.loadEarlier ?? null}
-          />
+            resetKeys={[props.threadCwd]}
+            renderFallback={(fallback) => (
+              <RenderFailureView
+                {...fallback}
+                title="The conversation couldn't be displayed"
+                bottomInset={estimatedOverlayHeight}
+              />
+            )}
+          >
+            <ThreadFeed
+              environmentId={props.environmentId}
+              threadId={props.selectedThread.id}
+              workspaceRoot={props.threadCwd}
+              feed={props.selectedThreadFeed}
+              worktreeSetup={props.worktreeSetup}
+              setupWorkingStartedAt={props.setupWorkingStartedAt}
+              queuedMessages={props.queuedMessages}
+              dispatchingMessageId={props.dispatchingMessageId}
+              onEditPendingMessage={handleEditPendingMessage}
+              contentPresentation={props.contentPresentation}
+              agentLabel={agentLabel}
+              latestTurn={props.selectedThread.latestTurn}
+              turnOutputUsage={props.turnOutputUsage ?? null}
+              activeWorkStartedAt={props.activeWorkStartedAt}
+              listRef={listRef}
+              freeze={freeze}
+              anchorMessageId={anchorMessageId}
+              submittedMessageId={submittedMessageId}
+              contentInsetEndAdjustment={combinedContentInsetEndAdjustment}
+              contentTopInset={0}
+              contentBottomInset={
+                estimatedOverlayHeight +
+                (showFloatingStatus ? FLOATING_WORKING_CONTROL_COVERAGE : 0)
+              }
+              contentMaxWidth={contentMaxWidth}
+              layoutVariant={layoutVariant}
+              usesAutomaticContentInsets={props.usesAutomaticContentInsets}
+              onHeaderMaterialVisibilityChange={props.onHeaderMaterialVisibilityChange}
+              onEndFollowEnabledChange={setEndFollowEnabled}
+              skills={selectedProviderSkills}
+              onUseArtifactTemplate={handleUseArtifactTemplate}
+              loadEarlier={props.loadEarlier ?? null}
+            />
+          </RenderErrorBoundary>
         </View>
       ) : (
         <View className="flex-1" />
@@ -1031,6 +1068,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               <FloatingWorkingControl
                 colorScheme={isDarkMode ? "dark" : "light"}
                 status={floatingStatus}
+                devicePreview={
+                  devicePreviews.length > 0
+                    ? { count: devicePreviews.length, onPress: openDevicePreview }
+                    : null
+                }
                 showScrollToEnd={showScrollToEndButton}
                 onScrollToEnd={handleScrollToEnd}
               />

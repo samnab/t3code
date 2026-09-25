@@ -573,7 +573,6 @@ function ProjectScheduleEditorDialog({
                     lockedProvider={null}
                     instanceEntries={instanceEntries}
                     modelOptionsByInstance={modelOptionsByInstance}
-                    triggerVariant="outline"
                     triggerClassName="w-full max-w-none"
                     triggerAriaLabel="Schedule model"
                     onInstanceModelChange={(instanceId, nextModel) =>

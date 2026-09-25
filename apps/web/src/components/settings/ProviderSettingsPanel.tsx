@@ -196,7 +196,7 @@ function ProviderSettingsPlaceholder({
   readonly children?: ReactNode;
 }) {
   return (
-    <SettingsSection {...searchableSetting("providers")} hideTitle variant="plain">
+    <SettingsSection {...searchableSetting("providers")} variant="plain">
       {deviceTabs ? (
         <div className="flex min-h-11 min-w-0 items-center px-3 sm:px-4">{deviceTabs}</div>
       ) : null}
@@ -204,7 +204,7 @@ function ProviderSettingsPlaceholder({
         divided={false}
         className={cn(providerCardHeightClassName, "flex overflow-x-hidden overflow-y-auto")}
       >
-        <Empty className="min-h-88">
+        <Empty>
           <EmptyMedia variant="icon">{icon}</EmptyMedia>
           <EmptyHeader>
             <EmptyTitle>{title}</EmptyTitle>
@@ -315,7 +315,25 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
       hasServerConfig: environment.serverConfig !== null,
     }),
   )?.environmentId;
+  const searchableCursorEnvironmentId = options.find(
+    (environment) =>
+      environment.serverConfig?.environment.platform.os === "darwin" &&
+      isProviderSettingsEnvironmentAvailable({
+        connectionPhase: environment.connection.phase,
+        hasServerConfig: true,
+      }),
+  )?.environmentId;
   useEffect(() => {
+    if (
+      !target.scoped &&
+      searchTargetId === searchableSetting("cursor-keychain-usage").id &&
+      (!selectedEnvironmentCanRenderSettings ||
+        selectedEnvironment?.serverConfig?.environment.platform.os !== "darwin") &&
+      searchableCursorEnvironmentId !== undefined
+    ) {
+      setSelectedEnvironmentId(searchableCursorEnvironmentId);
+      return;
+    }
     if (
       !target.scoped &&
       (searchTargetId === searchableSetting("provider-health-check-interval").id ||
@@ -327,7 +345,9 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
     }
   }, [
     searchTargetId,
+    searchableCursorEnvironmentId,
     searchableEnvironmentId,
+    selectedEnvironment,
     selectedEnvironmentCanRenderSettings,
     target.scoped,
   ]);
@@ -335,7 +355,7 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
     options.length === 1 && options[0]?.entry.target._tag === "PrimaryConnectionTarget";
   const deviceTabs =
     !target.scoped && !onlyPrimaryDevice && options.length > 0 ? (
-      <ScrollArea hideScrollbars scrollFade className="h-11 min-w-0 flex-1 rounded-none">
+      <ScrollArea radius="none" hideScrollbars scrollFade className="h-11 min-w-0 flex-1">
         <ToggleGroup
           aria-label="Devices"
           variant="segmented"
@@ -354,7 +374,7 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
               <Tooltip key={environment.environmentId}>
                 <TooltipTrigger
                   render={
-                    <Toggle value={environment.environmentId} className="gap-2 text-left">
+                    <Toggle value={environment.environmentId}>
                       <EnvironmentMachineIcon
                         kind={machine}
                         className="size-3.5 shrink-0"
@@ -650,7 +670,10 @@ export function EnvironmentProviderSettings({
   }, [environmentId, refreshServerProviders]);
 
   const runProviderUpdate = useCallback(
-    async (candidate: ProviderSettingsUpdateCandidate) => {
+    async (
+      candidate: Pick<ProviderSettingsUpdateCandidate, "driver" | "instanceId">,
+      targetVersion?: string,
+    ) => {
       // Ref-based re-entry guard, mirroring refreshProviders: a state updater
       // may run after this function returns, so it cannot gate the dispatch.
       if (updatingInstanceIdsRef.current.has(candidate.instanceId)) {
@@ -664,6 +687,7 @@ export function EnvironmentProviderSettings({
         input: {
           provider: candidate.driver,
           instanceId: candidate.instanceId,
+          ...(targetVersion ? { targetVersion } : {}),
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -897,9 +921,8 @@ export function EnvironmentProviderSettings({
     );
     const updateCandidate = providerUpdateCandidateByInstanceId.get(row.instanceId);
     const isInstanceUpdateRunning =
-      updateCandidate !== undefined &&
-      (updatingProviderInstanceIds.has(updateCandidate.instanceId) ||
-        isProviderUpdateActive(updateCandidate));
+      updatingProviderInstanceIds.has(row.instanceId) ||
+      (liveProvider !== undefined && isProviderUpdateActive(liveProvider));
     const showInlineUpdateButton = updateCandidate !== undefined;
     const canRunInlineUpdate = updateCandidate !== undefined && !isInstanceUpdateRunning;
     const modelPreferences = settings.providerModelPreferences?.[row.instanceId] ?? {
@@ -997,6 +1020,19 @@ export function EnvironmentProviderSettings({
             defaultOptions,
           })
         }
+        onInstallRecommended={
+          mode === "editor" &&
+          liveProvider?.compatibilityAdvisory?.message &&
+          liveProvider.compatibilityAdvisory.recommendedVersion &&
+          liveProvider.versionAdvisory?.canInstallVersion
+            ? () => {
+                void runProviderUpdate(
+                  liveProvider,
+                  liveProvider.compatibilityAdvisory?.recommendedVersion ?? undefined,
+                );
+              }
+            : undefined
+        }
         onRunUpdate={
           mode === "editor" && showInlineUpdateButton && updateCandidate
             ? () => {
@@ -1004,16 +1040,14 @@ export function EnvironmentProviderSettings({
               }
             : undefined
         }
-        isUpdating={
-          mode === "editor" && showInlineUpdateButton ? isInstanceUpdateRunning : undefined
-        }
+        isUpdating={mode === "editor" ? isInstanceUpdateRunning : undefined}
       />
     );
   };
 
   return (
     <>
-      <SettingsSection {...searchableSetting("providers")} hideTitle variant="plain">
+      <SettingsSection {...searchableSetting("providers")} variant="plain">
         <div className="flex min-h-11 min-w-0 items-center gap-2 px-3 sm:px-4">
           {deviceTabs}
           <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">
@@ -1114,6 +1148,7 @@ export function EnvironmentProviderSettings({
         environmentId={environmentId}
         environmentLabel={environmentLabel}
         sources={settings.usageLimitSources}
+        cursorKeychainUsageEnabled={settings.cursorKeychainUsageEnabled}
         readOnly={readOnly}
       />
 

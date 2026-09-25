@@ -317,6 +317,7 @@ it.effect("upgrades the complete fork-at-60 schema to the fresh final schema", (
       { migrationId: 64, name: "ProjectionProjectsSchedules" },
       { migrationId: 65, name: "PullRequestFilesViewed" },
       { migrationId: 66, name: "ProjectionSubagentRunsFastMode" },
+      { migrationId: 67, name: "ProjectionThreadsAutoSettleDisabledAt" },
     ]);
     assert.ok(upgraded.messageColumns.some((column) => column.name === "context_json"));
     assert.deepStrictEqual(upgraded.schema, freshSchema);

@@ -12,7 +12,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon, GaugeIcon } from "lucide-react";
+import { ChevronDownIcon, EllipsisIcon, GaugeIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -23,6 +23,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import GitActionsControl from "../GitActionsControl";
 import { isTrailingDoubleClick } from "../Sidebar.logic";
 import { type DraftId } from "~/composerDraftStore";
@@ -47,8 +48,12 @@ import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
   WorkspaceBreadcrumbSeparator,
+  WorkspaceBreadcrumbText,
 } from "../WorkspaceBreadcrumb";
 import { cn } from "~/lib/utils";
+import { useIsMobile } from "~/hooks/useMediaQuery";
+import { Button } from "../ui/button";
+import { Menu, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -208,6 +213,40 @@ export const ChatHeader = memo(function ChatHeader({
       breakpoint: { value: HEADER_ACTIONS_EXPANDED_BREAKPOINT_REM, unit: "rem" },
     });
   }, [panelAnimationDurationMs, panelAnimationsActive]);
+  const isMobile = useIsMobile();
+  // Side panels can leave a desktop header narrower than a phone.
+  const [isNarrowHeader, setIsNarrowHeader] = useState(false);
+  useEffect(() => {
+    const container = headerActionsRef.current?.parentElement;
+    if (!container) return;
+    const update = () => setIsNarrowHeader(container.clientWidth < 512);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+  const actionsCollapsed = isMobile || isNarrowHeader;
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [actionsContainer] = useState(() => {
+    const container = document.createElement("div");
+    container.className = "contents";
+    return container;
+  });
+  // Reparent the DOM host, not the React controls: rotating a phone or resizing
+  // a window must not discard an unsaved script or Git dialog.
+  const mountInlineActions = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (node && !actionsCollapsed) node.appendChild(actionsContainer);
+    },
+    [actionsContainer, actionsCollapsed],
+  );
+  const mountMenuActions = useCallback(
+    (node: HTMLDivElement | null) => {
+      if (node && actionsCollapsed) node.appendChild(actionsContainer);
+    },
+    [actionsContainer, actionsCollapsed],
+  );
+  if (!actionsCollapsed && actionsOpen) setActionsOpen(false);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const activeProjectName = activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -365,6 +404,67 @@ export const ChatHeader = memo(function ChatHeader({
     },
     [commitRename],
   );
+  const headerActions = (
+    <>
+      {optimizerAttachment ? <CurrentOptimizerIndicator attachment={optimizerAttachment} /> : null}
+      {activeProject ? (
+        <>
+          {actionsCollapsed && optimizerAttachment && <MenuSeparator />}
+          {/* In the collapsed menu, close the overflow first so the schedules
+              dialog opens alone instead of stacking on the open menu. */}
+          <span
+            onClickCapture={actionsCollapsed ? () => setActionsOpen(false) : undefined}
+            className="contents"
+          >
+            <ProjectSchedulesControl project={activeProject} />
+          </span>
+        </>
+      ) : null}
+      {activeProjectScripts && (
+        <>
+          {actionsCollapsed && activeProject && <MenuSeparator />}
+          <ProjectScriptsControl
+            onRequestMenuClose={() => setActionsOpen(false)}
+            presentation={actionsCollapsed ? "menu" : "toolbar"}
+            scripts={activeProjectScripts}
+            fileScripts={fileScripts}
+            keybindings={keybindings}
+            preferredScriptId={preferredScriptId}
+            onRunScript={onRunProjectScript}
+            onAddScript={onAddProjectScript}
+            onUpdateScript={onUpdateProjectScript}
+            onDeleteScript={onDeleteProjectScript}
+          />
+        </>
+      )}
+      {showOpenInPicker && (
+        <>
+          {actionsCollapsed && (activeProject || activeProjectScripts) && <MenuSeparator />}
+          <OpenInPicker
+            presentation={actionsCollapsed ? "menu" : "toolbar"}
+            environmentId={activeThreadEnvironmentId}
+            keybindings={keybindings}
+            availableEditors={availableEditors}
+            openInCwd={openInCwd}
+          />
+        </>
+      )}
+      {activeProjectName && gitCwd && (
+        <>
+          {actionsCollapsed && (activeProject || activeProjectScripts || showOpenInPicker) && (
+            <MenuSeparator />
+          )}
+          <GitActionsControl
+            presentation={actionsCollapsed ? "menu" : "toolbar"}
+            gitCwd={gitCwd}
+            activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
+            onOpenPullRequest={onOpenPullRequest}
+            {...(draftId ? { draftId } : {})}
+          />
+        </>
+      )}
+    </>
+  );
   return (
     <div
       className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
@@ -392,12 +492,16 @@ export const ChatHeader = memo(function ChatHeader({
                   }
                 >
                   <ProjectFavicon project={activeProject} className="size-3.5" />
-                  <span className="max-w-40 truncate">{activeProjectName}</span>
+                  <WorkspaceBreadcrumbText className="max-w-40">
+                    {activeProjectName}
+                  </WorkspaceBreadcrumbText>
                 </TooltipTrigger>
                 <TooltipPopup side="top">New thread in {activeProjectName}</TooltipPopup>
               </Tooltip>
             </WorkspaceBreadcrumbItem>
-            <WorkspaceBreadcrumbSeparator />
+            <WorkspaceBreadcrumbSeparator>
+              <WorkspaceBreadcrumbText>/</WorkspaceBreadcrumbText>
+            </WorkspaceBreadcrumbSeparator>
           </>
         ) : null}
         <WorkspaceBreadcrumbItem current className="min-w-10 flex-1">
@@ -430,7 +534,9 @@ export const ChatHeader = memo(function ChatHeader({
                   />
                 }
               >
-                <h2 className="min-w-0 truncate">{activeThreadTitle}</h2>
+                <h2 className="min-w-0">
+                  <WorkspaceBreadcrumbText>{activeThreadTitle}</WorkspaceBreadcrumbText>
+                </h2>
                 <ChevronDownIcon
                   aria-hidden
                   data-thread-title-chevron
@@ -442,12 +548,10 @@ export const ChatHeader = memo(function ChatHeader({
           ) : (
             <Tooltip>
               <TooltipTrigger
-                render={
-                  <h2 aria-label={activeThreadTitle} className="min-w-0 flex-1 truncate">
-                    {activeThreadTitle}
-                  </h2>
-                }
-              />
+                render={<h2 aria-label={activeThreadTitle} className="min-w-0 flex-1" />}
+              >
+                <WorkspaceBreadcrumbText>{activeThreadTitle}</WorkspaceBreadcrumbText>
+              </TooltipTrigger>
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
           )}
@@ -458,42 +562,39 @@ export const ChatHeader = memo(function ChatHeader({
         data-chat-header-actions
         className={cn(
           "flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3",
-          rightPanelOpen ? "pr-0" : "pr-16",
-          "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:motion-safe:ease-out",
+          // Reserve two panel toggles plus their 4px gaps and 1px edge inset.
+          // The page header adds 8px more right padding at sm.
+          rightPanelOpen ? "pr-0" : "pr-18.25 sm:pr-14.25",
+          "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:motion-safe:ease-out",
         )}
       >
-        {optimizerAttachment ? (
-          <CurrentOptimizerIndicator attachment={optimizerAttachment} />
-        ) : null}
-        {activeProject ? <ProjectSchedulesControl project={activeProject} /> : null}
-        {activeProjectScripts && (
-          <ProjectScriptsControl
-            scripts={activeProjectScripts}
-            fileScripts={fileScripts}
-            keybindings={keybindings}
-            preferredScriptId={preferredScriptId}
-            onRunScript={onRunProjectScript}
-            onAddScript={onAddProjectScript}
-            onUpdateScript={onUpdateProjectScript}
-            onDeleteScript={onDeleteProjectScript}
-          />
-        )}
-        {showOpenInPicker && (
-          <OpenInPicker
-            environmentId={activeThreadEnvironmentId}
-            keybindings={keybindings}
-            availableEditors={availableEditors}
-            openInCwd={openInCwd}
-          />
-        )}
-        {activeProjectName && (
-          <GitActionsControl
-            gitCwd={gitCwd}
-            activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
-            onOpenPullRequest={onOpenPullRequest}
-            {...(draftId ? { draftId } : {})}
-          />
-        )}
+        <Menu open={actionsCollapsed && actionsOpen} onOpenChange={setActionsOpen}>
+          <MenuTrigger
+            className={
+              actionsCollapsed &&
+              (activeProject ||
+                activeProjectScripts ||
+                showOpenInPicker ||
+                (activeProjectName && gitCwd))
+                ? undefined
+                : "hidden"
+            }
+            render={<Button size="icon-sm" variant="ghost" aria-label="More header actions" />}
+          >
+            <EllipsisIcon className="size-4" />
+          </MenuTrigger>
+          <div ref={mountInlineActions} className="contents" />
+          <MenuPopup
+            data-chat-header-actions
+            keepMounted
+            aria-label="Header actions"
+            align="end"
+            finalFocus={actionsCollapsed ? undefined : false}
+          >
+            <div ref={mountMenuActions} className="contents" />
+            {createPortal(headerActions, actionsContainer)}
+          </MenuPopup>
+        </Menu>
       </div>
     </div>
   );

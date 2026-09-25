@@ -41,6 +41,7 @@ export function threadDetailToShell(
     settledAt: thread.settledAt,
     unsettledAt: thread.unsettledAt,
     activeOrderKey: thread.activeOrderKey,
+    autoSettleDisabledAt: thread.autoSettleDisabledAt,
     pinnedAt: thread.pinnedAt,
     pinOrderKey: thread.pinOrderKey,
     snoozedUntil: thread.snoozedUntil ?? null,

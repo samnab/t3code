@@ -227,7 +227,6 @@ export function DelegationSettingsPanel() {
                 instanceEntries={instanceEntries}
                 modelOptionsByInstance={modelOptionsByInstance}
                 disabled={!settingsHydrated}
-                triggerVariant="outline"
                 triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
                 triggerLabel="Add candidate"
                 triggerAriaLabel={`Add ${tier.label} tier candidate`}

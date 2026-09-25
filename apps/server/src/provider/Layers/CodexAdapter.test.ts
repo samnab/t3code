@@ -275,7 +275,7 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   recordImportedTranscript: () => Effect.die("unused"),
   getProvider: () =>
     Effect.die(new Error("ProviderSessionDirectory.getProvider is not used in test")),
-  getBinding: () => Effect.succeed(Option.none()),
+  getBinding: () => Effect.succeedNone,
   listThreadIds: () => Effect.succeed([]),
   listBindings: () => Effect.succeed([]),
 });
@@ -2003,6 +2003,48 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps app permission approval requests to permission_approval request types", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-app-permission-request"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/permissions/requestApproval",
+        requestId: ApprovalRequestId.make("req-perm-1"),
+        requestKind: "permission",
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("app_1"),
+        payload: {
+          cwd: "/tmp/project",
+          itemId: "app_1",
+          permissions: { network: { enabled: true } },
+          reason: "Fetch data from api.example.com",
+          startedAtMs: 1_778_000_000_000,
+          threadId: "thread-1",
+          turnId: "turn-1",
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.type, "request.opened");
+      if (firstEvent.value.type !== "request.opened") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.payload.requestType, "permission_approval");
+      NodeAssert.equal(firstEvent.value.payload.detail, "Fetch data from api.example.com");
+    }),
+  );
+
   it.effect("maps session/closed lifecycle events to canonical session.exited runtime events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -2625,6 +2667,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           method: "item/tool/requestUserInput",
           requestId: ApprovalRequestId.make("req-user-input-1"),
           payload: {
+            isBlocking: true,
             itemId: "item-user-input-1",
             threadId: "thread-1",
             turnId: "turn-1",

@@ -38,10 +38,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/unstable/ai";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLiveness.ts";
-import {
-  OrchestrationCommandInvariantError,
-  OrchestrationListenerCallbackError,
-} from "../orchestration/Errors.ts";
+import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
 import { NativeChildRunRepositoryAuto } from "../persistence/Layers/NativeChildRuns.ts";
 import { ProjectionSubagentRunRepositoryLive } from "../persistence/Layers/ProjectionSubagentRuns.ts";
 import { ProjectionSubagentTranscriptStoreLive } from "../persistence/Layers/ProjectionSubagentTranscripts.ts";
@@ -343,7 +340,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (
         Effect.suspend(
           (): Effect.Effect<
             { readonly sequence: number },
-            OrchestrationCommandInvariantError | OrchestrationListenerCallbackError
+            OrchestrationCommandInvariantError | PersistenceSqlError
           > => {
             const projectActivity = transcriptControl?.projectActivity;
             if (projectActivity !== undefined && command.type === "thread.activity.append") {
@@ -385,16 +382,16 @@ const makeHarness = Effect.fn("makeHarness")(function* (
                 commands.push(command);
                 deliveryControl?.acceptedCommandIds?.add(command.commandId);
                 return Effect.fail(
-                  new OrchestrationListenerCallbackError({
-                    listener: "domain-event",
+                  new PersistenceSqlError({
+                    operation: "OrchestrationEventStore.append:query",
                     detail: "simulated uncertain accepted dispatch",
                   }),
                 );
               }
               if (outcome === "uncertain") {
                 return Effect.fail(
-                  new OrchestrationListenerCallbackError({
-                    listener: "domain-event",
+                  new PersistenceSqlError({
+                    operation: "OrchestrationEventStore.append:query",
                     detail: "simulated uncertain dispatch",
                   }),
                 );

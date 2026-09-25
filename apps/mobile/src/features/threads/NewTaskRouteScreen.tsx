@@ -98,28 +98,24 @@ function NewTaskHeader(props: {
       title={props.title}
       subtitle={props.subtitle ?? undefined}
       sidebar={false}
+      backInSplitView={{
+        accessibilityLabel: "Go back",
+        icon: "chevron.left",
+      }}
+      options={{ headerBackVisible: !layout.usesSplitView }}
       hideBottomBorder
       onBack={() => navigation.goBack()}
-      actions={[
-        ...(Platform.OS === "ios" && layout.usesSplitView
-          ? [
-              {
-                accessibilityLabel: "Close new task",
-                icon: "xmark" as const,
-                onPress: () => navigation.goBack(),
-              },
-            ]
-          : []),
-        ...(props.canAddProject
+      actions={
+        props.canAddProject
           ? [
               {
                 accessibilityLabel: "Add project",
-                icon: "plus" as const,
+                icon: "plus",
                 onPress: () => navigation.dispatch(StackActions.push("AddProject")),
               },
             ]
-          : []),
-      ]}
+          : []
+      }
       search={{
         value: props.searchText,
         onChangeText: props.onSearchTextChange,
@@ -337,6 +333,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                         <ProjectFavicon
                           environmentId={scope.representative.environmentId}
                           faviconPath={scope.representative.faviconPath}
+                          projectIcon={scope.representative.projectIcon}
                           size={24}
                           projectTitle={scope.title}
                           workspaceRoot={scope.representative.workspaceRoot}
@@ -361,6 +358,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
                         <ProjectFavicon
                           environmentId={scope.representative.environmentId}
                           faviconPath={scope.representative.faviconPath}
+                          projectIcon={scope.representative.projectIcon}
                           size={20}
                           projectTitle={scope.title}
                           workspaceRoot={scope.representative.workspaceRoot}

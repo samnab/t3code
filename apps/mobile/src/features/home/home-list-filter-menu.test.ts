@@ -13,10 +13,8 @@ describe("buildHomeListFilterMenu", () => {
       ],
       selectedEnvironmentId: null,
       selectedProjectKey: "environment-1:project-1",
-      projectSortOrder: "updated_at",
       onEnvironmentChange: vi.fn(),
       onProjectChange,
-      onProjectSortOrderChange: vi.fn(),
     });
 
     const projectMenu = menu.items.find(
@@ -37,22 +35,5 @@ describe("buildHomeListFilterMenu", () => {
     projectMenu.items[2]?.onPress();
     expect(onProjectChange).toHaveBeenNthCalledWith(1, null);
     expect(onProjectChange).toHaveBeenNthCalledWith(2, "environment-1:project-2");
-  });
-
-  it("with listOrganization false, hides the sort submenus", () => {
-    const menu = buildHomeListFilterMenu({
-      environments: [],
-      projects: [],
-      selectedEnvironmentId: null,
-      selectedProjectKey: null,
-      projectSortOrder: "updated_at",
-      onEnvironmentChange: vi.fn(),
-      onProjectChange: vi.fn(),
-      onProjectSortOrderChange: vi.fn(),
-      listOrganization: false,
-    });
-
-    expect(menu.items.some((item) => item.title === "Sort projects")).toBe(false);
-    expect(menu.items.some((item) => item.title === "Sort threads")).toBe(false);
   });
 });

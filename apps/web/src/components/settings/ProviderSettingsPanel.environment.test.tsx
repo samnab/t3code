@@ -58,6 +58,7 @@ vi.mock("./settingsLayout", async (importOriginal) => {
   };
 });
 
+vi.mock("./SettingsScopeSentence", () => ({ SettingsScopeSentence: () => null }));
 vi.mock("react/compiler-runtime", async () => {
   const { reactHookHarness } = await import("../../test/reactHookHarness");
   return { c: reactHookHarness.useMemoCache };
@@ -233,11 +234,29 @@ describe("EnvironmentProviderSettings routing", () => {
     ["onFavoriteModelsChange", { favorites: [{ provider: codexId, model: "chosen" }] }],
     [
       "onHiddenModelsChange",
-      { providerModelPreferences: { [codexId]: { hiddenModels: ["chosen"], modelOrder: [] } } },
+      {
+        providerModelPreferences: {
+          [codexId]: {
+            hiddenModels: ["chosen"],
+            modelOrder: [],
+            defaultModel: null,
+            defaultOptions: [],
+          },
+        },
+      },
     ],
     [
       "onModelOrderChange",
-      { providerModelPreferences: { [codexId]: { hiddenModels: [], modelOrder: ["chosen"] } } },
+      {
+        providerModelPreferences: {
+          [codexId]: {
+            hiddenModels: [],
+            modelOrder: ["chosen"],
+            defaultModel: null,
+            defaultOptions: [],
+          },
+        },
+      },
     ],
   ])("saves %s on this device without changing the selected server", (action, expected) => {
     atoms.providers = [provider()];

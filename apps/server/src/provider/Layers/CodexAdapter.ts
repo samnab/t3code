@@ -22,6 +22,7 @@ import {
   type ToolActivityNativeAppReference,
   type ToolActivitySource,
   type ProviderUserInputAnswers,
+  type ServerProviderModel,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -108,6 +109,8 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  /** The provider's model list; supplies model display names for runtime info. */
+  readonly models?: Effect.Effect<ReadonlyArray<ServerProviderModel>>;
   readonly makeRuntime?: (
     options: CodexSessionRuntimeOptions,
   ) => Effect.Effect<
@@ -851,6 +854,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_change_approval";
     case "mcpServer/elicitation/request":
       return "mcp_elicitation_approval";
+    case "item/permissions/requestApproval":
+      return "permission_approval";
     case "applyPatchApproval":
       return "apply_patch_approval";
     case "execCommandApproval":
@@ -876,6 +881,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_change_approval";
     case "mcp-elicitation":
       return "mcp_elicitation_approval";
+    case "permission":
+      return "permission_approval";
     default:
       return "unknown";
   }
@@ -1425,6 +1432,20 @@ function mapToRuntimeEvents(
         }
         case "mcpServer/elicitation/request":
           return elicitation?.message;
+        case "item/permissions/requestApproval": {
+          const payload = readPayload(
+            EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
+            event.payload,
+          );
+          const requestedPaths = [
+            ...(payload?.permissions.fileSystem?.read ?? []),
+            ...(payload?.permissions.fileSystem?.write ?? []),
+          ];
+          return (
+            nonEmptyDetail(payload?.reason) ??
+            (requestedPaths.length > 0 ? `Access: ${requestedPaths.join(", ")}` : undefined)
+          );
+        }
         case "applyPatchApproval": {
           const payload = readPayload(
             EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams,
@@ -2455,6 +2476,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
           binaryPath: codexConfig.binaryPath,
+          ...(options?.models ? { models: options.models } : {}),
           launchArgs: isExperiment
             ? ""
             : resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
