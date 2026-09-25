@@ -14,7 +14,7 @@ import { NativeChildRunRepositoryLive } from "../Layers/NativeChildRuns.ts";
 import { runMigrations } from "../Migrations.ts";
 import { NativeChildRun, NativeChildRunRepository } from "../Services/NativeChildRuns.ts";
 
-const sqlLayer = NodeSqliteClient.layerMemory();
+const sqlLayer = NodeSqliteClient.layer({ filename: ":memory:" });
 const testLayer = NativeChildRunRepositoryLive.pipe(Layer.provideMerge(sqlLayer));
 
 it.layer(testLayer)("native child persistence", (it) => {

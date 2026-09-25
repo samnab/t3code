@@ -58,7 +58,7 @@ const profile = (updatedAt: string): ExperimentProfile => ({
   lastError: null,
 });
 
-it.layer(NodeSqliteClient.layerMemory())("ThreadExperimentStore", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("ThreadExperimentStore", (it) => {
   it.effect("round-trips and replaces a profile by thread", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

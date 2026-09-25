@@ -9,7 +9,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
-const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
+const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
 interface PullRequestRow {
   readonly threadId: string;
@@ -173,29 +173,32 @@ layer("061_ProjectionThreadPullRequests", (it) => {
   );
 });
 
-it.layer(Layer.fresh(NodeSqliteClient.layerMemory()))("061 Azure legacy links", (it) => {
-  it.effect("keeps legacy Azure repositories distinct across organizations", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 60 });
-      for (const organization of ["org-a", "org-b"]) {
-        yield* sql`
+it.layer(Layer.fresh(NodeSqliteClient.layer({ filename: ":memory:" })))(
+  "061 Azure legacy links",
+  (it) => {
+    it.effect("keeps legacy Azure repositories distinct across organizations", () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 60 });
+        for (const organization of ["org-a", "org-b"]) {
+          yield* sql`
           INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, linked_pull_request_json, created_at, updated_at)
           VALUES (${organization}, ${organization}, 'Azure', '{"instanceId":"codex","model":"gpt-5.4"}',
             ${encodeJson({ projectId: organization, repository: "web", number: 7, url: `https://dev.azure.com/${organization}/project/_git/web/pullrequest/7` })},
             '2026-03-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z')
         `;
-      }
-      yield* runMigrations({ toMigrationInclusive: 61 });
-      const rows =
-        yield* sql`SELECT host, repository, number FROM projection_thread_pull_requests ORDER BY repository`;
-      assert.deepStrictEqual(rows, [
-        { host: "dev.azure.com", repository: "org-a/project/_git/web", number: 7 },
-        { host: "dev.azure.com", repository: "org-b/project/_git/web", number: 7 },
-      ]);
-    }),
-  );
-});
+        }
+        yield* runMigrations({ toMigrationInclusive: 61 });
+        const rows =
+          yield* sql`SELECT host, repository, number FROM projection_thread_pull_requests ORDER BY repository`;
+        assert.deepStrictEqual(rows, [
+          { host: "dev.azure.com", repository: "org-a/project/_git/web", number: 7 },
+          { host: "dev.azure.com", repository: "org-b/project/_git/web", number: 7 },
+        ]);
+      }),
+    );
+  },
+);
 
 it.effect("upgrades the complete fork-at-60 schema to the fresh final schema", () =>
   Effect.gen(function* () {
@@ -282,12 +285,12 @@ it.effect("upgrades the complete fork-at-60 schema to the fresh final schema", (
         messageColumns,
         schema: yield* readSchema,
       };
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory()));
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
 
     const freshSchema = yield* Effect.gen(function* () {
       yield* runMigrations();
       return yield* readSchema;
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory()));
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
 
     assert.deepStrictEqual(upgraded.thread, {
       linkedPullRequestJson,
@@ -310,6 +313,10 @@ it.effect("upgrades the complete fork-at-60 schema to the fresh final schema", (
       { migrationId: 60, name: "NativeChildDeliveryBatches" },
       { migrationId: 61, name: "ProjectionThreadPullRequests" },
       { migrationId: 62, name: "ProjectionThreadMessageContext" },
+      { migrationId: 63, name: "ProjectionThreadTitleState" },
+      { migrationId: 64, name: "ProjectionProjectsSchedules" },
+      { migrationId: 65, name: "PullRequestFilesViewed" },
+      { migrationId: 66, name: "ProjectionSubagentRunsFastMode" },
     ]);
     assert.ok(upgraded.messageColumns.some((column) => column.name === "context_json"));
     assert.deepStrictEqual(upgraded.schema, freshSchema);

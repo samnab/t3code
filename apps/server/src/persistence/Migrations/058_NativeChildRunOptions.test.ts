@@ -5,7 +5,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "../Migrations.ts";
 
-it.layer(NodeSqliteClient.layerMemory())("058_NativeChildRunOptions", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("058_NativeChildRunOptions", (it) => {
   it.effect("adds the optional requested options column", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

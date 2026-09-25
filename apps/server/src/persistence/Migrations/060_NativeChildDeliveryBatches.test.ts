@@ -20,7 +20,7 @@ import {
 const timestamp = "2026-09-08T00:00:00.000Z";
 const parentThreadId = ThreadId.make("delivery-parent");
 const testLayer = NativeChildRunRepositoryLive.pipe(
-  Layer.provideMerge(NodeSqliteClient.layerMemory()),
+  Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
 );
 
 it.layer(testLayer)("060_NativeChildDeliveryBatches", (it) => {

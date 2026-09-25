@@ -9,7 +9,7 @@ import { NativeChildRunRepositoryLive } from "../Layers/NativeChildRuns.ts";
 import { runMigrations } from "../Migrations.ts";
 import { NativeChildMessage, NativeChildRunRepository } from "../Services/NativeChildRuns.ts";
 
-const sqlLayer = NodeSqliteClient.layerMemory();
+const sqlLayer = NodeSqliteClient.layer({ filename: ":memory:" });
 const testLayer = NativeChildRunRepositoryLive.pipe(Layer.provideMerge(sqlLayer));
 const timestamp = "2026-09-08T00:00:00.000Z";
 

@@ -5,7 +5,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "../Migrations.ts";
 
-it.layer(NodeSqliteClient.layerMemory())("057_ThreadExperiments", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("057_ThreadExperiments", (it) => {
   it.effect("creates the server-only experiment profile table", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
