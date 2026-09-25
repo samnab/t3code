@@ -20,7 +20,6 @@ import {
   threadArrangementOpenAtom,
 } from "../../state/thread-order";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
-import { getActiveThreadSortOrder } from "../home/home-list-options";
 import { useThreadListActions } from "../home/useThreadListActions";
 import {
   createThreadMovePlanner,
@@ -82,9 +81,6 @@ function ArrangementRow(props: {
 function DragHandle(props: {
   title: string;
   disabled: boolean;
-  /** Reorder (drag and step) is off, but section actions stay available —
-      e.g. active rows under "Last updated" can still be pinned or settled. */
-  readonly reorderDisabled?: boolean;
   onStart: () => void;
   onMove: (translation: number) => void;
   onEnd: (cancelled: boolean) => void;
@@ -99,7 +95,7 @@ function DragHandle(props: {
   const gesture = useMemo(
     () =>
       Gesture.Pan()
-        .enabled(!props.disabled && props.reorderDisabled !== true)
+        .enabled(!props.disabled)
         .minDistance(0)
         .shouldCancelWhenOutside(false)
         .runOnJS(true)
@@ -107,7 +103,7 @@ function DragHandle(props: {
         .onUpdate((event) => latest.current.onMove(event.translationY))
         .onEnd((event) => latest.current.onMove(event.translationY))
         .onFinalize((_, success) => latest.current.onEnd(!success)),
-    [props.disabled, props.reorderDisabled],
+    [props.disabled],
   );
   return (
     <GestureDetector gesture={gesture}>
@@ -117,7 +113,7 @@ function DragHandle(props: {
         accessibilityRole="adjustable"
         accessibilityLabel={`Reorder ${props.title}`}
         accessibilityHint="Move up and Move down reorder within this section. Other actions move between sections."
-        accessibilityState={{ disabled: props.disabled || props.reorderDisabled === true }}
+        accessibilityState={{ disabled: props.disabled }}
         accessibilityActions={[
           ...props.sectionActions,
           ...(props.canMoveUp ? [{ name: "decrement", label: "Move up" }] : []),
@@ -152,12 +148,6 @@ function DragHandle(props: {
 
 export function ThreadArrangementSheet(props: { onClose: () => void }) {
   const insets = useSafeAreaInsets();
-  // The sheet mounts fresh on each open, and the sort cannot change while the
-  // modal covers the app, so capture it once for this session.
-  const [threadSortOrder] = useState(getActiveThreadSortOrder);
-  // Web parity: under "Last updated" the active block is time-sorted, so it
-  // can be displayed but not rearranged; pinned arrangement is unchanged.
-  const activeMovesEnabled = threadSortOrder !== "updated_at";
   const threads = useAtomValue(environmentThreadShells.threadShellsAtom);
   const configs = useAtomValue(environmentServerConfigsAtom);
   const queuedThreadKeys = useAtomValue(queuedThreadKeysAtom);
@@ -198,11 +188,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
       ),
     };
     const pinned = getThreadListV2OrderedSection({ ...shared, section: "pinned" });
-    const active = getThreadListV2OrderedSection({
-      ...shared,
-      section: "active",
-      threadSortOrder,
-    });
+    const active = getThreadListV2OrderedSection({ ...shared, section: "active" });
     const visible = new Set([...pinned, ...active].map(keyOf));
     const parked = threads.filter(
       (thread) => thread.archivedAt === null && !visible.has(keyOf(thread)),
@@ -213,31 +199,27 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
       snoozed: parked.filter((thread) => effectiveSnoozed(thread, { now })),
       settled: parked.filter((thread) => !effectiveSnoozed(thread, { now })),
     };
-  }, [threads, configs, now, queuedThreadKeys, pendingOrder, threadSortOrder]);
+  }, [threads, configs, now, queuedThreadKeys, pendingOrder]);
   const planners = useMemo(() => {
-    const planner = (section: "pinned" | "active") => {
-      const reorderableEnvironmentIds = new Set(
-        [...configs].flatMap(([id, config]) =>
-          (
-            section === "pinned"
-              ? config.environment.capabilities.threadPinReorder
-              : config.environment.capabilities.threadActiveReorder
-          )
-            ? [id]
-            : [],
-        ),
-      );
-      // Time-sorted active rows have no saved arrangement to move within.
-      if (section === "active" && !activeMovesEnabled) reorderableEnvironmentIds.clear();
-      return createThreadMovePlanner({
+    const planner = (section: "pinned" | "active") =>
+      createThreadMovePlanner({
         ordered: sections[section],
         allThreads: threads,
         section,
-        reorderableEnvironmentIds,
+        reorderableEnvironmentIds: new Set(
+          [...configs].flatMap(([id, config]) =>
+            (
+              section === "pinned"
+                ? config.environment.capabilities.threadPinReorder
+                : config.environment.capabilities.threadActiveReorder
+            )
+              ? [id]
+              : [],
+          ),
+        ),
       });
-    };
     return { pinned: planner("pinned"), active: planner("active") };
-  }, [sections, threads, configs, activeMovesEnabled]);
+  }, [sections, threads, configs]);
   const rows = useMemo(() => {
     const result: Row[] = [];
     let offset = 0;
@@ -496,7 +478,6 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                                 .threadActiveReorder
                             )
                           }
-                          reorderDisabled={!activeMovesEnabled && item.section === "active"}
                           sectionActions={sectionActions}
                           onSectionMove={(section) => {
                             void moveThread(thread, {

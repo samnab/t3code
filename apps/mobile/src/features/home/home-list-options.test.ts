@@ -1,7 +1,4 @@
-import {
-  DEFAULT_SIDEBAR_PROJECT_SORT_ORDER,
-  DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
-} from "@t3tools/contracts";
+import { DEFAULT_SIDEBAR_PROJECT_SORT_ORDER } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { hasCustomHomeListOptions, type HomeListOptions } from "./home-list-options";
@@ -12,7 +9,6 @@ const defaults: HomeListOptions = {
     DEFAULT_SIDEBAR_PROJECT_SORT_ORDER === "manual"
       ? "updated_at"
       : DEFAULT_SIDEBAR_PROJECT_SORT_ORDER,
-  threadSortOrder: DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
 };
 
 describe("home list options", () => {

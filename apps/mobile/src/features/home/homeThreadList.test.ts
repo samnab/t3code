@@ -67,7 +67,6 @@ function buildGroups(
     environmentId: null,
     searchQuery: "",
     projectSortOrder: "updated_at",
-    threadSortOrder: "updated_at",
     projectGroupingMode: "repository",
     now: NOW,
     ...overrides,
@@ -445,7 +444,7 @@ describe("buildHomeThreadGroups", () => {
     ]);
   });
 
-  it("supports independent project and thread creation-time sorting", () => {
+  it("supports project creation-time sorting while threads stay recency-ordered", () => {
     const environmentId = EnvironmentId.make("environment-1");
     const olderProject = makeProject({
       environmentId,
@@ -485,7 +484,6 @@ describe("buildHomeThreadGroups", () => {
 
     const groups = buildGroups([olderProject, newerProject], threads, {
       projectSortOrder: "created_at",
-      threadSortOrder: "created_at",
       projectGroupingMode: "separate",
     });
 
@@ -493,7 +491,7 @@ describe("buildHomeThreadGroups", () => {
       "project-newer",
       "project-older",
     ]);
-    expect(groups[1]?.threads.map((thread) => thread.id)).toEqual(["new-created", "old-created"]);
+    expect(groups[1]?.threads.map((thread) => thread.id)).toEqual(["old-created", "new-created"]);
   });
 
   it("filters both projects and threads to one environment", () => {

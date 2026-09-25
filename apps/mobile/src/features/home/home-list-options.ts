@@ -1,18 +1,10 @@
-import type {
-  EnvironmentId,
-  SidebarProjectGroupingMode,
-  SidebarThreadSortOrder,
-} from "@t3tools/contracts";
-import {
-  DEFAULT_SIDEBAR_PROJECT_SORT_ORDER,
-  DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
-} from "@t3tools/contracts";
+import type { EnvironmentId, SidebarProjectGroupingMode } from "@t3tools/contracts";
+import { DEFAULT_SIDEBAR_PROJECT_SORT_ORDER } from "@t3tools/contracts";
 import {
   createContext,
   createElement,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useState,
   type PropsWithChildren,
@@ -25,7 +17,6 @@ import type { HomeProjectSortOrder } from "./homeThreadList";
 export interface HomeListOptions {
   readonly selectedEnvironmentId: EnvironmentId | null;
   readonly projectSortOrder: HomeProjectSortOrder;
-  readonly threadSortOrder: SidebarThreadSortOrder;
 }
 
 export interface ResolvedHomeListOptions extends HomeListOptions {
@@ -40,25 +31,6 @@ export const PROJECT_SORT_OPTIONS: ReadonlyArray<{
   { value: "created_at", label: "Created at" },
 ];
 
-export const THREAD_SORT_OPTIONS: ReadonlyArray<{
-  readonly value: SidebarThreadSortOrder;
-  readonly label: string;
-}> = [
-  { value: "updated_at", label: "Last user message" },
-  { value: "created_at", label: "Created at" },
-];
-
-/** Thread List v2 reads like the web v2 sidebar: the saved arrangement is
-    simply the default, so its menu uses the web's labels. Legacy lists keep
-    the explicit created-at label above. */
-export const THREAD_SORT_OPTIONS_V2: ReadonlyArray<{
-  readonly value: SidebarThreadSortOrder;
-  readonly label: string;
-}> = [
-  { value: "created_at", label: "Default" },
-  { value: "updated_at", label: "Last updated" },
-];
-
 function defaultHomeListOptions(): HomeListOptions {
   return {
     selectedEnvironmentId: null,
@@ -66,17 +38,7 @@ function defaultHomeListOptions(): HomeListOptions {
       DEFAULT_SIDEBAR_PROJECT_SORT_ORDER === "manual"
         ? "updated_at"
         : DEFAULT_SIDEBAR_PROJECT_SORT_ORDER,
-    threadSortOrder: DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
   };
-}
-
-/** Latest shared thread sort order, readable outside HomeListOptionsProvider —
-    the global ThreadArrangementHost mounts above it in App, so the Arrange
-    sheet can honor the sort the lists are using. */
-let activeThreadSortOrder: SidebarThreadSortOrder = DEFAULT_SIDEBAR_THREAD_SORT_ORDER;
-
-export function getActiveThreadSortOrder(): SidebarThreadSortOrder {
-  return activeThreadSortOrder;
 }
 
 interface HomeListOptionsContextValue {
@@ -95,9 +57,6 @@ export function HomeListOptionsProvider({
   readonly projectGroupingMode: SidebarProjectGroupingMode;
 }>) {
   const [options, setOptions] = useState<HomeListOptions>(defaultHomeListOptions);
-  useEffect(() => {
-    activeThreadSortOrder = options.threadSortOrder;
-  }, [options.threadSortOrder]);
   const value = useMemo(
     () => ({ options, setOptions, projectGroupingMode }),
     [options, projectGroupingMode],
@@ -117,8 +76,7 @@ export function hasCustomHomeListOptions(
   return (
     options.selectedEnvironmentId !== null ||
     (options.selectedProjectKey !== null && options.selectedProjectKey !== undefined) ||
-    options.projectSortOrder !== defaultProjectSortOrder ||
-    options.threadSortOrder !== DEFAULT_SIDEBAR_THREAD_SORT_ORDER
+    options.projectSortOrder !== defaultProjectSortOrder
   );
 }
 
@@ -147,13 +105,9 @@ export function useHomeListOptions(availableEnvironmentIds: ReadonlySet<Environm
   const setProjectSortOrder = useCallback((value: HomeProjectSortOrder) => {
     setOptions((current) => ({ ...current, projectSortOrder: value }));
   }, []);
-  const setThreadSortOrder = useCallback((value: SidebarThreadSortOrder) => {
-    setOptions((current) => ({ ...current, threadSortOrder: value }));
-  }, []);
   return {
     options: resolvedOptions,
     setSelectedEnvironmentId,
     setProjectSortOrder,
-    setThreadSortOrder,
   } as const;
 }

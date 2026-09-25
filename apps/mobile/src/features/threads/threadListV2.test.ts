@@ -374,29 +374,6 @@ describe("sortThreadsForListV2", () => {
     ]);
     expect(sorted.map((thread) => thread.id)).toEqual(["old-unsettled", "newest", "middle"]);
   });
-
-  it("with updated_at order, ranks by last user message and ignores the saved arrangement", () => {
-    const sorted = sortThreadsForListV2(
-      [
-        {
-          id: "arranged-top",
-          createdAt: "2026-06-01T08:00:00.000Z",
-          updatedAt: "2026-06-01T08:00:00.000Z",
-          latestUserMessageAt: "2026-06-01T09:00:00.000Z",
-          activeOrderKey: "a",
-        },
-        {
-          id: "messaged-latest",
-          createdAt: "2026-06-01T07:00:00.000Z",
-          updatedAt: "2026-06-01T07:00:00.000Z",
-          latestUserMessageAt: "2026-06-01T14:00:00.000Z",
-          activeOrderKey: "z",
-        },
-      ],
-      "updated_at",
-    );
-    expect(sorted.map((thread) => thread.id)).toEqual(["messaged-latest", "arranged-top"]);
-  });
 });
 
 describe("getThreadListV2OrderedSection", () => {
@@ -449,49 +426,6 @@ describe("getThreadListV2OrderedSection", () => {
 });
 
 describe("buildThreadListV2Items", () => {
-  it("time-sorts the active block under updated_at while pinned keeps its manual order", () => {
-    const threads = [
-      makeThread({
-        id: ThreadId.make("pinned-bottom"),
-        title: "Pinned bottom",
-        pinnedAt: NOW,
-        pinOrderKey: "f",
-        latestUserMessageAt: "2026-06-01T14:00:00.000Z",
-      }),
-      makeThread({
-        id: ThreadId.make("pinned-top"),
-        title: "Pinned top",
-        pinnedAt: NOW,
-        pinOrderKey: "a",
-      }),
-      makeThread({
-        id: ThreadId.make("arranged"),
-        title: "Arranged",
-        activeOrderKey: "a",
-        latestUserMessageAt: "2026-06-01T09:00:00.000Z",
-      }),
-      makeThread({
-        id: ThreadId.make("recent"),
-        title: "Recent",
-        activeOrderKey: "z",
-        latestUserMessageAt: "2026-06-01T12:00:00.000Z",
-      }),
-    ];
-    const layout = buildThreadListV2Items({
-      threads,
-      environmentId: null,
-      searchQuery: "",
-      now: NOW,
-      threadSortOrder: "updated_at",
-    });
-    expect(layout.items.map((item) => item.thread.id)).toEqual([
-      "pinned-top",
-      "pinned-bottom",
-      "recent",
-      "arranged",
-    ]);
-  });
-
   it("places a persisted settled thread in the settled shelf", () => {
     const thread = makeThread({
       id: ThreadId.make("linked-merged"),

@@ -11,11 +11,7 @@ import {
 import { LegendList } from "@legendapp/list/react-native";
 import type { MenuAction } from "@react-native-menu/menu";
 import { useAtomValue } from "@effect/atom-react";
-import {
-  DEFAULT_SIDEBAR_THREAD_SORT_ORDER,
-  type EnvironmentId,
-  resolveEnvironmentMachineKind,
-} from "@t3tools/contracts";
+import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LayoutChangeEvent } from "react-native";
 import { Platform, StyleSheet, TextInput, View } from "react-native";
@@ -46,8 +42,6 @@ import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
 import {
   hasCustomHomeListOptions,
   PROJECT_SORT_OPTIONS,
-  THREAD_SORT_OPTIONS,
-  THREAD_SORT_OPTIONS_V2,
   useHomeListOptions,
 } from "../home/home-list-options";
 import { buildHomeListFilterMenu } from "../home/home-list-filter-menu";
@@ -199,7 +193,7 @@ function ThreadNavigationSidebarPane(
     () => new Set(environments.map((environment) => environment.environmentId)),
     [environments],
   );
-  const { options, setSelectedEnvironmentId, setProjectSortOrder, setThreadSortOrder } =
+  const { options, setSelectedEnvironmentId, setProjectSortOrder } =
     useHomeListOptions(availableEnvironmentIds);
   const searchEnvironmentIds = useMemo(
     () =>
@@ -337,7 +331,6 @@ function ThreadNavigationSidebarPane(
             searchQuery: props.searchQuery,
             matchedThreadKeys,
             projectSortOrder: options.projectSortOrder,
-            threadSortOrder: options.threadSortOrder,
             projectGroupingMode: options.projectGroupingMode,
           }),
     [
@@ -508,7 +501,6 @@ function ThreadNavigationSidebarPane(
           section,
           pendingOrder,
           now: new Date().toISOString(),
-          threadSortOrder: options.threadSortOrder,
           settlementEnvironmentIds,
           snoozeEnvironmentIds,
           queuedThreadKeys,
@@ -522,7 +514,6 @@ function ThreadNavigationSidebarPane(
     queuedThreadKeys,
     settlementEnvironmentIds,
     snoozeEnvironmentIds,
-    options.threadSortOrder,
     nowMinute,
     snoozeWakeTick,
   ]);
@@ -544,7 +535,6 @@ function ThreadNavigationSidebarPane(
       projectRefs: selectedProjectScope === null ? null : selectedProjectScope.projectRefs,
       searchQuery: props.searchQuery,
       matchedThreadKeys,
-      threadSortOrder: options.threadSortOrder,
       settlementEnvironmentIds,
       snoozeEnvironmentIds,
       queuedThreadKeys,
@@ -563,7 +553,6 @@ function ThreadNavigationSidebarPane(
     settledShelfExpanded,
     props.selectedThreadKey,
     options.selectedEnvironmentId,
-    options.threadSortOrder,
     props.searchQuery,
     matchedThreadKeys,
     settledVisibleCount,
@@ -637,9 +626,6 @@ function ThreadNavigationSidebarPane(
     threadListV2Enabled,
     threadListV2Layout,
   ]);
-  // Web parity: under "Last updated" the active block is time-sorted, so its
-  // rows can no longer be moved or arranged; pinned moves are unchanged.
-  const activeMovesEnabled = options.threadSortOrder !== "updated_at";
   const listMenuActions = useMemo<MenuAction[]>(
     () => [
       {
@@ -683,20 +669,10 @@ function ThreadNavigationSidebarPane(
               ],
             },
           ] satisfies MenuAction[])),
-      // V2 honors the thread sort (Default arrangement vs Last updated) but
-      // still lays projects out flat, so "Sort projects" remains legacy-only.
+      // Thread List v2 lays the list out in fixed creation order, so the
+      // sort controls stay hidden while the beta is on.
       ...(threadListV2Enabled
-        ? ([
-            {
-              id: "thread-sort",
-              title: "Sort threads",
-              subactions: THREAD_SORT_OPTIONS_V2.map((option) => ({
-                id: `thread-sort:${option.value}`,
-                title: option.label,
-                state: options.threadSortOrder === option.value ? "on" : "off",
-              })),
-            },
-          ] satisfies MenuAction[])
+        ? []
         : ([
             {
               id: "project-sort",
@@ -705,15 +681,6 @@ function ThreadNavigationSidebarPane(
                 id: `project-sort:${option.value}`,
                 title: option.label,
                 state: options.projectSortOrder === option.value ? "on" : "off",
-              })),
-            },
-            {
-              id: "thread-sort",
-              title: "Sort threads",
-              subactions: THREAD_SORT_OPTIONS.map((option) => ({
-                id: `thread-sort:${option.value}`,
-                title: option.label,
-                state: options.threadSortOrder === option.value ? "on" : "off",
               })),
             },
           ] satisfies MenuAction[])),
@@ -752,21 +719,8 @@ function ThreadNavigationSidebarPane(
         setProjectSortOrder(projectSort.value);
         return;
       }
-      const threadSort = THREAD_SORT_OPTIONS.find(
-        (option) => `thread-sort:${option.value}` === event,
-      );
-      if (threadSort) {
-        setThreadSortOrder(threadSort.value);
-        return;
-      }
     },
-    [
-      environments,
-      projectFilterOptions,
-      setProjectSortOrder,
-      setSelectedEnvironmentId,
-      setThreadSortOrder,
-    ],
+    [environments, projectFilterOptions, setProjectSortOrder, setSelectedEnvironmentId],
   );
 
   const [measuredHeaderHeight, setMeasuredHeaderHeight] = useState<number | null>(null);
@@ -974,7 +928,7 @@ function ThreadNavigationSidebarPane(
               reorderSupported={
                 item.item.pinned
                   ? pinReorderEnvironmentIds.has(thread.environmentId)
-                  : activeMovesEnabled && activeReorderEnvironmentIds.has(thread.environmentId)
+                  : activeReorderEnvironmentIds.has(thread.environmentId)
               }
               canMoveUp={pendingOrder === null && movePlanner(movedId, "up") !== null}
               canMoveDown={pendingOrder === null && movePlanner(movedId, "down") !== null}
@@ -1095,7 +1049,6 @@ function ThreadNavigationSidebarPane(
       }
     },
     [
-      activeMovesEnabled,
       archiveThread,
       activeReorderEnvironmentIds,
       threadMovePlanners,
@@ -1141,12 +1094,9 @@ function ThreadNavigationSidebarPane(
       updateGroupDisplay,
     ],
   );
-  // The filter icon lights for anything that reshapes the v2 list, including
-  // a non-default thread sort.
+  // The filter icon lights for anything that reshapes the v2 list.
   const filterCustomized = threadListV2Enabled
-    ? options.selectedEnvironmentId !== null ||
-      selectedProjectKey !== null ||
-      options.threadSortOrder !== DEFAULT_SIDEBAR_THREAD_SORT_ORDER
+    ? options.selectedEnvironmentId !== null || selectedProjectKey !== null
     : hasCustomHomeListOptions({ ...options, selectedProjectKey });
   const filterIcon = filterCustomized
     ? "line.3.horizontal.decrease.circle.fill"
@@ -1159,13 +1109,10 @@ function ThreadNavigationSidebarPane(
         selectedEnvironmentId: options.selectedEnvironmentId,
         selectedProjectKey,
         projectSortOrder: options.projectSortOrder,
-        threadSortOrder: options.threadSortOrder,
-        projectSort: !threadListV2Enabled,
-        threadSortOptions: threadListV2Enabled ? THREAD_SORT_OPTIONS_V2 : THREAD_SORT_OPTIONS,
+        listOrganization: !threadListV2Enabled,
         onEnvironmentChange: setSelectedEnvironmentId,
         onProjectChange: setSelectedProjectKey,
         onProjectSortOrderChange: setProjectSortOrder,
-        onThreadSortOrderChange: setThreadSortOrder,
       }),
     [
       environments,
@@ -1174,7 +1121,6 @@ function ThreadNavigationSidebarPane(
       selectedProjectKey,
       setProjectSortOrder,
       setSelectedEnvironmentId,
-      setThreadSortOrder,
       threadListV2Enabled,
     ],
   );

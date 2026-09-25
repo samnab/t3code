@@ -1,4 +1,3 @@
-import { DEFAULT_SIDEBAR_THREAD_SORT_ORDER } from "@t3tools/contracts";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
 import { useCallback, useRef } from "react";
 import type { SearchBarCommands } from "react-native-screens";
@@ -11,12 +10,7 @@ import {
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
 import { buildHomeListFilterMenu } from "./home-list-filter-menu";
-import {
-  hasCustomHomeListOptions,
-  PROJECT_SORT_OPTIONS,
-  THREAD_SORT_OPTIONS,
-  THREAD_SORT_OPTIONS_V2,
-} from "./home-list-options";
+import { hasCustomHomeListOptions, PROJECT_SORT_OPTIONS } from "./home-list-options";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 
 export type { HomeHeaderEnvironment } from "./HomeHeader.types";
@@ -24,14 +18,12 @@ export type { HomeHeaderEnvironment } from "./HomeHeader.types";
 export function HomeHeader(props: HomeHeaderProps) {
   const searchBarRef = useRef<SearchBarCommands>(null);
   const iconColor = useUniwindTheme()["--color-icon"];
-  // Thread List v2 sorts threads like the web sidebar but never sorts or
-  // groups projects, so "Sort projects" stays legacy-only; the customized
-  // icon lights for a non-default thread sort too.
+  // Thread List v2 lays the list out in fixed creation order, so the
+  // sort/group filter controls would be silently ignored — hide them and
+  // key the "customized" icon state off the environment filter alone.
   const threadListV2Enabled = useThreadListV2Enabled();
   const hasCustomListOptions = threadListV2Enabled
-    ? props.selectedEnvironmentId !== null ||
-      props.selectedProjectKey !== null ||
-      props.threadSortOrder !== DEFAULT_SIDEBAR_THREAD_SORT_ORDER
+    ? props.selectedEnvironmentId !== null || props.selectedProjectKey !== null
     : hasCustomHomeListOptions(props);
   const focusSearch = useCallback(() => {
     searchBarRef.current?.focus();
@@ -40,8 +32,7 @@ export function HomeHeader(props: HomeHeaderProps) {
   useHardwareKeyboardCommand("focusSearch", focusSearch);
   const filterMenu = buildHomeListFilterMenu({
     ...props,
-    projectSort: !threadListV2Enabled,
-    threadSortOptions: threadListV2Enabled ? THREAD_SORT_OPTIONS_V2 : THREAD_SORT_OPTIONS,
+    listOrganization: !threadListV2Enabled,
   });
 
   return (
@@ -170,21 +161,6 @@ export function HomeHeader(props: HomeHeaderProps) {
                 ))}
               </NativeHeaderToolbar.Menu>
             )}
-
-            <NativeHeaderToolbar.Menu title="Sort threads">
-              <NativeHeaderToolbar.Label>Sort threads</NativeHeaderToolbar.Label>
-              {(threadListV2Enabled ? THREAD_SORT_OPTIONS_V2 : THREAD_SORT_OPTIONS).map(
-                (option) => (
-                  <NativeHeaderToolbar.MenuAction
-                    key={option.value}
-                    isOn={props.threadSortOrder === option.value}
-                    onPress={() => props.onThreadSortOrderChange(option.value)}
-                  >
-                    <NativeHeaderToolbar.Label>{option.label}</NativeHeaderToolbar.Label>
-                  </NativeHeaderToolbar.MenuAction>
-                ),
-              )}
-            </NativeHeaderToolbar.Menu>
           </NativeHeaderToolbar.Menu>
           <NativeHeaderToolbar.Spacer flexible />
           <NativeHeaderToolbar.Button

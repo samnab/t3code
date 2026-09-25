@@ -17,7 +17,6 @@ import {
   type EnvironmentId,
   resolveEnvironmentMachineKind,
   type SidebarProjectGroupingMode,
-  type SidebarThreadSortOrder,
 } from "@t3tools/contracts";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -100,13 +99,11 @@ interface HomeScreenProps {
   readonly selectedEnvironmentId: EnvironmentId | null;
   readonly selectedProjectKey: string | null;
   readonly projectSortOrder: HomeProjectSortOrder;
-  readonly threadSortOrder: SidebarThreadSortOrder;
   readonly projectGroupingMode: SidebarProjectGroupingMode;
   readonly onSearchQueryChange: (query: string) => void;
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
   readonly onProjectChange: (projectKey: string | null) => void;
   readonly onProjectSortOrderChange: (sortOrder: HomeProjectSortOrder) => void;
-  readonly onThreadSortOrderChange: (sortOrder: SidebarThreadSortOrder) => void;
   readonly onAddConnection: () => void;
   readonly onOpenSettings: () => void;
   readonly onStartNewTask: () => void;
@@ -405,7 +402,6 @@ export function HomeScreen(props: HomeScreenProps) {
             searchQuery: props.searchQuery,
             matchedThreadKeys,
             projectSortOrder: props.projectSortOrder,
-            threadSortOrder: props.threadSortOrder,
             projectGroupingMode: props.projectGroupingMode,
           }),
     [
@@ -415,7 +411,6 @@ export function HomeScreen(props: HomeScreenProps) {
       props.projectSortOrder,
       props.searchQuery,
       props.selectedEnvironmentId,
-      props.threadSortOrder,
       matchedThreadKeys,
       scopedPendingTasks,
       scopedProjects,
@@ -675,7 +670,6 @@ export function HomeScreen(props: HomeScreenProps) {
           section,
           pendingOrder,
           now: new Date().toISOString(),
-          threadSortOrder: props.threadSortOrder,
           settlementEnvironmentIds,
           snoozeEnvironmentIds,
           queuedThreadKeys,
@@ -685,7 +679,6 @@ export function HomeScreen(props: HomeScreenProps) {
   }, [
     serverConfigs,
     props.threads,
-    props.threadSortOrder,
     pendingOrder,
     queuedThreadKeys,
     settlementEnvironmentIds,
@@ -713,7 +706,6 @@ export function HomeScreen(props: HomeScreenProps) {
       projectRefs: v2ScopedProjectGroup === null ? null : v2ScopedProjectGroup.projectRefs,
       searchQuery: props.searchQuery,
       matchedThreadKeys,
-      threadSortOrder: props.threadSortOrder,
       settlementEnvironmentIds,
       snoozeEnvironmentIds,
       queuedThreadKeys,
@@ -735,7 +727,6 @@ export function HomeScreen(props: HomeScreenProps) {
     snoozeEnvironmentIds,
     props.searchQuery,
     props.selectedEnvironmentId,
-    props.threadSortOrder,
     props.threads,
     matchedThreadKeys,
     threadListV2Enabled,
@@ -790,10 +781,6 @@ export function HomeScreen(props: HomeScreenProps) {
       }),
     [settledShelfExpanded, snoozedShelfExpanded, threadListV2Layout, v2PendingTasks],
   );
-
-  // Web parity: under "Last updated" the active block is time-sorted, so its
-  // rows can no longer be moved or arranged; pinned moves are unchanged.
-  const activeMovesEnabled = props.threadSortOrder !== "updated_at";
 
   useThreadJumpShortcuts(
     threadListV2Enabled ? threadListV2Items : listLayout.items,
@@ -897,7 +884,7 @@ export function HomeScreen(props: HomeScreenProps) {
           reorderSupported={
             item.item.pinned
               ? pinReorderEnvironmentIds.has(thread.environmentId)
-              : activeMovesEnabled && activeReorderEnvironmentIds.has(thread.environmentId)
+              : activeReorderEnvironmentIds.has(thread.environmentId)
           }
           canMoveUp={pendingOrder === null && movePlanner(movedId, "up") !== null}
           canMoveDown={pendingOrder === null && movePlanner(movedId, "down") !== null}
@@ -914,7 +901,6 @@ export function HomeScreen(props: HomeScreenProps) {
     },
     [
       handleDeleteThread,
-      activeMovesEnabled,
       activeReorderEnvironmentIds,
       threadMovePlanners,
       pendingOrder,

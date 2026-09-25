@@ -19,8 +19,8 @@ import type {
   ScopedProjectRef,
   SidebarProjectGroupingMode,
   SidebarProjectSortOrder,
-  SidebarThreadSortOrder,
 } from "@t3tools/contracts";
+import { DEFAULT_SIDEBAR_THREAD_SORT_ORDER } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
@@ -183,13 +183,12 @@ function groupSortTimestamp(group: HomeThreadGroup, sortOrder: HomeProjectSortOr
 
 /**
  * Trims a group's threads to recent activity for the default home view.
- * `sortedThreads` must already be ordered newest-first for `threadSortOrder`.
- * Keeps threads within {@link RECENT_THREAD_WINDOW_MS}; when none qualify, keeps
- * the most recent {@link RECENT_THREAD_FALLBACK_COUNT} so a project never vanishes.
+ * `sortedThreads` must already be ordered newest-first. Keeps threads within
+ * {@link RECENT_THREAD_WINDOW_MS}; when none qualify, keeps the most recent
+ * {@link RECENT_THREAD_FALLBACK_COUNT} so a project never vanishes.
  */
 function selectRecentThreads(
   sortedThreads: ReadonlyArray<EnvironmentThreadShell>,
-  threadSortOrder: SidebarThreadSortOrder,
   now: number,
   queuedThreadKeys: ReadonlySet<string> | undefined,
 ): ReadonlyArray<EnvironmentThreadShell> {
@@ -198,7 +197,7 @@ function selectRecentThreads(
   // waiting on, however old its last activity; it never trims away.
   const recent = sortedThreads.filter(
     (thread) =>
-      getThreadSortTimestamp(thread, threadSortOrder) >= cutoff ||
+      getThreadSortTimestamp(thread, DEFAULT_SIDEBAR_THREAD_SORT_ORDER) >= cutoff ||
       queuedThreadKeys?.has(scopedThreadKey(thread.environmentId, thread.id)) === true,
   );
   return recent.length > 0 ? recent : sortedThreads.slice(0, RECENT_THREAD_FALLBACK_COUNT);
@@ -214,7 +213,6 @@ export function buildHomeThreadGroups(input: {
   readonly searchQuery: string;
   readonly matchedThreadKeys?: ReadonlySet<string>;
   readonly projectSortOrder: HomeProjectSortOrder;
-  readonly threadSortOrder: SidebarThreadSortOrder;
   readonly projectGroupingMode: SidebarProjectGroupingMode;
   /** Current time used for the recency window; defaults to now. Injectable for tests. */
   readonly now?: number;
@@ -333,12 +331,12 @@ export function buildHomeThreadGroups(input: {
       continue;
     }
 
-    const sortedThreads = sortThreads(matchingThreads, input.threadSortOrder);
+    const sortedThreads = sortThreads(matchingThreads, DEFAULT_SIDEBAR_THREAD_SORT_ORDER);
     // An active search should reach the full history, so the recency window
     // only trims the default (no-query) view.
     const recentThreads =
       query.length === 0
-        ? selectRecentThreads(sortedThreads, input.threadSortOrder, now, input.queuedThreadKeys)
+        ? selectRecentThreads(sortedThreads, now, input.queuedThreadKeys)
         : sortedThreads;
 
     // A stale project id still resolves to the canonical member with the same
