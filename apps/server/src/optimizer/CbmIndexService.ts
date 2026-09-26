@@ -185,7 +185,7 @@ export const makeWith = Effect.fn("CbmIndexService.makeWith")(function* (
     const projectListResult = yield* dependencies
       .run({
         command: input.binaryPath,
-        args: ["cli", "list_projects", "--include-details", "true"],
+        args: ["cli", "list_projects", "--include-details", "true", "--format", "json"],
         cwd: input.repoPath,
         env: { CBM_ALLOWED_ROOT: input.repoPath },
         timeout: "30 seconds",
