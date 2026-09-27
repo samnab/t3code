@@ -362,7 +362,8 @@ const make = Effect.gen(function* () {
         .find((entry) => entry.role === "assistant" && entry.turnId === input.turnId)?.id ??
       MessageId.make(`assistant:${input.turnId}`);
 
-    // The contract keeps the expected ref; error status marks it unusable if capture failed.
+    // The contract keeps the expected ref, which may be missing after capture fails;
+    // restore and diff requests check git existence before using it.
     yield* orchestrationEngine.dispatch({
       type: "thread.turn.diff.complete",
       commandId: yield* serverCommandId("checkpoint-turn-diff-complete"),

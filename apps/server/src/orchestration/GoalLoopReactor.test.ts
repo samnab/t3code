@@ -432,48 +432,54 @@ describe("GoalLoopReactor", () => {
       ),
   );
 
-  it.effect("completes the loop on <goal_complete>", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const commands = yield* dispatchesFor(
-          {
-            shell: makeShell(),
-            messages: [
-              makeAssistantMessage("early note"),
-              makeAssistantMessage("Verified and shipped. <goal_complete>"),
-            ],
-          },
-          "error",
-        );
-        assert.strictEqual(commands.length, 1);
-        const command = commands[0]!;
-        assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
-        assert.strictEqual(command.action, "sync");
-        assert.strictEqual(command.state, "completed");
-      }),
-    ),
+  it.effect.each(["ready", "error"] as const)(
+    "completes the loop on <goal_complete> with %s checkpoint status",
+    (checkpointStatus) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const commands = yield* dispatchesFor(
+            {
+              shell: makeShell(),
+              messages: [
+                makeAssistantMessage("early note"),
+                makeAssistantMessage("Verified and shipped. <goal_complete>"),
+              ],
+            },
+            checkpointStatus,
+          );
+          assert.strictEqual(commands.length, 1);
+          const command = commands[0]!;
+          assert.strictEqual(command.type, "thread.goal.loop");
+          if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+          assert.strictEqual(command.action, "sync");
+          assert.strictEqual(command.state, "completed");
+        }),
+      ),
   );
 
-  it.effect("blocks the loop on <goal_blocked> with the agent's reason", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const commands = yield* dispatchesFor(
-          {
-            shell: makeShell(),
-            messages: [makeAssistantMessage("<goal_blocked> I need the API key. </goal_blocked>")],
-          },
-          "error",
-        );
-        assert.strictEqual(commands.length, 1);
-        const command = commands[0]!;
-        assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
-        assert.strictEqual(command.action, "sync");
-        assert.strictEqual(command.state, "blocked");
-        assert.strictEqual(command.reason, "I need the API key.");
-      }),
-    ),
+  it.effect.each(["ready", "error"] as const)(
+    "blocks the loop on <goal_blocked> with %s checkpoint status",
+    (checkpointStatus) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const commands = yield* dispatchesFor(
+            {
+              shell: makeShell(),
+              messages: [
+                makeAssistantMessage("<goal_blocked> I need the API key. </goal_blocked>"),
+              ],
+            },
+            checkpointStatus,
+          );
+          assert.strictEqual(commands.length, 1);
+          const command = commands[0]!;
+          assert.strictEqual(command.type, "thread.goal.loop");
+          if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+          assert.strictEqual(command.action, "sync");
+          assert.strictEqual(command.state, "blocked");
+          assert.strictEqual(command.reason, "I need the API key.");
+        }),
+      ),
   );
 
   it.effect("lets the final allowed turn complete before applying the iteration cap", () =>
@@ -492,22 +498,24 @@ describe("GoalLoopReactor", () => {
     ),
   );
 
-  it.effect("caps an unfinished loop after its final allowed turn", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const commands = yield* dispatchesFor(
-          {
-            shell: makeShell({ goalLoop: makeLoop({ iterations: 10, maxIterations: 10 }) }),
-            messages: [makeAssistantMessage("There is more work to do.")],
-          },
-          "error",
-        );
-        const command = commands[0]!;
-        assert.strictEqual(command.type, "thread.goal.loop");
-        if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
-        assert.strictEqual(command.state, "capped");
-      }),
-    ),
+  it.effect.each(["ready", "error"] as const)(
+    "caps an unfinished loop after its final allowed turn with %s checkpoint status",
+    (checkpointStatus) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const commands = yield* dispatchesFor(
+            {
+              shell: makeShell({ goalLoop: makeLoop({ iterations: 10, maxIterations: 10 }) }),
+              messages: [makeAssistantMessage("There is more work to do.")],
+            },
+            checkpointStatus,
+          );
+          const command = commands[0]!;
+          assert.strictEqual(command.type, "thread.goal.loop");
+          if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
+          assert.strictEqual(command.state, "capped");
+        }),
+      ),
   );
 
   it.effect("waits for active child work before accepting a completion tag", () =>

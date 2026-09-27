@@ -8,10 +8,10 @@
  * otherwise starts the next continuation turn.
  *
  * The end-of-turn signal is the `thread.turn-diff-completed` domain event.
- * That event is only dispatched by `CheckpointReactor` after the checkpoint
- * is captured and the turn diff is finalized, so continuing on it can never
- * race checkpointing. (`turn.processing.quiesced` marks the same point but
- * rides `RuntimeReceiptBus`, whose production layer is a deliberate no-op.)
+ * `CheckpointReactor` dispatches it once capture has either succeeded or
+ * failed and the turn diff is final. Continuing on it cannot race checkpointing.
+ * (`turn.processing.quiesced` marks the same point but rides `RuntimeReceiptBus`,
+ * whose production layer is a deliberate no-op.)
  *
  * Every command the reactor dispatches is keyed on the turn that just ended.
  * The engine replays a command id it has already accepted, so the key has to
