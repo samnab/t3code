@@ -300,6 +300,11 @@ describe("CheckpointReactor", () => {
     readonly checkpointLookupFailure?: (
       cwd: string,
     ) => VcsProcessTimeoutError | VcsProcessSpawnError | undefined;
+    readonly checkpointCaptureFailure?: (
+      cwd: string,
+      checkpointRef: CheckpointRef,
+    ) => VcsProcessTimeoutError | undefined;
+    readonly checkpointCaptureGate?: Effect.Effect<void>;
     readonly workspaceRefresh?: (cwd: string) => Effect.Effect<void>;
     readonly hasSession?: boolean;
     readonly seedFilesystemCheckpoints?: boolean;
@@ -387,6 +392,13 @@ describe("CheckpointReactor", () => {
           CheckpointStore.make.pipe(
             Effect.map((store) => ({
               ...store,
+              captureCheckpoint: (input) => {
+                const failure = options?.checkpointCaptureFailure?.(input.cwd, input.checkpointRef);
+                const capture = failure ? Effect.fail(failure) : store.captureCheckpoint(input);
+                return options?.checkpointCaptureGate
+                  ? options.checkpointCaptureGate.pipe(Effect.andThen(capture))
+                  : capture;
+              },
               hasCheckpointRef: (input) => {
                 const failure = options?.checkpointLookupFailure?.(input.cwd);
                 return failure ? Effect.fail(failure) : store.hasCheckpointRef(input);
@@ -668,6 +680,103 @@ describe("CheckpointReactor", () => {
           model.threads[0]?.activities.some((a) => a.kind === "checkpoint.capture.failed"),
         ).toBe(false);
       }),
+  );
+
+  effectIt.effect("finalizes a failed capture as an error without a checkpoint snapshot", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-1");
+      const turnId = asTurnId("turn-capture-timeout");
+      const ref = checkpointRefForThreadTurn(threadId, 1);
+      const captureStarted = yield* Deferred.make<void>();
+      const releaseCapture = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          seedFilesystemCheckpoints: false,
+          checkpointCaptureGate: Deferred.succeed(captureStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseCapture)),
+          ),
+          checkpointCaptureFailure: (cwd, checkpointRef) =>
+            checkpointRef === ref
+              ? new VcsProcessTimeoutError({
+                  operation: "test.captureCheckpoint",
+                  command: "git",
+                  cwd,
+                  timeoutMs: 30_000,
+                })
+              : undefined,
+        }),
+      );
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make("evt-capture-timeout"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId,
+        turnId,
+        payload: { state: "completed" },
+      });
+      yield* Deferred.await(captureStarted);
+      expect(
+        Array.from(yield* Stream.runCollect(harness.engine.readEvents(0))).some(
+          (event) => event.type === "thread.turn-diff-completed",
+        ),
+      ).toBe(false);
+      yield* Deferred.succeed(releaseCapture, undefined);
+      yield* Effect.promise(harness.drain);
+
+      const events = Array.from(yield* Stream.runCollect(harness.engine.readEvents(0)));
+      expect(events.filter((event) => event.type === "thread.turn-diff-completed")).toMatchObject([
+        {
+          payload: {
+            threadId,
+            turnId,
+            checkpointRef: ref,
+            status: "error",
+            files: [],
+          },
+        },
+      ]);
+      expect(yield* harness.nextReceipt).toMatchObject({
+        type: "checkpoint.diff.finalized",
+        turnId,
+        checkpointRef: ref,
+        status: "error",
+      });
+      expect(yield* harness.nextReceipt).toMatchObject({
+        type: "turn.processing.quiesced",
+        turnId,
+      });
+      const thread = (yield* Effect.promise(harness.readModel)).threads[0];
+      expect(thread?.latestTurn).toMatchObject({ turnId, state: "error" });
+      expect(thread?.checkpoints[0]).toMatchObject({
+        checkpointRef: ref,
+        status: "error",
+        files: [],
+      });
+      expect(
+        thread?.activities.filter((activity) => activity.kind === "checkpoint.capture.failed"),
+      ).toHaveLength(1);
+      expect(thread?.activities.some((activity) => activity.kind === "checkpoint.captured")).toBe(
+        false,
+      );
+      expect(gitRefExists(harness.cwd, ref)).toBe(false);
+
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make("evt-capture-timeout-replayed"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        turnId,
+        payload: { state: "completed" },
+      });
+      yield* Effect.promise(harness.drain);
+      expect(
+        Array.from(yield* Stream.runCollect(harness.engine.readEvents(0))).filter(
+          (event) => event.type === "thread.turn-diff-completed",
+        ),
+      ).toHaveLength(1);
+    }),
   );
 
   effectIt.effect(

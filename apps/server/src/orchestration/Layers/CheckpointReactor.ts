@@ -282,55 +282,78 @@ const make = Effect.gen(function* () {
       });
     }
 
-    yield* checkpointStore.captureCheckpoint({
-      cwd: input.cwd,
-      checkpointRef: targetCheckpointRef,
-    });
+    const captured = yield* checkpointStore
+      .captureCheckpoint({
+        cwd: input.cwd,
+        checkpointRef: targetCheckpointRef,
+      })
+      .pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          appendCaptureFailureActivity({
+            threadId: input.threadId,
+            turnId: input.turnId,
+            detail: error.message,
+            createdAt: input.createdAt,
+          }).pipe(
+            Effect.catch((activityError) =>
+              Effect.logWarning("failed to record checkpoint capture error", {
+                threadId: input.threadId,
+                turnId: input.turnId,
+                detail: activityError.message,
+              }),
+            ),
+            Effect.as(false),
+          ),
+        ),
+      );
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects files created or deleted during this turn.
-    yield* refreshWorkspaceEntries(input.cwd);
+    if (captured) yield* refreshWorkspaceEntries(input.cwd);
 
     // Git may have been initialized during this turn, leaving no pre-turn
     // snapshot. Keep the completion checkpoint for future turns, but do not
     // invent a baseline or attempt a diff against a ref that does not exist.
-    const files = yield* (
-      fromCheckpointExists
-        ? checkpointStore.diffCheckpoints({
-            cwd: input.cwd,
-            fromCheckpointRef,
-            toCheckpointRef: targetCheckpointRef,
-            fallbackFromToHead: false,
-            ignoreWhitespace: false,
-            format: "numstat",
-          })
-        : Effect.succeed("")
-    ).pipe(
-      Effect.map((diff) =>
-        parseTurnDiffFilesFromNumstat(diff).map((file) => ({
-          path: file.path,
-          kind: "modified" as const,
-          additions: file.additions,
-          deletions: file.deletions,
-        })),
-      ),
-      Effect.tapError((error) =>
-        appendCaptureFailureActivity({
-          threadId: input.threadId,
-          turnId: input.turnId,
-          detail: `Checkpoint captured, but turn diff summary is unavailable: ${error.message}`,
-          createdAt: input.createdAt,
-        }),
-      ),
-      Effect.catch((error) =>
-        Effect.logWarning("failed to derive checkpoint file summary", {
-          threadId: input.threadId,
-          turnId: input.turnId,
-          turnCount: input.turnCount,
-          detail: error.message,
-        }).pipe(Effect.as([])),
-      ),
-    );
+    const files = captured
+      ? yield* (
+          fromCheckpointExists
+            ? checkpointStore.diffCheckpoints({
+                cwd: input.cwd,
+                fromCheckpointRef,
+                toCheckpointRef: targetCheckpointRef,
+                fallbackFromToHead: false,
+                ignoreWhitespace: false,
+                format: "numstat",
+              })
+            : Effect.succeed("")
+        ).pipe(
+          Effect.map((diff) =>
+            parseTurnDiffFilesFromNumstat(diff).map((file) => ({
+              path: file.path,
+              kind: "modified" as const,
+              additions: file.additions,
+              deletions: file.deletions,
+            })),
+          ),
+          Effect.tapError((error) =>
+            appendCaptureFailureActivity({
+              threadId: input.threadId,
+              turnId: input.turnId,
+              detail: `Checkpoint captured, but turn diff summary is unavailable: ${error.message}`,
+              createdAt: input.createdAt,
+            }),
+          ),
+          Effect.catch((error) =>
+            Effect.logWarning("failed to derive checkpoint file summary", {
+              threadId: input.threadId,
+              turnId: input.turnId,
+              turnCount: input.turnCount,
+              detail: error.message,
+            }).pipe(Effect.as([])),
+          ),
+        )
+      : [];
 
     const assistantMessageId =
       input.assistantMessageId ??
@@ -339,6 +362,7 @@ const make = Effect.gen(function* () {
         .find((entry) => entry.role === "assistant" && entry.turnId === input.turnId)?.id ??
       MessageId.make(`assistant:${input.turnId}`);
 
+    // The contract keeps the expected ref; error status marks it unusable if capture failed.
     yield* orchestrationEngine.dispatch({
       type: "thread.turn.diff.complete",
       commandId: yield* serverCommandId("checkpoint-turn-diff-complete"),
@@ -346,7 +370,7 @@ const make = Effect.gen(function* () {
       turnId: input.turnId,
       completedAt: input.createdAt,
       checkpointRef: targetCheckpointRef,
-      status: input.status,
+      status: captured ? input.status : "error",
       files,
       assistantMessageId,
       checkpointTurnCount: input.turnCount,
@@ -358,7 +382,7 @@ const make = Effect.gen(function* () {
       turnId: input.turnId,
       checkpointTurnCount: input.turnCount,
       checkpointRef: targetCheckpointRef,
-      status: input.status,
+      status: captured ? input.status : "error",
       createdAt: input.createdAt,
     });
     yield* receiptBus.publish({
@@ -368,6 +392,8 @@ const make = Effect.gen(function* () {
       checkpointTurnCount: input.turnCount,
       createdAt: input.createdAt,
     });
+
+    if (!captured) return;
 
     yield* orchestrationEngine.dispatch({
       type: "thread.activity.append",

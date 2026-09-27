@@ -154,6 +154,7 @@ function makeDetail(
 function makeTurnDiffCompletedEvent(
   threadId: ThreadId = THREAD_ID,
   turnId: TurnId = TURN_ID,
+  status: "ready" | "error" = "ready",
 ): OrchestrationEvent {
   return {
     sequence: 1,
@@ -171,7 +172,7 @@ function makeTurnDiffCompletedEvent(
       turnId,
       checkpointTurnCount: 1,
       checkpointRef: CheckpointRef.make("refs/t3/checkpoints/goal-loop-thread/1"),
-      status: "ready",
+      status,
       files: [],
       assistantMessageId: null,
       completedAt: NOW,
@@ -359,7 +360,10 @@ describe("scanGoalSignal", () => {
 
 describe("GoalLoopReactor", () => {
   /** Runs one end-of-turn signal against a fixture and returns the dispatches. */
-  const dispatchesFor = Effect.fn("goalLoopDispatchesFor")(function* (options: HarnessOptions) {
+  const dispatchesFor = Effect.fn("goalLoopDispatchesFor")(function* (
+    options: HarnessOptions,
+    checkpointStatus: "ready" | "error" = "ready",
+  ) {
     const fixture = yield* makeHarness(options);
     return yield* Effect.gen(function* () {
       const reactor = yield* GoalLoopReactor.GoalLoopReactor;
@@ -368,7 +372,7 @@ describe("GoalLoopReactor", () => {
         activation: fixture.activation,
         shellReads: fixture.shellReads,
         events: fixture.events,
-        signals: [makeTurnDiffCompletedEvent()],
+        signals: [makeTurnDiffCompletedEvent(THREAD_ID, TURN_ID, checkpointStatus)],
       });
       return yield* Ref.get(fixture.commands);
     }).pipe(Effect.provide(fixture.layer));
@@ -431,13 +435,16 @@ describe("GoalLoopReactor", () => {
   it.effect("completes the loop on <goal_complete>", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const commands = yield* dispatchesFor({
-          shell: makeShell(),
-          messages: [
-            makeAssistantMessage("early note"),
-            makeAssistantMessage("Verified and shipped. <goal_complete>"),
-          ],
-        });
+        const commands = yield* dispatchesFor(
+          {
+            shell: makeShell(),
+            messages: [
+              makeAssistantMessage("early note"),
+              makeAssistantMessage("Verified and shipped. <goal_complete>"),
+            ],
+          },
+          "error",
+        );
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
@@ -451,10 +458,13 @@ describe("GoalLoopReactor", () => {
   it.effect("blocks the loop on <goal_blocked> with the agent's reason", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const commands = yield* dispatchesFor({
-          shell: makeShell(),
-          messages: [makeAssistantMessage("<goal_blocked> I need the API key. </goal_blocked>")],
-        });
+        const commands = yield* dispatchesFor(
+          {
+            shell: makeShell(),
+            messages: [makeAssistantMessage("<goal_blocked> I need the API key. </goal_blocked>")],
+          },
+          "error",
+        );
         assert.strictEqual(commands.length, 1);
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
@@ -485,10 +495,13 @@ describe("GoalLoopReactor", () => {
   it.effect("caps an unfinished loop after its final allowed turn", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const commands = yield* dispatchesFor({
-          shell: makeShell({ goalLoop: makeLoop({ iterations: 10, maxIterations: 10 }) }),
-          messages: [makeAssistantMessage("There is more work to do.")],
-        });
+        const commands = yield* dispatchesFor(
+          {
+            shell: makeShell({ goalLoop: makeLoop({ iterations: 10, maxIterations: 10 }) }),
+            messages: [makeAssistantMessage("There is more work to do.")],
+          },
+          "error",
+        );
         const command = commands[0]!;
         assert.strictEqual(command.type, "thread.goal.loop");
         if (command.type !== "thread.goal.loop" || command.action !== "sync") return;
