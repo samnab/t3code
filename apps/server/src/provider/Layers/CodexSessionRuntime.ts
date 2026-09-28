@@ -28,6 +28,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -309,6 +310,10 @@ export interface CodexSessionRuntimeShape {
   }) => Effect.Effect<EffectCodexSchema.V2ThreadGoalSetResponse, CodexSessionRuntimeError>;
   readonly pauseExecutionGoal: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly clearExecutionGoal: Effect.Effect<void, CodexSessionRuntimeError>;
+  /** Kill the background terminal started by command item `itemId`. */
+  readonly terminateBackgroundTerminal: (
+    itemId: string,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
@@ -1473,6 +1478,17 @@ export const rollbackCodexThread = Effect.fn("rollbackCodexThread")(function* (
   }
   return { threadId, turns: snapshot.turns.slice(0, retainedCount) };
 });
+
+const BackgroundTerminalList = Schema.Struct({
+  data: Schema.Array(Schema.Struct({ itemId: Schema.String, processId: Schema.String })),
+});
+
+/** processId of the listed background terminal for `itemId`; undefined once it has exited. */
+function findBackgroundTerminalProcessId(listed: unknown, itemId: string): string | undefined {
+  const decoded = Schema.decodeUnknownOption(BackgroundTerminalList)(listed);
+  return Option.getOrUndefined(decoded)?.data.find((terminal) => terminal.itemId === itemId)
+    ?.processId;
+}
 
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,
@@ -2908,6 +2924,23 @@ export const makeCodexSessionRuntime = (
           threadId: providerThreadId,
         });
       }),
+      terminateBackgroundTerminal: (itemId) =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          // Experimental methods absent from the generated client. T3 names
+          // the task by itemId; terminate wants the processId list reports.
+          // ponytail: first page only; follow nextCursor if threads ever
+          // hold that many live terminals.
+          const listed = yield* client.raw.request("thread/backgroundTerminals/list", {
+            threadId: providerThreadId,
+          });
+          const processId = findBackgroundTerminalProcessId(listed, itemId);
+          if (processId === undefined) return;
+          yield* client.raw.request("thread/backgroundTerminals/terminate", {
+            threadId: providerThreadId,
+            processId,
+          });
+        }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
         return yield* readCodexThread(client, providerThreadId);

@@ -10388,7 +10388,9 @@ export default function ChatView(props: ChatViewProps) {
         model={agentPanelModel}
         environmentId={activeThreadRef?.environmentId ?? null}
         threadId={activeThreadRef?.threadId ?? null}
-        canStopBackgroundProcesses={selectedProvider === "claudeAgent"}
+        canStopBackgroundProcesses={
+          selectedProvider === "claudeAgent" || selectedProvider === "codex"
+        }
       />
     ) : renderedRightPanelSurface?.kind === "device" ? (
       <Suspense fallback={null}>

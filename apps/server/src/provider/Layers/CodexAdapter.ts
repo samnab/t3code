@@ -128,6 +128,7 @@ interface CodexAdapterSessionContext {
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
   readonly turnTokenUsage: CodexTurnTokenUsageState;
+  readonly backgroundTerminals: CodexBackgroundTerminalState;
   stopped: boolean;
 }
 
@@ -1014,6 +1015,83 @@ function runtimeEventBase(
       payload: event.payload ?? {},
     },
   };
+}
+
+/**
+ * Per-session memory of Codex command items, used to surface background
+ * terminals as `shell` tasks. Codex keeps a backgrounded command's item
+ * `inProgress` past `turn/completed` and sends its `item/completed` only when
+ * the process exits (naturally or via `thread/backgroundTerminals/terminate`).
+ */
+interface CodexBackgroundTerminalState {
+  /** In-flight command items: itemId → command. */
+  readonly live: Map<string, string>;
+  /** Items already surfaced as background tasks. */
+  readonly backgrounded: Set<string>;
+}
+
+/**
+ * Feed every Codex event through; returns the task events to append. A
+ * command still running when its turn completes becomes a background task
+ * (taskId = Codex itemId); its later `item/completed` settles the task.
+ * ponytail: a command backgrounded mid-turn only appears once the turn ends;
+ * poll `thread/backgroundTerminals/list` during turns if that lag matters.
+ */
+function trackCodexBackgroundTerminals(
+  state: CodexBackgroundTerminalState,
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
+): ReadonlyArray<ProviderRuntimeEvent> {
+  if (event.method === "item/started" || event.method === "item/completed") {
+    const payload =
+      readPayload(EffectCodexSchema.V2ItemStartedNotification, event.payload) ??
+      readPayload(EffectCodexSchema.V2ItemCompletedNotification, event.payload);
+    const item = payload?.item;
+    if (item?.type !== "commandExecution") return [];
+    if (event.method === "item/started") {
+      if (item.status === "inProgress") state.live.set(item.id, item.command);
+      return [];
+    }
+    state.live.delete(item.id);
+    if (!state.backgrounded.delete(item.id)) return [];
+    const summary = typeof item.exitCode === "number" ? `exit code ${item.exitCode}` : undefined;
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        eventId: EventId.make(`${event.id}:background:${item.id}`),
+        type: "task.completed",
+        payload: {
+          taskId: RuntimeTaskId.make(item.id),
+          taskType: "shell",
+          status:
+            item.status === "completed"
+              ? "completed"
+              : item.status === "declined"
+                ? "stopped"
+                : "failed",
+          ...(summary ? { summary } : {}),
+        },
+      },
+    ];
+  }
+  if (event.method !== "turn/completed") return [];
+  const started: Array<ProviderRuntimeEvent> = [];
+  for (const [itemId, command] of state.live) {
+    if (state.backgrounded.has(itemId)) continue;
+    state.backgrounded.add(itemId);
+    const title = trimText(command);
+    started.push({
+      ...runtimeEventBase(event, canonicalThreadId),
+      eventId: EventId.make(`${event.id}:background:${itemId}`),
+      type: "task.started",
+      payload: {
+        taskId: RuntimeTaskId.make(itemId),
+        taskType: "shell",
+        ...(title ? { title, description: title } : {}),
+      },
+    });
+  }
+  return started;
 }
 
 function mapItemLifecycle(
@@ -2548,6 +2626,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // Per-session compaction signal memory: bounded by compactions this
         // session actually observed (rare), freed with the session.
         const seenCompactionTurnKeys = new Set<string>();
+        const backgroundTerminals: CodexBackgroundTerminalState = {
+          live: new Map(),
+          backgrounded: new Set(),
+        };
         // Fork into the session scope, not the calling fiber. `forkChild` makes
         // this a child of `startSession`, and Effect interrupts a fiber's
         // children when it completes, so the consumer died on return and every
@@ -2661,9 +2743,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }
               return runtimeEvent;
             });
-            const runtimeEvents = usageLimitError
-              ? [usageLimitError, ...mappedEvents]
-              : mappedEvents;
+            const backgroundEvents = trackCodexBackgroundTerminals(
+              backgroundTerminals,
+              event,
+              event.threadId,
+            );
+            const runtimeEvents = [
+              ...(usageLimitError ? [usageLimitError] : []),
+              ...mappedEvents,
+              ...backgroundEvents,
+            ];
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
@@ -2702,6 +2791,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           runtime,
           eventFiber,
           turnTokenUsage,
+          backgroundTerminals,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -2891,6 +2981,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.flatMap((response) => toExecutionGoalResult(response, threadId)),
     );
 
+  const stopTask: CodexAdapterShape["stopTask"] = (threadId, taskId) =>
+    requireSession(threadId).pipe(
+      Effect.andThen((session) => session.runtime.terminateBackgroundTerminal(taskId)),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/backgroundTerminals/terminate", cause),
+      ),
+    );
+
   const pauseExecutionGoal: CodexAdapterShape["pauseExecutionGoal"] = (threadId) =>
     requireSession(threadId).pipe(
       Effect.andThen((session) => session.runtime.pauseExecutionGoal),
@@ -3013,6 +3113,20 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
+    // Closing the app-server kills its background terminals, and no
+    // item/completed will follow; settle their tasks here.
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    for (const itemId of session.backgroundTerminals.backgrounded) {
+      yield* Queue.offer(runtimeEventQueue, {
+        eventId: EventId.make(`codex-background-stop:${session.threadId}:${itemId}`),
+        provider: PROVIDER,
+        threadId: session.threadId,
+        createdAt,
+        type: "task.completed",
+        payload: { taskId: RuntimeTaskId.make(itemId), taskType: "shell", status: "stopped" },
+      });
+    }
+    session.backgroundTerminals.backgrounded.clear();
   });
 
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>
@@ -3062,6 +3176,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     setExecutionGoal,
     pauseExecutionGoal,
     clearExecutionGoal,
+    stopTask,
     readThread,
     rollbackThread,
     uploadFeedback,

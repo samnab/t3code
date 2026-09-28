@@ -12,6 +12,7 @@ import {
   ProviderInstanceId,
   ProviderItemId,
   ProjectId,
+  RuntimeTaskId,
   type ProviderApprovalDecision,
   type ProviderEvent,
   type ProviderSession,
@@ -187,6 +188,11 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   pauseExecutionGoal = Effect.promise(() => this.pauseExecutionGoalImpl());
+  public readonly terminateBackgroundTerminalImpl = vi.fn((_itemId: string): Promise<void> =>
+    Promise.resolve(undefined),
+  );
+  terminateBackgroundTerminal = (itemId: string) =>
+    Effect.promise(() => this.terminateBackgroundTerminalImpl(itemId));
 
   clearExecutionGoal = Effect.promise(() => this.clearExecutionGoalImpl());
 
@@ -1815,6 +1821,77 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           },
         ],
       );
+    }),
+  );
+
+  it.effect("surfaces a command that outlives its turn as a stoppable shell task", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const tasksFiber = yield* Stream.runCollect(
+        adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type.startsWith("task.")),
+          Stream.take(2),
+        ),
+      ).pipe(Effect.forkChild);
+      // Sequence and shapes captured from codex-cli 0.157.1 unified exec.
+      const command = (id: string, status: string, exitCode: number | null) => ({
+        type: "commandExecution",
+        id,
+        command: `/bin/zsh -lc '${id}'`,
+        commandActions: [],
+        cwd: "/tmp",
+        processId: `pid-${id}`,
+        exitCode,
+        status,
+        source: "unifiedExecStartup",
+      });
+      const itemEvent = (method: "item/started" | "item/completed", item: object, n: number) =>
+        runtime.emit({
+          id: asEventId(`evt-item-${n}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          payload: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            ...(method === "item/started" ? { startedAtMs: n } : { completedAtMs: n }),
+            item,
+          },
+        });
+
+      yield* itemEvent("item/started", command("fg", "inProgress", null), 1);
+      yield* itemEvent("item/completed", command("fg", "completed", 0), 2);
+      yield* itemEvent("item/started", command("bg", "inProgress", null), 3);
+      yield* runtime.emit(codexTurnEvent("turn/completed", "turn-1"));
+      yield* itemEvent("item/completed", command("bg", "failed", 137), 4);
+
+      const tasks = Array.from(yield* Fiber.join(tasksFiber));
+      NodeAssert.deepStrictEqual(
+        tasks.map((event) => [event.type, event.payload]),
+        [
+          [
+            "task.started",
+            {
+              taskId: "bg",
+              taskType: "shell",
+              title: "/bin/zsh -lc 'bg'",
+              description: "/bin/zsh -lc 'bg'",
+            },
+          ],
+          [
+            "task.completed",
+            { taskId: "bg", taskType: "shell", status: "failed", summary: "exit code 137" },
+          ],
+        ],
+      );
+
+      const stopTask = adapter.stopTask;
+      NodeAssert.ok(stopTask);
+      yield* stopTask(asThreadId("thread-1"), RuntimeTaskId.make("bg"));
+      NodeAssert.deepStrictEqual(runtime.terminateBackgroundTerminalImpl.mock.calls, [["bg"]]);
     }),
   );
 
