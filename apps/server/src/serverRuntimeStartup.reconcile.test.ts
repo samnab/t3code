@@ -75,6 +75,7 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
     setExecutionGoal: () => Effect.die("unused"),
     pauseExecutionGoal: () => Effect.die("unused"),
     clearExecutionGoal: () => Effect.die("unused"),
+    stopTask: () => Effect.die("unused"),
     streamEvents: Stream.empty,
   }) satisfies ProviderService.ProviderService["Service"];
 

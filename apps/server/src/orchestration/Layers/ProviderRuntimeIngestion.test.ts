@@ -143,6 +143,7 @@ function createProviderServiceHarness() {
     setExecutionGoal: () => unsupported(),
     pauseExecutionGoal: () => unsupported(),
     clearExecutionGoal: () => unsupported(),
+    stopTask: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     assertConversationRollbackSupported: () => unsupported(),

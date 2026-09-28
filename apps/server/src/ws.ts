@@ -58,6 +58,7 @@ import {
   ProjectWriteFileError,
   ProviderUploadFeedbackError,
   ProviderExecutionGoalError,
+  ProviderTaskStopError,
   ProviderSetupError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
@@ -2593,6 +2594,18 @@ const makeWsRpcLayer = (
             providerService
               .getExecutionGoal(input)
               .pipe(Effect.mapError((cause) => toExecutionGoalRpcError(input.threadId, cause))),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.providerTaskStop]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerTaskStop,
+            providerService.stopTask(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderTaskStopError({ threadId: input.threadId, message: cause.message }),
+              ),
+              Effect.as({}),
+            ),
             { "rpc.aggregate": "provider" },
           ),
         [WS_METHODS.providerExecutionGoalPause]: (input) =>

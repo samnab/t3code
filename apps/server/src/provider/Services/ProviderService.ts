@@ -25,6 +25,7 @@ import type {
   ProviderUploadFeedbackResult,
   ProviderExecutionGoalGetResult,
   ProviderExecutionGoalSetInput,
+  ProviderTaskStopInput,
   MessageId,
   ThreadId,
   ProviderTurnStartResult,
@@ -166,6 +167,9 @@ export interface ProviderServiceShape {
   readonly clearExecutionGoal: (input: {
     readonly threadId: ThreadId;
   }) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Stop one running background task on the thread's live provider session. */
+  readonly stopTask: (input: ProviderTaskStopInput) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Canonical provider runtime event stream.

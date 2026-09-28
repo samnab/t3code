@@ -203,6 +203,7 @@ describe("ProviderSessionReaper", () => {
       setExecutionGoal: () => unsupported(),
       pauseExecutionGoal: () => unsupported(),
       clearExecutionGoal: () => unsupported(),
+      stopTask: () => unsupported(),
       listSessions: () => Effect.succeed([]),
       getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
       assertConversationRollbackSupported: () => unsupported(),

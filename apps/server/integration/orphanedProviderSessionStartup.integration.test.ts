@@ -124,6 +124,7 @@ const startupDependencies = Layer.mergeAll(
     setExecutionGoal: () => Effect.die("unused"),
     pauseExecutionGoal: () => Effect.die("unused"),
     clearExecutionGoal: () => Effect.die("unused"),
+    stopTask: () => Effect.die("unused"),
     listSessions: () => Effect.succeed([]),
     getCapabilities: () => Effect.die("unused"),
     assertConversationRollbackSupported: () => Effect.die("unused"),

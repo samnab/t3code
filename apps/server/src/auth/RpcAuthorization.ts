@@ -129,6 +129,7 @@ export const RPC_REQUIRED_SCOPES = {
   // with the other operate actions.
   [WS_METHODS.providerExecutionGoalGet]: AuthOrchestrationReadScope,
   [WS_METHODS.providerExecutionGoalPause]: AuthOrchestrationOperateScope,
+  [WS_METHODS.providerTaskStop]: AuthOrchestrationOperateScope,
   [WS_METHODS.providerExecutionGoalClear]: AuthOrchestrationOperateScope,
   [WS_METHODS.threadExperimentPreview]: AuthOrchestrationReadScope,
   [WS_METHODS.threadExperimentGet]: AuthOrchestrationReadScope,

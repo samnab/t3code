@@ -21,6 +21,7 @@ import {
   ProviderItemId,
   ProviderRuntimeEvent,
   type RuntimeMode,
+  RuntimeTaskId,
   ThreadId,
   ProviderInstanceId,
   ProjectId,
@@ -78,6 +79,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
+  public readonly stopTaskCalls: Array<string> = [];
   public closeCalls = 0;
   public closeError: unknown | undefined;
 
@@ -125,6 +127,10 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
     this.setMaxThinkingTokensCalls.push(maxThinkingTokens);
+  };
+
+  readonly stopTask = async (taskId: string): Promise<void> => {
+    this.stopTaskCalls.push(taskId);
   };
 
   readonly close = (): void => {
@@ -7460,6 +7466,27 @@ describe("ClaudeAdapterLive", () => {
       );
     });
   }
+
+  it.effect("stops one background task through the SDK without closing the session", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      if (!adapter.stopTask) return yield* Effect.die("Claude adapter must support stopTask");
+      yield* adapter.stopTask(session.threadId, RuntimeTaskId.make("bash-1"));
+
+      assert.deepEqual(harness.query.stopTaskCalls, ["bash-1"]);
+      assert.equal(harness.query.closeCalls, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect("updates model on sendTurn when model override is provided", () => {
     const harness = makeHarness();

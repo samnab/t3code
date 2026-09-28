@@ -308,6 +308,12 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    taskStop: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:task-stop",
+      tag: WS_METHODS.providerTaskStop,
+      scheduler,
+      concurrency,
+    }),
     experimentPreview: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:commands:thread:experiment-preview",
       tag: WS_METHODS.threadExperimentPreview,

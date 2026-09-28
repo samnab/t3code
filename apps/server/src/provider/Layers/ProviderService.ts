@@ -16,6 +16,7 @@ import {
   NonNegativeInt,
   type OptimizerId,
   ProviderExecutionGoalSetInput,
+  ProviderTaskStopInput,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -2883,6 +2884,27 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     yield* clear(routed.threadId);
   });
 
+  const stopTask: ProviderServiceMethod<"stopTask"> = Effect.fn("stopTask")(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.stopTask",
+      schema: ProviderTaskStopInput,
+      payload: rawInput,
+    });
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.stopTask",
+      allowRecovery: false,
+    });
+    const stop = routed.adapter.stopTask;
+    if (stop === undefined) {
+      return yield* toValidationError(
+        "ProviderService.stopTask",
+        `Provider '${routed.adapter.provider}' does not support stopping background tasks.`,
+      );
+    }
+    yield* stop(routed.threadId, input.taskId);
+  });
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     // Continuation is project-scopable, so decide it per session's project;
     // without orchestration the environment value is all there is.
@@ -3009,6 +3031,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     setExecutionGoal,
     pauseExecutionGoal,
     clearExecutionGoal,
+    stopTask,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

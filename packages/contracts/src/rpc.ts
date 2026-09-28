@@ -107,6 +107,8 @@ import {
   ProviderExecutionGoalError,
   ProviderExecutionGoalGetResult,
   ProviderExecutionGoalInput,
+  ProviderTaskStopError,
+  ProviderTaskStopInput,
   ProviderUploadFeedbackError,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
@@ -315,6 +317,7 @@ export const WS_METHODS = {
   providerExecutionGoalGet: "provider.executionGoal.get",
   providerExecutionGoalPause: "provider.executionGoal.pause",
   providerExecutionGoalClear: "provider.executionGoal.clear",
+  providerTaskStop: "provider.task.stop",
   threadExperimentPreview: "thread.experiment.preview",
   threadExperimentStart: "thread.experiment.start",
   threadExperimentGet: "thread.experiment.get",
@@ -1056,6 +1059,12 @@ const WsProviderExecutionGoalClearRpc = Rpc.make(WS_METHODS.providerExecutionGoa
   error: Schema.Union([ProviderExecutionGoalError, EnvironmentAuthorizationError]),
 });
 
+const WsProviderTaskStopRpc = Rpc.make(WS_METHODS.providerTaskStop, {
+  payload: ProviderTaskStopInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([ProviderTaskStopError, EnvironmentAuthorizationError]),
+});
+
 const ThreadExperimentRpcError = Schema.Union([
   ThreadExperimentError,
   EnvironmentAuthorizationError,
@@ -1589,6 +1598,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsProviderUploadFeedbackRpc,
   WsProviderExecutionGoalGetRpc,
   WsProviderExecutionGoalPauseRpc,
+  WsProviderTaskStopRpc,
   WsProviderExecutionGoalClearRpc,
   WsThreadExperimentPreviewRpc,
   WsThreadExperimentStartRpc,

@@ -481,6 +481,7 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
+  readonly stopTask: (taskId: string) => Promise<void>;
   readonly close: () => void;
 }
 
@@ -5415,6 +5416,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  // The SDK answers with a task_notification (status "stopped"), which the
+  // stream already maps to task.completed.
+  const stopTask: ClaudeAdapterShape["stopTask"] = Effect.fn("stopTask")(
+    function* (threadId, taskId) {
+      const context = yield* requireSession(threadId);
+      yield* Effect.tryPromise({
+        try: () => context.query.stopTask(taskId),
+        catch: (cause) => toRequestError(threadId, "task/stop", cause),
+      });
+    },
+  );
+
   const readThread: ClaudeAdapterShape["readThread"] = Effect.fn("readThread")(
     function* (threadId) {
       const context = yield* requireSession(threadId);
@@ -5694,6 +5707,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     startSession,
     sendTurn,
     interruptTurn,
+    stopTask,
     readThread,
     rollbackThread,
     respondToRequest,

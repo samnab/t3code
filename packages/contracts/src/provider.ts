@@ -5,6 +5,7 @@ import {
   EventId,
   IsoDateTime,
   ProviderItemId,
+  RuntimeTaskId,
   ThreadId,
   TurnId,
 } from "./baseSchemas.ts";
@@ -220,6 +221,21 @@ export class ProviderExecutionGoalError extends Schema.TaggedError<ProviderExecu
   {
     threadId: ThreadId,
     reason: ProviderExecutionGoalErrorReason,
+    message: Schema.String,
+  },
+) {}
+
+/** Stop one running background task (shell, monitor) on the thread's live session. */
+export const ProviderTaskStopInput = Schema.Struct({
+  threadId: ThreadId,
+  taskId: RuntimeTaskId,
+});
+export type ProviderTaskStopInput = typeof ProviderTaskStopInput.Type;
+
+export class ProviderTaskStopError extends Schema.TaggedError<ProviderTaskStopError>()(
+  "ProviderTaskStopError",
+  {
+    threadId: ThreadId,
     message: Schema.String,
   },
 ) {}

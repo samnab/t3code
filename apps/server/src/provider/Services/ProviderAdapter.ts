@@ -219,6 +219,13 @@ export interface ProviderAdapterShape<TError> {
   readonly clearExecutionGoal?: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
   /**
+   * Stop one running background task (shell, monitor) on the live session.
+   * Absent when the driver has no per-task stop; the task's terminal
+   * `task.completed` arrives through `streamEvents` as usual.
+   */
+  readonly stopTask?: (threadId: ThreadId, taskId: RuntimeTaskId) => Effect.Effect<void, TError>;
+
+  /**
    * Stop all sessions owned by this adapter.
    */
   readonly stopAll: () => Effect.Effect<void, TError>;

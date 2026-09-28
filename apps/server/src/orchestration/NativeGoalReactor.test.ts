@@ -256,6 +256,7 @@ const makeHarness = Effect.fn("makeNativeGoalHarness")(function* (options: Harne
           }),
         ),
       clearExecutionGoal: () => record("clear"),
+      stopTask: () => Effect.die("unused"),
       streamEvents: Stream.fromQueue(runtimeEvents),
     }),
     Layer.mock(ProviderSessionDirectory)({

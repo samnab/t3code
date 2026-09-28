@@ -35,6 +35,7 @@ import {
   ChevronDown,
   ChevronRight,
   Send,
+  Square,
   X,
   ZapIcon,
 } from "lucide-react";
@@ -42,6 +43,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
+import { threadEnvironment } from "~/state/threads";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useResizableWidth } from "~/hooks/useResizableWidth";
@@ -537,8 +539,26 @@ export function backgroundStatusLabel(
   return status === "failed" ? "failed" : status === "stopped" ? "stopped" : "done";
 }
 
-/** Background command/watch-loop row: same visual language as AgentRow, no click-through. */
-function BackgroundProcessRow({ process }: { process: RuntimeBackgroundProcess }) {
+interface BackgroundStopTarget {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+}
+
+/**
+ * Background command/watch-loop row: same visual language as AgentRow, no
+ * click-through. A running row gets a stop button when `stopTarget` is set
+ * (the thread's provider supports per-task stop); the row settles to
+ * "stopped" when the provider reports the task ended.
+ */
+function BackgroundProcessRow({
+  process,
+  stopTarget,
+}: {
+  process: RuntimeBackgroundProcess;
+  stopTarget: BackgroundStopTarget | null;
+}) {
+  const stopTask = useAtomCommand(threadEnvironment.taskStop);
+  const [stopping, setStopping] = useState(false);
   const elapsed = elapsedBetween(
     process.startedAt,
     process.status === "running" ? null : process.endedAt,
@@ -563,8 +583,26 @@ function BackgroundProcessRow({ process }: { process: RuntimeBackgroundProcess }
       <span className="min-w-0 whitespace-pre-wrap break-words font-mono text-xs font-medium">
         {process.title}
       </span>
-      <span className="min-w-14 whitespace-nowrap pt-0.5 text-right font-mono text-2xs tabular-nums text-muted-foreground/80">
+      <span className="flex min-w-14 items-start justify-end gap-1 whitespace-nowrap pt-0.5 text-right font-mono text-2xs tabular-nums text-muted-foreground/80">
         {statusText}
+        {process.status === "running" && stopTarget !== null ? (
+          <Button
+            size="icon-micro"
+            variant="ghost-muted"
+            aria-label="Stop process"
+            disabled={stopping}
+            onClick={async () => {
+              setStopping(true);
+              const result = await stopTask({
+                environmentId: stopTarget.environmentId,
+                input: { threadId: stopTarget.threadId, taskId: RuntimeTaskId.make(process.id) },
+              });
+              if (result._tag !== "Success") setStopping(false);
+            }}
+          >
+            <Square aria-hidden className="size-3" />
+          </Button>
+        ) : null}
       </span>
     </div>
   );
@@ -1111,10 +1149,12 @@ export function AgentsPanel({
   model,
   environmentId = null,
   threadId = null,
+  canStopBackgroundProcesses = false,
 }: {
   model: AgentPanelModel;
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
+  canStopBackgroundProcesses?: boolean;
 }) {
   const allAgents = useMemo(() => {
     const list: Array<RuntimeSubagent> = [...model.directAgents];
@@ -1176,6 +1216,10 @@ export function AgentsPanel({
 
   const hasAgentList = model.workflows.length > 0 || model.directAgents.length > 0;
   const hasBackgroundProcesses = model.backgroundProcesses.length > 0;
+  const stopTarget =
+    canStopBackgroundProcesses && environmentId !== null && threadId !== null
+      ? { environmentId, threadId }
+      : null;
   const showDivider = hasAgentList && hasBackgroundProcesses;
 
   const agentList = (
@@ -1205,7 +1249,7 @@ export function AgentsPanel({
             Background processes
           </div>
           {model.backgroundProcesses.map((process) => (
-            <BackgroundProcessRow key={process.id} process={process} />
+            <BackgroundProcessRow key={process.id} process={process} stopTarget={stopTarget} />
           ))}
         </section>
       ) : null}
@@ -1224,7 +1268,7 @@ export function AgentsPanel({
                 Background processes
               </div>
               {model.backgroundProcesses.map((process) => (
-                <BackgroundProcessRow key={process.id} process={process} />
+                <BackgroundProcessRow key={process.id} process={process} stopTarget={stopTarget} />
               ))}
             </section>
           </ScrollArea>

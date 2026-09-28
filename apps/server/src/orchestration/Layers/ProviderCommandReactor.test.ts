@@ -377,6 +377,7 @@ describe("ProviderCommandReactor", () => {
       setExecutionGoal: () => Effect.die("unused"),
       pauseExecutionGoal: () => Effect.die("unused"),
       clearExecutionGoal,
+      stopTask: () => Effect.die("unused"),
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
