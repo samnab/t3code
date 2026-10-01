@@ -28,7 +28,8 @@ function normalizeSeparators(path: string): string {
  * path is worth checking against the index, not just a bare filename.
  */
 export function needsWorkspaceBasenameLookup(relativePath: string): boolean {
-  return relativePath.trim().length > 0;
+  const trimmed = relativePath.trim();
+  return trimmed !== "." && trimmed !== ".." && trimmed.length > 0;
 }
 
 /**

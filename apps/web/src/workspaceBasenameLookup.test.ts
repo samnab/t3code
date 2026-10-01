@@ -15,6 +15,8 @@ describe("needsWorkspaceBasenameLookup", () => {
   it("flags relative paths too, since the agent's cwd may not be the root", () => {
     expect(needsWorkspaceBasenameLookup("apps/web/src/components/ChatView.tsx")).toBe(true);
     expect(needsWorkspaceBasenameLookup("apps\\web\\ChatView.tsx")).toBe(true);
+    expect(needsWorkspaceBasenameLookup(".")).toBe(false);
+    expect(needsWorkspaceBasenameLookup("..")).toBe(false);
     expect(needsWorkspaceBasenameLookup("   ")).toBe(false);
   });
 });

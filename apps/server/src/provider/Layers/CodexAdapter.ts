@@ -80,7 +80,6 @@ import {
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
-  type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -103,6 +102,7 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
+import { classifyCodexManagedError } from "../CodexManagedErrors.ts";
 const PROVIDER = ProviderDriverKind.make("codex");
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -118,6 +118,12 @@ export interface CodexAdapterLiveOptions {
     CodexSessionRuntimeError,
     ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
   >;
+  readonly resolveRuntime?: Effect.Effect<
+    import("../CodexManagedRuntime.ts").CodexEffectiveRuntime,
+    import("@t3tools/contracts").ProviderSetupError,
+    Scope.Scope
+  >;
+  readonly onManagedConnectionRevoked?: Effect.Effect<void>;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
@@ -129,6 +135,8 @@ interface CodexAdapterSessionContext {
   readonly eventFiber: Fiber.Fiber<void, never>;
   readonly turnTokenUsage: CodexTurnTokenUsageState;
   readonly backgroundTerminals: CodexBackgroundTerminalState;
+  readonly startInput: Parameters<CodexAdapterShape["startSession"]>[0];
+  readonly runtimeRevision?: string;
   stopped: boolean;
 }
 
@@ -2453,8 +2461,28 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           yield* Effect.suspend(() => stopSessionInternal(existing));
         }
 
+        const sessionScope = yield* Scope.make("sequential");
+        let sessionScopeTransferred = false;
+        yield* Effect.addFinalizer(() =>
+          sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
+        );
+        const resolved = options?.resolveRuntime
+          ? yield* options.resolveRuntime.pipe(
+              Effect.provideService(Scope.Scope, sessionScope),
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: cause.detail,
+                  }),
+              ),
+            )
+          : undefined;
+        const effectiveConfig = resolved?.config ?? codexConfig;
+        const effectiveEnvironment = resolved?.environment ?? options?.environment;
         const serviceTier =
-          input.modelSelection?.instanceId === boundInstanceId
+          !resolved && input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
@@ -2465,7 +2493,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // Voice-notification preference rides the spawn env; see
         // withVoiceNotificationsEnv.
         const sessionEnvironment = withVoiceNotificationsEnv(
-          options?.environment ?? process.env,
+          effectiveEnvironment ?? process.env,
           input.voiceNotifications,
         );
         if (optimizerAttachments?.headroom) {
@@ -2553,19 +2581,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
-          binaryPath: codexConfig.binaryPath,
           ...(options?.models ? { models: options.models } : {}),
+          binaryPath: effectiveConfig.binaryPath,
           launchArgs: isExperiment
             ? ""
-            : resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
+            : resolveCodexLaunchArgs(effectiveConfig.launchArgs, effectiveEnvironment),
           environment: sessionEnvironment,
-          ...(codexConfig.maxConcurrentSubagents
-            ? { maxConcurrentSubagents: codexConfig.maxConcurrentSubagents }
+          ...(effectiveConfig.maxConcurrentSubagents
+            ? { maxConcurrentSubagents: effectiveConfig.maxConcurrentSubagents }
             : {}),
           ...(experimentHomePath
             ? { homePath: experimentHomePath }
-            : codexConfig.homePath
-              ? { homePath: codexConfig.homePath }
+            : effectiveConfig.homePath
+              ? { homePath: effectiveConfig.homePath }
               : {}),
           ...(!isExperiment && isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
@@ -2602,11 +2630,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // after the stop and often sparse, so keep the session's merged view of
         // it and read it when a turn fails on the limit.
         let rateLimits: CodexRateLimitSnapshot | undefined;
-        const sessionScope = yield* Scope.make("sequential");
-        let sessionScopeTransferred = false;
-        yield* Effect.addFinalizer(() =>
-          sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
-        );
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
         const runtime = yield* createRuntime(runtimeInput).pipe(
           Effect.provideService(Scope.Scope, sessionScope),
@@ -2684,6 +2707,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               if (errorPayload?.error.codexErrorInfo === "usageLimitExceeded") return;
             }
 
+            const managedError = options?.resolveRuntime
+              ? classifyCodexManagedError(event.payload)
+              : undefined;
+            if (managedError?.revoke && options?.onManagedConnectionRevoked)
+              yield* options.onManagedConnectionRevoked;
             let usageLimitError: ProviderRuntimeEvent | undefined;
             let usageLimitMessage: string | undefined;
             if (event.method === "turn/completed") {
@@ -2695,7 +2723,18 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 completedPayload?.turn.status === "failed"
                   ? completedPayload.turn.error
                   : undefined;
-              if (turnError?.codexErrorInfo === "usageLimitExceeded") {
+              if (turnError && managedError) {
+                usageLimitMessage = managedError.message;
+                usageLimitError = {
+                  ...runtimeEventBase(event, event.threadId),
+                  type: "runtime.error",
+                  payload: {
+                    message: managedError.message,
+                    code: managedError.code,
+                    class: "provider_error",
+                  },
+                };
+              } else if (turnError?.codexErrorInfo === "usageLimitExceeded") {
                 usageLimitMessage = codexUsageLimitMessage(rateLimits, event.createdAt);
                 usageLimitError = {
                   ...runtimeEventBase(event, event.threadId),
@@ -2714,12 +2753,27 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               event.threadId,
               seenCompactionTurnKeys,
             ).map((runtimeEvent) => {
+              if (managedError && runtimeEvent.type === "runtime.error")
+                return {
+                  ...runtimeEvent,
+                  payload: {
+                    ...runtimeEvent.payload,
+                    message: managedError.message,
+                    detail: managedError.message,
+                    code: managedError.code,
+                  },
+                } satisfies ProviderRuntimeEvent;
+
               if (runtimeEvent.type === "turn.completed" && runtimeEvent.turnId) {
                 return {
                   ...runtimeEvent,
                   payload: {
                     ...runtimeEvent.payload,
-                    ...(usageLimitMessage ? { errorMessage: usageLimitMessage } : {}),
+                    ...(managedError
+                      ? { errorMessage: managedError.message }
+                      : usageLimitMessage
+                        ? { errorMessage: usageLimitMessage }
+                        : {}),
                     tokenUsage: completeCodexTurnTokenUsage(
                       turnTokenUsage,
                       String(runtimeEvent.turnId),
@@ -2792,6 +2846,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           eventFiber,
           turnTokenUsage,
           backgroundTerminals,
+          startInput: input,
+          ...(resolved ? { runtimeRevision: resolved.revision } : {}),
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -2833,13 +2889,34 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       { concurrency: 1 },
     );
 
-    const session = yield* requireSession(input.threadId);
+    let session = yield* requireSession(input.threadId);
+    if (options?.resolveRuntime) {
+      const next = yield* options.resolveRuntime.pipe(
+        Effect.scoped,
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: cause.detail,
+            }),
+        ),
+      );
+      if (next.revision !== session.runtimeRevision) {
+        const previous = yield* session.runtime.getSession;
+        yield* startSession({
+          ...session.startInput,
+          ...(previous.resumeCursor ? { resumeCursor: previous.resumeCursor } : {}),
+        });
+        session = yield* requireSession(input.threadId);
+      }
+    }
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
         : undefined;
     const serviceTier =
-      input.modelSelection?.instanceId === boundInstanceId
+      !options?.resolveRuntime && input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
     return yield* session.runtime
