@@ -839,7 +839,7 @@ export function foldBackgroundProcesses(
   }
   return roster
     .map((process) => ({ ...process }))
-    .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id));
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.id.localeCompare(a.id));
 }
 
 function inventoryStatus(status: OrchestrationSubagentRun["status"]): RuntimeSubagentStatus {
@@ -1033,7 +1033,7 @@ export function deriveAgentPanelModel({
   const workflows = source
     .filter((agent) => agent.kind === "workflow")
     .slice()
-    .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id));
+    .sort((a, b) => b.firstSeenAt.localeCompare(a.firstSeenAt) || b.id.localeCompare(a.id));
   const workflowIds = new Set(workflows.map((workflow) => workflow.id));
   const members = new Map<string, RuntimeSubagent[]>();
   const direct: RuntimeSubagent[] = [];
@@ -1135,11 +1135,11 @@ export function deriveAgentPanelModel({
 
   return {
     workflows: workflowGroups,
-    // Updates and the >100-agent retention ranking must never reshuffle rows
-    // that remain visible.
+    // Newest first. Updates and the >100-agent retention ranking must never
+    // reshuffle rows that remain visible.
     directAgents: direct
       .slice()
-      .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id)),
+      .sort((a, b) => b.firstSeenAt.localeCompare(a.firstSeenAt) || b.id.localeCompare(a.id)),
     runningCount,
     waitingCount,
     idleCount,
