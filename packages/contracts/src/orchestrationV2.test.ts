@@ -490,6 +490,7 @@ describe("orchestration V2 contracts", () => {
       action: "sync",
       state: "running",
       mode: "native",
+      iterations: 1,
       goalLoopGuard: { updatedAt: now },
     });
     const loopEvent = decodeOrchestrationV2DomainEvent({
@@ -522,7 +523,12 @@ describe("orchestration V2 contracts", () => {
     expect(clearGoal).toMatchObject({ goal: null });
     expect(pause).toMatchObject({ action: "pause" });
     expect(voice).toMatchObject({ voiceNotifications: false });
-    expect(sync).toMatchObject({ action: "sync", state: "running", mode: "native" });
+    expect(sync).toMatchObject({
+      action: "sync",
+      state: "running",
+      mode: "native",
+      iterations: 1,
+    });
     expect(loopEvent.type).toBe("thread.goal-loop-updated");
     expect(voiceEvent.type).toBe("thread.voice-notifications-set");
     expect(() =>

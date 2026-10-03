@@ -2550,6 +2550,7 @@ export const ThreadGoalLoopSyncCommand = Schema.Struct({
   reason: Schema.optional(TrimmedNonEmptyString),
   state: Schema.optional(ThreadGoalLoopState),
   mode: Schema.optional(ThreadGoalLoopMode),
+  iterations: Schema.optional(NonNegativeInt),
   goalLoopGuard: Schema.optional(Schema.Struct({ updatedAt: Schema.DateTimeUtc })),
 });
 export type ThreadGoalLoopSyncCommand = typeof ThreadGoalLoopSyncCommand.Type;

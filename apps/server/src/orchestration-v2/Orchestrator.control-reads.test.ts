@@ -114,6 +114,7 @@ it.effect(
         action: "sync",
         state: "running",
         mode: "native",
+        iterations: 1,
         goalLoopGuard: { updatedAt: guardedAt },
       });
 
@@ -126,6 +127,7 @@ it.effect(
       thread = yield* projections.getThread(threadId);
       assert.equal(thread.goalLoop?.state, "running");
       assert.equal(thread.goalLoop?.mode, "native");
+      assert.equal(thread.goalLoop?.iterations, 1);
       assert.equal(thread.voiceNotifications, true);
       const shell = yield* projections.getThreadShell(threadId);
       assert.equal(shell?.goal, "Second goal");

@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
+import { parseThreadGoalCommand } from "../goals/threadGoalCommand.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
@@ -53,6 +54,13 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
   command: OrchestrationV2Command,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  if (command.type === "message.dispatch" && parseThreadGoalCommand(command.text) !== null) {
+    return yield* new Orchestrator.OrchestratorCommandRejectedError({
+      commandId: command.commandId,
+      commandType: command.type,
+      cause: "A /goal command is thread metadata and cannot start a provider turn.",
+    });
+  }
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
     const config = yield* ServerConfig.ServerConfig;
     const incomingByQuestionId = command.attachmentsByQuestionId;
@@ -167,6 +175,13 @@ export const sendToThread = Effect.fn("ThreadMessageIntake.sendToThread")(functi
   input: ThreadManagement.ThreadManagementSendInput,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  if (parseThreadGoalCommand(input.text) !== null) {
+    return yield* new Orchestrator.OrchestratorCommandRejectedError({
+      commandId: input.commandId,
+      commandType: "message.dispatch",
+      cause: "A /goal command is thread metadata and cannot start a provider turn.",
+    });
+  }
   const claimed = yield* AttachmentClaims.claimPendingAttachments(input);
   return yield* threads.sendToThread({ ...input, attachments: claimed.attachments }).pipe(
     Effect.tap((result) => releaseUnusedClaims(claimed.claimedPaths, result.message.attachments)),
@@ -182,6 +197,22 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
   input: ThreadLaunch.ThreadLaunchInput,
 ) {
   const launches = yield* ThreadLaunch.ThreadLaunchService;
+  if (
+    input.initialMessage !== undefined &&
+    parseThreadGoalCommand(input.initialMessage.text) !== null
+  ) {
+    return yield* new ThreadLaunch.ThreadLaunchError({
+      operation: "dispatch-message",
+      commandId: input.commandId,
+      projectId: input.projectId,
+      ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+      cause: new Orchestrator.OrchestratorCommandRejectedError({
+        commandId: input.commandId,
+        commandType: "message.dispatch",
+        cause: "A /goal command is thread metadata and cannot start a provider turn.",
+      }),
+    });
+  }
   yield* AttachmentClaims.validateAttachmentLimits(input.initialMessage?.attachments ?? []);
   if (!input.initialMessage?.attachments.some(AttachmentClaims.attachmentIsPendingUpload)) {
     return yield* launches.launch(input);
