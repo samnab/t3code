@@ -73,6 +73,7 @@ describe("mobile slash commands", () => {
       query: "plan",
       atMessageStart: true,
       hasThread: true,
+      hasCompactableConversation: true,
       allowInteractionMode: true,
       selectedProviderStatus: {
         driver: ProviderDriverKind.make("codex"),
@@ -99,5 +100,25 @@ describe("mobile slash commands", () => {
         allowInteractionMode: false,
       }),
     ).toEqual({ text: "/plan ", cursor: 6, interactionMode: null });
+  });
+
+  it("deduplicates provider commands shadowed by visible T3 commands", () => {
+    const items = buildComposerSlashCommandItems({
+      query: "",
+      atMessageStart: true,
+      hasThread: true,
+      hasCompactableConversation: true,
+      allowInteractionMode: true,
+      selectedProviderStatus: {
+        driver: ProviderDriverKind.make("codex"),
+        slashCommands: [
+          { name: "/goal", description: "Provider goal" },
+          { name: "compact", description: "Compact" },
+        ],
+      },
+    });
+
+    expect(items.filter((item) => item.label === "/goal")).toHaveLength(1);
+    expect(items.some((item) => item.label === "/compact")).toBe(true);
   });
 });

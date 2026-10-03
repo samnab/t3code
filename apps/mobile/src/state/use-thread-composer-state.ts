@@ -1,6 +1,21 @@
 import type { ComposerTextPaste } from "../native/T3ComposerEditor.types";
 import { useAtomValue } from "@effect/atom-react";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
+import { deriveThreadBackgroundWork } from "@t3tools/client-runtime/state/thread-background-work";
+import {
+  deriveTurnOutputThroughput,
+  type TurnOutputThroughput,
+} from "@t3tools/client-runtime/state/tokenThroughput";
+import {
+  deleteThreadGoalWork,
+  nextThreadGoalEditorEpoch,
+  readThreadGoalState,
+  readThreadVoiceNotifications,
+  resolveComposerThreadGoalCommand,
+  runThreadGoalMutation,
+  threadGoalEditorReducer,
+  type ThreadGoalLoopAction,
+} from "@t3tools/client-runtime/state/thread-goal-editor";
 import {
   deriveProviderSubagentStatus,
   deriveRunlessWorkStartedAt,
@@ -8,7 +23,7 @@ import {
   deriveThreadRuntime,
   threadRuntimeHasInterruptibleRun,
 } from "@t3tools/client-runtime/state/thread-execution";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Alert } from "react-native";
 
 import {
@@ -22,6 +37,7 @@ import {
   type ProviderInteractionMode,
   type RuntimeMode,
   type ThreadId,
+  ThreadGoal,
 } from "@t3tools/contracts";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
@@ -81,6 +97,7 @@ import {
   resolveComposerDispatchMode,
   type ActiveTurnComposerAction,
 } from "@t3tools/client-runtime/state/composer-dispatch";
+import { Cause } from "effect";
 import { Atom } from "effect/unstable/reactivity";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { prepareTurnAttachments } from "../lib/attachmentUpload";
@@ -195,6 +212,31 @@ export function useThreadComposerState() {
     label: "edit queued message",
     reportFailure: false,
   });
+  const setThreadGoal = useAtomCommand(threadEnvironment.setGoal, {
+    label: "set thread goal",
+    reportFailure: false,
+  });
+  const clearThreadGoal = useAtomCommand(threadEnvironment.clearGoal, {
+    label: "clear thread goal",
+    reportFailure: false,
+  });
+  const controlThreadGoalLoop = useAtomCommand(threadEnvironment.controlGoalLoop, {
+    label: "control thread goal loop",
+    reportFailure: false,
+  });
+  const setThreadVoiceNotifications = useAtomCommand(threadEnvironment.setVoiceNotifications, {
+    label: "set thread voice notifications",
+    reportFailure: false,
+  });
+  const stopThreadBackgroundTask = useAtomCommand(threadEnvironment.stopBackgroundTask, {
+    label: "stop background task",
+    reportFailure: false,
+  });
+  const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
+    label: "interrupt thread goal work",
+    reportFailure: false,
+  });
+  const [goalEditorState, dispatchGoalEditor] = useReducer(threadGoalEditorReducer, null);
   const [isSavingQueuedEdit, setIsSavingQueuedEdit] = useState(false);
   const savingQueuedEditRef = useRef(false);
   const pastedTextFileNamesRef = useRef<{ threadKey: string | null; names: Set<string> }>({
@@ -327,6 +369,23 @@ export function useThreadComposerState() {
   const draftAttachments = editedDraft?.attachments ?? [];
   const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
   const selectedThread = selectedThreadShell;
+  const selectedThreadGoalState = readThreadGoalState(selectedThread ?? {});
+  const voiceNotifications = readThreadVoiceNotifications(selectedThread ?? {});
+  const backgroundWork = useMemo(
+    () =>
+      selectedThreadProjection
+        ? deriveThreadBackgroundWork(selectedThreadProjection.projection)
+        : [],
+    [selectedThreadProjection],
+  );
+  const outputThroughputByProviderTurnId = useMemo(() => {
+    if (!selectedThreadProjection) return {} as Readonly<Record<string, TurnOutputThroughput>>;
+    const entries = selectedThreadProjection.projection.providerTurns.flatMap((turn) => {
+      const throughput = deriveTurnOutputThroughput(turn);
+      return throughput === null ? [] : ([[turn.id, throughput]] as const);
+    });
+    return Object.fromEntries(entries) as Readonly<Record<string, TurnOutputThroughput>>;
+  }, [selectedThreadProjection]);
   const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const selectedProvider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
@@ -464,6 +523,178 @@ export function useThreadComposerState() {
     ? (selectedThreadRuntime?.activeRunId ?? null)
     : null;
 
+  useEffect(() => {
+    if (!selectedThreadKey) return;
+    dispatchGoalEditor({
+      type: "remoteUpdate",
+      threadKey: selectedThreadKey,
+      goal: selectedThreadGoalState.goal,
+    });
+  }, [selectedThreadGoalState.goal, selectedThreadKey]);
+
+  const openGoalEditor = useCallback(() => {
+    if (!selectedThreadShell || !selectedThreadKey) return;
+    dispatchGoalEditor({
+      type: "open",
+      epoch: nextThreadGoalEditorEpoch(),
+      threadKey: selectedThreadKey,
+      environmentId: selectedThreadShell.environmentId,
+      threadId: selectedThreadShell.id,
+      goal: selectedThreadGoalState.goal,
+    });
+  }, [selectedThreadGoalState.goal, selectedThreadKey, selectedThreadShell]);
+
+  const onGoalDraftChange = useCallback((text: string) => {
+    dispatchGoalEditor({ type: "setDraft", text });
+  }, []);
+
+  const onCloseGoalEditor = useCallback(() => {
+    dispatchGoalEditor({ type: "close" });
+  }, []);
+
+  const onSaveGoal = useCallback(async () => {
+    if (goalEditorState === null || goalEditorState.saving) return;
+    const snapshot = goalEditorState;
+    dispatchGoalEditor({ type: "beginSave" });
+    const result = await runThreadGoalMutation(
+      { environmentId: snapshot.environmentId, threadId: snapshot.threadId },
+      () =>
+        setThreadGoal({
+          environmentId: snapshot.environmentId,
+          input: { threadId: snapshot.threadId, goal: ThreadGoal.make(snapshot.draft.trim()) },
+        }),
+    );
+    if (result.status === "busy") {
+      dispatchGoalEditor({
+        type: "saveFailure",
+        threadKey: snapshot.threadKey,
+        epoch: snapshot.epoch,
+        error: "Another goal update is still in progress.",
+      });
+      return;
+    }
+    if (AsyncResult.isFailure(result.value)) {
+      dispatchGoalEditor({
+        type: "saveFailure",
+        threadKey: snapshot.threadKey,
+        epoch: snapshot.epoch,
+        error: String(Cause.squash(result.value.cause)),
+      });
+      return;
+    }
+    dispatchGoalEditor({
+      type: "saveSuccess",
+      threadKey: snapshot.threadKey,
+      epoch: snapshot.epoch,
+      goal: snapshot.draft.trim(),
+    });
+  }, [goalEditorState, setThreadGoal]);
+
+  const runGoalLoopAction = useCallback(
+    async (action: ThreadGoalLoopAction) => {
+      if (!selectedThreadShell) return false;
+      const result = await controlThreadGoalLoop({
+        environmentId: selectedThreadShell.environmentId,
+        input: { threadId: selectedThreadShell.id, action },
+      });
+      if (AsyncResult.isFailure(result)) {
+        Alert.alert("Could not update the goal loop", String(Cause.squash(result.cause)));
+        return false;
+      }
+      return true;
+    },
+    [controlThreadGoalLoop, selectedThreadShell],
+  );
+
+  const onClearGoal = useCallback(async () => {
+    if (!selectedThreadShell || goalEditorState === null) return;
+    const snapshot = goalEditorState;
+    dispatchGoalEditor({ type: "beginSave" });
+    const result = await runThreadGoalMutation(
+      { environmentId: selectedThreadShell.environmentId, threadId: selectedThreadShell.id },
+      () =>
+        deleteThreadGoalWork({
+          loop: selectedThreadGoalState.goalLoop,
+          pauseGoalLoop: () => runGoalLoopAction("pause"),
+          interruptActiveTurn: async () => {
+            if (interruptibleRunId === null) return true;
+            const interrupted = await interruptThreadTurn({
+              environmentId: selectedThreadShell.environmentId,
+              input: { threadId: selectedThreadShell.id, runId: interruptibleRunId },
+            });
+            return !AsyncResult.isFailure(interrupted);
+          },
+          clearGoal: async () => {
+            const cleared = await clearThreadGoal({
+              environmentId: selectedThreadShell.environmentId,
+              input: { threadId: selectedThreadShell.id },
+            });
+            return !AsyncResult.isFailure(cleared);
+          },
+        }),
+    );
+    if (result.status === "busy") {
+      dispatchGoalEditor({
+        type: "saveFailure",
+        threadKey: snapshot.threadKey,
+        epoch: snapshot.epoch,
+        error: "Another goal update is still in progress.",
+      });
+      return;
+    }
+    if (result.value !== "stopped") {
+      dispatchGoalEditor({
+        type: "saveFailure",
+        threadKey: snapshot.threadKey,
+        epoch: snapshot.epoch,
+        error: "Could not clear the thread goal.",
+      });
+      return;
+    }
+    dispatchGoalEditor({
+      type: "saveSuccess",
+      threadKey: snapshot.threadKey,
+      epoch: snapshot.epoch,
+      goal: null,
+    });
+  }, [
+    clearThreadGoal,
+    goalEditorState,
+    interruptThreadTurn,
+    interruptibleRunId,
+    runGoalLoopAction,
+    selectedThreadGoalState.goalLoop,
+    selectedThreadShell,
+  ]);
+
+  const onUpdateVoiceNotifications = useCallback(
+    async (enabled: boolean) => {
+      if (!selectedThreadShell) return;
+      const result = await setThreadVoiceNotifications({
+        environmentId: selectedThreadShell.environmentId,
+        input: { threadId: selectedThreadShell.id, voiceNotifications: enabled },
+      });
+      if (AsyncResult.isFailure(result)) {
+        Alert.alert("Could not update voice notifications", String(Cause.squash(result.cause)));
+      }
+    },
+    [selectedThreadShell, setThreadVoiceNotifications],
+  );
+
+  const onStopBackgroundTask = useCallback(
+    async (taskId: string) => {
+      if (!selectedThreadShell) return;
+      const result = await stopThreadBackgroundTask({
+        environmentId: selectedThreadShell.environmentId,
+        input: { threadId: selectedThreadShell.id, taskId },
+      });
+      if (AsyncResult.isFailure(result)) {
+        Alert.alert("Could not stop background work", String(Cause.squash(result.cause)));
+      }
+    },
+    [selectedThreadShell, stopThreadBackgroundTask],
+  );
+
   const cancelQueuedRunEdit = useCallback(() => {
     if (selectedThreadKey === null || savingQueuedEditRef.current) return;
     endQueuedRunEdit(selectedThreadKey);
@@ -549,14 +780,6 @@ export function useThreadComposerState() {
       if (!selectedThreadShell) {
         return null;
       }
-      // The server has not created this thread yet. Queuing a follow-up against
-      // its id would strand the message: if the creation is rejected the thread
-      // never appears and the drain drops the orphan. The composer disables its
-      // send button too; this guard also covers the editor's submit key.
-      if (selectedThreadCreation !== null) {
-        return null;
-      }
-
       // Editing a queued message repurposes the composer: the send button saves
       // the edit in place instead of enqueuing a new message.
       const editKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
@@ -571,6 +794,54 @@ export function useThreadComposerState() {
       const thread = selectedThreadShell;
       const text = draft.text.trim();
       const attachments = draft.attachments;
+      const goalCommand = resolveComposerThreadGoalCommand({
+        text: draft.text,
+        isServerThread: selectedThreadCreation === null,
+        attachmentCount: attachments.length,
+        context: draft.context,
+        capabilityKnown: selectedEnvironmentRuntime?.serverConfig !== null,
+        supportsThreadGoals: true,
+      });
+      if (goalCommand !== null) {
+        if (goalCommand.blockReason !== null) {
+          const detail = {
+            "draft-thread": "Wait for the thread to finish starting, then try again.",
+            attachments: "Remove attachments before using /goal.",
+            context: "Remove context references before using /goal.",
+            unavailable: "Reconnect before changing the thread goal.",
+            unsupported: "This environment does not support thread goals.",
+          }[goalCommand.blockReason];
+          Alert.alert("Could not update the thread goal", detail);
+          return null;
+        }
+        if (goalCommand.command.action === "show") {
+          openGoalEditor();
+          return null;
+        }
+        const result =
+          goalCommand.command.action === "clear"
+            ? await clearThreadGoal({
+                environmentId: thread.environmentId,
+                input: { threadId: thread.id },
+              })
+            : await setThreadGoal({
+                environmentId: thread.environmentId,
+                input: { threadId: thread.id, goal: ThreadGoal.make(goalCommand.command.goal) },
+              });
+        if (AsyncResult.isFailure(result)) {
+          Alert.alert("Could not update the thread goal", String(Cause.squash(result.cause)));
+          return null;
+        }
+        clearComposerDraftContent(threadKey);
+        return null;
+      }
+      // The server has not created this thread yet. Queuing a follow-up against
+      // its id would strand the message: if the creation is rejected the thread
+      // never appears and the drain drops the orphan. Goal commands are parsed
+      // first so they can explain why draft threads cannot accept them yet.
+      if (selectedThreadCreation !== null) {
+        return null;
+      }
       if (
         composerAttachmentUploadBlockReason({
           environmentId: selectedThreadShell.environmentId,
@@ -714,6 +985,8 @@ export function useThreadComposerState() {
       return messageId;
     },
     [
+      clearThreadGoal,
+      openGoalEditor,
       activeThreadBusy,
       canSteerActiveTurn,
       followUpBehavior,
@@ -722,6 +995,7 @@ export function useThreadComposerState() {
       selectedEnvironmentRuntime?.serverConfig,
       selectedThreadCreation,
       selectedThreadShell,
+      setThreadGoal,
       uploadThreadFeedback,
     ],
   );
@@ -1062,6 +1336,20 @@ export function useThreadComposerState() {
     interactionMode,
     activeThreadBusy,
     interruptibleRunId,
+    goal: selectedThreadGoalState.goal,
+    goalLoop: selectedThreadGoalState.goalLoop,
+    goalEditorState,
+    openGoalEditor,
+    onGoalDraftChange,
+    onCloseGoalEditor,
+    onSaveGoal,
+    onClearGoal,
+    onGoalLoopAction: runGoalLoopAction,
+    voiceNotifications,
+    onUpdateVoiceNotifications,
+    backgroundWork,
+    onStopBackgroundTask,
+    outputThroughputByProviderTurnId,
     onChangeDraftMessage,
     onPickDraftMedia,
     onPickDraftFiles,

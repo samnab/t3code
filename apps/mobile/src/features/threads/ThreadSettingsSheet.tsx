@@ -250,6 +250,8 @@ type ThreadSettingsSessionProps = {
   readonly onUpdateOptionSelections: (selections: ReadonlyArray<ProviderOptionSelection>) => void;
   readonly runtimeMode: RuntimeMode;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
+  readonly voiceNotifications?: boolean;
+  readonly onUpdateVoiceNotifications?: (enabled: boolean) => void;
 };
 
 export type ExistingThreadSettingsRouteSession = ThreadSettingsSessionProps & {
@@ -303,6 +305,8 @@ type ThreadSettingsSessionValue = {
   readonly runtimeMode: RuntimeMode;
   readonly runtimeModeChoices: ReturnType<typeof runtimeModeChoicesForSupportedModes>;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
+  readonly voiceNotifications?: boolean;
+  readonly onUpdateVoiceNotifications?: (enabled: boolean) => void;
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
   readonly providerExpansionOverrides: ReadonlySet<string>;
   readonly hasLegacyModels: boolean;
@@ -475,6 +479,8 @@ function ThreadSettingsSessionProvider(
       runtimeMode: compatibleRuntimeMode,
       runtimeModeChoices,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
+      voiceNotifications: props.voiceNotifications,
+      onUpdateVoiceNotifications: props.onUpdateVoiceNotifications,
       displayedDescriptors,
       favoriteKeys,
       favoritesLoaded,
@@ -512,6 +518,8 @@ function ThreadSettingsSessionProvider(
       pressModel,
       providerFilter,
       props.onUpdateRuntimeMode,
+      props.onUpdateVoiceNotifications,
+      props.voiceNotifications,
       props.providerGroups,
       runtimeModeChoices,
       searchQuery,
@@ -766,7 +774,7 @@ function ThreadSettingsOptionsItem(props: {
         })}
         <Animated.View layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}>
           <DisclosureRow
-            isLast
+            isLast={session.onUpdateVoiceNotifications === undefined}
             label="Runtime"
             value={
               session.runtimeModeChoices.find((choice) => choice.mode === session.runtimeMode)
@@ -775,6 +783,16 @@ function ThreadSettingsOptionsItem(props: {
             onPress={() => props.onOpenSubmenu({ kind: "runtime" })}
           />
         </Animated.View>
+        {session.onUpdateVoiceNotifications ? (
+          <Animated.View layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}>
+            <SwitchRow
+              isLast
+              label="Voice notifications"
+              value={session.voiceNotifications ?? true}
+              onValueChange={session.onUpdateVoiceNotifications}
+            />
+          </Animated.View>
+        ) : null}
       </Animated.View>
 
       {Platform.OS !== "ios" && session.hasLegacyModels ? (
@@ -1422,6 +1440,8 @@ export function NewTaskThreadSettingsRouteScreen() {
       onUpdateOptionSelections={flow.setSelectedModelOptions}
       runtimeMode={flow.runtimeMode}
       onUpdateRuntimeMode={flow.setRuntimeMode}
+      voiceNotifications={flow.voiceNotifications}
+      onUpdateVoiceNotifications={flow.setVoiceNotifications}
       onClose={() => navigation.goBack()}
     />
   );

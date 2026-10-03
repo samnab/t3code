@@ -18,6 +18,7 @@ import {
   T3_PROJECT_FILE_NAME,
   ThreadId,
 } from "@t3tools/contracts";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { sanitizeNewRefName } from "@t3tools/shared/git";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
@@ -111,6 +112,7 @@ import {
 } from "./new-task-context-presentation";
 import { resolveEnvironmentProjectMatch } from "./new-task-project-selection";
 import { resolveProjectThreadCreationBranch } from "./projectThreadCreationValidation";
+import { resolveNewThreadModelSelection } from "@t3tools/client-runtime/state/provider-model-defaults";
 
 type WorkspaceMode = "local" | "worktree";
 
@@ -177,6 +179,7 @@ type NewTaskFlowContextValue = {
   readonly currentCheckoutBranchName: string | null;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly voiceNotifications: boolean;
   readonly planModeEnabled: boolean;
   readonly expandedProvider: string | null;
   readonly environments: ReadonlyArray<{
@@ -233,6 +236,7 @@ type NewTaskFlowContextValue = {
   readonly loadMoreBranches: () => void;
   readonly setRuntimeMode: (value: RuntimeMode) => void;
   readonly setInteractionMode: (value: ProviderInteractionMode) => void;
+  readonly setVoiceNotifications: (value: boolean) => void;
   readonly setSelectedModelOptions: (
     value: ReadonlyArray<ProviderOptionSelection> | undefined,
   ) => void;
@@ -540,26 +544,27 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     selectedEnvironmentServerConfig,
     storedStickyModelSelection,
   );
+  const inheritedModelSelection = resolveNewThreadModelSelection({
+    projectDefaultSelection: projectDefaultModelSelection,
+    carriedSelection: stickyModelSelection,
+    shouldCarrySelection: true,
+    settings: DEFAULT_UNIFIED_SETTINGS,
+  });
   const modelOptions = useMemo(
     () =>
       buildModelOptions(
         selectedEnvironmentServerConfig,
-        draftModelSelection ?? projectDefaultModelSelection ?? stickyModelSelection,
+        draftModelSelection ?? inheritedModelSelection,
       ),
-    [
-      selectedEnvironmentServerConfig,
-      draftModelSelection,
-      projectDefaultModelSelection,
-      stickyModelSelection,
-    ],
+    [selectedEnvironmentServerConfig, draftModelSelection, inheritedModelSelection],
   );
 
   // An unsent draft keeps its explicit pick. Fresh drafts resolve the project
   // default before the last manual app-wide selection and provider default.
   const selectedModel = resolveNewTaskModelSelection({
     draftSelection: draftModelSelection,
-    projectDefaultSelection: projectDefaultModelSelection,
-    stickySelection: stickyModelSelection,
+    projectDefaultSelection: inheritedModelSelection,
+    stickySelection: null,
     modelOptions,
   });
   const selectedModelKey = selectedModel
@@ -585,6 +590,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const interactionMode = planModeEnabled
     ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
     : DEFAULT_PROVIDER_INTERACTION_MODE;
+  const voiceNotifications = selectedProjectDraft.voiceNotifications ?? true;
   const setSelectedModelKey = useCallback(
     // Options ride along in the same write: a follow-up setSelectedModelOptions
     // call would rebuild the selection from the stale pre-switch model.
@@ -968,6 +974,14 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     },
     [selectedProjectDraftKey, selectedProviderStatus],
   );
+  const setVoiceNotifications = useCallback(
+    (value: boolean) => {
+      if (selectedProjectDraftKey) {
+        updateComposerDraftSettings(selectedProjectDraftKey, { voiceNotifications: value });
+      }
+    },
+    [selectedProjectDraftKey],
+  );
 
   const beginEditingPendingTask = useCallback((messageId: string): boolean => {
     const message = findQueuedPendingTask(messageId);
@@ -984,6 +998,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         modelSelection: message.modelSelection,
         runtimeMode: message.runtimeMode,
         interactionMode: message.interactionMode,
+        voiceNotifications: message.voiceNotifications,
         workspaceSelection: {
           mode: message.creation.workspaceMode,
           branch: message.creation.branch,
@@ -1059,6 +1074,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
             (candidate) => candidate.instanceId === draftModelSelection.instanceId,
           ),
         }),
+        voiceNotifications: draft.voiceNotifications ?? true,
         creation: {
           projectId: selectedProject.id,
           ...(projectTitle !== undefined ? { projectTitle } : {}),
@@ -1227,6 +1243,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       currentCheckoutBranchName,
       runtimeMode,
       interactionMode,
+      voiceNotifications,
       planModeEnabled,
       expandedProvider,
       environments,
@@ -1261,6 +1278,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       loadMoreBranches,
       setRuntimeMode,
       setInteractionMode,
+      setVoiceNotifications,
       setSelectedModelOptions,
       setExpandedProvider,
     }),
@@ -1281,6 +1299,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       filteredBranches,
       finishEditingPendingTask,
       interactionMode,
+      voiceNotifications,
       isScratchDraft,
       planModeEnabled,
       loadBranches,
@@ -1309,6 +1328,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectBranch,
       selectEnvironment,
       setInteractionMode,
+      setVoiceNotifications,
       setPrompt,
       setRuntimeMode,
       setSelectedModelKey,

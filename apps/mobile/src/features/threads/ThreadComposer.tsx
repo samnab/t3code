@@ -1,6 +1,11 @@
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import {
+  resolveThreadGoalDisplay,
+  type ThreadGoalEditorState,
+  type ThreadGoalLoopAction,
+} from "@t3tools/client-runtime/state/thread-goal-editor";
 import { useAtomValue } from "@effect/atom-react";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { pastedTextDisposition, replaceTextSelection } from "@t3tools/client-runtime/text-paste";
@@ -15,6 +20,8 @@ import {
   type RuntimeMode,
   type ServerConfig as T3ServerConfig,
   type UsageLimitsReport,
+  type ThreadGoal,
+  type ThreadGoalLoop,
 } from "@t3tools/contracts";
 import {
   collectProviderUsageLimits,
@@ -74,6 +81,7 @@ import { fileRoutePathSegments } from "../files/filePath";
 import {
   ComposerActionButton,
   ComposerInlineControl,
+  ComposerToolbarScroller,
   ComposerToolbarRow,
 } from "../../components/ComposerToolbar";
 import { ProviderIcon } from "../../components/ProviderIcon";
@@ -122,6 +130,8 @@ import {
   useThreadSettingsSheetPresentation,
   type NavigationWithFinishTransitioning,
 } from "./use-thread-settings-sheet-presentation";
+import { ThreadGoalEditorSheet } from "./ThreadGoalEditorSheet";
+import { mobileGoalLoopAction, mobileGoalLoopStatus } from "./thread-goal-loop";
 
 /**
  * Height of the collapsed composer (pill + vertical padding, excluding safe-area inset).
@@ -175,6 +185,17 @@ export interface ThreadComposerProps {
   readonly followUpBehavior: FollowUpBehavior;
   /** Whether the live turn can actually be steered by this provider. */
   readonly canSteerActiveTurn: boolean;
+  readonly goal: ThreadGoal | null;
+  readonly goalLoop: ThreadGoalLoop | null;
+  readonly goalEditorState: ThreadGoalEditorState | null;
+  readonly onOpenGoalEditor: () => void;
+  readonly onGoalDraftChange: (text: string) => void;
+  readonly onCloseGoalEditor: () => void;
+  readonly onSaveGoal: () => void;
+  readonly onClearGoal: () => void;
+  readonly onGoalLoopAction: (action: ThreadGoalLoopAction) => void;
+  readonly voiceNotifications: boolean;
+  readonly onUpdateVoiceNotifications: (enabled: boolean) => void;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onPickDraftMedia: () => Promise<void>;
@@ -441,6 +462,13 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   // Content lives under the edit's own draft while a queued message is open;
   // the owner key still identifies this composer for settings and dictation.
   const composerDraftKey = props.draftKey ?? composerOwnerKey;
+  const goalDisplay = resolveThreadGoalDisplay({
+    goal: props.goal,
+    controlsVisible: props.connectionState === "connected",
+    supportsThreadGoals: true,
+  });
+  const goalLoopAction = mobileGoalLoopAction(props.goalLoop);
+  const goalLoopStatus = mobileGoalLoopStatus(props.goalLoop);
   const openDraftDocument = (attachment: ComposerDocumentAttachment) => {
     Keyboard.dismiss();
     navigation.navigate("ThreadAttachment", {
@@ -680,12 +708,16 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       },
       runtimeMode: currentRuntimeMode,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
+      voiceNotifications: props.voiceNotifications,
+      onUpdateVoiceNotifications: props.onUpdateVoiceNotifications,
     }),
     [
       currentModelSelection,
       currentRuntimeMode,
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
+      props.onUpdateVoiceNotifications,
+      props.voiceNotifications,
       providerOptionDescriptors,
       settingsOwnerId,
       threadProviderGroups,
@@ -1109,7 +1141,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                       onPickMedia={props.onPickDraftMedia}
                       onPickFiles={props.onPickDraftFiles}
                     />
-                    <View className="min-w-0 shrink">
+                    <ComposerToolbarScroller>
                       <ComposerInlineControl
                         accessibilityLabel="Model and reasoning settings"
                         emphasized
@@ -1121,10 +1153,30 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                           />
                         )}
                         label={currentModelOption?.label ?? currentModelSelection.model}
-                        maxWidth="100%"
                         onPress={openSettings}
                       />
-                    </View>
+                      {goalDisplay !== "none" ? (
+                        <ComposerInlineControl
+                          accessibilityLabel={
+                            props.goal === null ? "Set thread goal" : "Edit thread goal"
+                          }
+                          icon="flag"
+                          label={props.goal ?? "Goal"}
+                          maxWidth={180}
+                          onPress={goalDisplay === "control" ? props.onOpenGoalEditor : undefined}
+                          static={goalDisplay === "passive"}
+                        />
+                      ) : null}
+                      {goalLoopAction !== null ? (
+                        <ComposerInlineControl
+                          accessibilityLabel={`${goalLoopAction} goal loop`}
+                          icon={goalLoopAction === "pause" ? "pause" : "play"}
+                          label={goalLoopStatus ?? goalLoopAction}
+                          onPress={() => props.onGoalLoopAction(goalLoopAction)}
+                          showChevron={false}
+                        />
+                      ) : null}
+                    </ComposerToolbarScroller>
                   </View>
                 )}
                 <View className="shrink-0 flex-row items-center">
@@ -1160,6 +1212,17 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
 
       <VideoPreviewModal source={previewVideo} onRequestClose={closePreview} />
       <FilePreviewModal source={previewFile} onRequestClose={closePreview} />
+      {props.goalEditorState !== null ? (
+        <ThreadGoalEditorSheet
+          state={props.goalEditorState}
+          goalLoop={props.goalLoop}
+          onDraftChange={props.onGoalDraftChange}
+          onSave={props.onSaveGoal}
+          onClear={props.onClearGoal}
+          onGoalLoopAction={props.onGoalLoopAction}
+          onClose={props.onCloseGoalEditor}
+        />
+      ) : null}
     </Animated.View>
   );
 });

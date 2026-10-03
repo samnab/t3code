@@ -22,6 +22,8 @@ import type {
   RuntimeRequestId,
   ServerConfig as T3ServerConfig,
   ThreadId,
+  ThreadGoal,
+  ThreadGoalLoop,
   UsageLimitsReport,
 } from "@t3tools/contracts";
 import {
@@ -105,6 +107,12 @@ import type {
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { ComposerFeedback } from "./ComposerFeedback";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
+import type { ThreadBackgroundTask } from "@t3tools/client-runtime/state/thread-background-work";
+import type { TurnOutputThroughput } from "@t3tools/client-runtime/state/tokenThroughput";
+import type {
+  ThreadGoalEditorState,
+  ThreadGoalLoopAction,
+} from "@t3tools/client-runtime/state/thread-goal-editor";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { ProviderSubagentBar } from "./ProviderSubagentBar";
 import { ThreadCreationFailedCard } from "./ThreadCreationFailedCard";
@@ -131,6 +139,7 @@ import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
+import { ThreadBackgroundWorkCard } from "./ThreadBackgroundWorkCard";
 
 export interface ThreadDetailScreenProps {
   readonly worktreeSetup?: WorktreeSetupCardProps | null;
@@ -179,6 +188,20 @@ export interface ThreadDetailScreenProps {
   readonly composerDraftKey: string | null;
   readonly followUpBehavior: FollowUpBehavior;
   readonly canSteerActiveTurn: boolean;
+  readonly goal: ThreadGoal | null;
+  readonly goalLoop: ThreadGoalLoop | null;
+  readonly goalEditorState: ThreadGoalEditorState | null;
+  readonly onOpenGoalEditor: () => void;
+  readonly onGoalDraftChange: (text: string) => void;
+  readonly onCloseGoalEditor: () => void;
+  readonly onSaveGoal: () => void;
+  readonly onClearGoal: () => void;
+  readonly onGoalLoopAction: (action: ThreadGoalLoopAction) => void;
+  readonly voiceNotifications: boolean;
+  readonly onUpdateVoiceNotifications: (enabled: boolean) => void;
+  readonly backgroundWork: ReadonlyArray<ThreadBackgroundTask>;
+  readonly onStopBackgroundTask: (taskId: string) => void;
+  readonly outputThroughputByProviderTurnId: Readonly<Record<string, TurnOutputThroughput>>;
   readonly isSavingQueuedEdit: boolean;
   readonly onCancelQueuedRunEdit: () => void;
   readonly onRemoveQueuedEditAttachment: (attachmentId: string) => void;
@@ -1088,6 +1111,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               onEndFollowEnabledChange={setEndFollowEnabled}
               skills={selectedProviderSkills}
               onUseArtifactTemplate={handleUseArtifactTemplate}
+              outputThroughputByProviderTurnId={props.outputThroughputByProviderTurnId}
             />
           </RenderErrorBoundary>
         </View>
@@ -1251,6 +1275,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                     : undefined
                 }
               >
+                {props.backgroundWork.length > 0 ? (
+                  <ThreadBackgroundWorkCard
+                    work={props.backgroundWork}
+                    onStop={props.onStopBackgroundTask}
+                  />
+                ) : null}
                 {isProviderSubagent ? (
                   <View
                     className="self-center px-3 pt-1.5"
@@ -1309,6 +1339,17 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       draftKey={props.composerDraftKey ?? undefined}
                       followUpBehavior={props.followUpBehavior}
                       canSteerActiveTurn={props.canSteerActiveTurn}
+                      goal={props.goal}
+                      goalLoop={props.goalLoop}
+                      goalEditorState={props.goalEditorState}
+                      onOpenGoalEditor={props.onOpenGoalEditor}
+                      onGoalDraftChange={props.onGoalDraftChange}
+                      onCloseGoalEditor={props.onCloseGoalEditor}
+                      onSaveGoal={props.onSaveGoal}
+                      onClearGoal={props.onClearGoal}
+                      onGoalLoopAction={props.onGoalLoopAction}
+                      voiceNotifications={props.voiceNotifications}
+                      onUpdateVoiceNotifications={props.onUpdateVoiceNotifications}
                       queuedEdit={
                         props.queuedRunEdit === null
                           ? null

@@ -203,6 +203,12 @@ function SettingsIndexSections() {
           target="SettingsEnvironmentMaintenance"
           disabled={noServerTargets}
         />
+        <SettingsRow
+          icon="bolt.horizontal.circle"
+          label="Optimizers"
+          target="SettingsOptimizers"
+          disabled={noServerTargets}
+        />
       </SettingsSection>
 
       <SettingsSection title="App">

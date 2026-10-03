@@ -11,6 +11,7 @@ import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
+import type { TurnOutputThroughput } from "@t3tools/client-runtime/state/tokenThroughput";
 import {
   type OrchestrationMessageContext,
   ThreadId,
@@ -294,6 +295,7 @@ export interface ThreadFeedProps {
   readonly onEndFollowEnabledChange?: (enabled: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   readonly onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
+  readonly outputThroughputByProviderTurnId: Readonly<Record<string, TurnOutputThroughput>>;
 }
 
 async function waitForThreadShell(
@@ -1492,6 +1494,7 @@ function renderFeedEntry(
     | "onEditPendingMessage"
     | "threadId"
     | "workspaceRoot"
+    | "outputThroughputByProviderTurnId"
   > & {
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
@@ -1629,6 +1632,11 @@ function renderFeedEntry(
       props.terminalAssistantMessageIds.has(message.id) &&
       !assistantTurnStillInProgress &&
       !message.streaming;
+    const providerTurnId = message.projectedItem?.item.providerTurnId ?? null;
+    const outputThroughput =
+      providerTurnId === null
+        ? null
+        : (props.outputThroughputByProviderTurnId[providerTurnId] ?? null);
 
     if (isUser) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
@@ -1891,6 +1899,14 @@ function renderFeedEntry(
             <Text className="font-t3-medium text-xs tabular-nums text-foreground-secondary">
               {timestampLabel}
             </Text>
+            {outputThroughput ? (
+              <Text
+                accessibilityLabel={`Average output ${outputThroughput.tokensPerSecond.toFixed(1)} tokens per second`}
+                className="font-t3-medium text-xs tabular-nums text-foreground-secondary"
+              >
+                {outputThroughput.tokensPerSecond.toFixed(1)} tok/s
+              </Text>
+            ) : null}
           </View>
         ) : null}
       </Animated.View>
@@ -2933,6 +2949,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             threadTitle: props.threadTitle,
             skills: props.skills,
             workspaceRoot: props.workspaceRoot,
+            outputThroughputByProviderTurnId: props.outputThroughputByProviderTurnId,
           })}
           {props.worktreeSetup && info.index === setupAnchorIndex ? (
             <WorktreeSetupCard key={props.threadId} {...props.worktreeSetup} />
@@ -2949,6 +2966,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       setupAnchorIndex,
       props.dispatchingMessageId,
       props.onEditPendingMessage,
+      props.outputThroughputByProviderTurnId,
       copiedRowId,
       disclosureToggleSettling,
       expandedWorkRows,

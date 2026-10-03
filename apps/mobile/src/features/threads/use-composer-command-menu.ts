@@ -6,6 +6,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import { matchComposerThreadItems } from "@t3tools/client-runtime/composerThreadItems";
+import { dedupeProviderSlashCommands } from "@t3tools/client-runtime/provider-slash-commands";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 
 const EMPTY_THREAD_SHELLS: ReadonlyArray<EnvironmentThreadShell> = [];
@@ -92,6 +93,17 @@ export function buildComposerSlashCommandItems(input: {
       label: "/default",
       description: "Switch to default mode",
     },
+    ...(input.hasThread
+      ? [
+          {
+            id: "cmd:goal",
+            type: "slash-command" as const,
+            command: "goal",
+            label: "/goal",
+            description: "View or change the thread goal",
+          },
+        ]
+      : []),
   ] satisfies ComposerCommandItem[];
   const items: ComposerCommandItem[] = builtIn.filter(
     (item) => item.command.includes(query) && (item.command === "model" || allowInteractionMode),
@@ -100,7 +112,13 @@ export function buildComposerSlashCommandItems(input: {
   // Providers expand commands only at the start of a message. T3 commands
   // change local state and do not have this restriction.
   if (!input.atMessageStart) return items;
-  for (const command of input.selectedProviderStatus?.slashCommands ?? []) {
+  const providerCommands = dedupeProviderSlashCommands(
+    input.selectedProviderStatus?.slashCommands ?? [],
+    items.flatMap((item) =>
+      item.type === "slash-command" && typeof item.command === "string" ? [item.command] : [],
+    ),
+  );
+  for (const command of providerCommands) {
     if (!command.name.toLowerCase().includes(query)) continue;
     if (command.name === "compact" && !input.hasCompactableConversation) continue;
     // T3's own limits command is answered by the thread composer; New Task has

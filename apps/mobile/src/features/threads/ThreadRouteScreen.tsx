@@ -921,6 +921,7 @@ function ThreadRouteContent(
           modelSelection: selectedThread.modelSelection,
           runtimeMode: selectedThread.runtimeMode,
           interactionMode: selectedThread.interactionMode,
+          voiceNotifications: selectedThread.voiceNotifications ?? true,
           workspaceMode: "local",
           branch: null,
           worktreePath: null,
@@ -1046,6 +1047,20 @@ function ThreadRouteContent(
           composerDraftKey={composer.composerDraftKey}
           followUpBehavior={composer.followUpBehavior}
           canSteerActiveTurn={composer.canSteerActiveTurn}
+          goal={composer.goal}
+          goalLoop={composer.goalLoop}
+          goalEditorState={composer.goalEditorState}
+          onOpenGoalEditor={composer.openGoalEditor}
+          onGoalDraftChange={composer.onGoalDraftChange}
+          onCloseGoalEditor={composer.onCloseGoalEditor}
+          onSaveGoal={composer.onSaveGoal}
+          onClearGoal={composer.onClearGoal}
+          onGoalLoopAction={composer.onGoalLoopAction}
+          voiceNotifications={composer.voiceNotifications}
+          onUpdateVoiceNotifications={composer.onUpdateVoiceNotifications}
+          backgroundWork={composer.backgroundWork}
+          onStopBackgroundTask={composer.onStopBackgroundTask}
+          outputThroughputByProviderTurnId={composer.outputThroughputByProviderTurnId}
           isSavingQueuedEdit={composer.isSavingQueuedEdit}
           onCancelQueuedRunEdit={composer.cancelQueuedRunEdit}
           onRemoveQueuedEditAttachment={composer.onRemoveQueuedEditAttachment}

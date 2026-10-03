@@ -106,6 +106,7 @@ import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
 import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
+import { SettingsOptimizersRouteScreen } from "./features/settings/SettingsOptimizersRouteScreen";
 import { SettingsRouteScreen } from "./features/settings/SettingsRouteScreen";
 import { SettingsThreadsRouteScreen } from "./features/settings/SettingsThreadsRouteScreen";
 import { SettingsEnvironmentFilterProvider } from "./features/settings/settings-environment-filter";
@@ -243,6 +244,11 @@ const SettingsContentStack = createNativeStackNavigator({
       screen: SettingsNotificationsRouteScreen,
       linking: "notifications",
       options: { title: "Notifications" },
+    }),
+    SettingsOptimizers: createNativeStackScreen({
+      screen: SettingsOptimizersRouteScreen,
+      linking: "optimizers",
+      options: { title: "Optimizers" },
     }),
     SettingsThreads: createNativeStackScreen({
       screen: SettingsThreadsRouteScreen,
