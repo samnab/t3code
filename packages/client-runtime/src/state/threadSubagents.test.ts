@@ -51,7 +51,7 @@ describe("deriveThreadTurnSubagents", () => {
     expect(deriveThreadTurnSubagents({ runs: [activeRun], subagents: [] })).toBeNull();
   });
 
-  it("scopes the roster to the active run and orders it by start time", () => {
+  it("scopes the roster to the active run and lists the newest start first", () => {
     const turn = deriveThreadTurnSubagents({
       runs: [run("run-0", "completed"), activeRun],
       subagents: [
@@ -62,8 +62,39 @@ describe("deriveThreadTurnSubagents", () => {
     });
 
     expect(turn?.runId).toBe("run-1");
-    expect(turn?.subagents.map((entry) => entry.id)).toEqual(["a", "b"]);
+    expect(turn?.subagents.map((entry) => entry.id)).toEqual(["b", "a"]);
     expect(turn?.turnActive).toBe(true);
+  });
+
+  it("breaks same-start ties by id descending", () => {
+    const turn = deriveThreadTurnSubagents({
+      runs: [activeRun],
+      subagents: [
+        subagent({ id: "a", startedAt: at("2026-06-20T00:00:02.000Z") }),
+        subagent({ id: "c", startedAt: at("2026-06-20T00:00:02.000Z") }),
+        subagent({ id: "b", startedAt: at("2026-06-20T00:00:02.000Z") }),
+      ],
+    });
+
+    expect(turn?.subagents.map((entry) => entry.id)).toEqual(["c", "b", "a"]);
+  });
+
+  it("keeps a started agent in place when its status and updatedAt change", () => {
+    const started = [
+      subagent({ id: "a", startedAt: at("2026-06-20T00:00:02.000Z") }),
+      subagent({ id: "b", startedAt: at("2026-06-20T00:00:05.000Z") }),
+    ];
+    const before = deriveThreadTurnSubagents({ runs: [activeRun], subagents: started });
+    const after = deriveThreadTurnSubagents({
+      runs: [activeRun],
+      subagents: [
+        { ...started[0]!, status: "completed", updatedAt: at("2026-06-20T00:01:00.000Z") },
+        started[1]!,
+      ],
+    });
+
+    expect(before?.subagents.map((entry) => entry.id)).toEqual(["b", "a"]);
+    expect(after?.subagents.map((entry) => entry.id)).toEqual(["b", "a"]);
   });
 
   it("falls back to the most recently updated agent's run once the turn settles", () => {

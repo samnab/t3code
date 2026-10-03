@@ -22,7 +22,11 @@ export interface ThreadTurnSubagents {
   /** The run the roster belongs to: the active one, else the most recent one that spawned agents. */
   readonly runId: RunId | null;
   readonly turnActive: boolean;
-  /** Spawn order: startedAt, falling back to updatedAt for agents that never started. */
+  /**
+   * Newest first by start time, falling back to updatedAt for agents that
+   * never started. Ties break by id descending so the order is total and an
+   * update never reshuffles rows that stay visible.
+   */
   readonly subagents: ReadonlyArray<Subagent>;
   readonly liveCount: number;
   readonly settledCount: number;
@@ -53,7 +57,7 @@ export function deriveThreadTurnSubagents(
   const runId = activeRun?.id ?? latestUpdated.runId;
   const subagents = copySorted(
     projection.subagents.filter((subagent) => subagent.runId === runId),
-    (left, right) => orderKey(left) - orderKey(right) || left.id.localeCompare(right.id),
+    (left, right) => orderKey(right) - orderKey(left) || right.id.localeCompare(left.id),
   );
   if (subagents.length === 0) return null;
 

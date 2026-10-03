@@ -19,7 +19,15 @@ export function canStopThreadBackgroundTask(
   return capability?.canListTasks === true && capability.stoppableTaskKinds.includes(task.kind);
 }
 
-/** Derives the same pending-work roster as the shell and marks only capability-backed stop actions. */
+/**
+ * Derives the same pending-work roster as the shell and marks only
+ * capability-backed stop actions.
+ *
+ * Pending tasks carry no timestamps, so order comes from the derivation:
+ * provider roster first, then turn items oldest to newest. Reversing it lists
+ * the newest process first and keeps rows that stay pending in place as
+ * newer work arrives.
+ */
 export function deriveThreadBackgroundWork(
   projection: OrchestrationV2ThreadProjection,
 ): ReadonlyArray<ThreadBackgroundTask> {
@@ -35,7 +43,8 @@ export function deriveThreadBackgroundWork(
     runs: projection.runs,
   });
   const capability = resolveThreadProviderSession(projection)?.capabilities.backgroundWork;
-  return tasks.map((task) => ({
+  // `.reverse()` on a copy, not `.toReversed()`: this runs on Hermes.
+  return [...tasks].reverse().map((task) => ({
     task,
     canStop: canStopThreadBackgroundTask(task, capability),
   }));
