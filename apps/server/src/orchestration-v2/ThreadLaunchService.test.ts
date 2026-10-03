@@ -57,7 +57,9 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
+import { injectThreadGoal } from "../goals/threadGoalProviderInput.ts";
 
 const projectId = ProjectId.make("project:launch-test");
 const otherProjectId = ProjectId.make("project:launch-other");
@@ -270,6 +272,38 @@ function waitUntil<E, R>(predicate: () => Effect.Effect<boolean, E, R>): Effect.
     assert.fail("Condition was not reached before timeout.");
   });
 }
+
+it.effect("creates the first turn with draft goal and voice settings already active", () => {
+  const harness = makeHarness();
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const input = {
+      ...launchInput({
+        command: "command:launch:draft-settings",
+        thread: "thread:launch:draft-settings",
+        message: "Start the work",
+      }),
+      goal: "Ship the launch fix",
+      voiceNotifications: false,
+    };
+    const launched = yield* launches.launch(input);
+    const policy = yield* RuntimePolicy.RuntimePolicyV2;
+    const runtimePolicy = yield* policy.resolve({
+      thread: launched.projection.thread,
+      modelSelection,
+    });
+    const message = launched.projection.messages[0];
+
+    assert.equal(launched.projection.thread.goal, "Ship the launch fix");
+    assert.equal(launched.projection.thread.voiceNotifications, false);
+    assert.equal(runtimePolicy.voiceNotifications, false);
+    assert.isDefined(message);
+    assert.include(
+      injectThreadGoal(message!.text, launched.projection.thread, message!),
+      "Ship the launch fix",
+    );
+  }).pipe(Effect.provide(Layer.mergeAll(harness.layer, RuntimePolicy.layer)));
+});
 
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>

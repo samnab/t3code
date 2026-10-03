@@ -57,7 +57,7 @@ it.effect(
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const threadId = ThreadId.make("thread:goal-voice-controls");
 
-      yield* orchestrator.dispatch({
+      const create = yield* orchestrator.dispatch({
         type: "thread.create",
         commandId: CommandId.make("goal-voice:create"),
         threadId,
@@ -73,6 +73,11 @@ it.effect(
         createdBy: "user",
         creationSource: "web",
       });
+      const created = create.storedEvents
+        .map((stored) => stored.event)
+        .find((event) => event.type === "thread.created");
+      assert.equal(created?.payload.goal, "First goal");
+      assert.equal(created?.payload.voiceNotifications, false);
       let thread = yield* projections.getThread(threadId);
       assert.equal(thread.goal, "First goal");
       assert.equal(thread.goalLoop?.state, "idle");

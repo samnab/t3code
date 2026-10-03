@@ -76,6 +76,7 @@ import {
   isBranchMismatchDismissedForSession,
   reconcileMountedTerminalThreadIds,
   resolveDraftPromotionNavigationTarget,
+  resolveDraftThreadCreationSettings,
   resolveEffectiveInteractionMode,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
@@ -97,6 +98,20 @@ const helloWorldTemplate: CodexArtifactTemplate = {
   skillDirectory: "/Users/test/.codex/skills/artifact-template-hello-world",
   skillName: "artifact-template-hello-world",
 };
+
+describe("draft thread creation settings", () => {
+  it("carries explicit goal and voice choices into thread creation", () => {
+    expect(
+      resolveDraftThreadCreationSettings({
+        goal: "Ship the launch fix",
+        voiceNotifications: false,
+      }),
+    ).toEqual({ goal: "Ship the launch fix", voiceNotifications: false });
+    expect(resolveDraftThreadCreationSettings({ goal: null, voiceNotifications: null })).toEqual(
+      {},
+    );
+  });
+});
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return makeThreadFixture({

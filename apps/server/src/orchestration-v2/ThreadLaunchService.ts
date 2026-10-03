@@ -17,6 +17,7 @@ import {
   type RunId,
   type RuntimeMode,
   type ScheduledTaskId,
+  type ThreadGoal,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -76,6 +77,8 @@ export interface ThreadLaunchInput {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly goal?: ThreadGoal | null;
+  readonly voiceNotifications?: boolean;
   readonly workspaceStrategy: ThreadLaunchWorkspaceStrategy;
   readonly initialMessage?: ThreadLaunchInitialMessage;
   readonly importedNativeThread?: {
@@ -711,6 +714,10 @@ const make = Effect.gen(function* () {
                 modelSelection: input.modelSelection,
                 runtimeMode: input.runtimeMode,
                 interactionMode: input.interactionMode,
+                ...(input.goal === undefined ? {} : { goal: input.goal }),
+                ...(input.voiceNotifications === undefined
+                  ? {}
+                  : { voiceNotifications: input.voiceNotifications }),
                 branch: initialBranch,
                 worktreePath: initialWorktreePath,
                 ...(input.importedNativeThread === undefined

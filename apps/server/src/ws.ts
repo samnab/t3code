@@ -1915,6 +1915,10 @@ const makeWsRpcLayer = (
                   modelSelection: input.modelSelection,
                   runtimeMode: input.runtimeMode,
                   interactionMode: input.interactionMode,
+                  ...(input.goal === undefined ? {} : { goal: input.goal }),
+                  ...(input.voiceNotifications === undefined
+                    ? {}
+                    : { voiceNotifications: input.voiceNotifications }),
                   workspaceStrategy: input.workspaceStrategy,
                   ...(input.initialMessage === undefined
                     ? {}
