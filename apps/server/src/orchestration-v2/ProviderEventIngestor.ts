@@ -342,7 +342,12 @@ export const layer: Layer.Layer<
       Effect.gen(function* () {
         switch (input.event.type) {
           case "account.rate-limits.updated":
-            return [];
+            return [
+              yield* makeDomainEvent(input, {
+                type: "account.rate-limits.updated",
+                payload: input.event.payload,
+              }),
+            ];
           case "app_thread.created":
             return [
               yield* makeDomainEvent(input, {

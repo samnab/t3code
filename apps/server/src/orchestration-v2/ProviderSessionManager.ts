@@ -1422,6 +1422,36 @@ export const layerWithOptions = (
           ),
         );
 
+      const persistAccountRateLimitUpdate = (
+        entry: LiveSessionEntry,
+        event: Extract<ProviderAdapterV2Event, { readonly type: "account.rate-limits.updated" }>,
+      ) =>
+        Effect.gen(function* () {
+          const current = (yield* Ref.get(sessions)).get(
+            sessionKey(entry.runtime.providerSessionId),
+          );
+          if (current?.runtime !== entry.runtime) return;
+          yield* Effect.forEach(
+            current.attachedThreadIds,
+            (threadId) =>
+              providerEventIngestor.ingestNormalized({
+                providerSessionId: entry.runtime.providerSessionId,
+                providerInstanceId: entry.runtime.instanceId,
+                threadId,
+                event,
+              }),
+            { discard: true },
+          );
+        }).pipe(
+          entry.requestEventPermit.withPermits(1),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("orchestration-v2.driver-session.rate-limit-persist-failed", {
+              providerSessionId: entry.runtime.providerSessionId,
+              cause,
+            }),
+          ),
+        );
+
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
         return entry.runtime.events.pipe(
@@ -1441,7 +1471,9 @@ export const layerWithOptions = (
               Effect.andThen(
                 event.type === "provider_session.updated"
                   ? persistProviderSessionUpdate(entry, event)
-                  : Effect.void,
+                  : event.type === "account.rate-limits.updated"
+                    ? persistAccountRateLimitUpdate(entry, event)
+                    : Effect.void,
               ),
               Effect.andThen(
                 Effect.gen(function* () {

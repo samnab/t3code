@@ -40,6 +40,7 @@ import type {
   OrchestrationV2ExecutionNode,
   ModelSelection,
   OrchestrationV2PlanArtifact,
+  OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderFailure,
   OrchestrationV2ProviderRetry,
@@ -79,6 +80,8 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - scope teardown must synchronously snapshot descendants before the app-server process is reaped.
+import { execFileSync } from "node:child_process";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
@@ -161,6 +164,60 @@ const CODEX_PROVIDER = ProviderDriverKind.make("codex");
 export const CODEX_DRIVER_KIND = CODEX_PROVIDER;
 export const CODEX_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CODEX_DRIVER_KIND);
 
+export interface CodexDescendantReaperDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly processTable?: () => string;
+  readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
+}
+
+/** Reaps only descendants recorded from one process-table snapshot. */
+export function reapCodexDescendantProcesses(
+  rootPid: number,
+  dependencies: CodexDescendantReaperDependencies = {},
+): ReadonlyArray<number> {
+  if ((dependencies.platform ?? process.platform) === "win32") return [];
+
+  let processTable: string;
+  try {
+    processTable =
+      dependencies.processTable?.() ??
+      execFileSync("ps", ["-Ao", "pid=,ppid="], { encoding: "utf8" });
+  } catch {
+    return [];
+  }
+
+  const childrenByParent = new Map<number, Array<number>>();
+  for (const line of processTable.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    const parentPid = Number(match[2]);
+    const children = childrenByParent.get(parentPid) ?? [];
+    children.push(pid);
+    childrenByParent.set(parentPid, children);
+  }
+
+  const descendants: Array<number> = [];
+  const pending = [...(childrenByParent.get(rootPid) ?? [])];
+  while (pending.length > 0) {
+    const pid = pending.pop()!;
+    descendants.push(pid);
+    pending.push(...(childrenByParent.get(pid) ?? []));
+  }
+
+  const killed: Array<number> = [];
+  const kill = dependencies.kill ?? process.kill;
+  for (const pid of descendants.reverse()) {
+    try {
+      kill(pid, "SIGKILL");
+      killed.push(pid);
+    } catch {
+      // The process may have exited after the snapshot.
+    }
+  }
+  return killed;
+}
+
 /** Describe approval scope even when Codex omits or blanks the optional reason. */
 export function codexFileChangeApprovalPrompt(input: {
   readonly reason?: string | null;
@@ -217,6 +274,7 @@ const CodexBackgroundTerminalTerminateResponse = Schema.Struct({
 const CodexBackgroundTerminalsListResponse = Schema.Struct({
   data: Schema.Array(
     Schema.Struct({
+      itemId: Schema.optional(Schema.String),
       processId: Schema.String,
     }),
   ),
@@ -234,7 +292,11 @@ const CODEX_CLIENT_CAPABILITIES = {
   optOutNotificationMethods: ["turn/diff/updated"],
 } as const;
 
-export const CodexProviderCapabilitiesV2 = {
+export const CodexProviderCapabilitiesV2: OrchestrationV2ProviderCapabilities = {
+  backgroundWork: {
+    canListTasks: true,
+    stoppableTaskKinds: ["command"],
+  },
   sessions: {
     supportsMultipleProviderThreadsPerSession: true,
     supportsModelSwitchInSession: true,
@@ -326,7 +388,7 @@ export const CodexProviderCapabilitiesV2 = {
   runtimePolicy: {
     enforcement: "native",
   },
-} satisfies OrchestrationV2ProviderCapabilities;
+};
 
 function toProtocolError(detail: string, payload?: unknown): ProviderAdapterProtocolError {
   return new ProviderAdapterProtocolError({
@@ -1293,6 +1355,13 @@ const makeCodexAppServerClientFactoryCommandLayer = (
                   }),
               ),
             );
+            // Effect finalizers are LIFO: register after spawn so descendants
+            // are snapshotted before the app-server teardown can reparent them.
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                reapCodexDescendantProcesses(Number(handle.pid));
+              }),
+            );
             const context = yield* Layer.build(CodexClient.layerChildProcess(handle, options));
             return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
               Effect.provide(context),
@@ -1412,6 +1481,13 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
                   cause,
                 }),
             ),
+          );
+          // Effect finalizers are LIFO: register after spawn so descendants
+          // are snapshotted before the app-server teardown can reparent them.
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              reapCodexDescendantProcesses(Number(handle.pid));
+            }),
           );
           const protocolLogger = makeCodexAppServerProtocolLogger({
             nativeEventLogger,
@@ -3829,6 +3905,13 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               });
             }
             const update = codexRateLimitsToUpdate(payload.rateLimits);
+            if (update) {
+              yield* emitProviderEvent({
+                type: "account.rate-limits.updated",
+                driver: CODEX_PROVIDER,
+                payload: { limits: update },
+              });
+            }
             if (update && adapterOptions.onUsageLimits) {
               const checkedAt = DateTime.formatIso(yield* DateTime.now);
               yield* adapterOptions.onUsageLimits({ ...update, checkedAt });
@@ -5400,6 +5483,56 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               }
               return false;
             }),
+          listBackgroundTasks: (providerThread) =>
+            Effect.gen(function* () {
+              const contexts = [
+                ...(yield* Ref.get(activeTurns)).values(),
+                ...(yield* Ref.get(settledTurns)).values(),
+              ];
+              const tasks = new Map<string, OrchestrationV2PendingBackgroundTask>();
+              for (const context of contexts) {
+                if (context.providerThread.id !== providerThread.id) continue;
+                const items = (yield* Ref.get(runningCommandItemsByTurn)).get(context.nativeTurnId);
+                for (const item of items?.values() ?? []) {
+                  tasks.set(item.id, {
+                    taskId: item.id,
+                    kind: "command",
+                    description: nonEmptyText(item.command, "Background command"),
+                  });
+                }
+              }
+              return [...tasks.values()];
+            }),
+          stopBackgroundTask: ({ providerThread, taskId }) =>
+            Effect.gen(function* () {
+              const nativeThreadId = yield* getNativeThreadId(providerThread);
+              let cursor: string | null = null;
+              while (true) {
+                const response: unknown = yield* client.raw.request(
+                  "thread/backgroundTerminals/list",
+                  { threadId: nativeThreadId, ...(cursor === null ? {} : { cursor }) },
+                );
+                const page = yield* decodeCodexBackgroundTerminalsListResponse(response);
+                const processId = page.data.find(
+                  (terminal) => terminal.itemId === taskId,
+                )?.processId;
+                if (processId !== undefined) {
+                  yield* terminateBackgroundTerminal(nativeThreadId, processId);
+                  return;
+                }
+                if (page.nextCursor === null) return;
+                cursor = page.nextCursor;
+              }
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterProtocolError({
+                    driver: CODEX_PROVIDER,
+                    detail: `Failed to stop Codex background terminal ${taskId}.`,
+                    payload: cause,
+                  }),
+              ),
+            ),
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
               Effect.andThen(

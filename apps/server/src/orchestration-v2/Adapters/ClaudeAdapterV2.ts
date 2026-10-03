@@ -170,7 +170,11 @@ export function claudeProviderTurnTokenUsage(
 export const CLAUDE_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CLAUDE_PROVIDER);
 const DEFAULT_CLAUDE_SETTINGS = Schema.decodeSync(ClaudeSettings)({});
 
-export const ClaudeProviderCapabilitiesV2 = {
+export const ClaudeProviderCapabilitiesV2: OrchestrationV2ProviderCapabilities = {
+  backgroundWork: {
+    canListTasks: true,
+    stoppableTaskKinds: ["command", "monitor", "background_task"],
+  },
   sessions: {
     supportsMultipleProviderThreadsPerSession: false,
     supportsModelSwitchInSession: true,
@@ -262,7 +266,7 @@ export const ClaudeProviderCapabilitiesV2 = {
   runtimePolicy: {
     enforcement: "native",
   },
-} satisfies OrchestrationV2ProviderCapabilities;
+};
 
 const CLAUDE_CODE_PRESET_TOOLS = {
   type: "preset",
@@ -323,6 +327,7 @@ export interface ClaudeAgentSdkQuerySession {
   readonly offer: (message: SDKUserMessage) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly setModel: (model: string) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly interrupt: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
+  readonly stopTask?: (taskId: string) => Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
   readonly close: Effect.Effect<void, ClaudeAgentSdkQueryRunnerError>;
 }
 
@@ -348,6 +353,8 @@ export class ClaudeBackgroundWorkBlocksQueryReplacementError extends Schema.Tagg
     return "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
   }
 }
+
+const isProviderAdapterProtocolError = Schema.is(ProviderAdapter.ProviderAdapterProtocolError);
 
 export interface ClaudeAgentSdkQueryRunnerShape {
   readonly allocateSessionId: Effect.Effect<string, ClaudeAgentSdkQueryRunnerError>;
@@ -679,6 +686,11 @@ export const claudeAgentSdkQueryRunnerLiveLayer: Layer.Layer<
               }),
             ),
           ),
+          stopTask: (taskId) =>
+            Effect.tryPromise({
+              try: () => queryRuntime.stopTask(taskId),
+              catch: (cause) => queryRunnerError(cause, "stopTask"),
+            }),
           close: Queue.shutdown(promptQueue).pipe(
             Effect.andThen(closeClaudeQuery(queryRuntime)),
             Effect.tap(() =>
@@ -5350,6 +5362,13 @@ export function makeClaudeAdapterV2(
               : { overageIncluded: undefined };
             const update = claudeRateLimitEventToUpdate(rateLimitInfo, names);
             const now = yield* DateTime.now;
+            if (update) {
+              yield* emitProviderEvent({
+                type: "account.rate-limits.updated",
+                driver: CLAUDE_PROVIDER,
+                payload: { limits: update },
+              });
+            }
             if (update && adapterOptions.onUsageLimits) {
               yield* adapterOptions.onUsageLimits({
                 ...update,
@@ -7378,6 +7397,49 @@ export function makeClaudeAdapterV2(
                 ).size > 0
               );
             }),
+          listBackgroundTasks: (providerThread) =>
+            Effect.gen(function* () {
+              const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+              if (nativeThreadId === undefined || nativeThreadId === null) return [];
+              return [
+                ...rosterForNativeThread(
+                  yield* Ref.get(pendingBackgroundTasksByNativeThread),
+                  nativeThreadId,
+                ).values(),
+              ];
+            }),
+          stopBackgroundTask: ({ providerThread, taskId }) =>
+            Effect.gen(function* () {
+              const nativeThreadId = providerThread.nativeThreadRef?.nativeId;
+              const liveQuery = yield* Ref.get(queryContext);
+              if (
+                nativeThreadId === undefined ||
+                nativeThreadId === null ||
+                liveQuery?.nativeThreadId !== nativeThreadId
+              ) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: `No live Claude query owns background task ${taskId}.`,
+                });
+              }
+              if (liveQuery.query.stopTask === undefined) {
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: "This Claude query runtime cannot stop individual background tasks.",
+                });
+              }
+              yield* liveQuery.query.stopTask(taskId);
+            }).pipe(
+              Effect.mapError((cause) =>
+                isProviderAdapterProtocolError(cause)
+                  ? cause
+                  : new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CLAUDE_PROVIDER,
+                      detail: `Failed to stop Claude background task ${taskId}.`,
+                      payload: cause,
+                    }),
+              ),
+            ),
           ensureThread: Effect.fn("ClaudeAdapterV2.ensureThread")(
             function* (threadInput: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) {
               const createdAt = yield* DateTime.now;

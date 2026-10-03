@@ -37,6 +37,7 @@ import { layer as threadTitleRegenerationServiceLayer } from "./ThreadTitleRegen
 import { layer as providerEventIngestorLayer } from "./ProviderEventIngestor.ts";
 import { layer as providerSessionManagerLayer } from "./ProviderSessionManager.ts";
 import { layer as providerRuntimeRecoveryLayer } from "./ProviderRuntimeRecoveryService.ts";
+import { layer as providerBackgroundTaskServiceLayer } from "./ProviderBackgroundTaskService.ts";
 import { layer as providerSwitchServiceLayer } from "./ProviderSwitchService.ts";
 import { layer as providerTurnControlServiceLayer } from "./ProviderTurnControlService.ts";
 import { layer as providerTurnStartServiceLayer } from "./ProviderTurnStartService.ts";
@@ -287,6 +288,9 @@ const providerRuntimeRecoveryProvided = providerRuntimeRecoveryLayer.pipe(
     ),
   ),
 );
+const providerBackgroundTaskProvided = providerBackgroundTaskServiceLayer.pipe(
+  Layer.provide(Layer.merge(projectionStoreLayer, providerSessionManagerProvided)),
+);
 
 export const OrchestrationV2LayerLive = Layer.mergeAll(
   orchestratorProvided,
@@ -295,6 +299,7 @@ export const OrchestrationV2LayerLive = Layer.mergeAll(
   providerSessionManagerProvided,
   providerAuthServiceProvided,
   providerRuntimeRecoveryProvided,
+  providerBackgroundTaskProvided,
   projectionMaintenanceProvided,
   legacyV1ThreadImporterProvided,
 );

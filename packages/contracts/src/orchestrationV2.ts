@@ -40,6 +40,7 @@ import {
   OrchestrationGetTurnDiffResult,
 } from "./checkpointDiff.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { ProviderUsageLimitsUpdate } from "./providerUsageLimits.ts";
 import {
   ThreadLinkedPullRequest,
   ThreadPullRequestLink,
@@ -321,6 +322,14 @@ export const OrchestrationV2ProviderCapabilities = Schema.Struct({
   context: OrchestrationV2ContextCapabilities,
   checkpointing: OrchestrationV2CheckpointCapabilities,
   identity: OrchestrationV2IdentityCapabilities,
+  backgroundWork: Schema.optional(
+    Schema.Struct({
+      canListTasks: Schema.Boolean,
+      stoppableTaskKinds: Schema.Array(
+        Schema.Literals(["subagent", "command", "monitor", "background_task"]),
+      ),
+    }),
+  ),
   // Events persisted before this field existed decode to the weaker
   // client-boundary guarantee so replay never overclaims enforcement.
   runtimePolicy: OrchestrationV2RuntimePolicyCapabilities.pipe(
@@ -1547,6 +1556,11 @@ export type ThreadVoiceNotificationsSetPayload = typeof ThreadVoiceNotifications
 export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("account.rate-limits.updated"),
+    payload: Schema.Struct({ limits: ProviderUsageLimitsUpdate }),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("thread.created"),
     payload: OrchestrationV2AppThread,
   }),
@@ -2371,6 +2385,11 @@ export type OrchestrationV2RawProviderEventJson = typeof OrchestrationV2RawProvi
 export const OrchestrationV2DomainEventJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("account.rate-limits.updated"),
+    payload: Schema.Struct({ limits: ProviderUsageLimitsUpdate }),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("thread.created"),
     payload: OrchestrationV2AppThreadJson,
   }),
@@ -3015,6 +3034,7 @@ export type OrchestrationV2ServerCommand = OrchestrationV2Command | Orchestratio
 
 export const ORCHESTRATION_V2_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
+  stopBackgroundTask: "orchestration.stopBackgroundTask",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   searchThreads: "orchestration.searchThreads",
@@ -3302,11 +3322,40 @@ export class OrchestrationV2ThreadLaunchError extends Schema.TaggedError<Orchest
   },
 ) {}
 
+export class OrchestrationV2BackgroundTaskUnsupportedError extends Schema.TaggedError<OrchestrationV2BackgroundTaskUnsupportedError>()(
+  "OrchestrationV2BackgroundTaskUnsupportedError",
+  {
+    threadId: ThreadId,
+    taskId: TrimmedNonEmptyString,
+    driver: ProviderDriverKind,
+  },
+) {
+  override get message(): string {
+    return `${this.driver} cannot stop background task ${this.taskId}.`;
+  }
+}
+
+export class OrchestrationV2BackgroundTaskStopError extends Schema.TaggedError<OrchestrationV2BackgroundTaskStopError>()(
+  "OrchestrationV2BackgroundTaskStopError",
+  {
+    reason: Schema.Literals([
+      "task-not-found",
+      "provider-session-not-active",
+      "unexpected-failure",
+    ]),
+    threadId: ThreadId,
+    taskId: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
 export const OrchestrationV2RpcError = Schema.Union([
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2ThreadLaunchError,
+  OrchestrationV2BackgroundTaskUnsupportedError,
+  OrchestrationV2BackgroundTaskStopError,
 ]);
 export type OrchestrationV2RpcError = typeof OrchestrationV2RpcError.Type;
 
@@ -3364,6 +3413,10 @@ export const OrchestrationV2RpcSchemas = {
   dispatchCommand: {
     input: OrchestrationV2Command,
     output: OrchestrationV2DispatchCommandResult,
+  },
+  stopBackgroundTask: {
+    input: Schema.Struct({ threadId: ThreadId, taskId: TrimmedNonEmptyString }),
+    output: Schema.Void,
   },
   getTurnDiff: {
     input: OrchestrationGetTurnDiffInput,

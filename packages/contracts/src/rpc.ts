@@ -189,6 +189,8 @@ import {
   ORCHESTRATION_V2_WS_METHODS,
   OrchestrationGetWorkflowScriptError,
   OrchestrationV2DispatchCommandError,
+  OrchestrationV2BackgroundTaskStopError,
+  OrchestrationV2BackgroundTaskUnsupportedError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2RpcSchemas,
@@ -1500,6 +1502,19 @@ const WsOrchestrationV2DispatchCommandRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS
   error: Schema.Union([OrchestrationV2DispatchCommandError, EnvironmentAuthorizationError]),
 });
 
+const WsOrchestrationV2StopBackgroundTaskRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.stopBackgroundTask,
+  {
+    payload: OrchestrationV2RpcSchemas.stopBackgroundTask.input,
+    success: OrchestrationV2RpcSchemas.stopBackgroundTask.output,
+    error: Schema.Union([
+      OrchestrationV2BackgroundTaskUnsupportedError,
+      OrchestrationV2BackgroundTaskStopError,
+      EnvironmentAuthorizationError,
+    ]),
+  },
+);
+
 const WsOrchestrationV2GetTurnDiffRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.getTurnDiff, {
   payload: OrchestrationV2RpcSchemas.getTurnDiff.input,
   success: OrchestrationV2RpcSchemas.getTurnDiff.output,
@@ -1846,6 +1861,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeBackgroundPolicyRpc,
   WsSubscribeResourceTelemetryRpc,
   WsOrchestrationV2DispatchCommandRpc,
+  WsOrchestrationV2StopBackgroundTaskRpc,
   WsOrchestrationV2GetWorkflowScriptRpc,
   WsOrchestrationV2GetTurnDiffRpc,
   WsOrchestrationV2GetFullThreadDiffRpc,
