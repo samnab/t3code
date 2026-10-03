@@ -7,6 +7,7 @@ import {
   ChatAttachmentId,
   CommandId,
   EventId,
+  MessageId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
@@ -46,6 +47,29 @@ const failingDispatch = (captured: OrchestrationV2ServerCommand[]) =>
   });
 
 const NOW = DateTime.makeUnsafe("2026-09-13T00:00:00.000Z");
+
+it.effect("rejects goal commands before they can become provider turns", () => {
+  const captured: OrchestrationV2ServerCommand[] = [];
+  return Effect.gen(function* () {
+    const result = yield* dispatchCommand({
+      type: "message.dispatch",
+      commandId: CommandId.make("goal-command"),
+      threadId: ThreadId.make("thread-goal-command"),
+      messageId: MessageId.make("message-goal-command"),
+      text: "/goal Ship the feature",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    }).pipe(Effect.provide(failingDispatch(captured)), Effect.result);
+
+    expect(result).toMatchObject({
+      _tag: "Failure",
+      failure: { _tag: "OrchestratorCommandRejectedError" },
+    });
+    expect(captured).toHaveLength(0);
+  }).pipe(Effect.provide(intakeTestLayer));
+});
 
 const answeredRespondEvents = (input: {
   readonly threadId: ThreadId;

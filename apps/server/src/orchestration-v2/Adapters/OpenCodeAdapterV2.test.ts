@@ -146,6 +146,10 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
   suffix: string,
   nativeSessionId: string,
   client: object,
+  options?: {
+    readonly voiceNotifications?: boolean;
+    readonly onSessionEnvironment?: (environment: NodeJS.ProcessEnv) => void;
+  },
 ) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const instanceId = ProviderInstanceId.make(`opencode-${suffix}`);
@@ -155,13 +159,23 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
     model: "anthropic/claude-sonnet",
     options: [],
   };
-  const policy = runtimePolicy("full-access", { cwd: "/workspace" });
+  const policy = runtimePolicy("full-access", {
+    cwd: "/workspace",
+    ...(options?.voiceNotifications === undefined
+      ? {}
+      : { voiceNotifications: options.voiceNotifications }),
+  });
   const adapter = makeOpenCodeAdapterV2({
     instanceId,
     settings: OPEN_CODE_TEST_SETTINGS,
     environment: {},
     runtime: {
-      connectToOpenCodeServer: () => Effect.succeed({ url: "http://test.invalid", external: true }),
+      connectToOpenCodeServer: (
+        input: Parameters<OpenCodeRuntimeShape["connectToOpenCodeServer"]>[0],
+      ) => {
+        options?.onSessionEnvironment?.(input.environment ?? {});
+        return Effect.succeed({ url: "http://test.invalid", external: true });
+      },
       createOpenCodeSdkClient: () => client,
     } as unknown as OpenCodeRuntimeShape,
     idAllocator,
@@ -237,6 +251,30 @@ const makeOpenCodeRuntimeHarness = Effect.fn("makeOpenCodeRuntimeHarness")(funct
 });
 
 describe("OpenCodeAdapterV2", () => {
+  it.effect("disables voice notifications in the server environment", () =>
+    Effect.gen(function* () {
+      let environment: NodeJS.ProcessEnv | undefined;
+      yield* makeOpenCodeRuntimeHarness(
+        "voice-off",
+        "root",
+        {
+          event: { subscribe: async () => ({ stream: asyncEventStream().stream }) },
+          session: {
+            create: async () => ({ data: { id: "root", time: { created: 1, updated: 1 } } }),
+            children: async () => ({ data: [] }),
+          },
+        },
+        {
+          voiceNotifications: false,
+          onSessionEnvironment: (value) => {
+            environment = value;
+          },
+        },
+      );
+      assert.deepEqual(environment, { T3_VOICE_NOTIFICATIONS: "0" });
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
   it.effect.each(["completed", "failed", "unresolved", "unavailable", "reconnect"] as const)(
     "normalizes OpenCode step usage for %s turns",
     (ending) =>

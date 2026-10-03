@@ -66,6 +66,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import { parseThreadGoalCommand } from "../goals/threadGoalCommand.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import {
   isCheckpointRestoreIsolated,
@@ -2254,6 +2255,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return update({
             ...(command.state === undefined ? {} : { state: command.state }),
             ...(command.mode === undefined ? {} : { mode: command.mode }),
+            ...(command.iterations === undefined ? {} : { iterations: command.iterations }),
             ...(command.reason === undefined ? {} : { reason: command.reason }),
           });
       }
@@ -9340,6 +9342,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchProviderSessionDetach(command, events, effects);
         break;
       case "message.dispatch": {
+        if (parseThreadGoalCommand(command.text) !== null) {
+          return yield* new OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "A /goal command is thread metadata and cannot start a provider turn.",
+          });
+        }
         // The provider owns a native subagent's conversation, so a sent
         // message has nowhere to go. Answers to a subagent's questions never
         // target it either: adapters ask them on the top-level parent thread.

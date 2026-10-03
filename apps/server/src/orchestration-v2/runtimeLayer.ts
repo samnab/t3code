@@ -1,4 +1,6 @@
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
+import * as GoalLoop from "../goals/GoalLoopService.ts";
+import * as GoalLoopWorker from "../goals/GoalLoopWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
 import * as OrchestrationCommandReceipts from "../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -308,6 +310,9 @@ export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
   scheduledTaskProvided,
   UsageLimitRecoveryWorker.workerLive.pipe(
     Layer.provide(Layer.mergeAll(projectionStoreLayer, threadManagementProvided)),
+  ),
+  GoalLoopWorker.workerLive.pipe(
+    Layer.provide(GoalLoop.layer.pipe(Layer.provide(threadManagementProvided))),
   ),
   providerContinuationWorkerProvided,
   agentSessionImporterProvided,

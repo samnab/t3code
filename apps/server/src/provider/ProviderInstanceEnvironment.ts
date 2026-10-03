@@ -20,3 +20,11 @@ export function mergeProviderInstanceEnvironment(
   }
   return next;
 }
+
+/** Applies one thread's voice preference to a provider process environment. */
+export function withVoiceNotificationsEnv(
+  env: NodeJS.ProcessEnv,
+  enabled: boolean | undefined,
+): NodeJS.ProcessEnv {
+  return { ...env, T3_VOICE_NOTIFICATIONS: enabled === false ? "0" : "1" };
+}

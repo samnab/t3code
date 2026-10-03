@@ -30,6 +30,7 @@ function makeThread(input: {
   readonly now: DateTime.Utc;
   readonly worktreePath: string | null;
   readonly runtimeMode?: RuntimeMode;
+  readonly voiceNotifications?: boolean;
 }): OrchestrationV2AppThread {
   const threadId = ThreadId.make("thread:runtime-policy");
   return {
@@ -56,6 +57,7 @@ function makeThread(input: {
     archivedAt: null,
     settledOverride: null,
     settledAt: null,
+    voiceNotifications: input.voiceNotifications ?? true,
     lastVisitedAt: null,
     deletedAt: null,
   };
@@ -131,6 +133,18 @@ it.layer(TestLayer)("RuntimePolicyV2", (it) => {
         modelSelection,
       });
       assert.equal(resolved.cwd, "/project-worktree");
+    }),
+  );
+
+  it.effect("carries the thread voice preference into provider runtime policy", () =>
+    Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      const resolved = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: null, voiceNotifications: false }),
+        modelSelection,
+      });
+      assert.equal(resolved.voiceNotifications, false);
     }),
   );
 
