@@ -1,5 +1,9 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
+import {
+  RTK_CODEX_SESSION_INSTRUCTIONS,
+  RTK_SESSION_PREFACE,
+} from "../optimizer/RtkSessionInstructions.ts";
 import { buildRuntimeInstructions } from "./RuntimeInstructions.ts";
 
 import {
@@ -37,6 +41,19 @@ const toolInstructions = (availability: boolean | T3CodeToolAvailability): strin
     .filter(Boolean)
     .join("\n\n");
 };
+
+const rtkInstructions = (enabled: boolean): string =>
+  enabled
+    ? `<rtk_instructions>\n${RTK_SESSION_PREFACE}\n${RTK_CODEX_SESSION_INSTRUCTIONS}</rtk_instructions>`
+    : "";
+
+/** RTK is session-local and does not depend on T3's own MCP server being attached. */
+export function buildCodexRtkAdditionalContext(
+  enabled: boolean,
+): Record<string, V2TurnStartParams__AdditionalContextEntry> {
+  const rtk = rtkInstructions(enabled);
+  return rtk ? { t3_code_rtk: { kind: "application", value: rtk } } : {};
+}
 
 const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
 
@@ -211,6 +228,7 @@ export function buildCodexAdditionalContext(
    * setting, so the prompt cannot claim tools the turn doesn't have.
    */
   toolsAvailable: boolean | T3CodeToolAvailability = true,
+  rtkEnabled = false,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
   const tools = toolInstructions(toolsAvailable);
   // Separate keys keep each value under Codex's per-entry token cap.
@@ -221,5 +239,6 @@ export function buildCodexAdditionalContext(
       value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
     },
     ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
+    ...buildCodexRtkAdditionalContext(rtkEnabled),
   };
 }

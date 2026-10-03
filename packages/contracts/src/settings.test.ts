@@ -74,6 +74,61 @@ describe("PiSettings model concurrency", () => {
   });
 });
 
+describe("ServerSettings optimizer configuration", () => {
+  it("defaults omitted optimizer settings without changing existing settings files", () => {
+    const settings = decodeServerSettings({
+      projectOptimizerOverrides: {
+        "project-one": { rtk: true },
+      },
+    });
+
+    expect(settings.projectOptimizerOverrides).toEqual({
+      "project-one": { rtk: true, headroom: false, cbm: false },
+    });
+    expect(settings.optimizerBinaryPaths.cbm).toBe("codebase-memory-mcp");
+    expect(settings.headroomProxyUrl).toBe("http://127.0.0.1:6767");
+  });
+
+  it("accepts partial optimizer patches and CBM path overrides", () => {
+    expect(
+      decodeServerSettingsPatch({
+        projectOptimizerOverrides: {
+          "project-one": { cbm: true },
+          "project-two": null,
+        },
+        optimizerBinaryPaths: { cbm: "  /opt/cbm  " },
+      }),
+    ).toEqual({
+      projectOptimizerOverrides: {
+        "project-one": { cbm: true },
+        "project-two": null,
+      },
+      optimizerBinaryPaths: { cbm: "/opt/cbm" },
+    });
+  });
+
+  it.each([
+    "http://127.0.0.1:8787",
+    "http://127.0.0.1:8787/",
+    "http://localhost:8787",
+    "http://[::1]:8787",
+  ])("accepts a local Headroom proxy origin: %s", (headroomProxyUrl) => {
+    expect(decodeServerSettingsPatch({ headroomProxyUrl }).headroomProxyUrl).toBe(headroomProxyUrl);
+  });
+
+  it.each([
+    "https://127.0.0.1:8787",
+    "http://192.168.1.10:8787",
+    "http://example.com:8787",
+    "http://user@127.0.0.1:8787",
+    "http://127.0.0.1:8787/stats",
+    "http://127.0.0.1:8787?mode=cache",
+    "http://127.0.0.1:8787#status",
+  ])("rejects an unsafe Headroom proxy URL: %s", (headroomProxyUrl) => {
+    expect(() => decodeServerSettingsPatch({ headroomProxyUrl })).toThrow();
+  });
+});
+
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {
     expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");

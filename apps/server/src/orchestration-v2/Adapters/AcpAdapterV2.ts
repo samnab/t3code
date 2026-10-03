@@ -63,6 +63,7 @@ import {
   type AcpMcpOverAcpBridge,
 } from "../../mcp/AcpMcpOverAcpBridge.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as SessionOptimizerAttachments from "../../optimizer/SessionOptimizerAttachments.ts";
 import {
   applyAcpAgentTerminalUpdate,
   acpContentBlockDisplayText,
@@ -484,6 +485,11 @@ export interface AcpAdapterV2Options {
   readonly serverConfig: ServerConfig.ServerConfig["Service"];
   /** How agents spawn this install's `acp-mcp-bridge`; see `resolveSelfInvocation`. */
   readonly selfInvocation: SelfInvocation;
+  readonly sessionOptimizers?: SessionOptimizerAttachments.SessionOptimizerAttachments["Service"];
+  readonly optimizerCapabilities?: SessionOptimizerAttachments.SessionOptimizerCapabilities;
+  readonly resolveHeadroom?: (
+    proxyUrl: string,
+  ) => Effect.Effect<SessionOptimizerAttachments.SessionHeadroomAttachment | undefined>;
   /**
    * Opts the session into the ACP client `terminal` capability. Agents run
    * commands themselves unless an adapter sets this; with it, sessions
@@ -678,10 +684,11 @@ interface AcpMcpContext {
   readonly authorization?: string;
 }
 
-function acpMcpContext(threadId: ThreadId | null, self: SelfInvocation): AcpMcpContext {
+export function acpMcpContext(threadId: ThreadId | null, self: SelfInvocation): AcpMcpContext {
   if (threadId === null) return { servers: [], acpServers: [] };
   const session = McpProviderSession.readMcpProviderSession(threadId);
-  if (session === undefined) {
+  const optimizer = SessionOptimizerAttachments.readSessionOptimizerAttachments(threadId);
+  if (session === undefined && optimizer?.cbm === undefined && optimizer?.headroom === undefined) {
     return { servers: [], acpServers: [] };
   }
   // Stdio is ACP's required baseline MCP transport. Agents that advertise
@@ -692,25 +699,46 @@ function acpMcpContext(threadId: ThreadId | null, self: SelfInvocation): AcpMcpC
   // travels via environment variables, never the command line.
   return {
     servers: [
-      {
-        name: "t3-code",
-        command: self.command,
-        args: [...selfInvocationArgs(self, ["acp-mcp-bridge"])],
-        env: [
-          { name: "ELECTRON_RUN_AS_NODE", value: "1" },
-          { name: "T3_ACP_MCP_ENDPOINT", value: session.endpoint },
-          { name: "T3_ACP_MCP_AUTHORIZATION", value: session.authorizationHeader },
-        ],
-      },
+      ...(session === undefined
+        ? []
+        : [
+            {
+              name: "t3-code",
+              command: self.command,
+              args: [...selfInvocationArgs(self, ["acp-mcp-bridge"])],
+              env: [
+                { name: "ELECTRON_RUN_AS_NODE", value: "1" },
+                { name: "T3_ACP_MCP_ENDPOINT", value: session.endpoint },
+                { name: "T3_ACP_MCP_AUTHORIZATION", value: session.authorizationHeader },
+              ],
+            },
+          ]),
+      ...(optimizer?.cbm === undefined
+        ? []
+        : [
+            {
+              name: SessionOptimizerAttachments.CBM_MCP_SERVER_NAME,
+              command: optimizer.cbm.command,
+              args: [...optimizer.cbm.args],
+              env: Object.entries(optimizer.cbm.env).map(([name, value]) => ({ name, value })),
+            },
+          ]),
     ],
-    acpServers: [{ type: "acp", name: "t3-code", serverId: "t3-code" }],
-    endpoint: session.endpoint,
-    authorization: session.authorizationHeader,
+    acpServers:
+      session === undefined ? [] : [{ type: "acp", name: "t3-code", serverId: "t3-code" }],
+    ...(session === undefined
+      ? {}
+      : { endpoint: session.endpoint, authorization: session.authorizationHeader }),
     processEnvironment: {
-      T3_ACP_MCP_ENDPOINT: session.endpoint,
-      T3_ACP_MCP_AUTHORIZATION: session.authorizationHeader,
-      T3_ACP_MCP_NODE: self.command,
-      ...(self.entrypoint === undefined ? {} : { T3_ACP_MCP_ENTRYPOINT: self.entrypoint }),
+      ...(session === undefined
+        ? {}
+        : {
+            T3_ACP_MCP_ENDPOINT: session.endpoint,
+            T3_ACP_MCP_AUTHORIZATION: session.authorizationHeader,
+            T3_ACP_MCP_NODE: self.command,
+            ...(self.entrypoint === undefined ? {} : { T3_ACP_MCP_ENTRYPOINT: self.entrypoint }),
+          }),
+      ...optimizer?.headroom?.environment,
     },
   };
 }
@@ -1432,6 +1460,19 @@ export function makeAcpAdapterV2(
     openSession: Effect.fn("AcpAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const sessionScope = yield* Effect.scope;
+        if (
+          options.sessionOptimizers !== undefined &&
+          options.optimizerCapabilities !== undefined
+        ) {
+          yield* options.sessionOptimizers.resolve({
+            threadId: input.threadId,
+            cwd: input.runtimePolicy.cwd,
+            capabilities: options.optimizerCapabilities,
+            ...(options.resolveHeadroom === undefined
+              ? {}
+              : { resolveHeadroom: options.resolveHeadroom }),
+          });
+        }
         // Persisted ACP threads from before item identity v2 retain their old
         // deterministic ids. Fresh threads scope native ids by instance so
         // separately configured agents cannot collide.

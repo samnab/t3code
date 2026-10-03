@@ -4,7 +4,7 @@ import {
   resolveProviderInstanceEnabled,
   isProviderTextGenerationCapable,
   type ModelSelection,
-  type ProjectId,
+  ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
   type ProviderDriverKind,
@@ -280,6 +280,7 @@ export function applyServerSettingsPatch(
     // Merged per entry below; its `null` removals must not reach deepMerge.
     usageLimitSources: usageLimitSourcesPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
+    projectOptimizerOverrides: projectOptimizerOverridesPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
     // Already translated into `projectSettingsOverrides` above; the legacy
@@ -369,6 +370,34 @@ export function applyServerSettingsPatch(
             Object.entries(
               mergeSettingsEntries(current.projectSettingsOverrides, projectSettingsOverridesPatch),
             ).filter(([, entry]) => Object.keys(entry).length > 0),
+          ),
+        }
+      : {}),
+    ...(projectOptimizerOverridesPatch !== undefined
+      ? {
+          projectOptimizerOverrides: mergeSettingsEntries(
+            current.projectOptimizerOverrides,
+            Object.fromEntries(
+              Object.entries(projectOptimizerOverridesPatch).map(([projectId, optimizerPatch]) => [
+                projectId,
+                optimizerPatch === null
+                  ? null
+                  : {
+                      rtk:
+                        optimizerPatch.rtk ??
+                        current.projectOptimizerOverrides[ProjectId.make(projectId)]?.rtk ??
+                        false,
+                      headroom:
+                        optimizerPatch.headroom ??
+                        current.projectOptimizerOverrides[ProjectId.make(projectId)]?.headroom ??
+                        false,
+                      cbm:
+                        optimizerPatch.cbm ??
+                        current.projectOptimizerOverrides[ProjectId.make(projectId)]?.cbm ??
+                        false,
+                    },
+              ]),
+            ),
           ),
         }
       : {}),

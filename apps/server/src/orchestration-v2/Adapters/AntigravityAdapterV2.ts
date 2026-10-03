@@ -16,6 +16,8 @@ import * as EffectAcpErrors from "effect-acp/errors";
 
 import type { ServerConfig } from "../../config.ts";
 import type { AntigravityAuth } from "../../provider/AntigravityAuth.ts";
+import * as HeadroomRouting from "../../optimizer/HeadroomRouting.ts";
+import * as SessionOptimizerAttachments from "../../optimizer/SessionOptimizerAttachments.ts";
 import type * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 import {
   antigravityPermissionMode,
@@ -71,7 +73,7 @@ export interface AntigravityAdapterV2Options {
   readonly serverConfig: ServerConfig["Service"];
   /** Spawns the official agent with the instance's Google profile. */
   readonly makeRuntime: (
-    input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner">,
+    input: AntigravityAdapterRuntimeInput,
   ) => Effect.Effect<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
     EffectAcpErrors.AcpError | ProviderSetupError,
@@ -88,7 +90,14 @@ export interface AntigravityAdapterV2Options {
   readonly onSessionEvent?: AcpAdapterV2Flavor["onSessionEvent"];
   readonly nativeLogging?: Parameters<typeof makeAcpAdapterV2>[0]["nativeLogging"];
   readonly continuationRequests?: Parameters<typeof makeAcpAdapterV2>[0]["continuationRequests"];
+  readonly sessionOptimizers?: SessionOptimizerAttachments.SessionOptimizerAttachments["Service"];
 }
+
+export type AntigravityAdapterRuntimeInput = Omit<
+  AntigravityAcpRuntimeInput,
+  "spawn" | "childProcessSpawner"
+> &
+  Pick<AcpAdapterV2RuntimeInput, "processEnvironment">;
 
 /**
  * ACP 1.1.1 exposes subagent invocations as ordinary `start_subagent` tools
@@ -233,6 +242,14 @@ export function makeAntigravityAdapterV2(options: AntigravityAdapterV2Options) {
     idAllocator: options.idAllocator,
     serverConfig: options.serverConfig,
     selfInvocation: options.selfInvocation,
+    optimizerCapabilities: { rtk: false, headroom: true, cbm: true },
+    resolveHeadroom: (proxyUrl) =>
+      Effect.succeed(HeadroomRouting.resolveHeadroomEnvironment(proxyUrl)).pipe(
+        Effect.map((environment) => (environment === undefined ? undefined : { environment })),
+      ),
+    ...(options.sessionOptimizers === undefined
+      ? {}
+      : { sessionOptimizers: options.sessionOptimizers }),
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
     ...(options.continuationRequests === undefined
       ? {}

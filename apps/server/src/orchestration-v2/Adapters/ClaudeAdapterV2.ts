@@ -112,6 +112,8 @@ import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanc
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "../../provider/T3OrchestrationInstructions.ts";
 import { buildRuntimeInstructions } from "../../provider/RuntimeInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as HeadroomRouting from "../../optimizer/HeadroomRouting.ts";
+import * as SessionOptimizerAttachments from "../../optimizer/SessionOptimizerAttachments.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
@@ -936,23 +938,43 @@ export function claudeMcpQueryOverrides(input: {
   readonly mcpServers?: ClaudeQueryOptions["mcpServers"];
 } {
   const session = McpProviderSession.readMcpProviderSession(input.threadId);
-  if (session === undefined) {
+  const cbm = SessionOptimizerAttachments.readSessionOptimizerAttachments(input.threadId)?.cbm;
+  if (session === undefined && cbm === undefined) {
     return input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools };
   }
-  const mcpAllowedTools = input.readOnlySandbox
-    ? CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS
-    : [CLAUDE_T3_MCP_TOOL_WILDCARD];
+  const mcpAllowedTools = [
+    ...(session === undefined
+      ? []
+      : input.readOnlySandbox
+        ? CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS
+        : [CLAUDE_T3_MCP_TOOL_WILDCARD]),
+    ...(cbm === undefined ? [] : [`mcp__${SessionOptimizerAttachments.CBM_MCP_SERVER_NAME}__*`]),
+  ];
   return {
     allowedTools: Array.from(new Set([...(input.allowedTools ?? []), ...mcpAllowedTools])),
     mcpServers: {
-      "t3-code": {
-        type: "http",
-        url: session.endpoint,
-        headers: {
-          Authorization: session.authorizationHeader,
-        },
-        timeout: CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
-      },
+      ...(session === undefined
+        ? {}
+        : {
+            "t3-code": {
+              type: "http" as const,
+              url: session.endpoint,
+              headers: {
+                Authorization: session.authorizationHeader,
+              },
+              timeout: CLAUDE_T3_MCP_TOOL_TIMEOUT_MS,
+            },
+          }),
+      ...(cbm === undefined
+        ? {}
+        : {
+            [SessionOptimizerAttachments.CBM_MCP_SERVER_NAME]: {
+              type: "stdio" as const,
+              command: cbm.command,
+              args: [...cbm.args],
+              env: { ...cbm.env },
+            },
+          }),
     },
   };
 }
@@ -2881,6 +2903,7 @@ export interface ClaudeAdapterV2Options {
   readonly path: Path.Path;
   readonly idAllocator: IdAllocator.IdAllocatorV2Shape;
   readonly queryRunner: ClaudeAgentSdkQueryRunnerShape;
+  readonly sessionOptimizers?: SessionOptimizerAttachments.SessionOptimizerAttachments["Service"];
   readonly scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>;
   readonly onUsageLimits?: ServerProviderShape["applyUsageLimits"];
   /** Sink for wake-turn continuation requests; defaults to dropping them. */
@@ -2929,6 +2952,25 @@ export function makeClaudeAdapterV2(
     openSession: Effect.fn("ClaudeAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const sessionScope = yield* Effect.scope;
+        const optimizerAttachments =
+          adapterOptions.sessionOptimizers === undefined
+            ? undefined
+            : yield* adapterOptions.sessionOptimizers.resolve({
+                threadId: input.threadId,
+                cwd: input.runtimePolicy.cwd,
+                capabilities: { rtk: false, headroom: true, cbm: true },
+                resolveHeadroom: (proxyUrl) =>
+                  HeadroomRouting.resolveProviderHeadroomSessionRouting({
+                    provider: "claudeAgent",
+                    proxyUrl,
+                    config: adapterOptions.settings,
+                    ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
+                    environment: adapterOptions.environment,
+                  }).pipe(
+                    Effect.provideService(FileSystem.FileSystem, adapterOptions.fileSystem),
+                    Effect.provideService(Path.Path, adapterOptions.path),
+                  ),
+              });
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -6879,7 +6921,10 @@ export function makeClaudeAdapterV2(
                 cwd: turnInput.runtimePolicy.cwd,
                 attachmentsDir,
                 settings: adapterOptions.settings,
-                environment: adapterOptions.environment,
+                environment: {
+                  ...adapterOptions.environment,
+                  ...optimizerAttachments?.headroom?.environment,
+                },
                 tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
                 ...mcpOverrides,
                 permissionMode: queryPolicy.permissionMode,
@@ -7656,6 +7701,9 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
     const queryRunner = yield* ClaudeAgentSdkQueryRunner;
     const serverConfig = yield* ServerConfig.ServerConfig;
     const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+    const sessionOptimizers = yield* Effect.serviceOption(
+      SessionOptimizerAttachments.SessionOptimizerAttachments,
+    );
     const baseEnvironment = mergeProviderInstanceEnvironment(environment, hostEnvironment);
     const claudeEnvironment = yield* makeClaudeEnvironment(config, baseEnvironment);
     const path = yield* Path.Path;
@@ -7669,6 +7717,7 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       idAllocator,
       queryRunner,
       continuationRequests,
+      ...(Option.isSome(sessionOptimizers) ? { sessionOptimizers: sessionOptimizers.value } : {}),
       ...hooks,
     });
   },

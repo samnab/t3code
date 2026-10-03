@@ -24,6 +24,27 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("serverSettings helpers", () => {
+  it("merges project optimizer flags per entry and removes a project override", () => {
+    const projectOne = ProjectId.make("project-one");
+    const projectTwo = ProjectId.make("project-two");
+    const withOptimizer = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectOptimizerOverrides: {
+        [projectOne]: { rtk: true },
+        [projectTwo]: { headroom: true },
+      },
+    });
+    const next = applyServerSettingsPatch(withOptimizer, {
+      projectOptimizerOverrides: {
+        [projectOne]: { cbm: true },
+        [projectTwo]: null,
+      },
+    });
+
+    expect(next.projectOptimizerOverrides).toEqual({
+      "project-one": { rtk: true, headroom: false, cbm: true },
+    });
+  });
+
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },
