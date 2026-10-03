@@ -15,6 +15,7 @@ import {
 import type { ServerProviderShape } from "../../provider/Services/ServerProvider.ts";
 import type { CodexEffectiveRuntime } from "../../provider/CodexManagedRuntime.ts";
 import { buildCodexInitializeParams } from "../../provider/Layers/CodexProvider.ts";
+import { resolveCodexHomeKey, withCodexStartupLock } from "../../provider/CodexStartupLock.ts";
 import {
   codexRateLimitsToUpdate,
   mergeCodexRateLimits,
@@ -1692,20 +1693,67 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               );
         const resolvedSettings = resolvedRuntime?.config ?? adapterOptions.settings;
         const baseEnvironment = resolvedRuntime?.environment ?? adapterOptions.environment;
-        const client = yield* clientFactory.open({
-          instanceId: adapterOptions.instanceId,
-          threadId: input.threadId,
-          providerSessionId: input.providerSessionId,
-          runtimePolicy: input.runtimePolicy,
-          settings: {
-            ...resolvedSettings,
-            maxConcurrentSubagents: adapterOptions.settings.maxConcurrentSubagents,
-          },
-          environment: withVoiceNotificationsEnv(
-            baseEnvironment,
-            input.runtimePolicy.voiceNotifications,
-          ),
-        });
+        const initialized = yield* Ref.make(false);
+        /**
+         * The app-server handshake, idempotent so every entry point can run it
+         * before its first request. Sent once as part of the serialized
+         * startup below, so a session always starts from an initialized child.
+         */
+        const handshake = (connected: CodexClient.CodexAppServerClient["Service"]) =>
+          Effect.gen(function* () {
+            const alreadyInitialized = yield* Ref.get(initialized);
+            if (alreadyInitialized) {
+              return;
+            }
+
+            yield* connected.request("initialize", {
+              // Codex uses the client name as the request originator, so sessions
+              // identify themselves exactly like the provider probe.
+              clientInfo: buildCodexInitializeParams().clientInfo,
+              capabilities: CODEX_CLIENT_CAPABILITIES,
+            });
+            yield* connected.notify("initialized", undefined);
+            yield* Ref.set(initialized, true);
+          });
+        // Codex opens a sqlite state runtime under CODEX_HOME while starting,
+        // and two app-servers doing that at once make one of them exit 1. The
+        // gate covers the spawn and the handshake that proves this child is up,
+        // so the provider probes sharing the home start before or after it.
+        const client = yield* withCodexStartupLock(
+          resolveCodexHomeKey({
+            homePath: resolvedSettings.homePath,
+            environment: baseEnvironment,
+          }),
+          clientFactory
+            .open({
+              instanceId: adapterOptions.instanceId,
+              threadId: input.threadId,
+              providerSessionId: input.providerSessionId,
+              runtimePolicy: input.runtimePolicy,
+              settings: {
+                ...resolvedSettings,
+                maxConcurrentSubagents: adapterOptions.settings.maxConcurrentSubagents,
+              },
+              environment: withVoiceNotificationsEnv(
+                baseEnvironment,
+                input.runtimePolicy.voiceNotifications,
+              ),
+            })
+            .pipe(
+              Effect.tap((opened) =>
+                handshake(opened).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapterOpenSessionError({
+                        driver: CODEX_PROVIDER,
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      }),
+                  ),
+                ),
+              ),
+            ),
+        );
         const resolvedOptimizerThreads = yield* Ref.make(new Set<string>());
         /**
          * Attach the thread's project optimizers before Codex builds its
@@ -1769,22 +1817,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               }),
             ),
           );
-        const initialized = yield* Ref.make(false);
-        const ensureInitialized = Effect.gen(function* () {
-          const alreadyInitialized = yield* Ref.get(initialized);
-          if (alreadyInitialized) {
-            return;
-          }
-
-          yield* client.request("initialize", {
-            // Codex uses the client name as the request originator, so sessions
-            // identify themselves exactly like the provider probe.
-            clientInfo: buildCodexInitializeParams().clientInfo,
-            capabilities: CODEX_CLIENT_CAPABILITIES,
-          });
-          yield* client.notify("initialized", undefined);
-          yield* Ref.set(initialized, true);
-        });
+        const ensureInitialized = handshake(client);
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
