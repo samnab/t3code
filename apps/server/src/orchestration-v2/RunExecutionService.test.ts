@@ -37,6 +37,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
+import { injectThreadGoal } from "../goals/threadGoalProviderInput.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "./CheckpointService.ts";
@@ -603,8 +604,30 @@ it.effect(
         mimeType: "text/plain",
         sizeBytes: 1,
       });
+      const goalLoop = {
+        mode: "t3" as const,
+        iterations: 2,
+        maxIterations: 10,
+        updatedAt: DateTime.makeUnsafe("2026-10-02T12:00:00.000Z"),
+      };
       const cases = [
         { text: " /compact ", attachments: [], expected: "compact" },
+        {
+          text: injectThreadGoal("/compact", {
+            goal: "Ship the goal loop",
+            goalLoop: { ...goalLoop, state: "running" },
+          }),
+          attachments: [],
+          expected: "compact",
+        },
+        {
+          text: injectThreadGoal("/compact", {
+            goal: "Ship the goal loop",
+            goalLoop: { ...goalLoop, state: "completed" },
+          }),
+          attachments: [],
+          expected: "compact",
+        },
         { text: "/compact", attachments: [attachment], expected: "prompt" },
         { text: "Continue the work", attachments: [], expected: "prompt" },
       ];

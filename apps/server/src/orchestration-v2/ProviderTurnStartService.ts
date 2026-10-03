@@ -950,6 +950,7 @@ export const layer: Layer.Layer<
           records: message.context?.records ?? [],
         }),
         projection.thread,
+        message,
       );
       // Delivered once: this run's provider turn marks the work as told. A
       // restart continuation is prompted by its own text or resumes natively.
