@@ -58,6 +58,9 @@ import {
   DeviceScreenshotToolkit,
   DeviceStandardToolkit,
 } from "./toolkits/device/tools.ts";
+import * as AgentMessagingService from "./AgentMessagingService.ts";
+import { AgentMessagingHandlersLive } from "./toolkits/messaging/handlers.ts";
+import { AgentMessagingToolkit } from "./toolkits/messaging/tools.ts";
 
 const unauthorized = HttpServerResponse.jsonUnsafe(
   {
@@ -666,6 +669,11 @@ export const OrchestratorToolkitRegistrationLive = McpServer.toolkit(Orchestrato
   Layer.provide(ThreadMetadataMcpService.layer),
 );
 
+export const AgentMessagingToolkitRegistrationLive = McpServer.toolkit(AgentMessagingToolkit).pipe(
+  Layer.provide(AgentMessagingHandlersLive),
+  Layer.provide(AgentMessagingService.layer),
+);
+
 export const ThreadToolkitRegistrationLive = McpServer.toolkit(ThreadToolkit).pipe(
   Layer.provide(ThreadToolkitHandlersLive),
 );
@@ -718,6 +726,7 @@ const McpTransportLive = McpServer.layerHttp({
 export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   OrchestratorToolkitRegistrationLive,
+  AgentMessagingToolkitRegistrationLive,
   ThreadToolkitRegistrationLive,
   AttachmentRegistrationLive,
   ProjectRegistrationLive,

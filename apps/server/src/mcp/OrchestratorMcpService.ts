@@ -69,6 +69,7 @@ import {
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as DelegationPolicy from "./DelegationPolicy.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -756,6 +757,7 @@ const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
+  const delegationPolicy = yield* DelegationPolicy.DelegationPolicy;
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -1371,9 +1373,31 @@ const make = Effect.gen(function* () {
           );
         }
         const providers = yield* loadProviders;
+        const tierSelection =
+          input.target === undefined && input.tier !== undefined
+            ? yield* delegationPolicy.resolve(input.tier).pipe(
+                Effect.mapError((error) => {
+                  const code = DelegationPolicy.isDelegationPolicyError(error)
+                    ? error.code === "unknown_tier"
+                      ? "invalid_request"
+                      : "provider_unavailable"
+                    : "orchestration_error";
+                  return failure(code, error.message);
+                }),
+              )
+            : undefined;
         const target = yield* resolveTarget({
           parent,
-          target: input.target,
+          target:
+            tierSelection === undefined
+              ? input.target
+              : {
+                  providerInstanceId: tierSelection.instanceId,
+                  model: tierSelection.model,
+                  ...(tierSelection.options === undefined
+                    ? {}
+                    : { options: tierSelection.options }),
+                },
           providers,
         });
         const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
@@ -1947,4 +1971,5 @@ export const layer: Layer.Layer<
   | ProviderRegistry.ProviderRegistry
   | ProviderAdapterRegistry.ProviderAdapterRegistryV2
   | ScheduledTaskService.ScheduledTaskService
+  | DelegationPolicy.DelegationPolicy
 > = Layer.effect(OrchestratorMcpService, make);

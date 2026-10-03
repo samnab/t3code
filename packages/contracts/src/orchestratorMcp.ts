@@ -16,6 +16,7 @@ import {
   TrimmedNonEmptyString,
   TurnItemId,
 } from "./baseSchemas.ts";
+import { DelegationTierId } from "./settings.ts";
 import {
   ScheduledTaskRunStatus,
   ScheduledTaskSchedule,
@@ -171,6 +172,12 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
     description: "Self-contained task for one delegated child agent/subagent.",
   }),
   target: Schema.optional(OrchestratorMcpTarget),
+  tier: Schema.optional(
+    DelegationTierId.annotate({
+      description:
+        "Configured delegation tier. Used only when target is omitted; an explicit target wins.",
+    }),
+  ),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   mode: Schema.optional(

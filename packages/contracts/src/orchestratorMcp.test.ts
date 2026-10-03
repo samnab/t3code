@@ -22,6 +22,21 @@ const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSend
 const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("decodes configured delegation tiers", () => {
+    expect(
+      decodeDelegateTaskInput({
+        task: "Inspect the workspace.",
+        tier: "small",
+      }).tier,
+    ).toBe("small");
+    expect(() =>
+      decodeDelegateTaskInput({
+        task: "Inspect the workspace.",
+        tier: "tiny",
+      }),
+    ).toThrow();
+  });
+
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",
