@@ -612,6 +612,12 @@ describe("CodexAdapterV2 runtime policy", () => {
 });
 
 describe("CodexAdapterV2 process spawning", () => {
+  it("keeps process-scoped voice policy isolated to one app thread", () => {
+    assert.isFalse(
+      CodexAdapterV2.CodexProviderCapabilitiesV2.sessions.supportsMultipleProviderThreadsPerSession,
+    );
+  });
+
   it.effect("disables voice notifications in the app-server environment", () =>
     Effect.gen(function* () {
       let openedEnvironment: NodeJS.ProcessEnv | undefined;

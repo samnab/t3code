@@ -304,7 +304,10 @@ export const CodexProviderCapabilitiesV2: OrchestrationV2ProviderCapabilities = 
     stoppableTaskKinds: ["command"],
   },
   sessions: {
-    supportsMultipleProviderThreadsPerSession: true,
+    // Voice hooks inherit the app-server process environment. Keep one
+    // process per app thread so its T3_VOICE_NOTIFICATIONS value cannot leak
+    // from whichever thread happened to open a shared session first.
+    supportsMultipleProviderThreadsPerSession: false,
     supportsModelSwitchInSession: true,
     supportsProviderSwitchingViaHandoff: true,
     supportsRuntimeModeSwitchInSession: true,
