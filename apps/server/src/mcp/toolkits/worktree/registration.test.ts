@@ -5,6 +5,7 @@ import * as ServerConfig from "../../../config.ts";
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -24,6 +25,7 @@ import * as VcsStatusBroadcaster from "../../../vcs/VcsStatusBroadcaster.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import * as DelegationPolicy from "../../DelegationPolicy.ts";
 
 const StubServicesLive = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
@@ -33,6 +35,7 @@ const StubServicesLive = Layer.mergeAll(
   Layer.mock(ProviderRegistry.ProviderRegistry)({}),
   Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
   Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+  Layer.mock(DelegationPolicy.DelegationPolicy)({}),
   Layer.mock(ProjectService.ProjectService)({}),
   ServerSettings.layerTest({}),
   Layer.mock(GitWorkflowService.GitWorkflowService)({}),
@@ -76,6 +79,7 @@ it.effect("production mcp layer lists worktree tools over http", () =>
         ),
         Layer.provide(PreviewAutomationBroker.layer),
         Layer.provide(StubServicesLive),
+        Layer.provide(NodeSqliteClient.layer({ filename: ":memory:" })),
         Layer.build,
       );
 

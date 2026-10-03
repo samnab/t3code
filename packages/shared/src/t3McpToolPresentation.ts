@@ -103,6 +103,8 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Cancel", "Canceling", "Requested cancellation of", "delegated task"],
     "task-cancel",
   ),
+  agent_send: tool(["Send", "Sending", "Sent", "an agent message"], "thread-send"),
+  agent_inbox: tool(["Read", "Reading", "Read", "agent messages"], "thread-read"),
   schedule_task: tool(
     ["Schedule", "Scheduling", "Scheduled", "a recurring task"],
     "schedule-create",

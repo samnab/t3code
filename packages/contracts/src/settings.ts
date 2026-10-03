@@ -1240,6 +1240,28 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+export const DelegationTierId = Schema.Literals(["small", "medium", "large"]);
+export type DelegationTierId = typeof DelegationTierId.Type;
+
+export const DelegationCandidate = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  options: Schema.optional(ProviderOptionSelections),
+  /** Reserved for the optimizer-owned headroom policy. */
+  minHeadroomPercent: Schema.optional(
+    Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  ),
+});
+export type DelegationCandidate = typeof DelegationCandidate.Type;
+
+/** Ordered model candidates for each app-owned delegation tier. */
+export const DelegationTiers = Schema.Struct({
+  small: Schema.Array(DelegationCandidate).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  medium: Schema.Array(DelegationCandidate).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  large: Schema.Array(DelegationCandidate).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type DelegationTiers = typeof DelegationTiers.Type;
+
 export const ServerSettings = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
@@ -1444,6 +1466,9 @@ export const ServerSettings = Schema.Struct({
   // See providerInstance.ts for the forward/backward compatibility invariant.
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  delegationTiers: DelegationTiers.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ small: [], medium: [], large: [] })),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   bitbucket: BitbucketSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
@@ -1756,6 +1781,7 @@ export const ServerSettingsPatch = Schema.Struct({
   // patches risk leaving driver-specific config in a half-merged state.
   // The web UI sends a fully-formed map every time it edits this field.
   providerInstances: Schema.optionalKey(Schema.Record(ProviderInstanceId, ProviderInstanceConfig)),
+  delegationTiers: Schema.optionalKey(DelegationTiers),
   // Per-entry, unlike `providerInstances`: a client only ever adds or removes
   // one source, and sending the whole map races another edit that has not
   // echoed back yet. `null` removes; the server merges into its current map.

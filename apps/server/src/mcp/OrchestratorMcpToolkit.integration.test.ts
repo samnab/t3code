@@ -74,6 +74,7 @@ import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistr
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as DelegationPolicy from "./DelegationPolicy.ts";
 import { delegatedTaskRun, hasPendingChildRuns } from "./OrchestratorMcpService.ts";
 
 const parentThreadId = ThreadId.make("thread:mcp-orchestrator-parent");
@@ -466,6 +467,10 @@ const unusedScheduledTaskStubLayer = Layer.succeed(
   }),
 );
 
+const unusedDelegationPolicyLayer = Layer.mock(DelegationPolicy.DelegationPolicy)({
+  resolve: () => Effect.die("delegation policy is unused in this test"),
+});
+
 describe("orchestrator MCP toolkit", () => {
   it.live(
     "delegates cross-provider tasks, polls and cancels children, and creates ordinary threads",
@@ -631,6 +636,7 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(registryLayer),
             Layer.provide(providerRegistryLayer),
             Layer.provide(scheduledTaskStubLayer),
+            Layer.provide(unusedDelegationPolicyLayer),
             Layer.provide(NodeServices.layer),
           );
 
@@ -3540,6 +3546,7 @@ describe("orchestrator MCP toolkit", () => {
           ),
           Layer.provide(providerRegistryLayer),
           Layer.provide(unusedScheduledTaskStubLayer),
+          Layer.provide(unusedDelegationPolicyLayer),
           Layer.provide(NodeServices.layer),
         );
 

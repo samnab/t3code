@@ -24,6 +24,34 @@ const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
 const decodePiSettings = Schema.decodeUnknownSync(PiSettings);
 
+describe("ServerSettings delegation tiers", () => {
+  it("decodes an empty default for older settings files", () => {
+    expect(decodeServerSettings({}).delegationTiers).toEqual({
+      small: [],
+      medium: [],
+      large: [],
+    });
+  });
+
+  it("round-trips ordered tier candidates through settings and patches", () => {
+    const delegationTiers = {
+      small: [{ providerInstanceId: "codex", model: "gpt-5.4" }],
+      medium: [],
+      large: [
+        {
+          providerInstanceId: "claudeAgent",
+          model: "claude-opus-4-6",
+          minHeadroomPercent: 20,
+        },
+      ],
+    };
+    expect(encodeServerSettings(decodeServerSettings({ delegationTiers }))).toMatchObject({
+      delegationTiers,
+    });
+    expect(decodeServerSettingsPatch({ delegationTiers })).toEqual({ delegationTiers });
+  });
+});
+
 describe("CodexSettings maximum concurrent subagents", () => {
   it("defaults to Codex's concurrency and accepts legacy settings with a cap", () => {
     expect(decodeCodexSettings({}).maxConcurrentSubagents).toBe("");
