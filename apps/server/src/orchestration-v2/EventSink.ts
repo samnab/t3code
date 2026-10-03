@@ -348,11 +348,14 @@ const baseLayer: Layer.Layer<
           return committed;
         }),
       );
+      // Publish before waking workers. A woken worker writes its own, later
+      // events, and subscribers track a sequence cursor that discards anything
+      // at or below it, so these events have to reach them first.
+      yield* eventStore.publishCommitted(storedEvents);
+      yield* publishLiveEvents(storedEvents);
       if (input.effects.length > 0) {
         yield* effectOutbox.notifyAvailable(input.effects.length);
       }
-      yield* eventStore.publishCommitted(storedEvents);
-      yield* publishLiveEvents(storedEvents);
       return storedEvents;
     });
 
@@ -539,13 +542,15 @@ const baseLayer: Layer.Layer<
           return { receipt, storedEvents, committed: true as const, cancelledEffectIds };
         }),
       );
-      yield* effectOutbox.signalCancellations(result.cancelledEffectIds);
-      if (result.committed && input.effects.length > 0) {
-        yield* effectOutbox.notifyAvailable(input.effects.length);
-      }
+      // Both wakeups below hand work to fibers that publish their own, later
+      // events, so this command's events have to be published first.
       if (result.committed) {
         yield* eventStore.publishCommitted(result.storedEvents);
         yield* publishLiveEvents(result.storedEvents);
+      }
+      yield* effectOutbox.signalCancellations(result.cancelledEffectIds);
+      if (result.committed && input.effects.length > 0) {
+        yield* effectOutbox.notifyAvailable(input.effects.length);
       }
       return {
         receipt: result.receipt,
