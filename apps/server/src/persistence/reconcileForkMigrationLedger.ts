@@ -91,6 +91,22 @@ const forkHistory = [
   [67, "ProjectionThreadsAutoSettleDisabledAt"],
 ] as const;
 
+const forkOnlyMigrationNames = new Set([
+  "ProjectionSubagentRuns",
+  "ProjectionThreadGoal",
+  "ProjectionSubagentTranscripts",
+  "ProjectionThreadsVoiceNotifications",
+  "ProjectionThreadGoalLoop",
+  "NativeChildRuns",
+  "ProjectionThreadMessagesOrigin",
+  "ThreadExperiments",
+  "NativeChildRunOptions",
+  "NativeChildMessaging",
+  "NativeChildDeliveryBatches",
+  "ProjectionProjectsSchedules",
+  "ProjectionSubagentRunsFastMode",
+]);
+
 const rewrites = [
   [53, 46, "RepairAutomaticSettlementTimestamps"],
   [54, 47, "ProjectionProjectIcon"],
@@ -112,13 +128,6 @@ const matches = (
   rows.length === expected.length &&
   rows.every(
     (row, index) => row.migration_id === expected[index]?.[0] && row.name === expected[index]?.[1],
-  );
-
-const isUpstreamHistory = (rows: ReadonlyArray<MigrationRow>) =>
-  rows.length <= upstreamHistory.length &&
-  rows.every(
-    (row, index) =>
-      row.migration_id === upstreamHistory[index]?.[0] && row.name === upstreamHistory[index]?.[1],
   );
 
 const isExactForkHistory = (rows: ReadonlyArray<MigrationRow>) =>
@@ -147,22 +156,13 @@ export const reconcileForkMigrationLedger = Effect.fn("reconcileForkMigrationLed
       const history = yield* sql<MigrationRow>`
         SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
       `;
-      if (history.some((row) => row.migration_id > 67)) {
-        return yield* badState(
-          "Cannot reconcile fork migration ledger with migrations newer than the supported fork signature.",
-        );
-      }
-      if (isUpstreamHistory(history)) return false;
+      const hasForkRows = history.some((row) => forkOnlyMigrationNames.has(row.name));
+      if (!hasForkRows) return false;
 
       const v2Tables = yield* sql<{ readonly name: string }>`
         SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'orchestration_v2_events'
       `;
-      const hasForkRows = history.some((row) =>
-        forkHistory.some(
-          ([migrationId, name]) => row.migration_id === migrationId && row.name === name,
-        ),
-      );
-      if (hasForkRows && v2Tables.length > 0) {
+      if (v2Tables.length > 0) {
         return yield* badState(
           "Cannot reconcile fork migration ledger after orchestration v2 tables exist.",
         );

@@ -18,14 +18,24 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
+import * as References from "effect/References";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../../persistence/Migrations.ts";
 import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
+import Migration0042 from "../../persistence/Migrations/042_ProjectionThreadLinkedPullRequest.ts";
+import Migration0043 from "../../persistence/Migrations/043_ProjectionThreadsUnsettledAt.ts";
+import Migration0044 from "../../persistence/Migrations/044_ClearAutomaticProjectModelDefaults.ts";
+import Migration0045 from "../../persistence/Migrations/045_ProjectionProjectsAutoPull.ts";
+import Migration0046 from "../../persistence/Migrations/046_RepairAutomaticSettlementTimestamps.ts";
+import Migration0047 from "../../persistence/Migrations/047_ProjectionProjectIcon.ts";
+import Migration0048 from "../../persistence/Migrations/048_ProjectionThreadBranchPullRequest.ts";
+import Migration0049 from "../../persistence/Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import { CodexProviderCapabilitiesV2 } from "../Adapters/CodexAdapterV2.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EventSink from "../EventSink.ts";
@@ -76,8 +86,12 @@ const codexModelSelection = {
 
 /**
  * A V1 database as it exists on disk before a V2 server first opens it: schema
- * through upstream migration 49. The V2 runner applies the remaining legacy
- * migrations and the V2 cutover on top of that untouched copy.
+ * through migration 40 plus the 42-49 tail. Slot 41 carries a site-local
+ * `ThreadSummaryTimeline` migration, matching production databases where local
+ * builds recorded extra names under the shared id sequence. The V2 runner only
+ * applies migrations past the recorded maximum id, so the cutover in this test
+ * applies 050, 051 and 052 on top of the untouched copy — the same path the
+ * real upgrade takes.
  */
 const seedV1Database = (fixturePath: string, workspace: string) =>
   Effect.scoped(
@@ -86,7 +100,35 @@ const seedV1Database = (fixturePath: string, workspace: string) =>
       yield* sql`PRAGMA busy_timeout = 5000;`;
       yield* sql`PRAGMA foreign_keys = ON;`;
       yield* sql`PRAGMA journal_mode = WAL;`;
-      yield* runMigrations({ toMigrationInclusive: 49 });
+      yield* runMigrations({ toMigrationInclusive: 40 });
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (41, 'ThreadSummaryTimeline')
+      `;
+      yield* sql`
+        CREATE TABLE thread_summary_timeline_entries (
+          entry_id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          payload_json TEXT NOT NULL
+        )
+      `;
+      const tailMigrations = [
+        [42, "ProjectionThreadLinkedPullRequest", Migration0042],
+        [43, "ProjectionThreadsUnsettledAt", Migration0043],
+        [44, "ClearAutomaticProjectModelDefaults", Migration0044],
+        [45, "ProjectionProjectsAutoPull", Migration0045],
+        [46, "RepairAutomaticSettlementTimestamps", Migration0046],
+        [47, "ProjectionProjectIcon", Migration0047],
+        [48, "ProjectionThreadBranchPullRequest", Migration0048],
+        [49, "ProjectionThreadsActiveOrderKey", Migration0049],
+      ] as const;
+      for (const [id, name, migration] of tailMigrations) {
+        yield* migration;
+        yield* sql`
+          INSERT INTO effect_sql_migrations (migration_id, name)
+          VALUES (${id}, ${name})
+        `;
+      }
 
       yield* sql`
         INSERT INTO projection_projects (
@@ -579,6 +621,19 @@ const makeBootLayer = (input: {
   );
 };
 
+interface CapturedLog {
+  readonly message: unknown;
+  readonly annotations: Readonly<Record<string, unknown>>;
+}
+
+const makeCapturingLogger = (logs: CapturedLog[]) =>
+  Logger.make(({ fiber, message }) => {
+    logs.push({
+      message,
+      annotations: fiber.getRef(References.CurrentLogAnnotations),
+    });
+  });
+
 const messageOrdinals = (projection: OrchestrationV2ThreadProjection) =>
   projection.turnItems
     .filter(
@@ -610,6 +665,7 @@ describe("orchestration v2 legacy v1 cutover", () => {
           const longThreadId = ThreadId.make(LONG_THREAD);
 
           // First boot: the real file-backed stack migrates the copied database.
+          const boot1Logs: CapturedLog[] = [];
           const firstBoot = yield* Effect.scoped(
             Effect.gen(function* () {
               const sql = yield* SqlClient.SqlClient;
@@ -836,12 +892,20 @@ describe("orchestration v2 legacy v1 cutover", () => {
               const legacyThreadCount = yield* sql<{ readonly count: number }>`
               SELECT COUNT(*) AS count FROM projection_threads
             `;
+              const recordedMigration41 = yield* sql<{ readonly name: string }>`
+              SELECT name FROM effect_sql_migrations WHERE migration_id = 41
+            `;
+              const authSessionColumns = yield* sql<{ readonly name: string }>`
+              PRAGMA table_info(auth_sessions)
+            `;
               return {
                 migrationEventCount: migrationEventCount[0]?.count ?? 0,
                 importRows,
                 legacyMessageCount: legacyMessageCount[0]?.count ?? 0,
                 legacyThreadCount: legacyThreadCount[0]?.count ?? 0,
                 longProjection: continuedAgain,
+                migration41Name: recordedMigration41[0]?.name ?? null,
+                authSessionColumnNames: authSessionColumns.map((column) => column.name),
               };
             }).pipe(
               Effect.provide(
@@ -852,8 +916,28 @@ describe("orchestration v2 legacy v1 cutover", () => {
                   capturedTurns,
                 }),
               ),
+              Effect.provideService(
+                Logger.CurrentLoggers,
+                new Set([makeCapturingLogger(boot1Logs)]),
+              ),
             ),
           );
+
+          // The copied database recorded a site-local migration under id 41, so
+          // the migrator skipped this build's AuthSessionClientConnection by
+          // id. The divergence is surfaced at startup while the rest of the
+          // cutover still runs.
+          const divergenceLog = boot1Logs.find((log) =>
+            String(log.message).includes("migration history diverges"),
+          );
+          assert.deepStrictEqual(divergenceLog?.annotations.divergent, [
+            "41:ThreadSummaryTimeline (this build: AuthSessionClientConnection)",
+          ]);
+          assert.equal(firstBoot.migration41Name, "ThreadSummaryTimeline");
+          // The skipped migration's columns never landed; the schema gap is
+          // what the startup warning points at.
+          assert.notInclude(firstBoot.authSessionColumnNames, "client_surface");
+          assert.notInclude(firstBoot.authSessionColumnNames, "client_app_version");
 
           assert.equal(firstBoot.importRows.length, ALL_THREADS.length);
           const unhydratedRows = firstBoot.importRows.filter(
@@ -866,6 +950,7 @@ describe("orchestration v2 legacy v1 cutover", () => {
 
           // Restart: a fresh runtime on the same file repeats nothing, and the
           // still-unhydrated snoozed transcript lands lazily after the restart.
+          const boot2Logs: CapturedLog[] = [];
           yield* Effect.scoped(
             Effect.gen(function* () {
               const sql = yield* SqlClient.SqlClient;
@@ -942,7 +1027,17 @@ describe("orchestration v2 legacy v1 cutover", () => {
                   capturedTurns,
                 }),
               ),
+              Effect.provideService(
+                Logger.CurrentLoggers,
+                new Set([makeCapturingLogger(boot2Logs)]),
+              ),
             ),
+          );
+
+          // The recorded-name divergence persists across restarts; the warning
+          // fires again so it cannot be missed between upgrades.
+          assert.isTrue(
+            boot2Logs.some((log) => String(log.message).includes("migration history diverges")),
           );
         }).pipe(Effect.provide(NodeServices.layer)),
       ),

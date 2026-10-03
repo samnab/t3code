@@ -183,6 +183,40 @@ describe("fork migration ledger reconciliation", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
+  it.effect("leaves a site-local upstream migration name unchanged", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 40 });
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (41, 'ThreadSummaryTimeline')
+      `;
+      const before = yield* readHistory;
+
+      assert.deepStrictEqual(yield* reconcileForkMigrationLedger(), []);
+      assert.deepStrictEqual(yield* readHistory, before);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("rejects a fork-only migration name at an unexpected id", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 40 });
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (41, 'ProjectionThreadGoal')
+      `;
+      const before = yield* readHistory;
+
+      const error = yield* Effect.flip(reconcileForkMigrationLedger());
+      assert.isTrue(error instanceof Migrator.MigrationError);
+      if (error instanceof Migrator.MigrationError) {
+        assert.strictEqual(error.kind, "BadState");
+      }
+      assert.deepStrictEqual(yield* readHistory, before);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect(
     "rewrites the exact fork ledger, prunes fork tables, and runs migrations 55 and 56",
     () =>
@@ -284,20 +318,20 @@ describe("fork migration ledger reconciliation", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect("rejects an unexpected future migration", () =>
+  it.effect("leaves future upstream migrations unchanged and allows migration startup", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
-      yield* sql`
-        INSERT INTO effect_sql_migrations (migration_id, name) VALUES (68, 'UnexpectedFuture')
-      `;
+      for (let migrationId = 57; migrationId <= 70; migrationId++) {
+        yield* sql`
+          INSERT INTO effect_sql_migrations (migration_id, name)
+          VALUES (${migrationId}, ${`FutureUpstreamMigration${migrationId}`})
+        `;
+      }
       const before = yield* readHistory;
 
-      const error = yield* Effect.flip(reconcileForkMigrationLedger());
-      assert.isTrue(error instanceof Migrator.MigrationError);
-      if (error instanceof Migrator.MigrationError) {
-        assert.strictEqual(error.kind, "BadState");
-      }
+      assert.deepStrictEqual(yield* reconcileForkMigrationLedger(), []);
+      assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* readHistory, before);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
