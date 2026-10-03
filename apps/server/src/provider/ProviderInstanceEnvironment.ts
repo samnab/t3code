@@ -21,7 +21,12 @@ export function mergeProviderInstanceEnvironment(
   return next;
 }
 
-/** Applies one thread's voice preference to a provider process environment. */
+/**
+ * Applies one thread's voice preference to a provider process environment. Only
+ * correct for a provider with one process per thread; Codex shares an
+ * app-server, so its preference travels through the per-native-thread files in
+ * `voice/CodexVoicePreferenceFiles.ts`.
+ */
 export function withVoiceNotificationsEnv(
   env: NodeJS.ProcessEnv,
   enabled: boolean | undefined,

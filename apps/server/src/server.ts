@@ -167,6 +167,7 @@ import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementSer
 import * as ThreadPullRequestService from "./orchestration-v2/ThreadPullRequestService.ts";
 import * as RunFinalizationService from "./orchestration-v2/RunFinalizationService.ts";
 import * as ProjectionStoreV2 from "./orchestration-v2/ProjectionStore.ts";
+import * as CodexVoicePreferenceFiles from "./voice/CodexVoicePreferenceFiles.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -495,6 +496,13 @@ const ThreadPullRequestWorkerLive = Layer.effectDiscard(
   ThreadPullRequestService.make.pipe(Effect.flatMap((service) => service.start())),
 ).pipe(Layer.provide(PullRequestServiceLive));
 
+// Codex shares one app-server across a provider instance's threads, so the
+// per-thread voice preference travels through a file per native thread id
+// instead of the process environment.
+const CodexVoicePreferenceWorkerLive = Layer.effectDiscard(
+  CodexVoicePreferenceFiles.make.pipe(Effect.flatMap((service) => service.start())),
+).pipe(Layer.provide(ProjectionStoreV2.layer));
+
 const ProviderInstallationRefreshLive = Layer.effectDiscard(
   Effect.gen(function* () {
     const antigravity = yield* AntigravityInstallation.AntigravityInstallation;
@@ -534,6 +542,7 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
     Layer.provide(ProjectionStoreV2.layer),
   ),
   ThreadPullRequestWorkerLive,
+  CodexVoicePreferenceWorkerLive,
   Layer.effectDiscard(
     Effect.gen(function* () {
       const service = yield* PullRequestSyncReactor.PullRequestSyncReactor;
