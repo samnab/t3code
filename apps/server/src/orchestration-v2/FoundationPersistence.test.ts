@@ -51,7 +51,9 @@ import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 const isLiveStreamBufferError = Schema.is(LiveStreamBufferError);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -1504,6 +1506,105 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
       const unexpectedWake = yield* outbox.awaitAvailable.pipe(Effect.forkChild);
       yield* Effect.yieldNow;
       assert.isUndefined(unexpectedWake.pollUnsafe());
+    }).pipe(Effect.provide(Layer.fresh(TestLayer))),
+  );
+
+  it.effect("delivers a command's events ahead of the work its wakeup releases", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const eventStore = yield* EventStore.EventStoreV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      // Stands in for the effect worker an outbox notification wakes: it writes
+      // its own, later event the moment the outbox is notified.
+      const wokenWork = yield* Ref.make<Effect.Effect<void>>(Effect.void);
+      const sqlProvided = Layer.succeed(SqlClient.SqlClient, sql);
+      const sinkLayer = Layer.fresh(EventSink.layerFromStores).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            sqlProvided,
+            Layer.succeed(EventStore.EventStoreV2, eventStore),
+            Layer.succeed(ProjectionStore.ProjectionStoreV2, projectionStore),
+            Layer.succeed(CommandReceiptStore.CommandReceiptStoreV2, receipts),
+            Layer.succeed(EffectOutbox.EffectOutboxV2, {
+              ...outbox,
+              notifyAvailable: (count?: number) =>
+                Effect.flatMap(Ref.get(wokenWork), (work) => work).pipe(
+                  Effect.andThen(outbox.notifyAvailable(count)),
+                ),
+            }),
+            ProjectStore.layer.pipe(Layer.provide(sqlProvided)),
+            TurnItemPositionStore.layer.pipe(Layer.provide(sqlProvided)),
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        const commandId = CommandId.make("command:foundation-wake-ordering");
+        const threadId = ThreadId.make("thread:foundation-wake-ordering");
+        const thread = makeThread(threadId, now);
+        const metadataEvent = (id: string, title: string): OrchestrationV2DomainEvent => ({
+          id: EventId.make(id),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...thread, title },
+        });
+
+        const delivered: Array<number> = [];
+        const subscribed = yield* Deferred.make<void>();
+        const deliveredWokenEvent = yield* Deferred.make<void>();
+        const subscriber = yield* Stream.runForEach(eventSink.stream({ threadId }), (stored) =>
+          Effect.suspend(() => {
+            delivered.push(stored.sequence);
+            return delivered.length < 3
+              ? Deferred.succeed(subscribed, undefined)
+              : Deferred.succeed(deliveredWokenEvent, undefined);
+          }),
+        ).pipe(Effect.forkChild);
+
+        yield* eventSink.write({
+          events: [threadCreatedEvent({ id: "event:foundation-wake-ordering", thread, now })],
+        });
+        yield* Deferred.await(subscribed);
+        yield* Ref.set(
+          wokenWork,
+          eventSink
+            .write({ events: [metadataEvent("event:foundation-wake-ordering:woken", "Woken")] })
+            .pipe(Effect.asVoid, Effect.orDie),
+        );
+
+        const committed = yield* eventSink.commitCommand({
+          commandId,
+          threadId,
+          commandType: "foundation.wake-ordering",
+          acceptedAt: now,
+          events: [metadataEvent("event:foundation-wake-ordering:command", "Committed")],
+          effects: [
+            {
+              id: "effect:foundation-wake-ordering",
+              commandId,
+              threadId,
+              request: { type: "terminal.cleanup" as const },
+            },
+          ],
+        });
+        assert.isTrue(committed.committed);
+        yield* Deferred.await(deliveredWokenEvent);
+        yield* Fiber.interrupt(subscriber);
+
+        // Subscribers discard events at or below their cursor, so a later event
+        // reaching them first costs them the command's events for good.
+        assert.lengthOf(delivered, 3);
+        assert.deepEqual(
+          delivered,
+          [...delivered].sort((left, right) => left - right),
+        );
+      }).pipe(Effect.provide(sinkLayer));
+      // Fresh state: the command leaves an unclaimed effect row behind.
     }).pipe(Effect.provide(Layer.fresh(TestLayer))),
   );
 
