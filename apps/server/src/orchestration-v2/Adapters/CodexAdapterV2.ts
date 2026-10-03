@@ -1279,23 +1279,42 @@ export function codexThreadRuntimeParams(input: {
 } {
   const mcpSession =
     input.threadId === null ? undefined : McpProviderSession.readMcpProviderSession(input.threadId);
+  // One app-server serves every Codex thread, so optimizers that differ per
+  // project travel in this per-thread config instead of the process arguments.
+  const optimizers =
+    input.threadId === null
+      ? undefined
+      : SessionOptimizerAttachments.readSessionOptimizerAttachments(input.threadId);
+  const mcpServers: Record<string, Schema.Json> = {
+    ...(mcpSession === undefined
+      ? {}
+      : {
+          "t3-code": {
+            url: mcpSession.endpoint,
+            http_headers: {
+              Authorization: mcpSession.authorizationHeader,
+            },
+          },
+        }),
+    ...(optimizers?.cbm === undefined
+      ? {}
+      : {
+          [SessionOptimizerAttachments.CBM_MCP_SERVER_NAME]: {
+            command: optimizers.cbm.command,
+            args: [...optimizers.cbm.args],
+            env: { ...optimizers.cbm.env },
+          },
+        }),
+  };
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
-      ...(mcpSession === undefined
+      ...(Object.keys(mcpServers).length === 0 ? {} : { mcp_servers: mcpServers }),
+      ...(optimizers?.headroom?.codexBaseUrl === undefined
         ? {}
-        : {
-            mcp_servers: {
-              "t3-code": {
-                url: mcpSession.endpoint,
-                http_headers: {
-                  Authorization: mcpSession.authorizationHeader,
-                },
-              },
-            },
-          }),
+        : { openai_base_url: optimizers.headroom.codexBaseUrl }),
     },
   };
 }
@@ -1646,27 +1665,6 @@ export interface CodexAdapterV2Options {
   };
 }
 
-export function codexOptimizerLaunchConfig(
-  attachment: SessionOptimizerAttachments.SessionOptimizerAttachmentDescriptor | undefined,
-  baseEnvironment: NodeJS.ProcessEnv,
-): {
-  readonly environment: NodeJS.ProcessEnv;
-  readonly extraArgs: ReadonlyArray<string>;
-} {
-  return {
-    environment: {
-      ...baseEnvironment,
-      ...attachment?.headroom?.environment,
-    },
-    extraArgs: [
-      ...(attachment?.headroom?.codexAppServerArgs ?? []),
-      ...(attachment?.cbm === undefined
-        ? []
-        : SessionOptimizerAttachments.buildCodexCbmAppServerArgs(attachment.cbm)),
-    ],
-  };
-}
-
 export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): ProviderAdapterV2Shape {
   const { clientFactory, fileSystem, idAllocator, serverConfig } = adapterOptions;
   const continuationRequests = adapterOptions.continuationRequests;
@@ -1694,26 +1692,6 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               );
         const resolvedSettings = resolvedRuntime?.config ?? adapterOptions.settings;
         const baseEnvironment = resolvedRuntime?.environment ?? adapterOptions.environment;
-        const optimizerAttachments =
-          adapterOptions.sessionOptimizers === undefined || adapterOptions.path === undefined
-            ? undefined
-            : yield* adapterOptions.sessionOptimizers.resolve({
-                threadId: input.threadId,
-                cwd: input.runtimePolicy.cwd,
-                capabilities: { rtk: true, headroom: true, cbm: true },
-                resolveHeadroom: (proxyUrl) =>
-                  HeadroomRouting.resolveProviderHeadroomSessionRouting({
-                    provider: "codex",
-                    proxyUrl,
-                    config: resolvedSettings,
-                    ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
-                    environment: baseEnvironment,
-                  }).pipe(
-                    Effect.provideService(FileSystem.FileSystem, adapterOptions.fileSystem),
-                    Effect.provideService(Path.Path, adapterOptions.path),
-                  ),
-              });
-        const optimizerLaunch = codexOptimizerLaunchConfig(optimizerAttachments, baseEnvironment);
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
@@ -1724,11 +1702,45 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             maxConcurrentSubagents: adapterOptions.settings.maxConcurrentSubagents,
           },
           environment: withVoiceNotificationsEnv(
-            optimizerLaunch.environment,
+            baseEnvironment,
             input.runtimePolicy.voiceNotifications,
           ),
-          extraArgs: optimizerLaunch.extraArgs,
         });
+        const resolvedOptimizerThreads = yield* Ref.make(new Set<string>());
+        /**
+         * Attach the thread's project optimizers before Codex builds its
+         * config. One app-server serves several app threads, so this runs per
+         * app thread and `codexThreadRuntimeParams` carries the result in the
+         * thread's config overrides. Attachments live for the session scope.
+         */
+        const attachThreadOptimizers = (threadId: ThreadId | null, cwd: string | null) =>
+          Effect.gen(function* () {
+            const { sessionOptimizers, path: pathService } = adapterOptions;
+            if (threadId === null || sessionOptimizers === undefined || pathService === undefined) {
+              return;
+            }
+            const key = `${threadId}:${cwd ?? ""}`;
+            if ((yield* Ref.get(resolvedOptimizerThreads)).has(key)) return;
+            yield* sessionOptimizers
+              .resolve({
+                threadId,
+                cwd,
+                capabilities: { rtk: true, headroom: true, cbm: true },
+                resolveHeadroom: (proxyUrl) =>
+                  HeadroomRouting.resolveProviderHeadroomSessionRouting({
+                    provider: "codex",
+                    proxyUrl,
+                    config: resolvedSettings,
+                    ...(cwd === null ? {} : { cwd }),
+                    environment: baseEnvironment,
+                  }).pipe(
+                    Effect.provideService(FileSystem.FileSystem, adapterOptions.fileSystem),
+                    Effect.provideService(Path.Path, pathService),
+                  ),
+              })
+              .pipe(Effect.provideService(Scope.Scope, scope));
+            yield* Ref.update(resolvedOptimizerThreads, (current) => new Set(current).add(key));
+          });
         const additionalContextByThread = yield* Ref.make(
           new Map<
             string,
@@ -5604,15 +5616,18 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               ),
             ),
           ensureThread: (threadInput) =>
-            ensureInitialized.pipe(
+            attachThreadOptimizers(threadInput.threadId, threadInput.runtimePolicy.cwd).pipe(
+              Effect.andThen(ensureInitialized),
               Effect.andThen(
-                client.request(
-                  "thread/start",
-                  codexThreadRuntimeParams({
-                    threadId: threadInput.threadId,
-                    modelSelection: threadInput.modelSelection,
-                    runtimePolicy: threadInput.runtimePolicy,
-                  }),
+                Effect.suspend(() =>
+                  client.request(
+                    "thread/start",
+                    codexThreadRuntimeParams({
+                      threadId: threadInput.threadId,
+                      modelSelection: threadInput.modelSelection,
+                      runtimePolicy: threadInput.runtimePolicy,
+                    }),
+                  ),
                 ),
               ),
               Effect.map((response): OrchestrationV2ProviderThread =>
@@ -5637,6 +5652,10 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           resumeThread: (threadInput) =>
             Effect.gen(function* () {
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              yield* attachThreadOptimizers(
+                threadInput.threadId ?? threadInput.providerThread.appThreadId,
+                threadInput.runtimePolicy?.cwd ?? input.runtimePolicy.cwd,
+              );
 
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(
@@ -6416,6 +6435,10 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             Effect.gen(function* () {
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
+              yield* attachThreadOptimizers(
+                threadInput.targetThreadId,
+                threadInput.runtimePolicy?.cwd ?? input.runtimePolicy.cwd,
+              );
               const response = yield* ensureInitialized.pipe(
                 Effect.andThen(
                   client.request("thread/fork", {

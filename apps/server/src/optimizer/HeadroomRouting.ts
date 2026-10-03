@@ -22,7 +22,6 @@ import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
-const encodeJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.String));
 const decodeClaudeRoutingSettings = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Struct({
@@ -52,7 +51,8 @@ export interface HeadroomSessionRoutingInput {
 
 export interface HeadroomSessionRouting {
   readonly environment: Readonly<Record<string, string>>;
-  readonly codexAppServerArgs?: ReadonlyArray<string>;
+  /** Codex routes per thread: `openai_base_url` in the thread's config overrides. */
+  readonly codexBaseUrl?: string;
 }
 
 function isHeadroomRoutableProvider(
@@ -319,7 +319,7 @@ export const resolveProviderHeadroomSessionRouting = Effect.fn(
       ...headroomEnvironment(proxyUrl),
       OPENAI_BASE_URL: baseUrl,
     },
-    codexAppServerArgs: ["-c", `openai_base_url=${encodeJsonString(baseUrl)}`],
+    codexBaseUrl: baseUrl,
   };
 });
 

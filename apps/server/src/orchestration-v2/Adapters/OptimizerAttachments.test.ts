@@ -9,7 +9,7 @@ import {
 } from "../../optimizer/SessionOptimizerAttachments.ts";
 import { acpMcpContext } from "./AcpAdapterV2.ts";
 import { claudeMcpQueryOverrides } from "./ClaudeAdapterV2.ts";
-import { buildCodexTurnStartParams, codexOptimizerLaunchConfig } from "./CodexAdapterV2.ts";
+import { buildCodexTurnStartParams, codexThreadRuntimeParams } from "./CodexAdapterV2.ts";
 
 const threadId = ThreadId.make("thread-optimizer-adapters");
 
@@ -27,7 +27,7 @@ const attachOptimizers = () =>
         HEADROOM_PROXY_URL: "http://127.0.0.1:6767",
         OPENAI_BASE_URL: "http://127.0.0.1:6767/v1",
       },
-      codexAppServerArgs: ["-c", 'openai_base_url="http://127.0.0.1:6767/v1"'],
+      codexBaseUrl: "http://127.0.0.1:6767/v1",
     },
     cbm: {
       command: "/tools/codebase-memory-mcp",
@@ -37,43 +37,27 @@ const attachOptimizers = () =>
   });
 
 describe("optimizer attachment projections", () => {
-  it.effect("adds Codex RTK context and launch arguments only for attached optimizers", () =>
+  it.effect("adds Codex RTK context and thread config only for attached optimizers", () =>
     Effect.gen(function* () {
       attachOptimizers();
-      const launch = codexOptimizerLaunchConfig(
-        {
-          projectId: ProjectId.make("project-optimizer-adapters"),
+      // Codex shares one app-server across app threads, so CBM and Headroom
+      // have to ride in the per-thread config, not the process arguments.
+      const threadConfig = codexThreadRuntimeParams({
+        threadId,
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
           cwd: "/workspace/repo",
-          configured: ["rtk", "headroom", "cbm"],
-          attached: ["rtk", "headroom", "cbm"],
-          ready: ["rtk", "headroom"],
-          rtk: { command: "rtk" },
-          headroom: {
-            environment: { OPENAI_BASE_URL: "http://127.0.0.1:6767/v1" },
-            codexAppServerArgs: ["-c", 'openai_base_url="http://127.0.0.1:6767/v1"'],
-          },
-          cbm: {
-            command: "/tools/codebase-memory-mcp",
-            args: ["serve"],
-            env: { CBM_ALLOWED_ROOT: "/workspace/repo" },
-          },
         },
-        { KEEP_ME: "1" },
-      );
-      expect(launch.environment).toEqual({
-        KEEP_ME: "1",
-        OPENAI_BASE_URL: "http://127.0.0.1:6767/v1",
+      }).config;
+      expect(threadConfig["mcp_servers"]).toEqual({
+        "codebase-memory": {
+          command: "/tools/codebase-memory-mcp",
+          args: ["serve"],
+          env: { CBM_ALLOWED_ROOT: "/workspace/repo" },
+        },
       });
-      expect(launch.extraArgs).toEqual([
-        "-c",
-        'openai_base_url="http://127.0.0.1:6767/v1"',
-        "-c",
-        'mcp_servers.codebase-memory.command="/tools/codebase-memory-mcp"',
-        "-c",
-        'mcp_servers.codebase-memory.args=["serve"]',
-        "-c",
-        'mcp_servers.codebase-memory.env.CBM_ALLOWED_ROOT="/workspace/repo"',
-      ]);
+      expect(threadConfig["openai_base_url"]).toEqual("http://127.0.0.1:6767/v1");
 
       const turn = yield* buildCodexTurnStartParams({
         nativeThreadId: "native-optimizer-adapters",
@@ -113,11 +97,17 @@ describe("optimizer attachment projections", () => {
         }),
       });
 
-      expect(codexOptimizerLaunchConfig(undefined, { KEEP_ME: "1" })).toEqual({
-        environment: { KEEP_ME: "1" },
-        extraArgs: [],
-      });
       clearSessionOptimizerAttachments(threadId);
+      const detachedConfig = codexThreadRuntimeParams({
+        threadId,
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: "/workspace/repo",
+        },
+      }).config;
+      expect(detachedConfig).not.toHaveProperty("mcp_servers");
+      expect(detachedConfig).not.toHaveProperty("openai_base_url");
     }),
   );
 

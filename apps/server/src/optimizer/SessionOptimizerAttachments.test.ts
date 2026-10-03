@@ -2,7 +2,6 @@ import { describe, expect, it } from "@effect/vitest";
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 
 import {
-  buildCodexCbmAppServerArgs,
   clearAllSessionOptimizerAttachments,
   clearSessionOptimizerAttachments,
   isCurrentSessionOptimizerAttachments,
@@ -115,7 +114,7 @@ describe("SessionOptimizerAttachments", () => {
       rtk: { command: "rtk" as const },
       headroom: {
         environment: { OPENAI_BASE_URL: "http://127.0.0.1:6767/v1" },
-        codexAppServerArgs: ["-c", 'openai_base_url="http://127.0.0.1:6767/v1"'],
+        codexBaseUrl: "http://127.0.0.1:6767/v1",
       },
       cbm: {
         command: "codebase-memory-mcp",
@@ -143,24 +142,5 @@ describe("SessionOptimizerAttachments", () => {
     expect(readSessionOptimizerAttachments(threadId)).not.toHaveProperty("headroom");
 
     clearSessionOptimizerAttachments(threadId);
-  });
-});
-
-describe("buildCodexCbmAppServerArgs", () => {
-  it("scopes a single Codex MCP entry to the effective session cwd", () => {
-    expect(
-      buildCodexCbmAppServerArgs({
-        command: "/tools/codebase-memory-mcp",
-        args: ["serve"],
-        env: { CBM_ALLOWED_ROOT: "/repo/space here" },
-      }),
-    ).toEqual([
-      "-c",
-      'mcp_servers.codebase-memory.command="/tools/codebase-memory-mcp"',
-      "-c",
-      'mcp_servers.codebase-memory.args=["serve"]',
-      "-c",
-      'mcp_servers.codebase-memory.env.CBM_ALLOWED_ROOT="/repo/space here"',
-    ]);
   });
 });

@@ -566,13 +566,16 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
   ),
   Layer.provideMerge(ProviderRegistryLive),
-  Layer.provideMerge(OptimizerLayerLive),
   // The instance registry is the new routing keystone — text generation,
   // adapter lookup, and runtime ingestion all resolve `ProviderInstanceId`
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;
   // `providerInstances` hydration merges `settings.providers.<kind>`
   // with explicit `providerInstances` entries on boot.
   Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
+  // Below the instance registry: provider adapters look the attachment
+  // service up optionally when each instance is created, so it has to be a
+  // dependency of the registry, not a consumer of it.
+  Layer.provideMerge(OptimizerLayerLive),
   Layer.provideMerge(
     Layer.mergeAll(
       AntigravityInstallation.AntigravityInstallation.layer,
