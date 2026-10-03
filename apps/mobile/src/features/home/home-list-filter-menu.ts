@@ -1,4 +1,13 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, SidebarThreadSortOrder } from "@t3tools/contracts";
+
+/** Same choices and labels as the web sidebar's "Sort threads" picker. */
+export const THREAD_SORT_OPTIONS: ReadonlyArray<{
+  readonly value: SidebarThreadSortOrder;
+  readonly label: string;
+}> = [
+  { value: "created_at", label: "Default" },
+  { value: "updated_at", label: "Last updated" },
+];
 
 export interface HomeListFilterMenuEnvironment {
   readonly environmentId: EnvironmentId;
@@ -34,8 +43,10 @@ export function buildHomeListFilterMenu(props: {
   readonly projects: ReadonlyArray<HomeListFilterMenuProject>;
   readonly selectedEnvironmentId: EnvironmentId | null;
   readonly selectedProjectKey: string | null;
+  readonly threadSortOrder: SidebarThreadSortOrder;
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
   readonly onProjectChange: (projectKey: string | null) => void;
+  readonly onThreadSortOrderChange: (sortOrder: SidebarThreadSortOrder) => void;
 }): HomeListFilterMenu {
   const items: Array<HomeListFilterMenuAction | HomeListFilterMenuSubmenu> = [];
 
@@ -83,6 +94,17 @@ export function buildHomeListFilterMenu(props: {
       ],
     });
   }
+
+  items.push({
+    type: "submenu",
+    title: "Sort threads",
+    items: THREAD_SORT_OPTIONS.map((option) => ({
+      type: "action",
+      title: option.label,
+      state: props.threadSortOrder === option.value ? "on" : "off",
+      onPress: () => props.onThreadSortOrderChange(option.value),
+    })),
+  });
 
   return {
     title: "Thread list options",

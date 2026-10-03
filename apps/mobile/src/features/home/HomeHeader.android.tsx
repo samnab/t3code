@@ -1,6 +1,7 @@
 import type { MenuAction } from "@react-native-menu/menu";
 import { useCallback, useMemo } from "react";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
+import { THREAD_SORT_OPTIONS } from "./home-list-filter-menu";
 import { MaterialThreadListToolbar } from "./MaterialThreadListToolbar";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 
@@ -11,9 +12,8 @@ function checkedMenuState(checked: boolean) {
 }
 
 export function HomeHeader(props: HomeHeaderProps) {
-  // The list uses a fixed creation order and ignores sort/group options, so
-  // the filter menu only carries the filters and the "customized" icon state
-  // keys off those alone.
+  // Only the environment and project filters hide threads, so the
+  // "customized" icon keys off those alone; the thread sort just reorders.
   const hasCustomListOptions =
     props.selectedEnvironmentId !== null || props.selectedProjectKey !== null;
   const menuActions = useMemo<MenuAction[]>(
@@ -54,8 +54,23 @@ export function HomeHeader(props: HomeHeaderProps) {
               ],
             },
           ] satisfies MenuAction[])),
+      {
+        id: "thread-sort",
+        title: "Sort threads",
+        subactions: THREAD_SORT_OPTIONS.map((option) => ({
+          id: `thread-sort:${option.value}`,
+          title: option.label,
+          state: checkedMenuState(props.threadSortOrder === option.value),
+        })),
+      },
     ],
-    [props.environments, props.projects, props.selectedEnvironmentId, props.selectedProjectKey],
+    [
+      props.environments,
+      props.projects,
+      props.selectedEnvironmentId,
+      props.selectedProjectKey,
+      props.threadSortOrder,
+    ],
   );
   const handleMenuAction = useCallback(
     (event: { nativeEvent: { event: string } }) => {
@@ -88,6 +103,9 @@ export function HomeHeader(props: HomeHeaderProps) {
         }
         return;
       }
+
+      const threadSort = THREAD_SORT_OPTIONS.find((option) => id === `thread-sort:${option.value}`);
+      if (threadSort) props.onThreadSortOrderChange(threadSort.value);
     },
     [props],
   );

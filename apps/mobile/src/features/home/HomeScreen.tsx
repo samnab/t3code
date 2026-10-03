@@ -55,7 +55,10 @@ import {
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
   type ThreadListV2ListItem,
 } from "../threads/threadListV2";
-import { useThreadListV2ShelfPreferences } from "../threads/use-thread-list-v2-shelf-preferences";
+import {
+  useThreadListV2ShelfPreferences,
+  useThreadSortOrder,
+} from "../threads/use-thread-list-v2-shelf-preferences";
 import type { HomeListFilterMenuEnvironment } from "./home-list-filter-menu";
 import {
   buildHomeProjectScopes,
@@ -139,6 +142,7 @@ const ESTIMATED_THREAD_LIST_V2_ROW_HEIGHT = 72;
 // rows that are already built instead of rows still being rebuilt.
 const THREAD_LIST_V2_DRAW_DISTANCE = 1_000;
 const PRE_LIQUID_GLASS_BOTTOM_TOOLBAR_HEIGHT = 44;
+const NO_ENVIRONMENT_IDS: ReadonlySet<EnvironmentId> = new Set();
 /**
  * Top spacing between the list and the Android custom header. The Android
  * header is rendered in-flow above this screen and
@@ -494,9 +498,14 @@ export function HomeScreen(props: HomeScreenProps) {
     pinningEnvironmentIds,
     autoSettleOptOutEnvironmentIds,
     pinReorderEnvironmentIds,
-    activeReorderEnvironmentIds,
+    activeReorderEnvironmentIds: capableActiveReorderEnvironmentIds,
     titleRegenerationEnvironmentIds,
   } = listEnvironments;
+  const { threadSortOrder } = useThreadSortOrder();
+  // Web parity: under "Last updated" the active block is time-sorted, so its
+  // rows have no saved arrangement to move within; pinned moves are unchanged.
+  const activeReorderEnvironmentIds =
+    threadSortOrder === "updated_at" ? NO_ENVIRONMENT_IDS : capableActiveReorderEnvironmentIds;
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder(nowMinute, snoozeWakeTick);
   // Up/down menu availability for every card, computed once per section per
@@ -545,6 +554,7 @@ export function HomeScreen(props: HomeScreenProps) {
       settlementEnvironmentIds,
       snoozeEnvironmentIds,
       queuedThreadKeys,
+      threadSortOrder,
       settledLimit: settledVisibleCount,
       now: new Date().toISOString(),
       snoozedShelfExpanded,
@@ -552,6 +562,7 @@ export function HomeScreen(props: HomeScreenProps) {
       selectedThreadKey: null,
     });
   }, [
+    threadSortOrder,
     pendingOrder,
     queuedThreadKeys,
     nowMinute,

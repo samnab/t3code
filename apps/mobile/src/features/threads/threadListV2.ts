@@ -13,11 +13,12 @@ import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import {
   sortActiveThreadsByOrderKey,
+  sortActiveThreadsBySortOrder,
   resolveSettledThreadTimestamp,
   sortPinnedThreadsByOrderKey,
   sortSettledThreads,
 } from "@t3tools/client-runtime/state/thread-sort";
-import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectId, SidebarThreadSortOrder } from "@t3tools/contracts";
 
 import type { ThreadListProvider } from "../../state/thread-list-environments";
 import type { ThreadMoveAvailability } from "./threadOrder";
@@ -202,18 +203,21 @@ function parseTimestampMs(isoDate: string): number {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-/** The active order shared by web and native: new/reopened rows, then the
-    saved arrangement. Activity does not move a thread. */
+/** The active order shared by web and native. "created_at" (Default):
+    new/reopened rows, then the saved arrangement, so activity does not move a
+    thread. "updated_at" (Last updated): newest user message first. */
 export function sortThreadsForListV2<
   T extends {
     readonly id: string;
     readonly createdAt: string;
+    readonly updatedAt: string;
+    readonly latestUserMessageAt?: string | null | undefined;
     readonly unsettledAt?: string | null | undefined;
     readonly activeOrderKey?: string | null | undefined;
     readonly environmentId?: string | undefined;
   },
->(threads: readonly T[]): T[] {
-  return sortActiveThreadsByOrderKey(threads);
+>(threads: readonly T[], sortOrder: SidebarThreadSortOrder = "created_at"): T[] {
+  return sortActiveThreadsBySortOrder(threads, sortOrder);
 }
 
 /** Canonical card section for Move up/down, independent of search or scope. */
@@ -591,6 +595,8 @@ export function buildThreadListV2Items(input: {
       outbox. Such a thread has work the user is waiting on, so it stays in
       the active block even when the server has settled it. */
   readonly queuedThreadKeys?: ReadonlySet<string>;
+  /** The user's active-block sort. Absent = saved arrangement (tests). */
+  readonly threadSortOrder?: SidebarThreadSortOrder;
 }): ThreadListV2Layout {
   const now = input.now;
   const pending =
@@ -661,7 +667,11 @@ export function buildThreadListV2Items(input: {
     }
   }
 
-  const orderedActive = applyPendingThreadOrder(sortThreadsForListV2(active), "active", pending);
+  const orderedActive = applyPendingThreadOrder(
+    sortThreadsForListV2(active, input.threadSortOrder),
+    "active",
+    pending,
+  );
   const orderedSnoozed = [...snoozed].sort(
     (left, right) =>
       parseTimestampMs(left.snoozedUntil ?? "") - parseTimestampMs(right.snoozedUntil ?? ""),

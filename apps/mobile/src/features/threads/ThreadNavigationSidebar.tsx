@@ -11,6 +11,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-search";
 import { LegendList } from "@legendapp/list/react-native";
 import type { MenuAction } from "@react-native-menu/menu";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LayoutChangeEvent, TextInputInstance } from "react-native";
@@ -29,7 +30,10 @@ import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { useProjects, useNavigationThreadShells } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
-import { useThreadListV2ShelfPreferences } from "./use-thread-list-v2-shelf-preferences";
+import {
+  useThreadListV2ShelfPreferences,
+  useThreadSortOrder,
+} from "./use-thread-list-v2-shelf-preferences";
 import { usePendingThreadOrder } from "../../state/thread-order";
 import { threadListEnvironmentsAtom } from "../../state/server";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
@@ -39,7 +43,7 @@ import { useSavedRemoteConnections } from "../../state/use-remote-environment-re
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { useThreadJumpShortcuts } from "../keyboard/threadKeyboardShortcuts";
 import { useHomeListOptions } from "../home/home-list-options";
-import { buildHomeListFilterMenu } from "../home/home-list-filter-menu";
+import { buildHomeListFilterMenu, THREAD_SORT_OPTIONS } from "../home/home-list-filter-menu";
 import { buildHomeProjectScopes } from "../home/homeThreadList";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "../home/thread-swipe-actions";
 import { usePendingTaskListActions } from "../home/usePendingTaskListActions";
@@ -81,6 +85,7 @@ type SidebarListItem =
   | { readonly type: "v2-show-more"; readonly key: string; readonly hiddenCount: number };
 
 const SIDEBAR_STICKY_HEADER_HEIGHT = 106;
+const NO_ENVIRONMENT_IDS: ReadonlySet<EnvironmentId> = new Set();
 
 interface ThreadNavigationSidebarProps {
   readonly width: number;
@@ -317,9 +322,14 @@ function ThreadNavigationSidebarPane(
     pinningEnvironmentIds,
     autoSettleOptOutEnvironmentIds,
     pinReorderEnvironmentIds,
-    activeReorderEnvironmentIds,
+    activeReorderEnvironmentIds: capableActiveReorderEnvironmentIds,
     titleRegenerationEnvironmentIds,
   } = listEnvironments;
+  const { threadSortOrder, setThreadSortOrder } = useThreadSortOrder();
+  // Web parity: under "Last updated" the active block is time-sorted, so its
+  // rows have no saved arrangement to move within; pinned moves are unchanged.
+  const activeReorderEnvironmentIds =
+    threadSortOrder === "updated_at" ? NO_ENVIRONMENT_IDS : capableActiveReorderEnvironmentIds;
   const resolveProviderInstance = useThreadRowProviderInstanceResolver(providersByEnvironmentId);
   const pendingOrder = usePendingThreadOrder(nowMinute, snoozeWakeTick);
   // Up/down menu availability for every card, computed once per section per
@@ -366,6 +376,7 @@ function ThreadNavigationSidebarPane(
       settlementEnvironmentIds,
       snoozeEnvironmentIds,
       queuedThreadKeys,
+      threadSortOrder,
       settledLimit: settledVisibleCount,
       now: new Date().toISOString(),
       snoozedShelfExpanded,
@@ -373,6 +384,7 @@ function ThreadNavigationSidebarPane(
       selectedThreadKey: props.selectedThreadKey ?? null,
     });
   }, [
+    threadSortOrder,
     pendingOrder,
     queuedThreadKeys,
     nowMinute,
@@ -501,8 +513,17 @@ function ThreadNavigationSidebarPane(
               ],
             },
           ] satisfies MenuAction[])),
+      {
+        id: "thread-sort",
+        title: "Sort threads",
+        subactions: THREAD_SORT_OPTIONS.map((option) => ({
+          id: `thread-sort:${option.value}`,
+          title: option.label,
+          state: threadSortOrder === option.value ? ("on" as const) : ("off" as const),
+        })),
+      },
     ],
-    [environments, options, projectFilterOptions, selectedProjectKey],
+    [environments, options, projectFilterOptions, selectedProjectKey, threadSortOrder],
   );
   const handleListMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
@@ -529,8 +550,12 @@ function ThreadNavigationSidebarPane(
         }
         return;
       }
+      const threadSort = THREAD_SORT_OPTIONS.find(
+        (option) => `thread-sort:${option.value}` === event,
+      );
+      if (threadSort) setThreadSortOrder(threadSort.value);
     },
-    [environments, projectFilterOptions, setSelectedEnvironmentId],
+    [environments, projectFilterOptions, setSelectedEnvironmentId, setThreadSortOrder],
   );
 
   const [measuredHeaderHeight, setMeasuredHeaderHeight] = useState<number | null>(null);
@@ -802,8 +827,8 @@ function ThreadNavigationSidebarPane(
       unsnoozeThread,
     ],
   );
-  // The list ignores sort/group options, so only the environment and project
-  // filters can light the "customized" state.
+  // Only the environment and project filters hide threads, so only they light
+  // the "customized" state; the thread sort just reorders.
   const filterCustomized = options.selectedEnvironmentId !== null || selectedProjectKey !== null;
   const filterIcon = filterCustomized
     ? "line.3.horizontal.decrease.circle.fill"
@@ -815,10 +840,20 @@ function ThreadNavigationSidebarPane(
         projects: projectFilterOptions,
         selectedEnvironmentId: options.selectedEnvironmentId,
         selectedProjectKey,
+        threadSortOrder,
         onEnvironmentChange: setSelectedEnvironmentId,
         onProjectChange: setSelectedProjectKey,
+        onThreadSortOrderChange: setThreadSortOrder,
       }),
-    [environments, options, projectFilterOptions, selectedProjectKey, setSelectedEnvironmentId],
+    [
+      environments,
+      options,
+      projectFilterOptions,
+      selectedProjectKey,
+      setSelectedEnvironmentId,
+      setThreadSortOrder,
+      threadSortOrder,
+    ],
   );
   const nativeHeaderItems = useMemo(
     () =>

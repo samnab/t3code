@@ -13,8 +13,10 @@ describe("buildHomeListFilterMenu", () => {
       ],
       selectedEnvironmentId: null,
       selectedProjectKey: "environment-1:project-1",
+      threadSortOrder: "updated_at",
       onEnvironmentChange: vi.fn(),
       onProjectChange,
+      onThreadSortOrderChange: vi.fn(),
     });
 
     const projectMenu = menu.items.find(

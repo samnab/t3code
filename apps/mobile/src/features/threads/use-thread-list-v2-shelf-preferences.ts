@@ -1,4 +1,5 @@
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
+import { DEFAULT_SIDEBAR_THREAD_SORT_ORDER, type SidebarThreadSortOrder } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useRef } from "react";
 
@@ -42,4 +43,20 @@ export function useThreadListV2ShelfPreferences() {
     toggleSettledShelf,
     toggleSnoozedShelf,
   } as const;
+}
+
+/** The device's active-block sort, shared by the compact Home list and iPad
+    sidebar. Defaults like the web setting until the user picks one. */
+export function useThreadSortOrder() {
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const threadSortOrder =
+    (AsyncResult.isSuccess(preferencesResult)
+      ? preferencesResult.value.threadSortOrder
+      : undefined) ?? DEFAULT_SIDEBAR_THREAD_SORT_ORDER;
+  const setThreadSortOrder = useCallback(
+    (value: SidebarThreadSortOrder) => savePreferences({ threadSortOrder: value }),
+    [savePreferences],
+  );
+  return { threadSortOrder, setThreadSortOrder } as const;
 }

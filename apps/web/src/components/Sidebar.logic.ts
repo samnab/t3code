@@ -11,10 +11,7 @@ import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-searc
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
-import {
-  planPinnedReorder,
-  sortActiveThreadsByOrderKey,
-} from "@t3tools/client-runtime/state/thread-sort";
+import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -1049,23 +1046,9 @@ export function firstValidTimestampMs(
   return 0;
 }
 
-/** Applies the user's Active shelf ordering without changing pinned or lifecycle shelves. */
-export function sortThreadsForSidebar<
-  T extends ThreadSortInput & {
-    readonly id: string;
-    readonly unsettledAt?: string | null | undefined;
-  },
->(threads: readonly T[], sortOrder: SidebarThreadSortOrder = "created_at"): T[] {
-  if (sortOrder === "created_at") return sortActiveThreadsByOrderKey(threads);
-  const recencyMs = (thread: T) =>
-    Math.max(
-      getThreadSortTimestamp(thread, "updated_at"),
-      firstValidTimestampMs(thread.createdAt, thread.unsettledAt),
-    );
-  return [...threads].toSorted(
-    (left, right) => recencyMs(right) - recencyMs(left) || left.id.localeCompare(right.id),
-  );
-}
+// The Active shelf sort lives in client-runtime so web and mobile render the
+// same order for the same setting.
+export { sortActiveThreadsBySortOrder as sortThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
 
 // Pinned-reorder key math and the keyed sort live in client-runtime
 // (state/thread-sort) so web and mobile compute identical pinned orders.

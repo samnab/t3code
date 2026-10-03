@@ -5,7 +5,11 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import type { ProviderInstanceId, SidebarProjectGroupingMode } from "@t3tools/contracts";
+import type {
+  ProviderInstanceId,
+  SidebarProjectGroupingMode,
+  SidebarThreadSortOrder,
+} from "@t3tools/contracts";
 import type { ComposerEnterBehavior } from "../lib/composerEnterBehavior";
 import type { FollowUpBehavior } from "../lib/followUpBehavior";
 import { MOBILE_THEME_IDS, type MobileThemeId, type MobileThemeMode } from "../lib/mobileTheme";
@@ -49,6 +53,8 @@ export interface Preferences {
   /** Fresh keys reset both shelves to collapsed when users update. */
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
+  /** Device-local mirror of the web `sidebarThreadSortOrder` client setting. */
+  readonly threadSortOrder?: SidebarThreadSortOrder;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedError<MobilePreferencesLoadError>()(
@@ -110,6 +116,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     modelFavorites?: Preferences["modelFavorites"];
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
+    threadSortOrder?: SidebarThreadSortOrder;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -196,6 +203,9 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.threadListSnoozedShelfExpanded === "boolean") {
     preferences.threadListSnoozedShelfExpanded = parsed.threadListSnoozedShelfExpanded;
+  }
+  if (parsed.threadSortOrder === "updated_at" || parsed.threadSortOrder === "created_at") {
+    preferences.threadSortOrder = parsed.threadSortOrder;
   }
   return preferences;
 }

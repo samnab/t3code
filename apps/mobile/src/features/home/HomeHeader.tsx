@@ -8,7 +8,7 @@ import {
   createNativeMailSearchToolbarItem,
   NATIVE_MAIL_SEARCH_TOOLBAR_SUPPORTED,
 } from "../layout/native-mail-search-toolbar";
-import { buildHomeListFilterMenu } from "./home-list-filter-menu";
+import { buildHomeListFilterMenu, THREAD_SORT_OPTIONS } from "./home-list-filter-menu";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 
 export type { HomeHeaderEnvironment } from "./HomeHeader.types";
@@ -16,9 +16,8 @@ export type { HomeHeaderEnvironment } from "./HomeHeader.types";
 export function HomeHeader(props: HomeHeaderProps) {
   const searchBarRef = useRef<SearchBarCommands>(null);
   const iconColor = useUniwindTheme()["--color-icon"];
-  // The list uses a fixed creation order and ignores sort/group options, so
-  // the filter menu only carries the filters and the "customized" icon state
-  // keys off those alone.
+  // Only the environment and project filters hide threads, so the
+  // "customized" icon keys off those alone; the thread sort just reorders.
   const hasCustomListOptions =
     props.selectedEnvironmentId !== null || props.selectedProjectKey !== null;
   const focusSearch = useCallback(() => {
@@ -139,6 +138,19 @@ export function HomeHeader(props: HomeHeaderProps) {
                 ))}
               </NativeHeaderToolbar.Menu>
             ) : null}
+
+            <NativeHeaderToolbar.Menu title="Sort threads">
+              <NativeHeaderToolbar.Label>Sort threads</NativeHeaderToolbar.Label>
+              {THREAD_SORT_OPTIONS.map((option) => (
+                <NativeHeaderToolbar.MenuAction
+                  key={option.value}
+                  isOn={props.threadSortOrder === option.value}
+                  onPress={() => props.onThreadSortOrderChange(option.value)}
+                >
+                  <NativeHeaderToolbar.Label>{option.label}</NativeHeaderToolbar.Label>
+                </NativeHeaderToolbar.MenuAction>
+              ))}
+            </NativeHeaderToolbar.Menu>
           </NativeHeaderToolbar.Menu>
           <NativeHeaderToolbar.Spacer flexible />
           <NativeHeaderToolbar.Button

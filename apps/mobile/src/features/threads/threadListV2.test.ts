@@ -350,18 +350,40 @@ describe("resolveThreadListV2SnoozeGateExpiryMs", () => {
 describe("sortThreadsForListV2", () => {
   it("honors a saved active order and leaves new threads above it", () => {
     const sorted = sortThreadsForListV2([
-      { id: "newer-arranged", createdAt: "2026-06-01T12:00:00.000Z", activeOrderKey: "t" },
-      { id: "older-arranged", createdAt: "2026-06-01T08:00:00.000Z", activeOrderKey: "f" },
-      { id: "new", createdAt: "2026-06-01T13:00:00.000Z" },
+      {
+        id: "newer-arranged",
+        createdAt: "2026-06-01T12:00:00.000Z",
+        updatedAt: "2026-06-01T12:00:00.000Z",
+        activeOrderKey: "t",
+      },
+      {
+        id: "older-arranged",
+        createdAt: "2026-06-01T08:00:00.000Z",
+        updatedAt: "2026-06-01T08:00:00.000Z",
+        activeOrderKey: "f",
+      },
+      { id: "new", createdAt: "2026-06-01T13:00:00.000Z", updatedAt: "2026-06-01T13:00:00.000Z" },
     ]);
     expect(sorted.map((thread) => thread.id)).toEqual(["new", "older-arranged", "newer-arranged"]);
   });
 
   it("orders by creation time, newest first, ignoring activity", () => {
     const sorted = sortThreadsForListV2([
-      { id: "oldest", createdAt: "2026-06-01T08:00:00.000Z" },
-      { id: "newest", createdAt: "2026-06-01T12:00:00.000Z" },
-      { id: "middle", createdAt: "2026-06-01T10:00:00.000Z" },
+      {
+        id: "oldest",
+        createdAt: "2026-06-01T08:00:00.000Z",
+        updatedAt: "2026-06-01T08:00:00.000Z",
+      },
+      {
+        id: "newest",
+        createdAt: "2026-06-01T12:00:00.000Z",
+        updatedAt: "2026-06-01T12:00:00.000Z",
+      },
+      {
+        id: "middle",
+        createdAt: "2026-06-01T10:00:00.000Z",
+        updatedAt: "2026-06-01T10:00:00.000Z",
+      },
     ]);
     expect(sorted.map((thread) => thread.id)).toEqual(["newest", "middle", "oldest"]);
   });

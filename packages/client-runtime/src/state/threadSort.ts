@@ -375,6 +375,35 @@ export function sortActiveThreadsByOrderKey<
   });
 }
 
+/** Applies the user's thread sort to the active block on every client.
+    "created_at" (Default) keeps the saved arrangement; "updated_at" (Last
+    updated) ranks by the user's latest message, newest first. */
+export function sortActiveThreadsBySortOrder<
+  T extends ThreadSortInput & {
+    readonly id: string;
+    readonly unsettledAt?: string | null | undefined;
+    readonly activeOrderKey?: string | null | undefined;
+    readonly environmentId?: string | undefined;
+  },
+>(threads: readonly T[], sortOrder: SidebarThreadSortOrder): T[] {
+  if (sortOrder === "created_at") return sortActiveThreadsByOrderKey(threads);
+  return threads
+    .map((thread) => ({
+      thread,
+      recencyMs: Math.max(
+        getThreadSortTimestamp(thread, "updated_at"),
+        toSortableTimestamp(thread.createdAt) ??
+          toSortableTimestamp(thread.unsettledAt ?? undefined) ??
+          0,
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        right.recencyMs - left.recencyMs || left.thread.id.localeCompare(right.thread.id),
+    )
+    .map(({ thread }) => thread);
+}
+
 /**
  * planPinnedReorder specialized for mobile's Move up / Move down menu
  * actions: swap the moved thread with its displayed neighbor. Null when the

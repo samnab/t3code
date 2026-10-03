@@ -18,6 +18,7 @@ import { checkForAppUpdateOnLaunch, startAppUpdateForegroundRecheck } from "../u
 import { AndroidHomeFabLayout } from "./AndroidHomeFab";
 import { HomeScreen } from "./HomeScreen";
 import { HomeHeader } from "./HomeHeader";
+import { useThreadSortOrder } from "../threads/use-thread-list-v2-shelf-preferences";
 import { useHomeListOptions } from "./home-list-options";
 import { useHomeThreadSelection } from "./home-thread-navigation";
 import { buildHomeProjectScopes } from "./homeThreadList";
@@ -95,6 +96,7 @@ export function HomeRouteScreen() {
   );
   const { options: listOptions, setSelectedEnvironmentId } =
     useHomeListOptions(availableEnvironmentIds);
+  const { threadSortOrder, setThreadSortOrder } = useThreadSortOrder();
   const selectedEnvironmentId = listOptions.selectedEnvironmentId;
   const [selectedProjectKey, setSelectedProjectKey] = useState<string | null>(null);
   const projectFilterOptions = useMemo(
@@ -188,8 +190,10 @@ export function HomeRouteScreen() {
           searchQuery={searchQuery}
           selectedEnvironmentId={selectedEnvironmentId}
           selectedProjectKey={selectedProjectKey}
+          threadSortOrder={threadSortOrder}
           onEnvironmentChange={setSelectedEnvironmentId}
           onProjectChange={setSelectedProjectKey}
+          onThreadSortOrderChange={setThreadSortOrder}
           onOpenEnvironments={() =>
             navigation.navigate("SettingsSheet", {
               screen: "SettingsContent",
