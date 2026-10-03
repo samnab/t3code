@@ -258,6 +258,8 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   modelSelectionExplicit: Schema.optionalKey(Schema.Boolean),
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
+  goal: Schema.optionalKey(Schema.String),
+  voiceNotifications: Schema.optionalKey(Schema.Boolean),
 });
 type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
 
@@ -413,6 +415,9 @@ export interface ComposerThreadDraftState {
   modelSelectionExplicit?: boolean;
   runtimeMode: RuntimeMode | null;
   interactionMode: ProviderInteractionMode | null;
+  /** Thread settings staged before the first turn creates the server thread. */
+  goal: string | null;
+  voiceNotifications: boolean | null;
 }
 
 /**
@@ -631,6 +636,10 @@ interface ComposerDraftStoreState {
   setInteractionMode: (
     threadRef: ComposerThreadTarget,
     interactionMode: ProviderInteractionMode | null | undefined,
+  ) => void;
+  setComposerThreadSettings: (
+    threadRef: ComposerThreadTarget,
+    settings: { goal?: string | null; voiceNotifications?: boolean | null },
   ) => void;
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => boolean;
   /** Returns the ids the draft accepted; duplicates and over-cap attachments are left out. */
@@ -865,6 +874,8 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   activeProvider: null,
   runtimeMode: null,
   interactionMode: null,
+  goal: null,
+  voiceNotifications: null,
 });
 
 /**
@@ -888,6 +899,8 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     activeProvider: null,
     runtimeMode: null,
     interactionMode: null,
+    goal: null,
+    voiceNotifications: null,
   };
 }
 
@@ -982,7 +995,9 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
-    draft.interactionMode === null
+    draft.interactionMode === null &&
+    draft.goal === null &&
+    draft.voiceNotifications === null
   );
 }
 
@@ -1985,6 +2000,11 @@ function normalizePersistedDraftsByThreadId(
       draftCandidate.interactionMode === "plan" || draftCandidate.interactionMode === "default"
         ? draftCandidate.interactionMode
         : null;
+    const goal = typeof draftCandidate.goal === "string" ? draftCandidate.goal : null;
+    const voiceNotifications =
+      typeof draftCandidate.voiceNotifications === "boolean"
+        ? draftCandidate.voiceNotifications
+        : null;
     const contextIds = new Map<string, string>();
     for (const [kind, entries] of [
       ["image", attachments],
@@ -2080,7 +2100,9 @@ function normalizePersistedDraftsByThreadId(
       threadContexts.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
-      !interactionMode
+      !interactionMode &&
+      goal === null &&
+      voiceNotifications === null
     ) {
       continue;
     }
@@ -2113,6 +2135,8 @@ function normalizePersistedDraftsByThreadId(
         : {}),
       ...(runtimeMode ? { runtimeMode } : {}),
       ...(interactionMode ? { interactionMode } : {}),
+      ...(goal === null ? {} : { goal }),
+      ...(voiceNotifications === null ? {} : { voiceNotifications }),
     };
   }
 
@@ -2151,7 +2175,12 @@ function stripLegacyModelSeedsFromEmptyDraftSessions(
         modelSelectionExplicit: _modelSelectionExplicit,
         ...retained
       } = draft;
-      return retained.runtimeMode || retained.interactionMode ? [[threadKey, retained]] : [];
+      return retained.runtimeMode ||
+        retained.interactionMode ||
+        retained.goal !== undefined ||
+        retained.voiceNotifications !== undefined
+        ? [[threadKey, retained]]
+        : [];
     }),
   );
 }
@@ -2215,7 +2244,9 @@ export function partializeComposerDraftStoreState(
       draft.threadContexts.length === 0 &&
       !hasModelData &&
       draft.runtimeMode === null &&
-      draft.interactionMode === null
+      draft.interactionMode === null &&
+      draft.goal === null &&
+      draft.voiceNotifications === null
     ) {
       continue;
     }
@@ -2282,6 +2313,10 @@ export function partializeComposerDraftStoreState(
         : {}),
       ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
       ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
+      ...(draft.goal === null ? {} : { goal: draft.goal }),
+      ...(draft.voiceNotifications === null
+        ? {}
+        : { voiceNotifications: draft.voiceNotifications }),
     };
     persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
@@ -2557,6 +2592,8 @@ function toHydratedThreadDraft(
     ...(persistedDraft.modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
     runtimeMode: persistedDraft.runtimeMode ?? null,
     interactionMode: persistedDraft.interactionMode ?? null,
+    goal: persistedDraft.goal ?? null,
+    voiceNotifications: persistedDraft.voiceNotifications ?? null,
   };
 }
 
@@ -3399,6 +3436,30 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               ...base,
               interactionMode: nextInteractionMode,
             };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        setComposerThreadSettings: (threadRef, settings) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey];
+            const base = existing ?? createEmptyThreadDraft();
+            const nextDraft: ComposerThreadDraftState = { ...base, ...settings };
+            if (
+              nextDraft.goal === base.goal &&
+              nextDraft.voiceNotifications === base.voiceNotifications
+            ) {
+              return state;
+            }
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
               delete nextDraftsByThreadKey[threadKey];

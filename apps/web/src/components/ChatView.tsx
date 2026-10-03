@@ -74,6 +74,7 @@ import {
   resolveEnvironmentMachineKind,
   RuntimeMode,
   TerminalOpenInput,
+  ThreadGoal,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
@@ -85,6 +86,17 @@ import {
 import { readPastedComposerContext } from "./composerInlineTokenPaste";
 import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
 import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  nextThreadGoalEditorEpoch,
+  readThreadGoalState,
+  readThreadVoiceNotifications,
+  resolveComposerThreadGoalCommand,
+  runThreadGoalMutation,
+  threadGoalEditorCanSave,
+  threadGoalEditorDraftError,
+  threadGoalEditorReducer,
+  type ThreadGoalLoopAction,
+} from "@t3tools/client-runtime/state/thread-goal-editor";
 import { useThreadActions } from "../hooks/useThreadActions";
 import {
   deriveProviderSubagentStatus,
@@ -96,6 +108,8 @@ import {
   presentPendingBackgroundWork,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
+import { deriveThreadBackgroundWork } from "@t3tools/client-runtime/state/thread-background-work";
+import { deriveTurnOutputThroughput } from "@t3tools/client-runtime/state/tokenThroughput";
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
@@ -103,7 +117,7 @@ import {
   submitCodexFeedback,
   type CodexFeedbackSubmission,
 } from "@t3tools/client-runtime/state/threads";
-import { resolveThreadLastVisitedAt } from "./Sidebar.logic";
+import { resolveSeenCompletionAt, resolveThreadLastVisitedAt } from "./Sidebar.logic";
 import { derivePendingThreadRequests } from "@t3tools/client-runtime/state/thread-requests";
 import {
   parseScopedThreadKey,
@@ -123,7 +137,6 @@ import {
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
-import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import {
   latestUnheldRun,
   usageLimitRunPresentedAsLatest,
@@ -148,6 +161,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useReducer,
   useState,
 } from "react";
 import { flushSync } from "react-dom";
@@ -420,6 +434,7 @@ import {
   resolveScrollToEndClearance,
 } from "./composerFooterLayout";
 import { ChatHeader } from "./chat/ChatHeader";
+import { ThreadGoalEditor } from "./chat/ThreadGoalEditor";
 import { useRemoteOpenState } from "~/remoteOpen";
 import { shouldShowOpenInPicker } from "./chat/OpenInPicker.logic";
 import { useOpenFavoriteEditorShortcut } from "./chat/OpenInPickerShortcut";
@@ -1544,6 +1559,17 @@ export default function ChatView(props: ChatViewProps) {
   const setThreadInteractionMode = useAtomCommand(threadEnvironment.setInteractionMode, {
     reportFailure: false,
   });
+  const setThreadVoiceNotifications = useAtomCommand(threadEnvironment.setVoiceNotifications, {
+    reportFailure: false,
+  });
+  const setThreadGoal = useAtomCommand(threadEnvironment.setGoal, { reportFailure: false });
+  const clearThreadGoal = useAtomCommand(threadEnvironment.clearGoal, { reportFailure: false });
+  const controlThreadGoalLoop = useAtomCommand(threadEnvironment.controlGoalLoop, {
+    reportFailure: false,
+  });
+  const stopBackgroundTask = useAtomCommand(threadEnvironment.stopBackgroundTask, {
+    reportFailure: false,
+  });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const resumeThreadQueue = useAtomCommand(threadEnvironment.resumeThreadQueue, {
     reportFailure: false,
@@ -1711,6 +1737,12 @@ export default function ChatView(props: ChatViewProps) {
   const composerInteractionMode = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.interactionMode ?? null,
   );
+  const composerGoal = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.goal ?? null,
+  );
+  const composerVoiceNotifications = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.voiceNotifications ?? null,
+  );
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
   );
@@ -1738,6 +1770,9 @@ export default function ChatView(props: ChatViewProps) {
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
+  );
+  const setComposerThreadSettings = useComposerDraftStore(
+    (store) => store.setComposerThreadSettings,
   );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
@@ -2028,6 +2063,21 @@ export default function ChatView(props: ChatViewProps) {
     () => (serverProjection === null ? null : deriveLatestThreadRun(serverProjection)),
     [serverProjection],
   );
+  const activeTurnOutputThroughput = useMemo(() => {
+    if (serverProjection === null || serverLatestRun === null) return null;
+    for (const turn of serverProjection.providerTurns.toReversed()) {
+      const node = serverProjection.nodes.find((candidate) => candidate.id === turn.nodeId);
+      if (
+        node?.runId !== serverLatestRun.runId ||
+        turn.providerThreadId !== serverProjection.thread.activeProviderThreadId
+      ) {
+        continue;
+      }
+      const throughput = deriveTurnOutputThroughput(turn);
+      if (throughput !== null) return throughput;
+    }
+    return null;
+  }, [serverLatestRun, serverProjection]);
   const serverActivityRun = useMemo(
     () => (serverProjection === null ? null : deriveThreadActivityRun(serverProjection)),
     [serverProjection],
@@ -2170,6 +2220,35 @@ export default function ChatView(props: ChatViewProps) {
     widthStorageKey: `t3code:preview-panel-width:${activeThreadKey}`,
   });
   const activeThreadShell = useThreadShell(isServerThread ? activeThreadRef : null);
+  const threadGoalState = readThreadGoalState({
+    ...(activeThreadShell?.goal === undefined ? {} : { goal: activeThreadShell.goal }),
+    ...(activeThreadShell?.goalLoop === undefined ? {} : { goalLoop: activeThreadShell.goalLoop }),
+  });
+  const activeGoal = isServerThread ? threadGoalState.goal : composerGoal;
+  const activeGoalLoop = isServerThread ? threadGoalState.goalLoop : null;
+  const [goalEditor, dispatchGoalEditor] = useReducer(threadGoalEditorReducer, null);
+  const openGoalEditor = useCallback(() => {
+    dispatchGoalEditor({
+      type: "open",
+      epoch: nextThreadGoalEditorEpoch(),
+      threadKey: routeThreadKey,
+      environmentId,
+      threadId,
+      goal: activeGoal,
+    });
+  }, [activeGoal, environmentId, routeThreadKey, threadId]);
+  useEffect(() => {
+    dispatchGoalEditor({ type: "close" });
+  }, [routeThreadKey]);
+  const voiceNotifications = isServerThread
+    ? activeThreadShell === null
+      ? true
+      : readThreadVoiceNotifications({
+          ...(activeThreadShell.voiceNotifications === undefined
+            ? {}
+            : { voiceNotifications: activeThreadShell.voiceNotifications }),
+        })
+    : (composerVoiceNotifications ?? true);
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -2774,6 +2853,9 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     if (!serverThread?.id) return;
+    if (serverThread.latestRun?.completedAt && resolveSeenCompletionAt(serverThread) === null) {
+      return;
+    }
     const threadUpdatedAt = Date.parse(serverThread.updatedAt);
     if (Number.isNaN(threadUpdatedAt)) return;
     const effectiveLastVisitedAt = resolveThreadLastVisitedAt(
@@ -2841,6 +2923,21 @@ export default function ChatView(props: ChatViewProps) {
   const serverConfig = activeThread
     ? (activeEnvironment?.serverConfig ?? null)
     : (primaryEnvironment?.serverConfig ?? null);
+  const optimizerStatusQuery = useEnvironmentQuery(
+    activeEnvironment?.connection.phase === "connected"
+      ? serverEnvironment.optimizersGetStatus({ environmentId, input: { refresh: false } })
+      : null,
+  );
+  const currentSessionOptimizers = useMemo(() => {
+    if (activeThreadId === null) return [];
+    const attachment = optimizerStatusQuery.data?.attachments.find(
+      (candidate) => candidate.threadId === activeThreadId,
+    );
+    return attachment?.ready ?? [];
+  }, [activeThreadId, optimizerStatusQuery.data?.attachments]);
+  const openOptimizers = useCallback(() => {
+    void navigate({ to: "/settings/optimizers" });
+  }, [navigate]);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
@@ -3462,28 +3559,7 @@ export default function ChatView(props: ChatViewProps) {
     [activeThreadLiveTokenUsage, serverVisibleTurnItems, serverProjection],
   );
   const pendingBackgroundTasks = useMemo(() => {
-    if (serverProjection === null || serverProjection === undefined) {
-      return [];
-    }
-    const sessionError =
-      serverProjection.providerSessions.findLast(
-        (session) => session.providerInstanceId === serverProjection.thread.providerInstanceId,
-      )?.lastError ?? null;
-    const latestRun =
-      usageLimitRunPresentedAsLatest(
-        serverProjection.runs,
-        serverProjection.turnItems,
-        sessionError,
-      ) ?? latestUnheldRun(serverProjection.runs);
-    return [
-      ...derivePendingBackgroundWork({
-        latestRun,
-        providerThreads: serverProjection.providerThreads,
-        turnItems: serverProjection.turnItems,
-        activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
-        runs: serverProjection.runs,
-      }),
-    ];
+    return serverProjection === null ? [] : deriveThreadBackgroundWork(serverProjection);
   }, [serverProjection]);
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
@@ -4967,6 +5043,144 @@ export default function ChatView(props: ChatViewProps) {
     if (!interactionModeEnabled) return;
     handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
   }, [handleInteractionModeChange, interactionMode, interactionModeEnabled]);
+  const handleVoiceNotificationsChange = useCallback(
+    async (enabled: boolean) => {
+      if (enabled === voiceNotifications) return;
+      if (!isServerThread) {
+        setComposerThreadSettings(composerDraftTarget, { voiceNotifications: enabled });
+        scheduleComposerFocus();
+        return;
+      }
+      if (activeThreadId === null) return;
+      const result = await setThreadVoiceNotifications({
+        environmentId,
+        input: { threadId: activeThreadId, voiceNotifications: enabled },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadId,
+          error instanceof Error ? error.message : "Failed to update voice notifications.",
+        );
+      }
+      scheduleComposerFocus();
+    },
+    [
+      activeThreadId,
+      composerDraftTarget,
+      environmentId,
+      isServerThread,
+      scheduleComposerFocus,
+      setComposerThreadSettings,
+      setThreadError,
+      setThreadVoiceNotifications,
+      voiceNotifications,
+    ],
+  );
+  const saveGoal = useCallback(async () => {
+    if (goalEditor === null) return;
+    const validationError = threadGoalEditorDraftError(goalEditor.draft);
+    if (validationError !== null) return;
+    const goal = ThreadGoal.make(goalEditor.draft.trim());
+    dispatchGoalEditor({ type: "beginSave" });
+    if (!isServerThread) {
+      setComposerThreadSettings(composerDraftTarget, { goal });
+      dispatchGoalEditor({
+        type: "saveSuccess",
+        threadKey: goalEditor.threadKey,
+        goal,
+        epoch: goalEditor.epoch,
+      });
+      return;
+    }
+    const result = await setThreadGoal({
+      environmentId,
+      input: { threadId: goalEditor.threadId, goal },
+    });
+    if (result._tag === "Success") {
+      dispatchGoalEditor({
+        type: "saveSuccess",
+        threadKey: goalEditor.threadKey,
+        goal,
+        epoch: goalEditor.epoch,
+      });
+      return;
+    }
+    if (isAtomCommandInterrupted(result)) return;
+    const error = squashAtomCommandFailure(result);
+    dispatchGoalEditor({
+      type: "saveFailure",
+      threadKey: goalEditor.threadKey,
+      error: error instanceof Error ? error.message : "Failed to save the thread goal.",
+      epoch: goalEditor.epoch,
+    });
+  }, [
+    composerDraftTarget,
+    environmentId,
+    goalEditor,
+    isServerThread,
+    setComposerThreadSettings,
+    setThreadGoal,
+  ]);
+  const clearGoal = useCallback(async () => {
+    if (goalEditor === null) return;
+    dispatchGoalEditor({ type: "beginSave" });
+    if (!isServerThread) {
+      setComposerThreadSettings(composerDraftTarget, { goal: null });
+      dispatchGoalEditor({
+        type: "saveSuccess",
+        threadKey: goalEditor.threadKey,
+        goal: null,
+        epoch: goalEditor.epoch,
+      });
+      return;
+    }
+    const result = await clearThreadGoal({
+      environmentId,
+      input: { threadId: goalEditor.threadId },
+    });
+    if (result._tag === "Success") {
+      dispatchGoalEditor({
+        type: "saveSuccess",
+        threadKey: goalEditor.threadKey,
+        goal: null,
+        epoch: goalEditor.epoch,
+      });
+      return;
+    }
+    if (isAtomCommandInterrupted(result)) return;
+    const error = squashAtomCommandFailure(result);
+    dispatchGoalEditor({
+      type: "saveFailure",
+      threadKey: goalEditor.threadKey,
+      error: error instanceof Error ? error.message : "Failed to clear the thread goal.",
+      epoch: goalEditor.epoch,
+    });
+  }, [
+    clearThreadGoal,
+    composerDraftTarget,
+    environmentId,
+    goalEditor,
+    isServerThread,
+    setComposerThreadSettings,
+  ]);
+  const handleGoalLoopAction = useCallback(
+    async (action: ThreadGoalLoopAction) => {
+      if (!isServerThread || activeThreadId === null) return;
+      const result = await controlThreadGoalLoop({
+        environmentId,
+        input: { threadId: activeThreadId, action },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThreadId,
+          error instanceof Error ? error.message : "Failed to update the goal loop.",
+        );
+      }
+    },
+    [activeThreadId, controlThreadGoalLoop, environmentId, isServerThread, setThreadError],
+  );
   const openProviderSetup = useCallback(
     (instanceId: ProviderInstanceId) => {
       void navigate({
@@ -6834,29 +7048,30 @@ export default function ChatView(props: ChatViewProps) {
   // accepts a completed run while its provider still has background work.
   const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
-  const isStoppingBackgroundWork =
-    stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
-  const handleStopBackgroundWork = useCallback(async () => {
-    if (!activeThread) return;
-    const requestKey = `${environmentId}:${activeThread.id}`;
-    setStoppingBackgroundWorkKey(requestKey);
-    const result = await interruptThreadTurn({
-      environmentId,
-      input: { threadId: activeThread.id },
-    });
-    // Acceptance does not confirm termination. Allow retry while the provider
-    // finishes stopping the tasks or reports a failure.
-    setStoppingBackgroundWorkKey((current) => (current === requestKey ? null : current));
-    if (result._tag === "Failure") {
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to stop background work.",
-        );
+  const handleStopBackgroundWork = useCallback(
+    async (taskId: string) => {
+      if (!activeThread) return;
+      const requestKey = `${environmentId}:${activeThread.id}:${taskId}`;
+      setStoppingBackgroundWorkKey(requestKey);
+      const result = await stopBackgroundTask({
+        environmentId,
+        input: { threadId: activeThread.id, taskId },
+      });
+      // Acceptance does not confirm termination. Allow retry while the provider
+      // finishes stopping the tasks or reports a failure.
+      setStoppingBackgroundWorkKey((current) => (current === requestKey ? null : current));
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to stop background work.",
+          );
+        }
       }
-    }
-  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+    },
+    [activeThread, environmentId, setThreadError, stopBackgroundTask],
+  );
   const onOpenRelatedThread = useCallback(
     (threadId: ThreadId) => {
       void navigate({
@@ -6868,7 +7083,9 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const backgroundWorkBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
-    const presentation = presentPendingBackgroundWork(activeBackgroundTasks);
+    const presentation = presentPendingBackgroundWork(
+      activeBackgroundTasks.map(({ task }) => task),
+    );
     if (presentation === null || !activeThread) {
       return null;
     }
@@ -6876,19 +7093,20 @@ export default function ChatView(props: ChatViewProps) {
       id: `background-work:${activeThread.id}`,
       variant: "default",
       priority: "activity",
-      icon: (
-        <span
-          className="size-1.5 animate-status-pulse rounded-full bg-foreground"
-          aria-hidden="true"
-        />
-      ),
+      icon: <span className="size-1.5 rounded-full bg-foreground" aria-hidden="true" />,
       title: presentation.title,
       // A single named item is already in the title.
       description:
-        presentation.items.length === 1 && presentation.items[0]?.childThreadId === undefined
+        presentation.items.length === 1 &&
+        presentation.items[0]?.childThreadId === undefined &&
+        activeBackgroundTasks[0]?.canStop !== true
           ? undefined
           : presentation.items.map((item, index) => {
               const childThreadId = item.childThreadId;
+              const backgroundTask = activeBackgroundTasks.find(
+                ({ task }) => task.taskId === item.taskId,
+              );
+              const requestKey = `${environmentId}:${activeThread.id}:${item.taskId}`;
               return (
                 <Fragment key={item.taskId}>
                   {index > 0 ? ", " : null}
@@ -6903,26 +7121,29 @@ export default function ChatView(props: ChatViewProps) {
                       {item.label}
                     </InlineButton>
                   )}
+                  {backgroundTask?.canStop ? (
+                    <>
+                      {" "}
+                      <InlineButton
+                        tone="destructive"
+                        disabled={stoppingBackgroundWorkKey === requestKey}
+                        onClick={() => void handleStopBackgroundWork(item.taskId)}
+                      >
+                        {stoppingBackgroundWorkKey === requestKey ? "Stopping…" : "Stop"}
+                      </InlineButton>
+                    </>
+                  ) : null}
                 </Fragment>
               );
             }),
-      actions: (
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={isStoppingBackgroundWork}
-          onClick={() => void handleStopBackgroundWork()}
-        >
-          {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
-        </Button>
-      ),
     };
   }, [
     activeBackgroundTasks,
     activeThread,
+    environmentId,
     handleStopBackgroundWork,
-    isStoppingBackgroundWork,
     onOpenRelatedThread,
+    stoppingBackgroundWorkKey,
   ]);
   // A woken thread announces itself in the open view, not just the sidebar
   // pill. Dismissing marks the wake as seen (same acknowledgment as the
@@ -8576,6 +8797,62 @@ export default function ChatView(props: ChatViewProps) {
     const outgoingMessageContext = buildOutgoingMessageContext(
       composerAttachmentsSnapshot.map((attachment) => attachment.id),
     );
+    const goalCommand = resolveComposerThreadGoalCommand({
+      text: messageTextForSend,
+      isServerThread,
+      attachmentCount: composerAttachmentsSnapshot.length,
+      ...(outgoingMessageContext === undefined ? {} : { context: outgoingMessageContext }),
+      capabilityKnown: serverConfig !== null,
+      supportsThreadGoals: serverConfig !== null,
+    });
+    if (goalCommand !== null) {
+      if (goalCommand.blockReason !== null) {
+        const descriptions = {
+          "draft-thread": "Create the thread first, or use the goal editor in the top bar.",
+          attachments: "Remove attachments before using /goal.",
+          context: "Remove attached context before using /goal.",
+          unavailable: "Thread goal support is still loading.",
+          unsupported: "This server does not support thread goals.",
+        } as const;
+        setThreadError(activeThread.id, descriptions[goalCommand.blockReason]);
+        return;
+      }
+      if (goalCommand.command.action === "show") {
+        openGoalEditor();
+        setComposerDraftPrompt(composerDraftTarget, "");
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+        return;
+      }
+      const goalUpdate =
+        goalCommand.command.action === "set" ? ThreadGoal.make(goalCommand.command.goal) : null;
+      const mutation = await runThreadGoalMutation(routeThreadRef, () =>
+        goalUpdate === null
+          ? clearThreadGoal({ environmentId, input: { threadId: activeThread.id } })
+          : setThreadGoal({
+              environmentId,
+              input: { threadId: activeThread.id, goal: goalUpdate },
+            }),
+      );
+      if (mutation.status === "busy") {
+        setThreadError(activeThread.id, "A goal update is already in progress.");
+        return;
+      }
+      if (mutation.value._tag === "Failure") {
+        if (!isAtomCommandInterrupted(mutation.value)) {
+          const error = squashAtomCommandFailure(mutation.value);
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to update the thread goal.",
+          );
+        }
+        return;
+      }
+      setComposerDraftPrompt(composerDraftTarget, "");
+      promptRef.current = "";
+      composerRef.current?.resetCursorState();
+      return;
+    }
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const shouldQueueBehindActiveRun = phase === "running" && dispatchMode === "queue";
@@ -9253,6 +9530,41 @@ export default function ChatView(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        if (isLocalDraftThread) {
+          const stagedSettingsResults = await Promise.all([
+            ...(composerGoal === null
+              ? []
+              : [
+                  setThreadGoal({
+                    environmentId,
+                    input: { threadId: threadIdForSend, goal: ThreadGoal.make(composerGoal) },
+                  }),
+                ]),
+            ...(composerVoiceNotifications === null
+              ? []
+              : [
+                  setThreadVoiceNotifications({
+                    environmentId,
+                    input: {
+                      threadId: threadIdForSend,
+                      voiceNotifications: composerVoiceNotifications,
+                    },
+                  }),
+                ]),
+          ]);
+          const stagedSettingsFailure = stagedSettingsResults.find(
+            (result) => result._tag === "Failure" && !isAtomCommandInterrupted(result),
+          );
+          if (stagedSettingsFailure?._tag === "Failure") {
+            const error = squashAtomCommandFailure(stagedSettingsFailure);
+            setThreadError(
+              threadIdForSend,
+              error instanceof Error
+                ? error.message
+                : "The thread started, but its staged settings could not be applied.",
+            );
+          }
+        }
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
         // the sending thread's panel clears.
@@ -10566,6 +10878,11 @@ export default function ChatView(props: ChatViewProps) {
             activeThreadTitle={activeThread.title}
             activeProject={activeProject ?? null}
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
+            goal={activeGoal}
+            goalLoop={activeGoalLoop}
+            onOpenGoalEditor={openGoalEditor}
+            currentSessionOptimizers={currentSessionOptimizers}
+            onOpenOptimizers={openOptimizers}
             onNewThreadInProject={handleNewThreadInActiveProject}
             {...(activeDraftLogicalProjectKey
               ? { onOpenProjectSettings: handleOpenDraftProjectSettings }
@@ -10652,6 +10969,9 @@ export default function ChatView(props: ChatViewProps) {
                 }
                 runs={paintOnlyDisplayedTimeline ? [] : (serverProjection?.runs ?? [])}
                 latestRun={paintOnlyDisplayedTimeline ? null : activeActivityRun}
+                turnOutputThroughput={
+                  paintOnlyDisplayedTimeline ? null : activeTurnOutputThroughput
+                }
                 runningRunId={paintOnlyDisplayedTimeline ? null : activeRunningTurnId}
                 turnDiffSummaries={
                   paintOnlyDisplayedTimeline ? EMPTY_HELD_TURN_DIFF_SUMMARIES : turnDiffSummaries
@@ -10880,6 +11200,26 @@ export default function ChatView(props: ChatViewProps) {
                                   />
                                 ) : null
                               }
+                              goalEditor={
+                                goalEditor === null ? null : (
+                                  <ThreadGoalEditor
+                                    draft={goalEditor.draft}
+                                    savedGoal={goalEditor.savedGoal}
+                                    goalLoop={activeGoalLoop}
+                                    saving={goalEditor.saving}
+                                    error={goalEditor.error}
+                                    validationError={threadGoalEditorDraftError(goalEditor.draft)}
+                                    canSave={threadGoalEditorCanSave(goalEditor)}
+                                    onDraftChange={(draft) =>
+                                      dispatchGoalEditor({ type: "setDraft", text: draft })
+                                    }
+                                    onSave={() => void saveGoal()}
+                                    onClear={() => void clearGoal()}
+                                    onClose={() => dispatchGoalEditor({ type: "close" })}
+                                    onLoopAction={(action) => void handleGoalLoopAction(action)}
+                                  />
+                                )
+                              }
                               bannerItems={composerBannerItems}
                               // With attachments or contexts aboard the pick just inserts the
                               // text, so it sends as a prompt like the typed path would.
@@ -10907,6 +11247,7 @@ export default function ChatView(props: ChatViewProps) {
                               }
                               runtimeMode={runtimeMode}
                               interactionMode={interactionMode}
+                              voiceNotifications={voiceNotifications}
                               lockedProvider={modelPickerLockedProvider}
                               providerStatuses={providerStatuses as ServerProvider[]}
                               providerCatalogKnown={serverConfig !== null}
@@ -10972,6 +11313,7 @@ export default function ChatView(props: ChatViewProps) {
                               toggleInteractionMode={toggleInteractionMode}
                               handleRuntimeModeChange={handleRuntimeModeChange}
                               handleInteractionModeChange={handleInteractionModeChange}
+                              handleVoiceNotificationsChange={handleVoiceNotificationsChange}
                               focusComposer={focusComposer}
                               scheduleComposerFocus={scheduleComposerFocus}
                               setThreadError={setThreadError}

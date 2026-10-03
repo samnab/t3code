@@ -2872,13 +2872,32 @@ describe("composerDraftStore runtime and interaction settings", () => {
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.interactionMode).toBe("plan");
   });
 
+  it("stores goal and voice settings before the server thread exists", () => {
+    const store = useComposerDraftStore.getState();
+
+    store.setComposerThreadSettings(threadRef, {
+      goal: "Ship the port",
+      voiceNotifications: false,
+    });
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      goal: "Ship the port",
+      voiceNotifications: false,
+    });
+  });
+
   it("removes empty settings-only drafts when overrides are cleared", () => {
     const store = useComposerDraftStore.getState();
 
     store.setRuntimeMode(threadRef, "approval-required");
     store.setInteractionMode(threadRef, "plan");
+    store.setComposerThreadSettings(threadRef, {
+      goal: "Ship the port",
+      voiceNotifications: false,
+    });
     store.setRuntimeMode(threadRef, null);
     store.setInteractionMode(threadRef, null);
+    store.setComposerThreadSettings(threadRef, { goal: null, voiceNotifications: null });
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });

@@ -271,6 +271,7 @@ import { TimelineSystemDivider } from "./TimelineSystemDivider";
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
 import * as DateTime from "effect/DateTime";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
+import type { TurnOutputThroughput } from "@t3tools/client-runtime/state/tokenThroughput";
 import {
   buildReviewCommentRenderablePatch,
   formatReviewCommentFence,
@@ -325,6 +326,7 @@ interface TimelineRowSharedState {
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
   workGroupViewState: WorkGroupViewState;
+  turnOutputThroughput: TurnOutputThroughput | null;
 }
 
 interface TimelineRowActivityState {
@@ -421,6 +423,7 @@ interface MessagesTimelineProps {
   listRef: React.RefObject<LegendListRef | null>;
   timelineEntries: ReadonlyArray<TimelineEntry>;
   latestRun: TimelineLatestRun | null;
+  turnOutputThroughput?: TurnOutputThroughput | null;
   runningRunId?: RunId | null;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   routeThreadKey: string;
@@ -503,6 +506,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   listRef,
   timelineEntries,
   latestRun,
+  turnOutputThroughput = null,
   runningRunId = null,
   turnDiffSummaries,
   routeThreadKey,
@@ -1170,6 +1174,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
       workGroupViewState,
+      turnOutputThroughput,
     }),
     [
       readyCitationRequest,
@@ -1203,6 +1208,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
       workGroupViewState,
+      turnOutputThroughput,
     ],
   );
   const compactionAwaitingRow =
@@ -2603,6 +2609,11 @@ function AssistantMessageMeta({
   alwaysVisible?: boolean;
 }) {
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  const showThroughput =
+    ctx.turnOutputThroughput !== null &&
+    message.runId === activity.latestRunId &&
+    !message.streaming;
 
   return (
     <div
@@ -2637,7 +2648,32 @@ function AssistantMessageMeta({
           </TooltipPopup>
         </Tooltip>
       )}
+      {showThroughput && ctx.turnOutputThroughput ? (
+        <TurnOutputRate throughput={ctx.turnOutputThroughput} />
+      ) : null}
     </div>
+  );
+}
+
+function TurnOutputRate({ throughput }: { readonly throughput: TurnOutputThroughput }) {
+  const label = `${throughput.tokensPerSecond.toLocaleString(undefined, {
+    maximumFractionDigits: 1,
+  })} tok/s`;
+  const description = "Average output tokens per second over the whole turn.";
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            className="text-muted-foreground tabular-nums"
+            aria-label={`${description} ${label}`}
+          />
+        }
+      >
+        {label}
+      </TooltipTrigger>
+      <TooltipPopup>{description}</TooltipPopup>
+    </Tooltip>
   );
 }
 

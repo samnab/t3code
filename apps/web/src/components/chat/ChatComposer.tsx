@@ -1074,6 +1074,8 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
   FileIcon,
+  BellIcon,
+  BellOffIcon,
   BotIcon,
   CircleAlertIcon,
   PaperclipIcon,
@@ -1124,6 +1126,7 @@ import {
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
 } from "@t3tools/client-runtime/providerSkills";
+import { dedupeProviderSlashCommands } from "@t3tools/client-runtime/provider-slash-commands";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useDelayedStatus } from "../../hooks/useDelayedStatus";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
@@ -1233,10 +1236,12 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   runtimeModeOptions: ReadonlyArray<RuntimeModeOption>;
+  voiceNotifications: boolean;
   size?: "sm" | "xs";
   hidden?: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onVoiceNotificationsChange: (enabled: boolean) => void;
 }) {
   const size = props.size ?? "sm";
   const composerFloatingLayerProps = useComposerMenuProps();
@@ -1338,6 +1343,30 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
         </Select>
         <TooltipPopup side="top">
           {runtimeModeOption.label} — {runtimeModeOption.description}
+        </TooltipPopup>
+      </Tooltip>
+
+      <ComposerControlSeparator size={size} />
+      <Tooltip>
+        <Select
+          value={props.voiceNotifications ? "on" : "off"}
+          onValueChange={(value) => props.onVoiceNotificationsChange(value === "on")}
+        >
+          <TooltipTrigger
+            render={<ComposerSelectControl size={size} aria-label="Voice notifications" />}
+          >
+            <ComposerControlIcon
+              icon={props.voiceNotifications ? BellIcon : BellOffIcon}
+              size={size}
+            />
+          </TooltipTrigger>
+          <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
+            <SelectItem value="on">Voice notifications on</SelectItem>
+            <SelectItem value="off">Voice notifications off</SelectItem>
+          </SelectPopup>
+        </Select>
+        <TooltipPopup side="top">
+          Voice notifications {props.voiceNotifications ? "on" : "off"}
         </TooltipPopup>
       </Tooltip>
 
@@ -1574,6 +1603,7 @@ export interface ChatComposerProps {
   // Mode
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  voiceNotifications: boolean;
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
@@ -1623,6 +1653,7 @@ export interface ChatComposerProps {
 
   // Queued runs strip rendered above the composer (v2 queue/steer).
   queuedRunsControl?: ReactNode;
+  goalEditor?: ReactNode;
   // Queued-message edit mode: attachments already stored on the message being
   // edited. Rendered in the attachment strip with a remove control; removal is
   // client state in ChatView until the edit is saved.
@@ -1668,6 +1699,7 @@ export interface ChatComposerProps {
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
+  handleVoiceNotificationsChange: (enabled: boolean) => void;
 
   focusComposer: () => void;
   scheduleComposerFocus: () => void;
@@ -1724,6 +1756,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProposedPlan,
     runtimeMode,
     interactionMode: requestedInteractionMode,
+    voiceNotifications,
     lockedProvider,
     providerStatuses,
     providerCatalogKnown,
@@ -1773,6 +1806,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     toggleInteractionMode,
     handleRuntimeModeChange,
     handleInteractionModeChange,
+    handleVoiceNotificationsChange,
     focusComposer,
     scheduleComposerFocus,
     setThreadError,
@@ -2620,9 +2654,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedProviderSkills,
         settings.showSkillsInSlashMenu,
       );
-      const providerSlashCommandItems = getProviderSlashCommandsForSlashMenu(
-        selectedProviderSlashCommands,
-        slashMenuSkills,
+      const providerSlashCommandItems = dedupeProviderSlashCommands(
+        getProviderSlashCommandsForSlashMenu(selectedProviderSlashCommands, slashMenuSkills),
+        builtInSlashCommandItems.map((item) => item.command),
       ).map((command) => ({
         id: `provider-slash-command:${selectedProvider}:${command.name}`,
         type: "provider-slash-command" as const,
@@ -5320,10 +5354,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           interactionMode={interactionMode}
           runtimeMode={compatibleRuntimeMode}
           runtimeModeOptions={compatibleRuntimeModeOptions}
+          voiceNotifications={voiceNotifications}
           size={composerControlsCollapsed ? "xs" : "sm"}
           hidden={composerControlsHidden || restingHiddenBlockCount > 0}
           onToggleInteractionMode={toggleInteractionMode}
           onRuntimeModeChange={handleRuntimeModeChange}
+          onVoiceNotificationsChange={handleVoiceNotificationsChange}
         />
       ),
     },
@@ -5481,6 +5517,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           <CompactComposerControlsMenu
             interactionMode={interactionMode}
             runtimeMode={compatibleRuntimeMode}
+            voiceNotifications={voiceNotifications}
             runtimeModeOptions={compatibleRuntimeModeOptions}
             size={composerControlsCollapsed ? "xs" : "sm"}
             hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
@@ -5490,6 +5527,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             }
             onToggleInteractionMode={toggleInteractionMode}
             onRuntimeModeChange={handleRuntimeModeChange}
+            onVoiceNotificationsChange={handleVoiceNotificationsChange}
           />
         </div>
       </>
@@ -6565,6 +6603,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       <ComposerBanner.Dock>
         <ComposerBanner.Column>
           {props.queuedRunsControl}
+          {props.goalEditor}
           <ComposerBannerStack
             key={activeThreadId}
             className="relative z-0"
