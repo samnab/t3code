@@ -2587,8 +2587,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? ""
             : resolveCodexLaunchArgs(effectiveConfig.launchArgs, effectiveEnvironment),
           environment: sessionEnvironment,
-          ...(effectiveConfig.maxConcurrentSubagents
-            ? { maxConcurrentSubagents: effectiveConfig.maxConcurrentSubagents }
+          ...(codexConfig.maxConcurrentSubagents
+            ? { maxConcurrentSubagents: codexConfig.maxConcurrentSubagents }
             : {}),
           ...(experimentHomePath
             ? { homePath: experimentHomePath }

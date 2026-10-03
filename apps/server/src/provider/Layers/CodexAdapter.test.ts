@@ -3925,7 +3925,7 @@ it.effect("managed runtime rotation restarts app-server and resumes the same nat
   const layer = Layer.effect(
     CodexAdapter,
     Effect.gen(function* () {
-      return yield* makeCodexAdapter(decodeCodexSettings({}), {
+      return yield* makeCodexAdapter(decodeCodexSettings({ maxConcurrentSubagents: "20" }), {
         resolveRuntime: Effect.sync(() => ({
           config: decodeCodexSettings({
             binaryPath: "/t3/tools/codex/0.155.1/bin/codex",
@@ -3973,6 +3973,7 @@ it.effect("managed runtime rotation restarts app-server and resumes the same nat
     NodeAssert.deepEqual(runtimes[1]?.options.resumeCursor, { threadId: "native-managed-thread" });
     NodeAssert.equal(runtimes[1]?.options.environment?.ACCESS_TOKEN, "dummy-rotated");
     NodeAssert.equal(runtimes[1]?.options.binaryPath, "/t3/tools/codex/0.155.1/bin/codex");
+    NodeAssert.equal(runtimes[1]?.options.maxConcurrentSubagents, "20");
   }).pipe(Effect.provide(layer));
 });
 
