@@ -2134,6 +2134,27 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
+  it.effect("disables voice notifications in the query environment", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarnessWithOptions({ environment: { EXISTING: "kept" } });
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("voice-notifications-off"),
+          text: "Check voice policy",
+          attachments: [],
+          runtimePolicy: { ...CLAUDE_TEST_RUNTIME_POLICY, voiceNotifications: false },
+        }),
+      );
+      assert.deepEqual(harness.getOpenedOptions()?.env, {
+        EXISTING: "kept",
+        T3_VOICE_NOTIFICATIONS: "0",
+      });
+    }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
   it.effect.each(["completed", "interrupted"] as const)(
     "projects Claude thinking blocks when %s",
     (status) =>

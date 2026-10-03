@@ -68,6 +68,7 @@ export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2
       runtimeMode: input.thread.runtimeMode,
       interactionMode: input.thread.interactionMode,
       cwd: input.thread.worktreePath,
+      voiceNotifications: input.thread.voiceNotifications ?? true,
     }),
 });
 
@@ -132,6 +133,7 @@ export const layerFromProjectStore: Layer.Layer<
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
           cwd,
+          voiceNotifications: input.thread.voiceNotifications ?? true,
         });
       }),
     });

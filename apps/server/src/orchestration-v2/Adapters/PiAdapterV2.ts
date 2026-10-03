@@ -69,7 +69,10 @@ import {
   parsePiDiscoveredCommands,
   type PiCompactCommand,
 } from "../../provider/PiCommands.ts";
-import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
+import {
+  mergeProviderInstanceEnvironment,
+  withVoiceNotificationsEnv,
+} from "../../provider/ProviderInstanceEnvironment.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import * as ProviderAdapter from "../ProviderAdapter.ts";
 import {
@@ -440,7 +443,10 @@ export function makePiAdapterV2(
       }
       const launch = buildPiRpcLaunch({
         launchArgs: resolvedLaunchArgs.args,
-        environment: options.environment,
+        environment: withVoiceNotificationsEnv(
+          options.environment,
+          input.runtimePolicy.voiceNotifications,
+        ),
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,

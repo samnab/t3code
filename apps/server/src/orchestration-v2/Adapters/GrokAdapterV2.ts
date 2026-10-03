@@ -53,7 +53,10 @@ import {
   XAiAskUserQuestionRequest,
   XAiExitPlanModeRequest,
 } from "../../provider/acp/XAiAcpExtension.ts";
-import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
+import {
+  mergeProviderInstanceEnvironment,
+  withVoiceNotificationsEnv,
+} from "../../provider/ProviderInstanceEnvironment.ts";
 import { acpPermissionDisposition } from "../../provider/acp/AcpClientPolicy.ts";
 import * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 import * as ProviderEventLoggers from "../../provider/Layers/ProviderEventLoggers.ts";
@@ -279,7 +282,10 @@ export function makeGrokAcpAdapterFlavor(options: GrokAdapterV2Options): AcpAdap
           ...input,
           interruptPromptOnCancel: input.interruptPromptOnCancel ?? false,
           grokSettings: options.settings,
-          environment: options.environment,
+          environment: withVoiceNotificationsEnv(
+            options.environment,
+            runtimePolicy.voiceNotifications,
+          ),
           childProcessSpawner: options.childProcessSpawner,
           runtimeMode: grokLaunchRuntimeMode(runtimePolicy),
         })),

@@ -5,7 +5,10 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 
-import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
+import {
+  mergeProviderInstanceEnvironment,
+  withVoiceNotificationsEnv,
+} from "./ProviderInstanceEnvironment.ts";
 
 describe("mergeProviderInstanceEnvironment", () => {
   it.effect.each([
@@ -64,5 +67,21 @@ describe("mergeProviderInstanceEnvironment", () => {
       ANTHROPIC_API_KEY: "",
       PATH: "/bin",
     });
+  });
+});
+
+describe("withVoiceNotificationsEnv", () => {
+  it("sets the per-session voice flag without mutating the base environment", () => {
+    const baseEnv = { PATH: "/bin", T3_VOICE_NOTIFICATIONS: "inherited" };
+
+    expect(withVoiceNotificationsEnv(baseEnv, false)).toEqual({
+      PATH: "/bin",
+      T3_VOICE_NOTIFICATIONS: "0",
+    });
+    expect(withVoiceNotificationsEnv(baseEnv, true)).toEqual({
+      PATH: "/bin",
+      T3_VOICE_NOTIFICATIONS: "1",
+    });
+    expect(baseEnv.T3_VOICE_NOTIFICATIONS).toBe("inherited");
   });
 });

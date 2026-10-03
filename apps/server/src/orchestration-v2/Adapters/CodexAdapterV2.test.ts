@@ -612,6 +612,50 @@ describe("CodexAdapterV2 runtime policy", () => {
 });
 
 describe("CodexAdapterV2 process spawning", () => {
+  it.effect("disables voice notifications in the app-server environment", () =>
+    Effect.gen(function* () {
+      let openedEnvironment: NodeJS.ProcessEnv | undefined;
+      const adapter = CodexAdapterV2.makeCodexAdapterV2({
+        instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CODEX_SETTINGS,
+        environment: { EXISTING: "kept" },
+        clientFactory: {
+          open: (input) =>
+            Effect.sync(() => {
+              openedEnvironment = input.environment;
+            }).pipe(Effect.andThen(Effect.die("stop after environment capture"))),
+        },
+        fileSystem: yield* FileSystem.FileSystem,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+        serverConfig: yield* ServerConfig.ServerConfig,
+      });
+
+      yield* adapter
+        .openSession({
+          threadId: ThreadId.make("thread-codex-voice-off"),
+          providerSessionId: ProviderSessionId.make("provider-session-codex-voice-off"),
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: { ...CODEX_TEST_RUNTIME_POLICY, voiceNotifications: false },
+        })
+        .pipe(Effect.scoped, Effect.exit);
+
+      assert.deepEqual(openedEnvironment, {
+        EXISTING: "kept",
+        T3_VOICE_NOTIFICATIONS: "0",
+      });
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          NodeServices.layer,
+          IdAllocator.layer,
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-codex-voice-policy-" }).pipe(
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      ),
+    ),
+  );
+
   it("injects cwd, model, and MCP authorization into thread-scoped params", () => {
     const threadId = ThreadId.make("thread-codex-mcp");
     McpProviderSession.setMcpProviderSession({

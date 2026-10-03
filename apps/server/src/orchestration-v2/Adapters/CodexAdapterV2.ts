@@ -106,7 +106,10 @@ import {
   codexAppServerArgs,
   resolveCodexLaunchArgs,
 } from "../../provider/Layers/codexLaunchArgs.ts";
-import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
+import {
+  mergeProviderInstanceEnvironment,
+  withVoiceNotificationsEnv,
+} from "../../provider/ProviderInstanceEnvironment.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterDriverCreateError,
@@ -1581,7 +1584,10 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             ...resolvedSettings,
             maxConcurrentSubagents: adapterOptions.settings.maxConcurrentSubagents,
           },
-          environment: resolvedRuntime?.environment ?? adapterOptions.environment,
+          environment: withVoiceNotificationsEnv(
+            resolvedRuntime?.environment ?? adapterOptions.environment,
+            input.runtimePolicy.voiceNotifications,
+          ),
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<

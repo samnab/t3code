@@ -317,13 +317,18 @@ describe("Grok launch permission mode", () => {
   const testLayer = Layer.mergeAll(NodeServices.layer, IdAllocator.layer, serverConfigLayer);
 
   // Opens a session through the adapter's own Grok runtime factory and returns
-  // the argv it tried to launch. The spawn fails after recording, so no
+  // the command it tried to launch. The spawn fails after recording, so no
   // process starts.
   const launchArgs = (runtimePolicy: ProviderAdapterV2RuntimePolicy) =>
     Effect.gen(function* () {
-      const launches: Array<ReadonlyArray<string>> = [];
+      const launches: Array<{
+        readonly args: ReadonlyArray<string>;
+        readonly environment: NodeJS.ProcessEnv;
+      }> = [];
       const childProcessSpawner = ChildProcessSpawner.make((command) => {
-        if (command._tag === "StandardCommand") launches.push(command.args);
+        if (command._tag === "StandardCommand") {
+          launches.push({ args: command.args, environment: command.options.env ?? {} });
+        }
         return Effect.fail(
           PlatformError.systemError({
             _tag: "NotFound",
@@ -381,7 +386,17 @@ describe("Grok launch permission mode", () => {
     ).map(([runtimeMode, args]) => [runtimeMode, args.join(" "), args] as const),
   )("launches %s threads with %s", ([runtimeMode, , args]) =>
     Effect.gen(function* () {
-      assert.deepEqual(yield* launchArgs(policy(runtimeMode)), [args]);
+      assert.deepEqual(
+        (yield* launchArgs(policy(runtimeMode))).map((launch) => launch.args),
+        [args],
+      );
+    }),
+  );
+
+  it.effect("disables voice notifications in the spawned session environment", () =>
+    Effect.gen(function* () {
+      const launches = yield* launchArgs(policy("full-access", { voiceNotifications: false }));
+      assert.equal(launches[0]?.environment.T3_VOICE_NOTIFICATIONS, "0");
     }),
   );
 
@@ -441,9 +456,10 @@ describe("Grok launch permission mode", () => {
         ),
       );
       assert.equal(resolved.runtimeMode, "approval-required");
-      assert.deepEqual(yield* launchArgs(resolved), [
-        ["--permission-mode", "default", "agent", "stdio"],
-      ]);
+      assert.deepEqual(
+        (yield* launchArgs(resolved)).map((launch) => launch.args),
+        [["--permission-mode", "default", "agent", "stdio"]],
+      );
     }),
   );
 
@@ -451,16 +467,18 @@ describe("Grok launch permission mode", () => {
     Effect.gen(function* () {
       const asking = [["--permission-mode", "default", "agent", "stdio"]];
       assert.deepEqual(
-        yield* launchArgs(
+        (yield* launchArgs(
           policy("full-access", {
             approvalPolicy: "never",
             sandboxPolicy: { type: "workspaceWrite", writableRoots: [], networkAccess: false },
           }),
-        ),
+        )).map((launch) => launch.args),
         asking,
       );
       assert.deepEqual(
-        yield* launchArgs(policy("full-access", { approvalPolicy: "on-request" })),
+        (yield* launchArgs(policy("full-access", { approvalPolicy: "on-request" }))).map(
+          (launch) => launch.args,
+        ),
         asking,
       );
     }),

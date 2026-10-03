@@ -705,6 +705,20 @@ describe("PiAdapterV2", () => {
     ),
   );
 
+  it.effect("disables voice notifications in the spawned session environment", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const adapter = yield* makeAdapter(fake);
+      yield* adapter.openSession({
+        threadId: THREAD_ID,
+        providerSessionId: SESSION_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy: { ...runtimePolicy, voiceNotifications: false },
+      });
+      assert.equal(fake.lastSpawn().env.T3_VOICE_NOTIFICATIONS, "0");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("rejects a resume while a turn is active", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
