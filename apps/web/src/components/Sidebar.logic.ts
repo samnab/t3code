@@ -10,7 +10,10 @@ import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-searc
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
-import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  planPinnedReorder,
+  sortActiveThreadsByOrderKey,
+} from "@t3tools/client-runtime/state/thread-sort";
 import {
   effectiveSnoozed,
   type ThreadSnoozeShell,
@@ -746,6 +749,15 @@ export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
   return completedAt > lastVisitedAt;
 }
 
+/** Keep a completion unseen while background tasks still occupy the row's status slot. */
+export function resolveSeenCompletionAt(
+  thread: Pick<SidebarThreadSummary, "latestRun" | "pendingBackgroundTasks">,
+): string | null {
+  const completedAt = thread.latestRun?.completedAt;
+  if (!completedAt || thread.pendingBackgroundTasks.length > 0) return null;
+  return completedAt;
+}
+
 export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {
   if (target === null) return true;
   return !target.closest(THREAD_SELECTION_SAFE_SELECTOR);
@@ -1035,7 +1047,23 @@ export function firstValidTimestampMs(
   return 0;
 }
 
-export { sortActiveThreadsByOrderKey as sortThreadsForSidebar } from "@t3tools/client-runtime/state/thread-sort";
+/** Applies the user's Active shelf ordering without changing pinned or lifecycle shelves. */
+export function sortThreadsForSidebar<
+  T extends ThreadSortInput & {
+    readonly id: string;
+    readonly unsettledAt?: string | null | undefined;
+  },
+>(threads: readonly T[], sortOrder: SidebarThreadSortOrder = "created_at"): T[] {
+  if (sortOrder === "created_at") return sortActiveThreadsByOrderKey(threads);
+  const recencyMs = (thread: T) =>
+    Math.max(
+      getThreadSortTimestamp(thread, "updated_at"),
+      firstValidTimestampMs(thread.createdAt, thread.unsettledAt),
+    );
+  return [...threads].toSorted(
+    (left, right) => recencyMs(right) - recencyMs(left) || left.id.localeCompare(right.id),
+  );
+}
 
 // Pinned-reorder key math and the keyed sort live in client-runtime
 // (state/thread-sort) so web and mobile compute identical pinned orders.
@@ -1045,10 +1073,8 @@ export { sortPinnedThreadsByOrderKey as sortPinnedThreadsForSidebar } from "@t3t
 const EMPTY_CONTENT_MATCH_KEYS: ReadonlySet<string> = new Set<string>();
 
 /**
- * Search the already-ordered sidebar thread collection by title or linked PR,
- * plus any thread whose messages the server matched (`contentMatchKeys`, keyed
- * by `threadSearchMatchKey`). Keeping the input order means lifecycle ordering
- * (active, snoozed, settled) remains stable while the user narrows the list.
+ * Search the already-ordered sidebar threads by title, project, linked PR, or
+ * server-matched message content while preserving lifecycle ordering.
  */
 export function searchSidebarThreads<
   T extends {
@@ -1059,6 +1085,7 @@ export function searchSidebarThreads<
 >(
   threads: readonly T[],
   query: string,
+  projectNameFor: (thread: T) => string | undefined = () => undefined,
   contentMatchKeys: ReadonlySet<string> = EMPTY_CONTENT_MATCH_KEYS,
 ): T[] {
   const normalizedQuery = query.trim().toLowerCase();
@@ -1066,9 +1093,11 @@ export function searchSidebarThreads<
   const titleMatches: T[] = [];
   const contentMatches: T[] = [];
   for (const thread of threads) {
-    const matchesTitle = [thread.title, ...threadPullRequestSearchTerms(thread)].some((term) =>
-      term.toLowerCase().includes(normalizedQuery),
-    );
+    const matchesTitle = [
+      thread.title,
+      projectNameFor(thread) ?? "",
+      ...threadPullRequestSearchTerms(thread),
+    ].some((term) => term.toLowerCase().includes(normalizedQuery));
     if (matchesTitle) {
       titleMatches.push(thread);
     } else if (

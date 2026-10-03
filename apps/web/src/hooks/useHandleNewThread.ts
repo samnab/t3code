@@ -27,10 +27,10 @@ import { readProjects, readThreadShell, useProjects, useThreadShell } from "../s
 import {
   hasExplicitComposerModelSelection,
   resolveNewDraftStartFromOrigin,
-  resolveNewThreadModelSelectionOverride,
 } from "../lib/chatThreadActions";
 import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
 import { environmentServerConfigsAtom } from "../state/server";
+import { resolveNewThreadModelSelection } from "@t3tools/client-runtime/state/provider-model-defaults";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
@@ -57,6 +57,9 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 export function useNewThreadHandler() {
   const environmentServerConfigs = useAtomValue(environmentServerConfigsAtom);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const providerModelPreferences = useClientSettings(
+    (settings) => settings.providerModelPreferences,
+  );
   const router = useRouter();
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
@@ -138,12 +141,13 @@ export function useNewThreadHandler() {
       const projectDefaultModelSelection = projectSettings.settings.defaultModelSelection;
       const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
       const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
-        resolveNewThreadModelSelectionOverride({
+        resolveNewThreadModelSelection({
           projectDefaultSelection: projectDefaultModelSelection ?? null,
-          carrySelection: carryModelSelection,
-          carrySourceDraftId:
-            currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
-          destinationDraftId,
+          carriedSelection: carryModelSelection,
+          shouldCarrySelection:
+            currentRouteTarget?.kind !== "draft" ||
+            currentRouteTarget.draftId !== destinationDraftId,
+          settings: { providerModelPreferences },
         });
       // The shared resolver owns the priority order. The t3.json read is
       // skipped entirely when a higher-priority source decides, and its
@@ -430,7 +434,13 @@ export function useNewThreadHandler() {
         return { draftId, threadId };
       })();
     },
-    [environmentServerConfigs, getCurrentRouteTarget, projectGroupingSettings, router],
+    [
+      environmentServerConfigs,
+      getCurrentRouteTarget,
+      projectGroupingSettings,
+      providerModelPreferences,
+      router,
+    ],
   );
 }
 

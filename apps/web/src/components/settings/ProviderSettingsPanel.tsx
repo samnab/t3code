@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceId,
+  type ProviderOptionSelections,
   resolveEnvironmentMachineKind,
   resolveProviderInstanceEnabled,
 } from "@t3tools/contracts";
@@ -947,20 +948,29 @@ export function EnvironmentProviderSettings({
     next: {
       readonly hiddenModels: ReadonlyArray<string>;
       readonly modelOrder: ReadonlyArray<string>;
+      readonly defaultModel?: string | null;
+      readonly defaultOptions?: ProviderOptionSelections;
     },
   ) => {
     const hiddenModels = [...new Set(next.hiddenModels.filter((slug) => slug.trim().length > 0))];
     const modelOrder = [...new Set(next.modelOrder.filter((slug) => slug.trim().length > 0))];
+    const defaultModel = next.defaultModel ?? null;
+    const defaultOptions = next.defaultOptions ?? [];
     const rest = withoutProviderInstanceKey(settings.providerModelPreferences, instanceId);
     updateClientSettings({
       providerModelPreferences:
-        hiddenModels.length === 0 && modelOrder.length === 0
+        hiddenModels.length === 0 &&
+        modelOrder.length === 0 &&
+        defaultModel === null &&
+        defaultOptions.length === 0
           ? rest
           : {
               ...rest,
               [instanceId]: {
                 hiddenModels,
                 modelOrder,
+                defaultModel,
+                defaultOptions,
               },
             },
     });
@@ -1025,9 +1035,12 @@ export function EnvironmentProviderSettings({
       (liveProvider !== undefined && isProviderUpdateActive(liveProvider));
     const showInlineUpdateButton = updateCandidate !== undefined;
     const canRunInlineUpdate = updateCandidate !== undefined && !isInstanceUpdateRunning;
-    const modelPreferences = settings.providerModelPreferences?.[row.instanceId] ?? {
-      hiddenModels: [],
-      modelOrder: [],
+    const storedModelPreferences = settings.providerModelPreferences?.[row.instanceId];
+    const modelPreferences = {
+      hiddenModels: storedModelPreferences?.hiddenModels ?? [],
+      modelOrder: storedModelPreferences?.modelOrder ?? [],
+      defaultModel: storedModelPreferences?.defaultModel ?? null,
+      defaultOptions: storedModelPreferences?.defaultOptions ?? [],
     };
     const favoriteModels = Arr.filterMap(settings.favorites ?? [], (favorite) =>
       favorite.provider === row.instanceId ? Result.succeed(favorite.model) : Result.failVoid,
@@ -1162,6 +1175,18 @@ export function EnvironmentProviderSettings({
             ...modelPreferences,
             modelOrder,
           })
+        }
+        defaultModel={modelPreferences.defaultModel}
+        defaultOptions={modelPreferences.defaultOptions}
+        onDefaultModelChange={(defaultModel) =>
+          updateProviderModelPreferences(row.instanceId, {
+            ...modelPreferences,
+            defaultModel,
+            defaultOptions: [],
+          })
+        }
+        onDefaultOptionsChange={(defaultOptions) =>
+          updateProviderModelPreferences(row.instanceId, { ...modelPreferences, defaultOptions })
         }
         onInstallRecommended={
           mode === "editor" &&

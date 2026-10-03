@@ -1,11 +1,11 @@
-import { type EnvironmentId, type ThreadId } from "@t3tools/contracts";
+import { type EnvironmentId, type ThreadGoalLoop, type ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, GaugeIcon, TargetIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -42,6 +42,11 @@ interface ChatHeaderProps {
   rightPanelOpen: boolean;
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
+  goal: string | null;
+  goalLoop: ThreadGoalLoop | null;
+  onOpenGoalEditor: () => void;
+  currentSessionOptimizers: ReadonlyArray<string>;
+  onOpenOptimizers: () => void;
 }
 
 /**
@@ -74,6 +79,11 @@ export const ChatHeader = memo(function ChatHeader({
   rightPanelOpen,
   onNewThreadInProject,
   onOpenProjectSettings,
+  goal,
+  goalLoop,
+  onOpenGoalEditor,
+  currentSessionOptimizers,
+  onOpenOptimizers,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -332,6 +342,50 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              aria-label={goal === null ? "Set thread goal" : "Edit thread goal"}
+              onClick={onOpenGoalEditor}
+              className="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          }
+        >
+          <TargetIcon className="size-4" />
+          {goalLoop ? (
+            <span
+              aria-hidden
+              className={cn(
+                "absolute right-0.5 bottom-0.5 size-1.5 rounded-full ring-2 ring-background",
+                goalLoop.state === "running" ? "bg-success" : "bg-muted-foreground",
+              )}
+            />
+          ) : null}
+        </TooltipTrigger>
+        <TooltipPopup side="bottom">{goal ?? "Set thread goal"}</TooltipPopup>
+      </Tooltip>
+      {currentSessionOptimizers.length > 0 ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                aria-label="Current session optimizers"
+                onClick={onOpenOptimizers}
+                className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-success text-xs transition-colors hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            }
+          >
+            <GaugeIcon className="size-3.5" />
+            <span>{currentSessionOptimizers.length}</span>
+          </TooltipTrigger>
+          <TooltipPopup side="bottom">
+            Current session optimizers: {currentSessionOptimizers.join(", ")}
+          </TooltipPopup>
+        </Tooltip>
+      ) : null}
     </div>
   );
 });

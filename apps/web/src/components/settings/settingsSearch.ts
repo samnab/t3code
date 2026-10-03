@@ -23,6 +23,8 @@ export type SettingsPath =
   | "/settings/source-control"
   | "/settings/storage"
   | "/settings/connections"
+  | "/settings/optimizers"
+  | "/settings/delegation"
   | "/settings/archived";
 
 /**
@@ -95,6 +97,8 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
   "/settings/connections": "Connections",
+  "/settings/optimizers": "Optimizers",
+  "/settings/delegation": "Delegation",
   "/settings/archived": "Archive",
 };
 
@@ -580,6 +584,22 @@ export const SETTINGS_SEARCH_ITEMS = [
     providerSettingsOnly: true,
   },
   {
+    id: "optimizers",
+    title: "Optimizers",
+    to: "/settings/optimizers",
+    searchTerms: [
+      "RTK Headroom Codebase Memory CBM token savings shell output proxy MCP environment project attachments",
+    ],
+  },
+  {
+    id: "delegation",
+    title: "Delegation",
+    to: "/settings/delegation",
+    searchTerms: [
+      "delegation subagent tiers priority fallback usage headroom child agents routing",
+    ],
+  },
+  {
     id: "cursor-keychain-usage",
     title: "Cursor account usage",
     to: "/settings/providers",
@@ -882,6 +902,8 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/keybindings": null,
   "/settings/providers": null,
   "/settings/integrations": null,
+  "/settings/optimizers": null,
+  "/settings/delegation": null,
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",
   "/settings/connections": "connections",

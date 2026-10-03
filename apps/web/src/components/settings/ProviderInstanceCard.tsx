@@ -26,6 +26,7 @@ import {
   type AcpRegistryUrlAuthAction,
   type EnvironmentId,
   type ProjectId,
+  type ProviderOptionSelections,
   type ProviderDriverKind,
   type ServerProvider,
   type ServerProviderModel,
@@ -38,7 +39,10 @@ import {
 } from "@t3tools/shared/model";
 import { cn } from "../../lib/utils";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
-import { normalizeProviderAccentColor } from "../../providerInstances";
+import {
+  deriveProviderInstanceEntries,
+  normalizeProviderAccentColor,
+} from "../../providerInstances";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
@@ -50,9 +54,16 @@ import type { DriverOption, ProviderEnvironmentFieldDefinition } from "./provide
 import { deriveProviderSettingsFields, ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { ProviderModelPicker } from "../chat/ProviderModelPicker";
+import { TraitsPicker } from "../chat/TraitsPicker";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
-import { SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SETTINGS_PICKER_TRIGGER_CLASSNAME,
+  SettingResetButton,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
@@ -515,6 +526,10 @@ interface ProviderInstanceCardProps {
   readonly onHiddenModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onFavoriteModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
+  readonly defaultModel?: string | null | undefined;
+  readonly defaultOptions?: ProviderOptionSelections | undefined;
+  readonly onDefaultModelChange?: ((model: string | null) => void) | undefined;
+  readonly onDefaultOptionsChange?: ((options: ProviderOptionSelections) => void) | undefined;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly onInstallRecommended?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
@@ -570,6 +585,10 @@ export function ProviderInstanceCard({
   onHiddenModelsChange,
   onFavoriteModelsChange,
   onModelOrderChange,
+  defaultModel = null,
+  defaultOptions = [],
+  onDefaultModelChange,
+  onDefaultOptionsChange,
   onRunUpdate,
   onInstallRecommended,
   isUpdating = false,
@@ -648,6 +667,18 @@ export function ProviderInstanceCard({
     liveModels: liveProvider?.models,
     customModels,
   });
+  const liveDefaultModelEntry = liveProvider
+    ? deriveProviderInstanceEntries([liveProvider])[0]
+    : undefined;
+  const defaultModelEntry = liveDefaultModelEntry
+    ? { ...liveDefaultModelEntry, models: modelsForDisplay }
+    : undefined;
+  const resolvedDefaultModel =
+    defaultModel && modelsForDisplay.some((model) => model.slug === defaultModel)
+      ? defaultModel
+      : (modelsForDisplay.find((model) => model.isDefault)?.slug ??
+        modelsForDisplay[0]?.slug ??
+        null);
   const updateDisplayName = (value: string) => {
     const trimmed = value.trim();
     const { displayName: _omit, ...rest } = instance;
@@ -1204,6 +1235,57 @@ export function ProviderInstanceCard({
           className={readOnly ? "opacity-50 select-none" : undefined}
         >
           <div className="px-3 py-3 sm:px-4">
+            {driverKind ? (
+              <SettingsRow
+                title="Default model"
+                description="New threads on this provider start with this model and effort."
+              >
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
+                  {defaultModel !== null ? (
+                    <SettingResetButton
+                      label="default model"
+                      onClick={() => {
+                        onDefaultModelChange?.(null);
+                      }}
+                    />
+                  ) : null}
+                  {defaultModelEntry && resolvedDefaultModel ? (
+                    <>
+                      <ProviderModelPicker
+                        activeInstanceId={instanceId}
+                        model={resolvedDefaultModel}
+                        lockedProvider={driverKind}
+                        instanceEntries={[defaultModelEntry]}
+                        modelOptionsByInstance={new Map([[instanceId, modelsForDisplay]])}
+                        triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                        onInstanceModelChange={(_instanceId, model) =>
+                          onDefaultModelChange?.(model)
+                        }
+                      />
+                      <TraitsPicker
+                        provider={driverKind}
+                        instanceId={instanceId}
+                        models={defaultModelEntry.models}
+                        model={resolvedDefaultModel}
+                        prompt=""
+                        onPromptChange={() => {}}
+                        modelOptions={defaultOptions}
+                        allowPromptInjectedEffort={false}
+                        planModeEnabled={false}
+                        triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                        onModelOptionsChange={(nextOptions) =>
+                          onDefaultOptionsChange?.(nextOptions ?? [])
+                        }
+                      />
+                    </>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      Waiting for provider status…
+                    </span>
+                  )}
+                </div>
+              </SettingsRow>
+            ) : null}
             <p className="mb-3 text-xs text-muted-foreground">
               Favorites, visibility, and ordering are saved on this device. Custom models are saved
               on the selected environment.

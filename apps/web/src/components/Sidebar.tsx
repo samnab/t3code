@@ -31,6 +31,7 @@ import {
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
+import { readThreadGoalState } from "@t3tools/client-runtime/state/thread-goal-editor";
 import {
   resolveSettledThreadTimestamp,
   sortSettledThreads,
@@ -56,10 +57,11 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 
-import type { TimestampFormat } from "@t3tools/contracts/settings";
+import { SidebarThreadSortOrder, type TimestampFormat } from "@t3tools/contracts/settings";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
+  ArrowUpDownIcon,
   ArrowRightLeftIcon,
   CheckIcon,
   CircleAlertIcon,
@@ -77,6 +79,7 @@ import {
   ShieldQuestionIcon,
   SquarePenIcon,
   TerminalIcon,
+  UsersIcon,
   Undo2Icon,
   XIcon,
 } from "lucide-react";
@@ -135,7 +138,7 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
-import { useClientSettings } from "../hooks/useSettings";
+import { useClientSettings, useUpdateClientSettings } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
@@ -261,7 +264,16 @@ import {
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
-import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
+import {
+  Menu,
+  MenuItem,
+  MenuPopup,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuShortcut,
+  MenuTrigger,
+} from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import {
@@ -286,6 +298,11 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
 const WORKING_SHELF_EXPANDED_KEY = "t3code:sidebar:working-expanded";
+const isSidebarThreadSortOrder = Schema.is(SidebarThreadSortOrder);
+const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
+  created_at: "Default",
+  updated_at: "Last updated",
+};
 
 // Working beta: when this client saw each thread leave the Working shelf.
 // Module scope keeps the inbox order across routes that unmount the sidebar.
@@ -1175,6 +1192,46 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     () => scopeThreadRef(thread.environmentId, thread.id),
     [thread.environmentId, thread.id],
   );
+  const threadGoalState = readThreadGoalState({
+    ...(thread.goal === undefined ? {} : { goal: thread.goal }),
+    ...(thread.goalLoop === undefined ? {} : { goalLoop: thread.goalLoop }),
+  });
+  const backgroundTaskCount = thread.pendingBackgroundTasks.length;
+  const goalBadge = threadGoalState.goal ? (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-accent px-1.5 py-0.5 text-2xs text-sidebar-muted-foreground" />
+        }
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "size-1.5 rounded-full",
+            threadGoalState.goalLoop?.state === "running" ? "bg-success" : "bg-muted-foreground",
+          )}
+        />
+        Goal
+      </TooltipTrigger>
+      <TooltipPopup side="top">{threadGoalState.goal}</TooltipPopup>
+    </Tooltip>
+  ) : null;
+  const backgroundTaskBadge =
+    backgroundTaskCount > 0 ? (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span className="inline-flex shrink-0 items-center gap-1 text-sidebar-muted-foreground" />
+          }
+        >
+          <UsersIcon aria-hidden className="size-3" />
+          {backgroundTaskCount}
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          {backgroundTaskCount} background {backgroundTaskCount === 1 ? "task" : "tasks"}
+        </TooltipPopup>
+      </Tooltip>
+    ) : null;
   const threadKey = scopedThreadKey(threadRef);
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(props.isActive);
   const isRegeneratingTitle = thread.titleRegeneration != null;
@@ -1766,6 +1823,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {draftIndicator}
             {title}
             {pinIndicator}
+            {goalBadge}
+            {backgroundTaskBadge}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
@@ -2084,6 +2143,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 <span className="flex-1" />
               )}
               {terminalStatusIcon}
+              {goalBadge}
+              {backgroundTaskBadge}
               {prBadge}
               {diff ? (
                 <span className="shrink-0 font-mono">
@@ -2293,6 +2354,8 @@ export default function Sidebar() {
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
+  const sidebarThreadSortOrder = useClientSettings((s) => s.sidebarThreadSortOrder);
+  const updateClientSettings = useUpdateClientSettings();
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const workingShelfEnabled = useClientSettings((s) => s.sidebarWorkingShelfEnabled);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -2735,6 +2798,13 @@ export default function Sidebar() {
         ).push(thread);
       }
     }
+    if (sidebarThreadSortOrder === "updated_at") {
+      for (const thread of active) {
+        const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+        draggable.delete(threadKey);
+        activeReorderable.delete(threadKey);
+      }
+    }
     // One shared rule on every platform (see sortPinnedThreadsByOrderKey):
     // user-arranged keys first, keyless threads in creation order below.
     // Server capability only gates DRAGGING — it must not influence the
@@ -2747,7 +2817,7 @@ export default function Sidebar() {
             scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
           ),
         )
-      : sortThreadsForSidebar(active);
+      : sortThreadsForSidebar(active, sidebarThreadSortOrder);
     return {
       pinnedThreads:
         optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
@@ -2783,6 +2853,7 @@ export default function Sidebar() {
     optimisticDrop,
     scopedProjectKeys,
     serverConfigs,
+    sidebarThreadSortOrder,
     snoozeWakeTick,
     threads,
     workingShelfEnabled,
@@ -2815,9 +2886,10 @@ export default function Sidebar() {
       searchSidebarThreads(
         searchableThreads,
         threadSearchQuery,
+        (thread) => projectDisplayNameByKey.get(`${thread.environmentId}:${thread.projectId}`),
         new Set(threadSearchMatchByKey.keys()),
       ),
-    [searchableThreads, threadSearchQuery, threadSearchMatchByKey],
+    [projectDisplayNameByKey, searchableThreads, threadSearchQuery, threadSearchMatchByKey],
   );
   const threadSearchResultOrderKey = threadSearchResults
     .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
@@ -4814,6 +4886,33 @@ export default function Sidebar() {
                     </ComboboxList>
                   </ComboboxPopup>
                 </Combobox>
+              }
+              sortControl={
+                <Menu>
+                  <MenuTrigger
+                    render={
+                      <SidebarHeaderIconButton label="Sort threads" tooltip="Sort threads">
+                        <ArrowUpDownIcon />
+                      </SidebarHeaderIconButton>
+                    }
+                  />
+                  <MenuPopup align="end" className="min-w-40">
+                    <MenuRadioGroup
+                      value={sidebarThreadSortOrder}
+                      onValueChange={(value) => {
+                        if (isSidebarThreadSortOrder(value)) {
+                          updateClientSettings({ sidebarThreadSortOrder: value });
+                        }
+                      }}
+                    >
+                      {SidebarThreadSortOrder.literals.map((value) => (
+                        <MenuRadioItem key={value} value={value} closeOnClick>
+                          {SIDEBAR_THREAD_SORT_LABELS[value]}
+                        </MenuRadioItem>
+                      ))}
+                    </MenuRadioGroup>
+                  </MenuPopup>
+                </Menu>
               }
               onNewProject={openAddProjectCommandPalette}
               onNewThread={handleNewThreadClick}

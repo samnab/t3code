@@ -16,6 +16,7 @@ import { useComposerMenuState } from "./useComposerMenuState";
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
+  voiceNotifications: boolean;
   runtimeModeOptions: ReadonlyArray<{
     readonly mode: RuntimeMode;
     readonly label: string;
@@ -31,6 +32,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   hidden?: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onVoiceNotificationsChange: (enabled: boolean) => void;
 }) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
@@ -88,6 +90,15 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
               {option.label}
             </MenuRadioItem>
           ))}
+        </MenuRadioGroup>
+        <MenuDivider />
+        <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Notifications</div>
+        <MenuRadioGroup
+          value={props.voiceNotifications ? "on" : "off"}
+          onValueChange={(value) => props.onVoiceNotificationsChange(value === "on")}
+        >
+          <MenuRadioItem value="on">Voice notifications on</MenuRadioItem>
+          <MenuRadioItem value="off">Voice notifications off</MenuRadioItem>
         </MenuRadioGroup>
       </MenuPopup>
     </Menu>

@@ -34,6 +34,7 @@ import {
   resolveSidebarThreadStatus,
   resolveSidebarV2TopStatus,
   resolveThreadLastVisitedAt,
+  resolveSeenCompletionAt,
   resolveThreadRowClassName,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
@@ -528,6 +529,21 @@ describe("hasUnseenCompletion", () => {
   });
 });
 
+describe("resolveSeenCompletionAt", () => {
+  it("withholds completion until background work leaves the row", () => {
+    const latestRun = makeLatestRun();
+    expect(
+      resolveSeenCompletionAt({
+        latestRun,
+        pendingBackgroundTasks: [{ taskId: "agent-1", kind: "subagent" }],
+      }),
+    ).toBeNull();
+    expect(resolveSeenCompletionAt({ latestRun, pendingBackgroundTasks: [] })).toBe(
+      "2026-03-09T10:05:00.000Z",
+    );
+  });
+});
+
 describe("shouldRecedeSidebarThread", () => {
   it.each(["working", "waiting"] as const)(
     "recedes an inactive %s thread even when it is unread and woke",
@@ -1014,8 +1030,11 @@ describe("searchSidebarThreads", () => {
     expect(searchSidebarThreads(threads, "work")).toEqual([threads[0], threads[2]]);
   });
 
-  it("does not match project metadata", () => {
-    expect(searchSidebarThreads(threads, "workspace")).toEqual([threads[0]]);
+  it("matches project names when a resolver is supplied", () => {
+    expect(searchSidebarThreads(threads, "workspace", (thread) => thread.project)).toEqual([
+      threads[0],
+      threads[1],
+    ]);
   });
 
   it("returns no results for an empty query", () => {
@@ -1023,7 +1042,7 @@ describe("searchSidebarThreads", () => {
   });
 
   it("appends content-only matches after every title match", () => {
-    expect(searchSidebarThreads(threads, "work", contentKeys("thread-2"))).toEqual([
+    expect(searchSidebarThreads(threads, "work", undefined, contentKeys("thread-2"))).toEqual([
       threads[0],
       threads[2],
       threads[1],
@@ -1031,17 +1050,16 @@ describe("searchSidebarThreads", () => {
   });
 
   it("lists a thread matching both title and content once", () => {
-    expect(searchSidebarThreads(threads, "work", contentKeys("thread-1"))).toEqual([
+    expect(searchSidebarThreads(threads, "work", undefined, contentKeys("thread-1"))).toEqual([
       threads[0],
       threads[2],
     ]);
   });
 
   it("ignores content matches for threads outside the sidebar collection", () => {
-    expect(searchSidebarThreads(threads, "work", contentKeys("thread-missing"))).toEqual([
-      threads[0],
-      threads[2],
-    ]);
+    expect(searchSidebarThreads(threads, "work", undefined, contentKeys("thread-missing"))).toEqual(
+      [threads[0], threads[2]],
+    );
   });
 });
 
