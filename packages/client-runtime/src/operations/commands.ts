@@ -22,6 +22,8 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
+  type ThreadGoal,
+  type ThreadGoalLoopClientCommand,
   type ThreadId,
   type ThreadEnvMode,
   type UploadChatAttachment,
@@ -72,6 +74,8 @@ export interface CreateThreadInput extends CommandMetadata {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly goal?: ThreadGoal | null;
+  readonly voiceNotifications?: boolean;
   readonly branch: string | null;
   readonly worktreePath: string | null;
 }
@@ -130,6 +134,25 @@ export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly regenerateTitle?: boolean;
   /** Link (object) or unlink (null) a pull request (#8160). */
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null;
+  readonly goal?: ThreadGoal | null;
+}
+
+export interface SetThreadGoalInput extends ThreadCommandInput {
+  readonly goal: ThreadGoal;
+}
+
+export interface ControlThreadGoalLoopInput extends ThreadCommandInput {
+  readonly action: ThreadGoalLoopClientCommand["action"];
+  readonly reason?: string;
+}
+
+export interface SetThreadVoiceNotificationsInput extends ThreadCommandInput {
+  readonly voiceNotifications: boolean;
+}
+
+export interface StopThreadBackgroundTaskInput {
+  readonly threadId: ThreadId;
+  readonly taskId: string;
 }
 
 export interface SetThreadRuntimeModeInput extends ThreadCommandInput {
@@ -399,6 +422,10 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
     modelSelection: input.modelSelection,
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
+    ...(input.goal === undefined ? {} : { goal: input.goal }),
+    ...(input.voiceNotifications === undefined
+      ? {}
+      : { voiceNotifications: input.voiceNotifications }),
     branch: input.branch,
     worktreePath: input.worktreePath,
   });
@@ -562,6 +589,7 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       input.worktreePath !== undefined ||
       input.regenerateTitle !== undefined ||
       input.linkedPullRequest !== undefined ||
+      input.goal !== undefined ||
       input.limitRecovery !== undefined
     ) {
       result = yield* dispatch({
@@ -576,6 +604,7 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
         ...(input.linkedPullRequest === undefined
           ? {}
           : { linkedPullRequest: input.linkedPullRequest }),
+        ...(input.goal === undefined ? {} : { goal: input.goal }),
       });
     }
     if (input.modelSelection !== undefined) {
@@ -593,6 +622,47 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       });
     }
     return result ?? { sequence: 0 };
+  },
+);
+
+export const setThreadGoal = Effect.fn("EnvironmentCommands.setThreadGoal")(function* (
+  input: SetThreadGoalInput,
+) {
+  return yield* updateThreadMetadata(input);
+});
+
+export const clearThreadGoal = Effect.fn("EnvironmentCommands.clearThreadGoal")(function* (
+  input: ThreadCommandInput,
+) {
+  return yield* updateThreadMetadata({ ...input, goal: null });
+});
+
+export const controlThreadGoalLoop = Effect.fn("EnvironmentCommands.controlThreadGoalLoop")(
+  function* (input: ControlThreadGoalLoopInput) {
+    return yield* dispatch({
+      type: "thread.goal.loop",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      action: input.action,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+    });
+  },
+);
+
+export const setThreadVoiceNotifications = Effect.fn(
+  "EnvironmentCommands.setThreadVoiceNotifications",
+)(function* (input: SetThreadVoiceNotificationsInput) {
+  return yield* dispatch({
+    type: "thread.voice-notifications.set",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    voiceNotifications: input.voiceNotifications,
+  });
+});
+
+export const stopThreadBackgroundTask = Effect.fn("EnvironmentCommands.stopThreadBackgroundTask")(
+  function* (input: StopThreadBackgroundTaskInput) {
+    return yield* request(ORCHESTRATION_V2_WS_METHODS.stopBackgroundTask, input);
   },
 );
 

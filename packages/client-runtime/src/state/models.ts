@@ -104,6 +104,9 @@ export interface EnvironmentThreadShell {
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;
   readonly hasActionableProposedPlan: boolean;
+  readonly goal: OrchestrationV2ThreadShell["goal"];
+  readonly goalLoop: OrchestrationV2ThreadShell["goalLoop"];
+  readonly voiceNotifications: OrchestrationV2ThreadShell["voiceNotifications"];
   readonly pendingBackgroundTasks: ReadonlyArray<
     NonNullable<OrchestrationV2ThreadShell["pendingBackgroundTasks"]>[number]
   >;
@@ -242,6 +245,9 @@ export function presentThreadShell(
       thread.pendingRuntimeRequest.kind !== "auth_refresh",
     hasPendingUserInput: thread.pendingRuntimeRequest?.kind === "user_input",
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
+    goal: thread.goal ?? null,
+    goalLoop: thread.goalLoop ?? null,
+    voiceNotifications: thread.voiceNotifications ?? true,
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],
     providerInstanceHistory: thread.providerInstanceHistory ?? [],
     itemCount: thread.itemCount,

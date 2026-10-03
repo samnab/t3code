@@ -1083,6 +1083,15 @@ export function createServerEnvironmentAtoms<R, E>(
       staleTimeMs: 60_000,
       refreshTrigger: ({ environmentId }) => usageScanSettingsAtom(environmentId),
     }),
+    // Optimizer probes are host-local and cheap enough to refresh while the
+    // active settings panel is mounted. Every client addresses the same
+    // environment-scoped snapshot through this query family.
+    optimizersGetStatus: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:optimizers-status",
+      tag: WS_METHODS.optimizersGetStatus,
+      staleTimeMs: 30_000,
+      refreshIntervalMs: 30_000,
+    }),
     resourceTelemetry: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:resource-telemetry",
       tag: WS_METHODS.subscribeResourceTelemetry,

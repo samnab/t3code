@@ -7,6 +7,10 @@
       "types": "./src/composerThreadItems.ts",
       "default": "./src/composerThreadItems.ts"
     },
+    "./provider-slash-commands": {
+      "types": "./src/providerSlashCommands.ts",
+      "default": "./src/providerSlashCommands.ts"
+    },
     "./handoff": {
       "types": "./src/handoff.ts",
       "default": "./src/handoff.ts"
@@ -278,6 +282,18 @@
     "./state/thread-workflows": {
       "types": "./src/state/threadWorkflows.ts",
       "default": "./src/state/threadWorkflows.ts"
+    },
+    "./state/thread-background-work": {
+      "types": "./src/state/threadBackgroundWork.ts",
+      "default": "./src/state/threadBackgroundWork.ts"
+    },
+    "./state/thread-goal-editor": {
+      "types": "./src/state/threadGoalEditor.ts",
+      "default": "./src/state/threadGoalEditor.ts"
+    },
+    "./state/provider-model-defaults": {
+      "types": "./src/state/providerModelDefaults.ts",
+      "default": "./src/state/providerModelDefaults.ts"
     },
     "./state/composer-dispatch": {
       "types": "./src/state/composerDispatch.ts",

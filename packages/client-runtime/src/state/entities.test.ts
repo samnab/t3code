@@ -22,7 +22,7 @@ import {
   resolveThreadProviderStack,
   resolveThreadWorkingStartedAt,
 } from "./models.ts";
-import { v2Projection, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
+import { v2Now, v2Projection, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import { deriveLatestThreadRun, deriveThreadRuntime } from "./threadExecution.ts";
 import { derivePendingThreadRequests } from "./threadRequests.ts";
 
@@ -67,11 +67,25 @@ describe("scoped entity keys", () => {
 
 describe("V2 client presentation", () => {
   it("presents shell timestamps and status without constructing V1 state", () => {
-    const shell = presentThreadShell(environmentId, v2ThreadShell);
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      goal: "Ship it",
+      goalLoop: {
+        state: "running",
+        mode: "t3",
+        iterations: 1,
+        maxIterations: 10,
+        reason: null,
+        updatedAt: v2Now,
+      },
+      voiceNotifications: false,
+    });
     expect(shell.environmentId).toBe(environmentId);
     expect(shell.createdAt).toBe("2026-06-20T00:00:00.000Z");
     expect(shell.runtime).toBeNull();
-    expect(shell.source).toBe(v2ThreadShell);
+    expect(shell.goal).toBe("Ship it");
+    expect(shell.goalLoop?.state).toBe("running");
+    expect(shell.voiceNotifications).toBe(false);
   });
 
   it("preserves active ordering and both pull-request sources", () => {

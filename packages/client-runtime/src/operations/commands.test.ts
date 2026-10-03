@@ -3,6 +3,7 @@ import {
   CheckpointRef,
   CheckpointScopeId,
   CommandId,
+  EnvironmentAuthorizationError,
   EnvironmentId,
   MessageId,
   NodeId,
@@ -39,6 +40,8 @@ import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFix
 import {
   archiveThread,
   cancelQueuedRun,
+  clearThreadGoal,
+  controlThreadGoalLoop,
   createProject,
   dismissThreadUserInput,
   editQueuedRun,
@@ -50,7 +53,10 @@ import {
   reorderQueuedRun,
   revertThreadCheckpoint,
   settleThread,
+  setThreadGoal,
+  setThreadVoiceNotifications,
   startThreadTurn,
+  stopThreadBackgroundTask,
   unsettleThread,
   updateProject,
   updateThreadMetadata,
@@ -77,14 +83,25 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly launches?: OrchestrationV2ThreadLaunchInput[];
   readonly projection?: OrchestrationV2ThreadProjection;
   readonly projectionRequests?: ThreadId[];
+  readonly stoppedBackgroundTasks?: Array<{ readonly threadId: ThreadId; readonly taskId: string }>;
   readonly advertiseServerResolvedCommandContext?: boolean;
+  readonly rejectDispatch?: boolean;
 }) {
   const client = {
-    [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
-      Effect.sync(() => {
+    [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) => {
+      if (input.rejectDispatch === true) {
+        return Effect.fail(
+          new EnvironmentAuthorizationError({
+            message: "queue rejected",
+            requiredScope: "orchestration:operate",
+          }),
+        );
+      }
+      return Effect.sync(() => {
         input.commands.push(command);
         return { sequence: input.commands.length };
-      }),
+      });
+    },
     [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: (requestInput: {
       readonly threadId: ThreadId;
     }) =>
@@ -100,6 +117,13 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
           projection: input.projection ?? v2Projection,
           resumed: false,
         };
+      }),
+    [ORCHESTRATION_V2_WS_METHODS.stopBackgroundTask]: (stopInput: {
+      readonly threadId: ThreadId;
+      readonly taskId: string;
+    }) =>
+      Effect.sync(() => {
+        input.stoppedBackgroundTasks?.push(stopInput);
       }),
     [WS_METHODS.projectsMutate]: (mutation: ProjectMutation) =>
       Effect.sync(() => {
@@ -230,6 +254,72 @@ describe("V2 environment commands", () => {
       expect(commands).toEqual([
         { type: "thread.archive", commandId: "queued-command", threadId: "thread-1" },
       ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches goal, goal-loop, voice, and background-work commands", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const stoppedBackgroundTasks: Array<{ threadId: ThreadId; taskId: string }> = [];
+      const supervisor = yield* makeSupervisor({
+        commands,
+        projects: [],
+        stoppedBackgroundTasks,
+      });
+      const threadId = ThreadId.make("thread-1");
+
+      yield* setThreadGoal({
+        commandId: CommandId.make("set-goal"),
+        threadId,
+        goal: "Ship the runtime",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* controlThreadGoalLoop({
+        commandId: CommandId.make("pause-goal"),
+        threadId,
+        action: "pause",
+        reason: "User paused",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* setThreadVoiceNotifications({
+        commandId: CommandId.make("mute-thread"),
+        threadId,
+        voiceNotifications: false,
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* clearThreadGoal({
+        commandId: CommandId.make("clear-goal"),
+        threadId,
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      yield* stopThreadBackgroundTask({ threadId, taskId: "task-1" }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      );
+
+      expect(commands).toEqual([
+        {
+          type: "thread.metadata.update",
+          commandId: "set-goal",
+          threadId,
+          goal: "Ship the runtime",
+        },
+        {
+          type: "thread.goal.loop",
+          commandId: "pause-goal",
+          threadId,
+          action: "pause",
+          reason: "User paused",
+        },
+        {
+          type: "thread.voice-notifications.set",
+          commandId: "mute-thread",
+          threadId,
+          voiceNotifications: false,
+        },
+        {
+          type: "thread.metadata.update",
+          commandId: "clear-goal",
+          threadId,
+          goal: null,
+        },
+      ]);
+      expect(stoppedBackgroundTasks).toEqual([{ threadId, taskId: "task-1" }]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
@@ -434,6 +524,38 @@ describe("V2 environment commands", () => {
         });
       }
       expect(projectionRequests).toEqual([]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("surfaces queue and steer dispatch rejection to the caller", () =>
+    Effect.gen(function* () {
+      const supervisor = yield* makeSupervisor({
+        commands: [],
+        projects: [],
+        rejectDispatch: true,
+      });
+
+      for (const dispatchMode of ["queue", "steer"] as const) {
+        const error = yield* startThreadTurn({
+          commandId: CommandId.make(`rejected-${dispatchMode}`),
+          threadId: v2ThreadId,
+          message: {
+            messageId: MessageId.make(`rejected-${dispatchMode}-message`),
+            role: "user",
+            text: dispatchMode,
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          dispatchMode,
+        }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.flip,
+        );
+
+        expect(error._tag).toBe("EnvironmentAuthorizationError");
+        expect(error.message).toBe("queue rejected");
+      }
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
