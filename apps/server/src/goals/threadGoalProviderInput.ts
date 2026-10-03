@@ -1,13 +1,26 @@
-import type { ThreadGoalLoop } from "@t3tools/contracts";
+import type { ChatAttachment, ThreadGoalLoop } from "@t3tools/contracts";
+
+import { isNativeMaintenanceCommand } from "../orchestration-v2/NativeMaintenanceCommand.ts";
 
 interface ThreadGoalState {
   readonly goal?: string | null | undefined;
   readonly goalLoop?: ThreadGoalLoop | null | undefined;
 }
 
-/** Returns the provider-only goal block for an active T3 goal loop. */
+interface ProviderInputMessage {
+  readonly text: string;
+  readonly attachments: ReadonlyArray<ChatAttachment>;
+}
+
+/** Returns the provider-only goal block until a T3 goal is completed. */
 export function getT3GoalInjection(thread: ThreadGoalState): string | null {
-  if (thread.goal == null || thread.goalLoop?.mode !== "t3") return null;
+  if (
+    thread.goal == null ||
+    thread.goalLoop?.mode !== "t3" ||
+    thread.goalLoop.state === "completed"
+  ) {
+    return null;
+  }
   return formatThreadGoalInjection({
     goal: thread.goal,
     iteration: thread.goalLoop.iterations,
@@ -28,7 +41,12 @@ export function formatThreadGoalInjection(input: {
   ].join("\n");
 }
 
-export function injectThreadGoal(text: string, thread: ThreadGoalState): string {
+export function injectThreadGoal(
+  text: string,
+  thread: ThreadGoalState,
+  message: ProviderInputMessage = { text, attachments: [] },
+): string {
+  if (isNativeMaintenanceCommand(message)) return message.text;
   const injection = getT3GoalInjection(thread);
   return injection === null ? text : `${injection}\n\n${text}`;
 }
