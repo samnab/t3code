@@ -254,6 +254,42 @@ it.effect("records accepted billed turn usage once without billing the context w
 });
 
 layer("ProviderEventIngestorV2", (it) => {
+  it.effect("normalizes account rate-limit updates into durable v2 events", () =>
+    Effect.gen(function* () {
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const projectId = yield* idAllocator.allocate.project({ fixtureName: "rate-limit-event" });
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "rate-limit-event",
+        projectId,
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const events = yield* ingestor.normalize({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+        event: {
+          type: "account.rate-limits.updated",
+          driver: CODEX_DRIVER,
+          payload: {
+            limits: {
+              windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 25 }],
+            },
+          },
+        },
+      });
+
+      assert.lengthOf(events, 1);
+      assert.strictEqual(events[0]?.type, "account.rate-limits.updated");
+      if (events[0]?.type === "account.rate-limits.updated") {
+        assert.strictEqual(events[0].payload.limits.windows[0]?.usedPercent, 25);
+      }
+    }),
+  );
+
   it.effect("normalizes provider events through the real event log and projection store", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;

@@ -3777,6 +3777,71 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   );
 
   const backgroundStopCases = [true, false, "still_running"] as const;
+
+  it.effect("stops the requested Codex background terminal by item id", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const transcript = makeCodexReplayTranscript({
+          scenario: "codex-bg-stop-individual",
+          entries: [
+            ...backgroundExecTranscript.entries.slice(0, -1),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/backgroundTerminals/list",
+                params: { threadId: BG_NATIVE_THREAD },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 4,
+                result: {
+                  data: [{ itemId: BG_COMMAND_ITEM, processId: "4242" }],
+                  nextCursor: null,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 5,
+                method: "thread/backgroundTerminals/terminate",
+                params: { threadId: BG_NATIVE_THREAD, processId: "4242" },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: { id: 5, result: { terminated: true } },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-codex-bg-stop-individual"),
+            text: BG_PROMPT,
+          }),
+        );
+        yield* harness.firstTerminal;
+        assert.deepEqual(
+          (yield* harness.runtime.listBackgroundTasks!(harness.providerThread)).map(
+            (task) => task.taskId,
+          ),
+          [BG_COMMAND_ITEM],
+        );
+        yield* harness.runtime.stopBackgroundTask!({
+          providerThread: harness.providerThread,
+          taskId: BG_COMMAND_ITEM,
+        });
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
   const makeBackgroundStopTranscript = (terminated: (typeof backgroundStopCases)[number]) => {
     const stillRunning = terminated === "still_running";
     return makeCodexReplayTranscript({
@@ -5801,6 +5866,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               event.turnItem.failure.resetAt === resetAt,
           );
           assert.isDefined(item);
+        }
+        if (
+          scenario.name === "known-reset" ||
+          scenario.name === "late-reset" ||
+          scenario.name === "deferred-reset"
+        ) {
+          yield* awaitUntil(
+            () => harness.events.some((event) => event.type === "account.rate-limits.updated"),
+            "rate-limit event",
+          );
+          const rateLimitEvent = harness.events.find(
+            (event) => event.type === "account.rate-limits.updated",
+          );
+          assert.isDefined(rateLimitEvent);
         }
         if (scenario.name === "retry") assert.equal(terminal.retry?.attempt, 1);
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),

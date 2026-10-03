@@ -2006,6 +2006,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   const makeWakeHarnessWithOptions = (options?: {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
     readonly interrupt?: Effect.Effect<void>;
+    readonly stopTask?: (taskId: string) => Effect.Effect<void>;
     readonly environment?: NodeJS.ProcessEnv;
   }) =>
     Effect.gen(function* () {
@@ -2072,6 +2073,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                   }),
                 setModel: () => Effect.void,
                 interrupt: options?.interrupt ?? Effect.void,
+                stopTask: options?.stopTask ?? (() => Effect.void),
                 close: options?.close?.(sdkMessages) ?? Effect.void,
               };
             }),
@@ -2455,6 +2457,55 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
         ),
       );
+    }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("emits parsed Claude rate limits on the provider event stream", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      const now = yield* DateTime.now;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make("attempt-claude-rate-limit-event"),
+          text: "Continue.",
+          attachments: [],
+        }),
+      );
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "rejected",
+            rateLimitType: "five_hour",
+            utilization: 1,
+            resetsAt: 2_000_100_000,
+          },
+          session_id: WAKE_NATIVE_SESSION,
+          uuid: "00000000-0000-4000-8000-000000000606",
+        }),
+      );
+      yield* awaitUntil(
+        () => harness.events.some((candidate) => candidate.type === "account.rate-limits.updated"),
+        "rate-limit event",
+      );
+      const event = harness.events.find(
+        (candidate) => candidate.type === "account.rate-limits.updated",
+      );
+      assert.isDefined(event);
+      if (event?.type === "account.rate-limits.updated") {
+        assert.strictEqual(event.payload.limits.windows[0]?.kind, "session");
+      }
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({
+          uuid: "00000000-0000-4000-8000-000000000607",
+          result: "Done.",
+        }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
     }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
@@ -3275,6 +3326,39 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       (event): event is Extract<ProviderAdapterV2Event, { type: "provider_thread.updated" }> =>
         event.type === "provider_thread.updated",
     );
+
+  it.effect("stops the requested Claude background task", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const stopped: Array<string> = [];
+        const harness = yield* makeWakeHarnessWithOptions({
+          stopTask: (taskId) => Effect.sync(() => stopped.push(taskId)).pipe(Effect.asVoid),
+        });
+        const now = yield* DateTime.now;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-stop-task"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* harness.offerAndWait(wakeTaskStarted);
+        const tasks = yield* harness.runtime.listBackgroundTasks!(harness.providerThread);
+        assert.deepEqual(
+          tasks.map((task) => task.taskId),
+          [WAKE_TASK_ID],
+        );
+        yield* harness.runtime.stopBackgroundTask!({
+          providerThread: harness.providerThread,
+          taskId: WAKE_TASK_ID,
+        });
+        assert.deepEqual(stopped, [WAKE_TASK_ID]);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
 
   it.effect(
     "uses task_started as an incremental roster fallback and clears on empty snapshot",

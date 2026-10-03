@@ -1,6 +1,7 @@
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
+import * as ProviderBackgroundTaskService from "./orchestration-v2/ProviderBackgroundTaskService.ts";
 import * as NodeCrypto from "node:crypto";
 
 import * as DateTime from "effect/DateTime";
@@ -1106,6 +1107,8 @@ const makeWsRpcLayer = (
       const threadSearch = yield* ThreadSearch.ThreadSearch;
 
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const providerBackgroundTasks =
+        yield* ProviderBackgroundTaskService.ProviderBackgroundTaskServiceV2;
       const analytics = yield* AnalyticsService.AnalyticsService;
       // Client-origin attribution (#7774): every thread/turn the connecting
       // client starts is credited to its surface + app version. Best-effort:
@@ -1753,6 +1756,15 @@ const makeWsRpcLayer = (
       });
 
       const handlers = ServerWsRpcGroup.of({
+        [ORCHESTRATION_V2_WS_METHODS.stopBackgroundTask]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_V2_WS_METHODS.stopBackgroundTask,
+            providerBackgroundTasks.stop(input),
+            {
+              "rpc.aggregate": "orchestrationV2",
+              "orchestration_v2.thread_id": input.threadId,
+            },
+          ),
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_V2_WS_METHODS.dispatchCommand,

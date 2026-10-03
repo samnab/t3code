@@ -637,6 +637,8 @@ export function applyToProjection(
   };
 
   switch (event.type) {
+    case "account.rate-limits.updated":
+      return projection;
     case "thread.created":
     case "thread.archived":
     case "thread.unarchived":
@@ -1681,6 +1683,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const apply: ProjectionStoreV2Shape["apply"] = (event) =>
       Effect.gen(function* () {
         switch (event.type) {
+          case "account.rate-limits.updated":
+            break;
           case "thread.created":
           case "thread.archived":
           case "thread.unarchived":
@@ -2544,6 +2548,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         }
 
         if (
+          event.type !== "account.rate-limits.updated" &&
           event.type !== "thread.created" &&
           event.type !== "thread.archived" &&
           event.type !== "thread.unarchived" &&

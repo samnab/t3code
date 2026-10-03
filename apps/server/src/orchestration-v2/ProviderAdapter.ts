@@ -12,6 +12,7 @@ import {
   OrchestrationV2PlanArtifact,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderFailure,
+  OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderRetry,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderTurn,
@@ -515,6 +516,13 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly hasPendingBackgroundWorkForThread?: (
     providerThread: OrchestrationV2ProviderThread,
   ) => Effect.Effect<boolean>;
+  readonly listBackgroundTasks?: (
+    providerThread: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2PendingBackgroundTask>, ProviderAdapterV2Error>;
+  readonly stopBackgroundTask?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly taskId: string;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
   /**
    * Capacity for the requested model/options, independent of native thread usage.
    * `cwd` is the thread's working directory, for providers whose project config

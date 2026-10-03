@@ -161,6 +161,8 @@ export function applyOrchestrationV2ProjectionEvent(
   const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
   const base = { ...projection, updatedAt: event.occurredAt };
   switch (event.type) {
+    case "account.rate-limits.updated":
+      return projection;
     case "thread.created":
     case "thread.archived":
     case "thread.unarchived":
