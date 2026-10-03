@@ -1,6 +1,6 @@
-import { CodexInstallation } from "../CodexInstallation.ts";
-import { ServerSecretStore } from "../../auth/ServerSecretStore.ts";
-import { ServerEnvironmentIdentity } from "../../environment/ServerEnvironment.ts";
+import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
+import * as CodexInstallation from "../CodexInstallation.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 /**
  * Multi-instance validation slices for `ProviderInstanceRegistryLive`.
  *
@@ -13,7 +13,7 @@ import { ServerEnvironmentIdentity } from "../../environment/ServerEnvironment.t
  *
  *  2. **Many drivers, one registry** — the "all drivers slice" describe
  *     block below configures one instance of every shipped driver
- *     (`codex`, `claudeAgent`, `cursor`, `grok`, `pi`, `opencode`) in a single
+ *     (`codex`, `claudeAgent`, `cursor`, `grok`, `opencode`) in a single
  *     `ProviderInstanceConfigMap` and asserts the registry boots them all
  *     without cross-contamination. This proves the driver SPI is uniform
  *     across every provider — any driver plugs into the registry through
@@ -21,7 +21,7 @@ import { ServerEnvironmentIdentity } from "../../environment/ServerEnvironment.t
  *
  * Every instance in these tests is configured with `enabled: false` so the
  * provider-status checks short-circuit to pending/disabled snapshots
- * without trying to spawn real `codex` / `claude` / `agent` / `grok` / `pi` / `opencode`
+ * without trying to spawn real `codex` / `claude` / `agent` / `grok` / `opencode`
  * binaries. That keeps the assertions focused on registry routing
  * behaviour rather than the runtime details of each provider.
  */
@@ -34,7 +34,6 @@ import {
   type CursorSettings,
   type GrokSettings,
   type OpenCodeSettings,
-  type PiSettings,
   ProviderDriverKind,
   type ProviderInstanceConfigMap,
   ProviderInstanceId,
@@ -49,22 +48,22 @@ import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
-import type { BuiltInDriversEnv } from "../builtInDrivers.ts";
-import { AntigravityInstallation } from "../AntigravityInstallation.ts";
-import { ServerConfig } from "../../config.ts";
+import * as AntigravityInstallation from "../AntigravityInstallation.ts";
+import * as ServerConfig from "../../config.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
-import { ServerSettingsService } from "../../serverSettings.ts";
-import { ClaudeDriver } from "../Drivers/ClaudeDriver.ts";
-import { CodexDriver } from "../Drivers/CodexDriver.ts";
-import { CursorDriver } from "../Drivers/CursorDriver.ts";
-import { GrokDriver } from "../Drivers/GrokDriver.ts";
-import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
-import { PiDriver } from "../Drivers/PiDriver.ts";
+import * as ServerSettings from "../../serverSettings.ts";
+import { ClaudeDriver, type ClaudeDriverEnv } from "../Drivers/ClaudeDriver.ts";
+import { CodexDriver, type CodexDriverEnv } from "../Drivers/CodexDriver.ts";
+import { CursorDriver, type CursorDriverEnv } from "../Drivers/CursorDriver.ts";
+import { GrokDriver, type GrokDriverEnv } from "../Drivers/GrokDriver.ts";
+import { OpenCodeDriver, type OpenCodeDriverEnv } from "../Drivers/OpenCodeDriver.ts";
 import * as ModelManifest from "../ModelManifest.ts";
-import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
+import * as OpenCodeRuntime from "../opencodeRuntime.ts";
+import * as OpenCodeServerLedger from "../OpenCodeServerLedger.ts";
 import * as ResetCreditCoordinator from "./resetCreditCoordinator.ts";
-import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
+import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+import { ProviderOrchestrationAdapterInfrastructureLive } from "./ProviderOrchestrationAdapterInfrastructure.ts";
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
@@ -109,7 +108,6 @@ const makeCodexConfig = (overrides: Partial<CodexSettings>): CodexSettings => ({
   binaryPath: "codex",
   homePath: "",
   shadowHomePath: "",
-  maxConcurrentSubagents: "",
   launchArgs: "",
   customModels: [],
   ...overrides,
@@ -127,8 +125,6 @@ const makeClaudeConfig = (overrides: Partial<ClaudeSettings>): ClaudeSettings =>
 
 const makeCursorConfig = (overrides: Partial<CursorSettings>): CursorSettings => ({
   enabled: false,
-  binaryPath: "cursor-agent",
-  apiEndpoint: "",
   customModels: [],
   ...overrides,
 });
@@ -137,15 +133,6 @@ const makeGrokConfig = (overrides: Partial<GrokSettings>): GrokSettings => ({
   enabled: false,
   binaryPath: "grok",
   customModels: [],
-  ...overrides,
-});
-
-const makePiConfig = (overrides: Partial<PiSettings>): PiSettings => ({
-  enabled: false,
-  binaryPath: "pi",
-  launchArgs: "",
-  customModels: [],
-  modelConcurrency: {},
   ...overrides,
 });
 
@@ -258,27 +245,38 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
   // `NodeServices.layer` through `Layer.provideMerge` to satisfy that
   // dependency while still surfacing NodeServices to the test body (the
   // codex driver's `create` yields `ChildProcessSpawner` directly).
-  const testLayer = ServerConfig.layerTest(process.cwd(), {
+  const baseLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "provider-instance-registry-test",
   }).pipe(
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(
-      Layer.mock(CodexInstallation)({ managedDirectory: "unused-managed-installation" }),
+      Layer.mock(CodexInstallation.CodexInstallation)({
+        managedDirectory: "unused-managed-installation",
+      }),
     ),
-    Layer.provideMerge(Layer.mock(ServerSecretStore)({})),
+    Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
     Layer.provideMerge(
-      Layer.succeed(ServerEnvironmentIdentity, {
+      Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
         getEnvironmentId: Effect.succeed(
           EnvironmentId.make("00000000-0000-4000-8000-000000000001"),
         ),
       }),
     ),
     Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
-    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(TestHttpClientLive),
-    Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
+  );
+  const testLayer = ProviderOrchestrationAdapterInfrastructureLive.pipe(
+    Layer.provideMerge(baseLayer),
   );
 
   it.live("boots two independent codex instances from a ProviderInstanceConfigMap", () =>
@@ -310,7 +308,7 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
         },
       };
 
-      const { registry } = yield* makeProviderInstanceRegistry({
+      const { registry } = yield* makeProviderInstanceRegistry<CodexDriverEnv>({
         drivers: [CodexDriver],
         configMap,
       });
@@ -329,7 +327,7 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
       const work = yield* registry.getInstance(workId);
       expect(personal).toBeDefined();
       expect(work).toBeDefined();
-      expect(personal!.adapter).not.toBe(work!.adapter);
+      expect(personal!.orchestrationAdapter).not.toBe(work!.orchestrationAdapter);
       expect(personal!.textGeneration).not.toBe(work!.textGeneration);
       expect(personal!.snapshot).not.toBe(work!.snapshot);
 
@@ -455,7 +453,7 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
         },
       };
 
-      const { registry } = yield* makeProviderInstanceRegistry({
+      const { registry } = yield* makeProviderInstanceRegistry<CodexDriverEnv | ClaudeDriverEnv>({
         drivers: [CodexDriver, ClaudeDriver],
         configMap,
       });
@@ -588,7 +586,7 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
           },
         };
 
-        const { registry } = yield* makeProviderInstanceRegistry({
+        const { registry } = yield* makeProviderInstanceRegistry<CodexDriverEnv>({
           drivers: [CodexDriver],
           configMap,
         });
@@ -621,21 +619,24 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
   // provides `OpenCodeRuntimeLive`'s deps while keeping its own outputs
   // surfaced; that merged layer then provides `ServerConfig.layerTest`'s
   // `FileSystem` dep while keeping everything else surfaced to the test.
-  const infraLayer = OpenCodeRuntimeLive.pipe(
+  const infraLayer = OpenCodeRuntime.OpenCodeRuntimeLive.pipe(
+    Layer.provide(OpenCodeServerLedger.layerTest),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(
-      Layer.mock(CodexInstallation)({ managedDirectory: "unused-managed-installation" }),
+      Layer.mock(CodexInstallation.CodexInstallation)({
+        managedDirectory: "unused-managed-installation",
+      }),
     ),
-    Layer.provideMerge(Layer.mock(ServerSecretStore)({})),
     Layer.provideMerge(
-      Layer.succeed(ServerEnvironmentIdentity, {
+      Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
         getEnvironmentId: Effect.succeed(
           EnvironmentId.make("00000000-0000-4000-8000-000000000001"),
         ),
       }),
     ),
   );
-  const testLayer = AntigravityInstallation.layer.pipe(
+  const baseLayer = AntigravityInstallation.AntigravityInstallation.layer.pipe(
+    Layer.provideMerge(ServerSecretStore.layer),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), {
         prefix: "provider-instance-registry-all-drivers-test",
@@ -643,11 +644,20 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
     ),
     Layer.provideMerge(infraLayer),
     Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
-    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(ServerSettings.layerTest()),
     Layer.provideMerge(TestHttpClientLive),
-    Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
     Layer.provideMerge(ModelManifest.layerTest),
     Layer.provideMerge(ResetCreditCoordinator.layerTest),
+  );
+  const testLayer = ProviderOrchestrationAdapterInfrastructureLive.pipe(
+    Layer.provideMerge(baseLayer),
   );
 
   it.live("boots one instance of every shipped driver from a single config map", () =>
@@ -656,14 +666,12 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       const claudeId = ProviderInstanceId.make("claude_default");
       const cursorId = ProviderInstanceId.make("cursor_default");
       const grokId = ProviderInstanceId.make("grok_default");
-      const piId = ProviderInstanceId.make("pi_default");
       const openCodeId = ProviderInstanceId.make("opencode_default");
 
       const codexDriverKind = ProviderDriverKind.make("codex");
       const claudeDriverKind = ProviderDriverKind.make("claudeAgent");
       const cursorDriverKind = ProviderDriverKind.make("cursor");
       const grokDriverKind = ProviderDriverKind.make("grok");
-      const piDriverKind = ProviderDriverKind.make("pi");
       const openCodeDriverKind = ProviderDriverKind.make("opencode");
 
       const configMap: ProviderInstanceConfigMap = {
@@ -694,12 +702,6 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
           enabled: false,
           config: makeGrokConfig({}),
         },
-        [piId]: {
-          driver: piDriverKind,
-          displayName: "Pi",
-          enabled: false,
-          config: makePiConfig({}),
-        },
         [openCodeId]: {
           driver: openCodeDriverKind,
           displayName: "OpenCode",
@@ -708,8 +710,10 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         },
       };
 
-      const { registry } = yield* makeProviderInstanceRegistry<BuiltInDriversEnv>({
-        drivers: [CodexDriver, ClaudeDriver, CursorDriver, GrokDriver, PiDriver, OpenCodeDriver],
+      const { registry } = yield* makeProviderInstanceRegistry<
+        CodexDriverEnv | ClaudeDriverEnv | CursorDriverEnv | GrokDriverEnv | OpenCodeDriverEnv
+      >({
+        drivers: [CodexDriver, ClaudeDriver, CursorDriver, GrokDriver, OpenCodeDriver],
         configMap,
       });
 
@@ -719,9 +723,9 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(unavailable).toEqual([]);
 
       const instances = yield* registry.listInstances;
-      expect(instances).toHaveLength(6);
+      expect(instances).toHaveLength(5);
       expect(instances.map((instance) => instance.instanceId).toSorted()).toEqual(
-        [codexId, claudeId, cursorId, grokId, piId, openCodeId].toSorted(),
+        [codexId, claudeId, cursorId, grokId, openCodeId].toSorted(),
       );
 
       // Instance lookup by id resolves each instance to its own bundle —
@@ -731,33 +735,29 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       const claude = yield* registry.getInstance(claudeId);
       const cursor = yield* registry.getInstance(cursorId);
       const grok = yield* registry.getInstance(grokId);
-      const pi = yield* registry.getInstance(piId);
       const openCode = yield* registry.getInstance(openCodeId);
       expect(codex?.driverKind).toBe(codexDriverKind);
       expect(claude?.driverKind).toBe(claudeDriverKind);
       expect(cursor?.driverKind).toBe(cursorDriverKind);
       expect(grok?.driverKind).toBe(grokDriverKind);
-      expect(pi?.driverKind).toBe(piDriverKind);
       expect(openCode?.driverKind).toBe(openCodeDriverKind);
       expect(codex?.displayName).toBe("Codex");
       expect(claude?.displayName).toBe("Claude");
       expect(cursor?.displayName).toBe("Cursor");
       expect(grok?.displayName).toBe("Grok");
-      expect(pi?.displayName).toBe("Pi");
       expect(openCode?.displayName).toBe("OpenCode");
 
       // Every instance owns its own set of closures — no sharing across
-      // drivers. `adapter` / `textGeneration` / `snapshot` are all
+      // drivers. `orchestrationAdapter` / `textGeneration` / `snapshot` are all
       // distinct references even when two instances happen to share a
       // trait (e.g. Cursor + others all use a stub-or-real
       // `textGeneration`; they must still be different object values).
       const adapters = [
-        codex!.adapter,
-        claude!.adapter,
-        cursor!.adapter,
-        grok!.adapter,
-        pi!.adapter,
-        openCode!.adapter,
+        codex!.orchestrationAdapter,
+        claude!.orchestrationAdapter,
+        cursor!.orchestrationAdapter,
+        grok!.orchestrationAdapter,
+        openCode!.orchestrationAdapter,
       ];
       expect(new Set(adapters).size).toBe(adapters.length);
       const textGenerations = [
@@ -765,7 +765,6 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         claude!.textGeneration,
         cursor!.textGeneration,
         grok!.textGeneration,
-        pi!.textGeneration,
         openCode!.textGeneration,
       ];
       expect(new Set(textGenerations).size).toBe(textGenerations.length);
@@ -774,7 +773,6 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         claude!.snapshot,
         cursor!.snapshot,
         grok!.snapshot,
-        pi!.snapshot,
         openCode!.snapshot,
       ];
       expect(new Set(snapshots).size).toBe(snapshots.length);
@@ -814,12 +812,6 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(grokSnapshot.driver).toBe(grokDriverKind);
       expect(grokSnapshot.enabled).toBe(false);
       expect(grokSnapshot.continuation?.groupKey).toBe(`${grokDriverKind}:instance:${grokId}`);
-
-      const piSnapshot = yield* pi!.snapshot.getSnapshot;
-      expect(piSnapshot.instanceId).toBe(piId);
-      expect(piSnapshot.driver).toBe(piDriverKind);
-      expect(piSnapshot.enabled).toBe(false);
-      expect(piSnapshot.continuation?.groupKey).toBe(`${piDriverKind}:instance:${piId}`);
 
       const openCodeSnapshot = yield* openCode!.snapshot.getSnapshot;
       expect(openCodeSnapshot.instanceId).toBe(openCodeId);

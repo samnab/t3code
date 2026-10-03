@@ -28,6 +28,7 @@ import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/co
 import {
   codexModelFamily,
   createModelCapabilities,
+  formatCodexModelName,
   readCustomModelEntries,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -66,7 +67,6 @@ const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_PRESENTATION = {
   displayName: "Codex",
   showInteractionModeToggle: true,
-  executionGoal: "native",
   reportsContextWindow: true,
 } as const;
 
@@ -222,19 +222,12 @@ export function mapCodexModelCapabilities(
   });
 }
 
-const toDisplayName = (model: CodexSchema.V2ModelListResponse__Model): string => {
-  // Capitalize 'gpt' to 'GPT-' and capitalize any letter following a dash
-  return model.displayName
-    .replace(/^gpt/i, "GPT") // Handle start with 'gpt' or 'GPT'
-    .replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
-};
-
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
 ): ReadonlyArray<ServerProviderModel> {
   return response.data.map((model) => ({
     slug: model.model,
-    name: toDisplayName(model),
+    name: formatCodexModelName(model.displayName),
     isCustom: false,
     ...(model.isDefault ? { isDefault: true } : {}),
     capabilities: mapCodexModelCapabilities(model),
@@ -374,14 +367,13 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   readonly binaryPath: string;
   readonly homePath?: string | undefined;
   readonly launchArgs?: string | undefined;
-  readonly maxConcurrentSubagents?: string | undefined;
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv | undefined;
 }) {
   // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
   // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
   // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
-  // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
+  // Expand here for parity with `CodexTextGeneration`.
   const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const environment = {
@@ -390,7 +382,7 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   };
   const spawnCommand = yield* resolveSpawnCommand(
     input.binaryPath,
-    codexAppServerArgs(input.launchArgs, input.maxConcurrentSubagents),
+    codexAppServerArgs(input.launchArgs),
     { env: environment, extendEnv: true },
   );
   const child = yield* spawner
@@ -425,7 +417,6 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly launchArgs?: string;
-  readonly maxConcurrentSubagents?: string | undefined;
   readonly cwd: string;
   readonly customModels?: ReadonlyArray<CustomModelSetting>;
   readonly environment?: NodeJS.ProcessEnv;
@@ -494,7 +485,6 @@ export const probeCodexSkillsForCwd = Effect.fn("probeCodexSkillsForCwd")(functi
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly launchArgs?: string;
-  readonly maxConcurrentSubagents?: string | undefined;
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv;
 }) {
@@ -581,7 +571,6 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly binaryPath: string;
     readonly homePath?: string;
     readonly launchArgs?: string;
-    readonly maxConcurrentSubagents?: string;
     readonly cwd: string;
     readonly customModels: ReadonlyArray<CustomModelSetting>;
     readonly environment?: NodeJS.ProcessEnv;
@@ -626,9 +615,6 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     cwd: process.cwd(),
     customModels: codexSettings.customModels,
     environment: resolvedEnvironment,
-    ...(codexSettings.maxConcurrentSubagents
-      ? { maxConcurrentSubagents: codexSettings.maxConcurrentSubagents }
-      : {}),
     ...(managedAuth ? { skipNativeUsage: true } : {}),
   }).pipe(
     Effect.scoped,

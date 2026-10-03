@@ -158,7 +158,6 @@ import {
   getComposerDraftAfterSelection,
   archiveCloudComposerDrafts,
   clearComposerDraftContent,
-  clearComposerDraftContentIfUnchanged,
   clearComposerDraftContentState,
   clearComposerDraftsEnvironment,
   ComposerDraftPersistenceError,
@@ -176,6 +175,7 @@ import {
   getComposerDraftSnapshot,
   mergeComposerDraftContentState,
   migrateLegacyNewTaskDraft,
+  modelOptionMemoryAtom,
   releaseUnusedComposerAttachmentFiles,
   removeComposerDraftsForEnvironment,
   replaceComposerDraftAttachments,
@@ -215,6 +215,7 @@ afterEach(() => {
   appAtomRegistry.set(composerDraftsAtom, {});
   appAtomRegistry.set(composerCloudDraftsAtom, { accountId: null, signedOut: {} });
   appAtomRegistry.set(stickyComposerModelSelectionAtom, null);
+  appAtomRegistry.set(modelOptionMemoryAtom, {});
   appAtomRegistry.set(threadOutboxManager.queuedMessagesByThreadKeyAtom, {});
   composerAttachmentCleanupMocks.remove.mockClear();
   composerAttachmentCleanupMocks.releaseUploads.mockReset();
@@ -1917,6 +1918,44 @@ describe("mobile composer drafts", () => {
     });
   });
 
+  it("decodes model option memory from the composer document", () => {
+    expect(
+      decodePersistedComposerState({
+        schemaVersion: 1,
+        drafts: {},
+        modelOptionMemory: {
+          pi: { "xai/grok-4.6": [{ id: "thinking", value: "xhigh" }] },
+        },
+      }).modelOptionMemory,
+    ).toEqual({ pi: { "xai/grok-4.6": [{ id: "thinking", value: "xhigh" }] } });
+  });
+
+  it("merges persisted option memory without replacing newer choices", async () => {
+    composerDraftFileMocks.setDocument({
+      schemaVersion: 1,
+      drafts: {},
+      modelOptionMemory: {
+        pi: {
+          "xai/grok-4.6": [{ id: "thinking", value: "high" }],
+          "openai/gpt-5.4": [{ id: "thinking", value: "medium" }],
+        },
+      },
+    });
+    appAtomRegistry.set(modelOptionMemoryAtom, {
+      pi: { "xai/grok-4.6": [{ id: "thinking", value: "xhigh" }] },
+    });
+
+    ensureComposerDraftsLoaded();
+    await waitForComposerDraftsLoaded();
+
+    expect(appAtomRegistry.get(modelOptionMemoryAtom)).toEqual({
+      pi: {
+        "xai/grok-4.6": [{ id: "thinking", value: "xhigh" }],
+        "openai/gpt-5.4": [{ id: "thinking", value: "medium" }],
+      },
+    });
+  });
+
   it("waits for hydration before persisting the latest composer state", async () => {
     vi.useFakeTimers();
     composerDraftFileMocks.setDocument({
@@ -2172,19 +2211,6 @@ describe("mobile composer drafts", () => {
     appAtomRegistry.set(composerDraftsAtom, { [draftKey]: selectedDraft });
 
     expect(getComposerDraftSnapshot(draftKey)).toEqual(selectedDraft);
-  });
-
-  it("does not clear a newer draft after an earlier command succeeds", () => {
-    const draftKey = "environment-1:thread-1";
-    setComposerDraftText(draftKey, "/goal first");
-    const submitted = getComposerDraftSnapshot(draftKey);
-
-    setComposerDraftText(draftKey, "/goal second");
-    clearComposerDraftContentIfUnchanged(draftKey, submitted);
-    expect(getComposerDraftSnapshot(draftKey).text).toBe("/goal second");
-
-    clearComposerDraftContentIfUnchanged(draftKey, getComposerDraftSnapshot(draftKey));
-    expect(getComposerDraftSnapshot(draftKey).text).toBe("");
   });
 
   it("drops another environment's upload stamp when a draft moves across machines", () => {

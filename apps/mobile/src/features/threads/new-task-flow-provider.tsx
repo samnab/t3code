@@ -68,11 +68,14 @@ import {
   capturePendingTaskEditorWriteBaseline,
   flushPendingTaskEditorWrite,
 } from "../../state/pending-task-editor-writes";
+import {
+  rememberModelOptions,
+  withRememberedModelOptions,
+} from "../../state/use-model-option-memory";
 import { useDebouncedValue, usePaginatedBranches } from "../../state/queries";
 import { vcsEnvironment } from "../../state/vcs";
 import {
   flattenQueuedThreadMessages,
-  resolvePendingTaskDraftText,
   threadOutboxManager,
   type QueuedThreadMessage,
 } from "../../state/thread-outbox";
@@ -245,6 +248,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const groupingSettings = useMobileProjectGroupingSettings();
   const { enabled: legacyPlanModeEnabled, loaded: planModePreferenceLoaded } =
     useLegacyPlanModeState();
+
   const projectScopes = useMemo(
     () =>
       sortHomeProjectScopes({
@@ -331,7 +335,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       repositoryIdentity: null,
       defaultModelSelection: editingPendingTask.modelSelection ?? null,
       scripts: [],
-      schedules: [],
       createdAt: editingPendingTask.createdAt,
       updatedAt: editingPendingTask.createdAt,
     };
@@ -593,7 +596,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!option) {
         return;
       }
-      const selection = options ? { ...option.selection, options } : option.selection;
+      const selection = withRememberedModelOptions(
+        options ? { ...option.selection, options } : option.selection,
+      );
       const provider = selectedEnvironmentServerConfig?.providers.find(
         (candidate) => candidate.instanceId === selection.instanceId,
       );
@@ -612,6 +617,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!selectedModel || !selectedProjectDraftKey) {
         return;
       }
+      rememberModelOptions(selectedModel.instanceId, selectedModel.model, options ?? []);
       const nextSelection: ModelSelection = options
         ? { ...selectedModel, options }
         : {
@@ -1006,11 +1012,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         return null;
       }
       const draft = getComposerDraftSnapshot(selectedProjectDraftKey);
-      // Same policy trim as the composer send path: native String.trim strips
-      // U+FEFF, which the /goal delimiter policy keeps as content, so it would
-      // reclassify a FEFF-joined ordinary draft into "/goal" queue text that
-      // the drain then blocks forever. Null when nothing visible remains.
-      const text = resolvePendingTaskDraftText(draft.text);
+      const text = draft.text.trim();
       // Use the displayed selection rules without substituting an unavailable
       // Antigravity model while the task is queued.
       const draftModelSelection =
@@ -1018,7 +1020,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
           selectedEnvironmentServerConfig,
           draft.modelSelection ?? null,
         ) ?? selectedModel;
-      if (text === null || !draftModelSelection) {
+      if (text.length === 0 || !draftModelSelection) {
         return null;
       }
       // A saved choice from before the project went no-project must not

@@ -9,35 +9,9 @@ export const resolveCodexLaunchArgs = (
 
 const codexLaunchArgv = (launchArgs?: string): ReadonlyArray<string> => tokenizeCliArgs(launchArgs);
 
-const CODEX_MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
-const POSITIVE_INTEGER_PATTERN = /^[1-9]\d*$/;
-
-/**
- * Translate T3's child-subagent setting into Codex's total-thread and
- * child-thread configuration keys. The structured setting is appended after
- * user launch arguments so it has deterministic precedence over conflicts.
- */
-export const codexSubagentConcurrencyArgs = (
-  maxConcurrentSubagents?: string,
-): ReadonlyArray<string> => {
-  const value = maxConcurrentSubagents?.trim() ?? "";
-  if (value === "" || !POSITIVE_INTEGER_PATTERN.test(value)) return [];
-
-  const count = BigInt(value);
-  if (count > CODEX_MAX_SAFE_INTEGER) return [];
-
-  return [
-    "-c",
-    `agents.max_concurrent_threads_per_session=${count}`,
-    "-c",
-    `features.multi_agent_v2.max_concurrent_threads_per_session=${count + 1n}`,
-  ];
-};
-
-export const codexAppServerArgs = (launchArgs?: string, maxConcurrentSubagents?: string) => [
+export const codexAppServerArgs = (launchArgs?: string) => [
   "app-server",
   ...codexLaunchArgv(launchArgs),
-  ...codexSubagentConcurrencyArgs(maxConcurrentSubagents),
 ];
 
 export const codexExecLaunchArgs = (launchArgs?: string) => {
@@ -62,17 +36,4 @@ export const codexExecLaunchArgs = (launchArgs?: string) => {
   }
 
   return execArgs;
-};
-
-export const codexSessionAppServerArgs = (
-  appServerArgs: ReadonlyArray<string> | undefined,
-  launchArgs: string | undefined,
-  maxConcurrentSubagents?: string,
-) => {
-  const launchAppServerArgs = codexAppServerArgs(launchArgs);
-  return [
-    ...launchAppServerArgs,
-    ...(appServerArgs ?? []),
-    ...codexSubagentConcurrencyArgs(maxConcurrentSubagents),
-  ];
 };

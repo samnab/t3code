@@ -1,6 +1,6 @@
-// Minimal codex app-server stand-in for runtime-level collab tests.
-// Speaks just enough of the protocol for CodexSessionRuntime to start a
-// session, using REAL captured responses (codexMultiAgentWire.json), then
+// Minimal codex app-server stand-in, spawned as the Codex binary by the
+// provider readiness probe tests. Answers the handshake and, for session
+// requests, returns REAL captured responses (codexMultiAgentWire.json), then
 // replays a scripted multi-agent notification sequence read from the
 // T3_CODEX_COLLAB_SCRIPT env var (a JSON file path) when the first turn
 // starts. Runs as a plain Node process — stdlib only.
@@ -18,7 +18,6 @@ const script = JSON.parse(NodeFS.readFileSync(process.env.T3_CODEX_COLLAB_SCRIPT
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let turnStartCount = 0;
 let activeTurn;
-const threadResumeCounts = new Map();
 // Server->client requests the runtime must answer (approval prompts), keyed
 // by the numeric JSON-RPC id this peer allocated for them.
 const openServerRequests = new Map();
@@ -123,14 +122,7 @@ rl.on("line", (line) => {
       );
     }
     const threadId = message.params?.threadId;
-    const configuredSnapshot = script.childResumeSnapshots?.[threadId];
-    const childSnapshot = Array.isArray(configuredSnapshot)
-      ? configuredSnapshot[
-          Math.min(threadResumeCounts.get(threadId) ?? 0, configuredSnapshot.length - 1)
-        ]
-      : configuredSnapshot;
-    if (Array.isArray(configuredSnapshot))
-      threadResumeCounts.set(threadId, (threadResumeCounts.get(threadId) ?? 0) + 1);
+    const childSnapshot = script.childResumeSnapshots?.[threadId];
     if (script.resumeRequestMarker) {
       write({
         jsonrpc: "2.0",
@@ -215,78 +207,6 @@ rl.on("line", (line) => {
         params: {
           threadId: rootThreadId,
           turn: { ...turn, status: "completed" },
-        },
-      });
-    }
-    return;
-  }
-  if (
-    method === "thread/goal/get" ||
-    method === "thread/goal/set" ||
-    method === "thread/goal/clear"
-  ) {
-    // Record the exact goal request (sidecar file the test reads), then
-    // answer from the script: goalGet is the ThreadGoal (or null),
-    // goalMethodNotFound simulates an outdated Codex binary.
-    NodeFS.appendFileSync(
-      `${process.env.T3_CODEX_COLLAB_SCRIPT}.goalCalls`,
-      `${JSON.stringify({ method, params: message.params })}\n`,
-    );
-    if (script.goalMethodNotFound === true) {
-      write({ id, error: { code: -32601, message: "Method not found" } });
-      return;
-    }
-    if (method === "thread/goal/get") {
-      write({ id, result: { goal: script.goalGet ?? null } });
-      return;
-    }
-    if (method === "thread/goal/set") {
-      const goal = script.goalGet ?? {
-        threadId: message.params?.threadId,
-        objective: "ship the fix",
-        status: "paused",
-        tokenBudget: null,
-        tokensUsed: 0,
-        timeUsedSeconds: 0,
-        createdAt: 1776272400,
-        updatedAt: 1776272460,
-      };
-      write({ id, result: { goal: { ...goal, status: message.params?.status ?? goal.status } } });
-      return;
-    }
-    write({ id, result: { cleared: true } });
-    return;
-  }
-  if (method === "thread/compact/start") {
-    // Record the exact compact request (sidecar file the test reads) and
-    // answer like the real app server: accept immediately, then signal the
-    // compact turn's completion asynchronously.
-    NodeFS.appendFileSync(
-      `${process.env.T3_CODEX_COLLAB_SCRIPT}.compacts`,
-      `${JSON.stringify({ threadId: message.params?.threadId })}\n`,
-    );
-    write({ id, result: {} });
-    // The current protocol signals the finished compact turn as a completed
-    // `contextCompaction` item; `thread/compacted` is the deprecated shape.
-    // compactionSignal scripts which shape(s) the peer emits: "notification"
-    // (default, legacy), "item", or "both" (transition overlap).
-    const compactionSignal = script.compactionSignal ?? "notification";
-    if (compactionSignal === "notification" || compactionSignal === "both") {
-      write({
-        jsonrpc: "2.0",
-        method: "thread/compacted",
-        params: { threadId: message.params?.threadId, turnId: "compact-turn-1" },
-      });
-    }
-    if (compactionSignal === "item" || compactionSignal === "both") {
-      write({
-        jsonrpc: "2.0",
-        method: "item/completed",
-        params: {
-          threadId: message.params?.threadId,
-          turnId: "compact-turn-1",
-          completedAtMs: 1_778_000_000_000,
-          item: { id: "item-context-compaction-1", type: "contextCompaction" },
         },
       });
     }

@@ -12,7 +12,7 @@ import { shortcutLabelForCommand } from "~/keybindings";
 import { projectIconColorClassName } from "~/projectIconColors";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useScratchProject } from "~/hooks/useScratchProject";
-import { useClientSettings, usePrimarySettings } from "~/hooks/useSettings";
+import { useClientSettings } from "~/hooks/useSettings";
 import { hasExplicitComposerModelSelection } from "~/lib/chatThreadActions";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -66,7 +66,6 @@ export function DraftHeroHeadline({
   );
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
   const applyStickyState = useComposerDraftStore((store) => store.applyStickyState);
-  const primarySettings = usePrimarySettings();
   const setModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const openAddProject = useCallback(() => openCommandPalette({ open: "add-project" }), []);
   const { scratchEnvironmentId, scratchWorkspaceRootFor, openScratchProject } = useScratchProject();
@@ -192,7 +191,7 @@ export function DraftHeroHeadline({
       draftId,
     );
     if (!hasExplicitComposerModelSelection(currentDraft)) {
-      applyStickyState(draftId, primarySettings);
+      applyStickyState(draftId);
       const environmentSettings = environments.find(
         (environment) => environment.environmentId === project.environmentId,
       )?.serverConfig?.settings;

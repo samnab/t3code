@@ -3,11 +3,16 @@ import type {
   ProjectId,
   ProviderInteractionMode,
   ServerProvider,
+  ThreadId,
 } from "@t3tools/contracts";
+import { matchComposerThreadItems } from "@t3tools/client-runtime/composerThreadItems";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
+
+const EMPTY_THREAD_SHELLS: ReadonlyArray<EnvironmentThreadShell> = [];
 import { COMPOSER_CONTEXT_MAX_RECORDS } from "@t3tools/contracts";
 import { Alert } from "react-native";
 import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
-import { pullRequestComposerContext } from "../../lib/composerContext";
+import { pullRequestComposerContext, threadComposerContext } from "../../lib/composerContext";
 import { uuidv4 } from "../../lib/uuid";
 import {
   getComposerDraftSnapshot,
@@ -56,8 +61,6 @@ export function buildComposerSlashCommandItems(input: {
   readonly hasCompactableConversation?: boolean;
   /** Whether T3 itself offers /usage-limits for the selected provider. */
   readonly offersUsageLimits?: boolean;
-  /** Whether this thread supports the T3-local /goal command. */
-  readonly supportsThreadGoals?: boolean;
   readonly allowInteractionMode: boolean;
   readonly selectedProviderStatus: Pick<
     ServerProvider,
@@ -75,24 +78,6 @@ export function buildComposerSlashCommandItems(input: {
       label: "/model",
       description: "Switch model",
     },
-    ...(input.hasThread && input.supportsThreadGoals
-      ? ([
-          {
-            id: "cmd:goal",
-            type: "slash-command",
-            command: "goal",
-            label: "/goal",
-            description: "Set or view this thread's goal",
-          },
-          {
-            id: "cmd:goal-experiment",
-            type: "slash-command",
-            command: "goal experiment",
-            label: "/goal experiment",
-            description: "Preview a bounded goal experiment",
-          },
-        ] as const)
-      : []),
     {
       id: "cmd:plan",
       type: "slash-command",
@@ -109,9 +94,7 @@ export function buildComposerSlashCommandItems(input: {
     },
   ] satisfies ComposerCommandItem[];
   const items: ComposerCommandItem[] = builtIn.filter(
-    (item) =>
-      item.command.includes(query) &&
-      (item.command === "model" || item.command.startsWith("goal") || allowInteractionMode),
+    (item) => item.command.includes(query) && (item.command === "model" || allowInteractionMode),
   );
 
   // Providers expand commands only at the start of a message. T3 commands
@@ -186,12 +169,13 @@ export function useComposerCommandMenu({
   draftMessage,
   ownerKey,
   environmentId,
+  threadShells = EMPTY_THREAD_SHELLS,
+  currentThreadId = null,
   projectCwd,
   pullRequestProjectId = null,
   pullRequestRepository = null,
   selectedProviderStatus,
   hasThread,
-  supportsThreadGoals = false,
   hasCompactableConversation,
   offersUsageLimits = false,
   enabled = true,
@@ -202,12 +186,15 @@ export function useComposerCommandMenu({
   readonly draftMessage: string;
   readonly ownerKey: string | null;
   readonly environmentId: EnvironmentId | null;
+  /** Candidates for `@` thread suggestions; the caller reads them from the entity store. */
+  readonly threadShells?: ReadonlyArray<EnvironmentThreadShell>;
+  /** Left out of `@` thread suggestions: a thread is never context for itself. */
+  readonly currentThreadId?: ThreadId | null;
   readonly projectCwd: string | null;
   readonly pullRequestProjectId?: ProjectId | null;
   readonly pullRequestRepository?: string | null;
   readonly selectedProviderStatus: ServerProvider | null;
   readonly hasThread: boolean;
-  readonly supportsThreadGoals?: boolean;
   readonly hasCompactableConversation: boolean;
   /** Whether T3 itself offers /usage-limits for the selected provider. */
   readonly offersUsageLimits?: boolean;
@@ -362,7 +349,6 @@ export function useComposerCommandMenu({
         hasThread,
         hasCompactableConversation,
         offersUsageLimits,
-        supportsThreadGoals,
         allowInteractionMode: onUpdateInteractionMode !== undefined,
         selectedProviderStatus: selectedProviderStatus
           ? {
@@ -472,21 +458,35 @@ export function useComposerCommandMenu({
     }
 
     if (trigger.kind === "path") {
-      return pathSearch.entries.map((entry) => {
-        const parts = entry.path.split("/");
-        return {
-          id: `path:${entry.path}`,
-          type: "path" as const,
-          path: entry.path,
-          kind: entry.kind,
-          label: parts[parts.length - 1] ?? entry.path,
-          description: parts.length > 1 ? parts.slice(0, -1).join("/") : "",
-        };
-      });
+      const threadItems = environmentId
+        ? matchComposerThreadItems({
+            shells: threadShells,
+            environmentId,
+            excludeThreadId: currentThreadId,
+            query: trigger.query,
+          })
+        : [];
+      return [
+        ...threadItems,
+        ...pathSearch.entries.map((entry) => {
+          const parts = entry.path.split("/");
+          return {
+            id: `path:${entry.path}`,
+            type: "path" as const,
+            path: entry.path,
+            kind: entry.kind,
+            label: parts[parts.length - 1] ?? entry.path,
+            description: parts.length > 1 ? parts.slice(0, -1).join("/") : "",
+          };
+        }),
+      ];
     }
 
     return [];
   }, [
+    currentThreadId,
+    environmentId,
+    threadShells,
     hasThread,
     hasCompactableConversation,
     onUpdateInteractionMode,
@@ -495,7 +495,6 @@ export function useComposerCommandMenu({
     projectCwd,
     selectedProviderStatus,
     skills,
-    supportsThreadGoals,
     trigger,
     offersUsageLimits,
   ]);
@@ -503,6 +502,41 @@ export function useComposerCommandMenu({
   const onSelect = useCallback(
     (item: ComposerCommandItem) => {
       if (!trigger) return;
+      if (item.type === "thread") {
+        if (!ownerKey || trigger.kind !== "path") return;
+        const shell = threadShells.find(
+          (candidate) =>
+            candidate.environmentId === item.thread.environmentId &&
+            candidate.id === item.thread.threadId,
+        );
+        if (!shell) return;
+        const record = threadComposerContext(item.thread, shell.title);
+        const existing = getComposerDraftSnapshot(ownerKey).context?.records ?? [];
+        const alreadyAttached = existing.some((entry) => entry.contextId === record.contextId);
+        if (!alreadyAttached && existing.length >= COMPOSER_CONTEXT_MAX_RECORDS) {
+          Alert.alert(
+            "Too many context items",
+            "Remove some context from the draft and try again.",
+          );
+          return;
+        }
+        const result = replaceTextRange(
+          draftMessage,
+          trigger.rangeStart,
+          trigger.rangeEnd,
+          `${formatComposerContextReference(record)} `,
+        );
+        onChangeDraftMessage(result.text);
+        if (!alreadyAttached) {
+          const draft = getComposerDraftSnapshot(ownerKey);
+          setComposerDraftContext(ownerKey, {
+            version: 1,
+            records: [...(draft.context?.records ?? []), record],
+          });
+        }
+        setSelection({ start: result.cursor, end: result.cursor });
+        return;
+      }
       if (item.type === "pull-request") {
         if (
           !ownerKey ||
@@ -571,6 +605,7 @@ export function useComposerCommandMenu({
       onUpdateInteractionMode,
       onUsageLimits,
       selectedProviderStatus?.showInteractionModeToggle,
+      threadShells,
       trigger,
     ],
   );

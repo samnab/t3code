@@ -16,9 +16,11 @@ import { useComposerMenuState } from "./useComposerMenuState";
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
+  runtimeModeOptions: ReadonlyArray<{
+    readonly mode: RuntimeMode;
+    readonly label: string;
+  }>;
   showInteractionModeToggle: boolean;
-  showVoiceNotificationsToggle: boolean;
-  voiceNotifications: boolean;
   traitsMenuContent?: ReactNode;
   size?: "sm" | "xs";
   /**
@@ -29,7 +31,6 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   hidden?: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
-  onVoiceNotificationsChange: (enabled: boolean) => void;
 }) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
@@ -82,27 +83,12 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             props.onRuntimeModeChange(value as RuntimeMode);
           }}
         >
-          <MenuRadioItem value="approval-required">Supervised</MenuRadioItem>
-          <MenuRadioItem value="auto-accept-edits">Auto-accept edits</MenuRadioItem>
-          <MenuRadioItem value="auto">Auto</MenuRadioItem>
-          <MenuRadioItem value="full-access">Full access</MenuRadioItem>
+          {props.runtimeModeOptions.map((option) => (
+            <MenuRadioItem key={option.mode} value={option.mode}>
+              {option.label}
+            </MenuRadioItem>
+          ))}
         </MenuRadioGroup>
-        {props.showVoiceNotificationsToggle ? (
-          <>
-            <MenuDivider />
-            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Voice</div>
-            <MenuRadioGroup
-              value={props.voiceNotifications ? "on" : "off"}
-              onValueChange={(value) => {
-                if (!value) return;
-                props.onVoiceNotificationsChange(value === "on");
-              }}
-            >
-              <MenuRadioItem value="on">Voice on</MenuRadioItem>
-              <MenuRadioItem value="off">Voice off</MenuRadioItem>
-            </MenuRadioGroup>
-          </>
-        ) : null}
       </MenuPopup>
     </Menu>
   );

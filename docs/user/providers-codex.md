@@ -25,14 +25,6 @@ T3 Code can use your installed Codex and its existing login. Run `codex login`
 on the environment's machine to sign in. [Provider setup](./install.md#providers)
 covers installation and custom configuration.
 
-## Reduce context usage
-
-Choose **Compact context** in the context meter (web and desktop) or in the composer's expanded
-toolbar (mobile) to ask Codex to summarize the conversation and continue with the summary. T3 Code
-sends Codex's own compaction request — Codex writes the summary, and T3 Code never edits it or
-picks a summary model. Compaction only runs on an idle thread; while a turn is running the control
-waits. The thread's **Context compacted** activity appears when Codex finishes.
-
 ## Use multiple accounts
 
 Add another ChatGPT account in **Settings → Providers**, then select the account
@@ -71,10 +63,6 @@ store, configure file storage for this setup. See
 Use a completely separate **CODEX_HOME path**, with no shadow home, when you want
 separate Codex sessions and configuration. That instance cannot continue threads
 from the other home.
-
-To limit native multi-agent fan-out, set **Maximum concurrent subagents** in the provider settings.
-The value counts child subagents and excludes the primary session. It applies to new sessions; leave
-it blank to use Codex's default.
 
 ## Switch accounts in an existing thread
 
@@ -117,39 +105,3 @@ In an existing Codex thread, send `/feedback` with an optional description, for
 example `/feedback The agent stopped before finishing the tests`. This uploads
 the conversation and Codex logs to OpenAI. The returned thread ID can be shared
 with OpenAI support.
-
-## Sub-agent models
-
-The web and desktop Agents panel shows each sub-agent's model and reasoning effort when Codex
-reports them. If Codex does not report either value, T3 Code leaves it out instead of using the
-parent agent's settings.
-
-## Codex execution goals
-
-Codex can track an **execution goal** for a thread on its own: an objective it works toward with a
-token budget, time used, and a status it updates itself. T3 Code does not create or store these
-goals — it reads the one Codex already set for the live session.
-
-Open **Codex execution goal…** from the thread's action menu (click the thread title in the chat
-header, or right-click the thread in the sidebar). On mobile, use the flag button in the composer's
-expanded toolbar. The panel shows the objective, status, tokens used, time used, and when Codex
-last updated it. **Refresh** re-reads the live goal.
-
-You can also act on it:
-
-- **Pause** asks Codex to pause an active goal for this session.
-- **Clear** asks Codex to stop tracking the goal. Clearing asks for confirmation first.
-
-Reading and changing the execution goal needs a live Codex session for the thread. If Codex is too
-old to know execution goals, the panel says so — update the Codex CLI and try again.
-
-### Thread goals are separate
-
-A [thread goal](./composer.md#thread-goals) is owned by T3 Code. Codex receives the goal with each
-turn, while T3 Code starts follow-up turns and tracks the iteration limit just as it does for other
-providers.
-
-Before sending work for a standard thread goal, T3 Code deactivates any Codex execution goal on
-the live session. If that cannot be done, T3 Code does not start competing goal work and reports
-the failure in the thread. The execution-goal panel remains available for inspecting, pausing, or
-clearing a provider-native goal when no standard thread goal is driving the session.

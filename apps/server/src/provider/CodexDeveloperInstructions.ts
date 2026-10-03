@@ -1,22 +1,15 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
-import {
-  RTK_CODEX_SESSION_INSTRUCTIONS,
-  RTK_SESSION_PREFACE,
-} from "../optimizer/RtkSessionInstructions.ts";
 import { buildRuntimeInstructions } from "./RuntimeInstructions.ts";
 
-const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `## T3 Code collaborative browser
-
-You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
-
-For browser work, first call \`preview_status\`. If no automation-capable preview is attached, call \`preview_open\` before concluding that the browser is unavailable. Then use \`preview_navigate\`, \`preview_snapshot\`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
-
-Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or \`preview_open\` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.`;
+import {
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+} from "./T3OrchestrationInstructions.ts";
 
 const T3_CODE_DEVICE_TOOL_INSTRUCTIONS = `## T3 Code devices
 
-The \`t3-code\` MCP server also exposes \`device_*\` tools for iOS Simulators and Android Emulators on this environment. For mobile verification, call \`device_list\`, then \`device_open\` so the user can watch the device in their Device panel; its result explains how to drive the device. Driving happens through the \`agent-device\` CLI, which is on PATH. Keep the host config and session flags returned by \`device_open\` on every command so concurrent devices stay independent: prefer \`agent-device snapshot -i\` refs over coordinates, and use \`device_screenshot\` when you need to see the screen. Prefer these tools and \`agent-device\` for opening and driving devices. Platform tools such as \`xcrun simctl\` and \`adb\` remain available for anything they do not cover, such as builds, logs, or port forwarding. If \`device_list\` reports a platform as unavailable, say so.`;
+The \`t3-code\` MCP server also exposes \`device_*\` tools for iOS Simulators and Android Emulators on this environment. For mobile verification, call \`device_list\`, then \`device_open\` so the user can watch the device in their Device panel; its result explains how to drive the device. Driving happens through the \`agent-device\` CLI, using the exact launcher path returned by \`device_open\`. Keep the host config and session flags returned by \`device_open\` on every command so concurrent devices stay independent: prefer \`agent-device snapshot -i\` refs over coordinates, and use \`device_screenshot\` when you need to see the screen. Prefer these tools and \`agent-device\` for opening and driving devices. Platform tools such as \`xcrun simctl\` and \`adb\` remain available for anything they do not cover, such as builds, logs, or port forwarding. If \`device_list\` reports a platform as unavailable, say so.`;
 
 export interface T3CodeToolAvailability {
   readonly browser: boolean;
@@ -44,15 +37,6 @@ const toolInstructions = (availability: boolean | T3CodeToolAvailability): strin
     .filter(Boolean)
     .join("\n\n");
 };
-
-/**
- * The T3 session-only preface plus the full pinned upstream text are injected
- * verbatim when the session attached RTK; the tags mark the block boundary.
- */
-const rtkInstructions = (rtkEnabled: boolean): string =>
-  rtkEnabled
-    ? `<rtk_instructions>\n${RTK_SESSION_PREFACE}\n${RTK_CODEX_SESSION_INSTRUCTIONS}</rtk_instructions>`
-    : "";
 
 const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
 
@@ -227,18 +211,15 @@ export function buildCodexAdditionalContext(
    * setting, so the prompt cannot claim tools the turn doesn't have.
    */
   toolsAvailable: boolean | T3CodeToolAvailability = true,
-  /** Whether this session attached RTK and should receive its full guidance. */
-  rtkEnabled = false,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
   const tools = toolInstructions(toolsAvailable);
-  const rtk = rtkInstructions(rtkEnabled);
   // Separate keys keep each value under Codex's per-entry token cap.
   return {
+    t3_code_orchestration: { kind: "application", value: T3_CODE_ORCHESTRATION_INSTRUCTIONS },
     t3_code_runtime: {
       kind: "application",
       value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
     },
     ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
-    ...(rtk ? { t3_code_rtk: { kind: "application", value: rtk } } : {}),
   };
 }

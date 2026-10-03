@@ -43,11 +43,13 @@ describe("ServerProvider", () => {
         status: "authenticated",
       },
       checkedAt: "2026-04-10T00:00:00.000Z",
+      supportedRuntimeModes: ["approval-required", "future-mode", "full-access"],
       models: [],
     });
 
     expect(parsed.slashCommands).toEqual([]);
     expect(parsed.skills).toEqual([]);
+    expect(parsed.supportedRuntimeModes).toEqual(["approval-required", "full-access"]);
     expect(parsed.versionAdvisory).toBeUndefined();
     expect(parsed.updateState).toBeUndefined();
   });
@@ -76,19 +78,6 @@ describe("ServerProvider", () => {
     });
 
     expect(parsed.versionAdvisory?.canUpdate).toBe(false);
-  });
-
-  it("decodes the execution-goal capability and keeps old-server snapshots without it", () => {
-    const decoded = decodeServerProvider({
-      ...baseProviderSnapshot,
-      executionGoal: "native",
-    });
-    expect(decoded.executionGoal).toBe("native");
-
-    // Old servers (and non-Codex providers) never send the field; absent
-    // must stay undefined so clients hide the execution-goal controls.
-    const legacy = decodeServerProvider({ ...baseProviderSnapshot });
-    expect(legacy.executionGoal).toBeUndefined();
   });
 
   it("decodes continuation group metadata", () => {

@@ -1,13 +1,3 @@
-/**
- * Pi model thinking-level capabilities.
- *
- * Source: extracted from upstream T3 PR #7211
- * (`apps/server/src/provider/Layers/piThinkingCapabilities.ts`, head
- * `a00565fbfc34a5fefd1222e1868f41e36cb02378`, MIT, author StiensWout) — see
- * `docs/fork/upstream-pr-ledger.md`.
- *
- * @module provider/Layers/piThinkingCapabilities
- */
 import { type ModelCapabilities, type ProviderOptionChoice } from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as Predicate from "effect/Predicate";
@@ -17,15 +7,7 @@ import * as Predicate from "effect/Predicate";
  * model via `thinkingLevelMap`; advertising them globally makes
  * `set_thinking_level` fail on models that lack them.
  */
-export const PI_THINKING_LEVELS = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
+const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export type PiThinkingLevel = (typeof PI_THINKING_LEVELS)[number];
 
@@ -56,13 +38,11 @@ export function thinkingCapabilitiesForPiModel(
         id: "thinking",
         label: "Thinking",
         type: "select",
-        options: levels.map(
-          (level): ProviderOptionChoice => ({
-            id: level,
-            label: PI_THINKING_LEVEL_LABELS[level],
-            ...(level === defaultLevel ? { isDefault: true } : {}),
-          }),
-        ),
+        options: levels.map((level): ProviderOptionChoice => ({
+          id: level,
+          label: PI_THINKING_LEVEL_LABELS[level],
+          ...(level === defaultLevel ? { isDefault: true } : {}),
+        })),
       },
     ],
   });

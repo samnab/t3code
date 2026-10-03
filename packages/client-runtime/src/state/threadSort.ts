@@ -1,9 +1,8 @@
-import type {
-  OrchestrationMessageOrigin,
-  OrchestrationThreadShell,
-  ProjectId,
-} from "@t3tools/contracts";
+import type { ProjectId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
+import type { EnvironmentThreadShell } from "./models.ts";
+import * as Arr from "effect/Array";
+import * as Order from "effect/Order";
 
 export interface ThreadSortInput {
   readonly createdAt: string;
@@ -12,7 +11,6 @@ export interface ThreadSortInput {
   readonly messages?: ReadonlyArray<{
     readonly createdAt: string;
     readonly role: string;
-    readonly origin?: OrchestrationMessageOrigin | undefined;
   }>;
 }
 
@@ -23,8 +21,8 @@ export function toSortableTimestamp(iso: string | undefined): number | null {
 }
 
 export type SettledThreadTimestampInput = Pick<
-  OrchestrationThreadShell,
-  "settledAt" | "latestUserMessageAt" | "latestTurn" | "updatedAt"
+  EnvironmentThreadShell,
+  "settledAt" | "latestUserMessageAt" | "latestRun" | "updatedAt"
 >;
 
 /** The timestamp a settled row sorts and labels by on every client: settledAt
@@ -38,9 +36,9 @@ export function resolveSettledThreadTimestamp(thread: SettledThreadTimestampInpu
   let latestMs = Number.NEGATIVE_INFINITY;
   for (const candidate of [
     thread.latestUserMessageAt,
-    thread.latestTurn?.requestedAt,
-    thread.latestTurn?.startedAt,
-    thread.latestTurn?.completedAt,
+    thread.latestRun?.requestedAt,
+    thread.latestRun?.startedAt,
+    thread.latestRun?.completedAt,
   ]) {
     const parsed = toSortableTimestamp(candidate ?? undefined);
     if (candidate != null && parsed !== null && parsed > latestMs) {
@@ -92,7 +90,7 @@ function getLatestUserMessageTimestamp(thread: ThreadSortInput): number {
   let latestUserMessageTimestamp: number | null = null;
 
   for (const message of thread.messages ?? []) {
-    if (message.role !== "user" || message.origin !== undefined) continue;
+    if (message.role !== "user") continue;
     const messageTimestamp = toSortableTimestamp(message.createdAt);
     if (messageTimestamp === null) continue;
     latestUserMessageTimestamp =
@@ -128,7 +126,7 @@ export function getThreadSortTimestamp(
  * top instead of sinking back to its creation-order slot. Shared by web and
  * mobile so both render the same order. Malformed timestamps sink to 0.
  */
-function activeThreadAnchorTimestampMs(thread: {
+export function activeThreadAnchorTimestampMs(thread: {
   readonly createdAt: string;
   readonly unsettledAt?: string | null | undefined;
 }): number {
@@ -375,34 +373,6 @@ export function sortActiveThreadsByOrderKey<
       (left.environmentId ?? "").localeCompare(right.environmentId ?? "")
     );
   });
-}
-
-/**
- * Active-block sort driven by the sidebar thread sort-order setting, shared by
- * the web sidebar and mobile's Thread List v2. "created_at" (Default) is the
- * order-key sort above. "updated_at" (Last updated) ignores those keys — so
- * manual arrangement is neither displayed nor editable — and sorts
- * newest-first by the user's last message, maxed with the creation/un-settle
- * anchor so a freshly un-settled thread still surfaces.
- */
-export function sortActiveThreadsBySortOrder<
-  T extends ThreadSortInput & {
-    readonly id: string;
-    readonly unsettledAt?: string | null | undefined;
-    readonly activeOrderKey?: string | null | undefined;
-    readonly environmentId?: string | undefined;
-  },
->(threads: readonly T[], sortOrder: SidebarThreadSortOrder): T[] {
-  if (sortOrder === "created_at") return sortActiveThreadsByOrderKey(threads);
-  const recencyMs = (thread: T) =>
-    Math.max(
-      getThreadSortTimestamp(thread, "updated_at"),
-      toSortableTimestamp(thread.createdAt) ?? 0,
-      toSortableTimestamp(thread.unsettledAt ?? undefined) ?? 0,
-    );
-  return [...threads].sort(
-    (left, right) => recencyMs(right) - recencyMs(left) || left.id.localeCompare(right.id),
-  );
 }
 
 /**

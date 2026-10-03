@@ -5,6 +5,7 @@ import {
   formatContextWindowCompactionMessage,
   hasAvailableCompactionProvider,
   hasDismissedResumeCompaction,
+  formatContextWindowCost,
   resolveContextWindowModelDisplayName,
   shouldOfferResumeCompaction,
   shouldReserveContextWindowMeter,
@@ -34,7 +35,7 @@ function claudeProvider(input: {
 describe("hasAvailableCompactionProvider", () => {
   const originalInstanceId = ProviderInstanceId.make("claude_original");
 
-  it("falls back to any enabled instance of the driver when the selected instance is disabled", () => {
+  it("rejects a fallback in a different locked continuation group", () => {
     const providers = deriveProviderInstanceEntries([
       claudeProvider({
         instanceId: originalInstanceId,
@@ -52,6 +53,30 @@ describe("hasAvailableCompactionProvider", () => {
         providers,
         driverKind: ProviderDriverKind.make("claudeAgent"),
         instanceId: originalInstanceId,
+        lockedInstanceId: originalInstanceId,
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts an enabled fallback in the locked continuation group", () => {
+    const providers = deriveProviderInstanceEntries([
+      claudeProvider({
+        instanceId: originalInstanceId,
+        continuationGroupKey: "claude:home:/original",
+        enabled: false,
+      }),
+      claudeProvider({
+        instanceId: "claude_fallback",
+        continuationGroupKey: "claude:home:/original",
+      }),
+    ]);
+
+    expect(
+      hasAvailableCompactionProvider({
+        providers,
+        driverKind: ProviderDriverKind.make("claudeAgent"),
+        instanceId: originalInstanceId,
+        lockedInstanceId: originalInstanceId,
       }),
     ).toBe(true);
   });
@@ -260,5 +285,12 @@ describe("shouldReserveContextWindowMeter", () => {
     expect(shouldReserveContextWindowMeter({ ...loadingStartedThread, meterEnabled: false })).toBe(
       false,
     );
+  });
+});
+
+describe("formatContextWindowCost", () => {
+  it("keeps ordinary and sub-cent ACP costs readable", () => {
+    expect(formatContextWindowCost({ amount: 0.42, currency: "USD" })).toBe("USD 0.42");
+    expect(formatContextWindowCost({ amount: 0.0042, currency: "USD" })).toBe("USD 0.0042");
   });
 });

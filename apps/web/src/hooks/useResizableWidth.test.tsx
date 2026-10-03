@@ -35,7 +35,6 @@ function pointer(clientX = 100) {
     button: 0,
     pointerId: 1,
     clientX,
-    clientY: clientX,
     currentTarget: target,
     preventDefault() {},
     stopPropagation() {},
@@ -44,12 +43,10 @@ function pointer(clientX = 100) {
 
 function Panel({
   edge = "left",
-  axis = "x",
   maxWidth = 800,
   storageKey = "test-panel-width",
 }: {
-  edge?: "left" | "right" | "top";
-  axis?: "x" | "y";
+  edge?: "left" | "right";
   maxWidth?: number;
   storageKey?: string;
 }) {
@@ -59,7 +56,6 @@ function Panel({
     minWidth: 200,
     maxWidth,
     edge,
-    axis,
   });
   useLayoutEffect(() => {
     result = resize;
@@ -144,19 +140,6 @@ describe("panel resize cleanup", () => {
       expect(cancelAnimationFrame).toHaveBeenCalledWith(42);
     },
   );
-
-  it("uses the release position for a fast top-edge vertical drag", async () => {
-    await act(() => renderer.update(<Panel edge="top" axis="y" />));
-    await act(() => {
-      result.handlers.onPointerDown(pointer());
-      result.handlers.onPointerMove(pointer(50));
-      expect(style.cursor).toBe("row-resize");
-      result.handlers.onPointerUp(pointer(25));
-    });
-    expect(result.width).toBe(475);
-    expect(setItem).toHaveBeenCalledExactlyOnceWith("test-panel-width", "475");
-    expect(cancelAnimationFrame).toHaveBeenCalledWith(42);
-  });
 
   it.each([
     [800, 450],

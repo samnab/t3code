@@ -36,7 +36,6 @@ function makeProject(
       : null,
     defaultModelSelection: null,
     scripts: [],
-    schedules: [],
     createdAt: "2026-07-01T00:00:00.000Z",
     updatedAt: "2026-07-01T00:00:00.000Z",
   };

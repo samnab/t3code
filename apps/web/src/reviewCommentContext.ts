@@ -1,6 +1,5 @@
 import type { FileDiffMetadata, SelectedLineRange, SelectionSide } from "@pierre/diffs";
 import { PullRequestContextMetadata, type PullRequestReviewPosition } from "@t3tools/contracts";
-import { trimThreadGoalWhitespace } from "@t3tools/shared/composerTrigger";
 import * as Schema from "effect/Schema";
 
 const ReviewCommentSelectionSchema = Schema.Struct({
@@ -57,54 +56,6 @@ export function formatReviewCommentFence(language: string, contents: string): st
   return [`${fence}${language}`, contents.trimEnd(), fence].join("\n");
 }
 
-function escapeReviewCommentAttribute(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-/**
- * Keeps a comment's own words from closing the block they travel in. The parser ends an
- * attachment at the first `</review_comment>`, so text carrying one would spill the rest of
- * itself into the prompt — and could open a forged attachment naming any file it liked. Only
- * ever the local reader's words before, but a pull request's review bodies come from whoever
- * wrote them.
- */
-function neutralizeReviewCommentTags(text: string): string {
-  return text.replace(/<(?=\/?review_comment\b)/giu, "&lt;");
-}
-
-export function formatReviewCommentContext(comment: ReviewCommentContext): string {
-  return [
-    [
-      "<review_comment",
-      ` sectionId="${escapeReviewCommentAttribute(comment.sectionId)}"`,
-      ` sectionTitle="${escapeReviewCommentAttribute(comment.sectionTitle)}"`,
-      ` filePath="${escapeReviewCommentAttribute(comment.filePath)}"`,
-      ` startIndex="${comment.startIndex}"`,
-      ` endIndex="${comment.endIndex}"`,
-      ` rangeLabel="${escapeReviewCommentAttribute(comment.rangeLabel)}"`,
-      ">",
-    ].join(""),
-    neutralizeReviewCommentTags(comment.text.trim()),
-    formatReviewCommentFence(comment.fenceLanguage ?? "diff", comment.diff),
-    "</review_comment>",
-  ].join("\n");
-}
-
-export function appendReviewCommentsToPrompt(
-  prompt: string,
-  comments: ReadonlyArray<ReviewCommentContext>,
-): string {
-  const blocks = comments.map(formatReviewCommentContext);
-  if (blocks.length === 0) return prompt;
-  const trimmedPrompt = trimThreadGoalWhitespace(prompt);
-  return trimmedPrompt.length > 0
-    ? `${trimmedPrompt}\n\n${blocks.join("\n\n")}`
-    : blocks.join("\n\n");
-}
 export function buildFileReviewComment(input: {
   id: string;
   filePath: string;

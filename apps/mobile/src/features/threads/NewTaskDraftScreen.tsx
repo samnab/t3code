@@ -32,11 +32,7 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
-import {
-  hasVisibleThreadGoalText,
-  parseThreadGoalCommand,
-  trimThreadGoalWhitespace,
-} from "@t3tools/shared/composerTrigger";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 
 import {
   ComposerEditor,
@@ -107,7 +103,7 @@ import {
   type ComposerDraft,
   waitForComposerDraftsLoaded,
 } from "../../state/use-composer-drafts";
-import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
+import { useEnvironmentServerConfig, useProjects, useThreadShells } from "../../state/entities";
 import { useProjectClone } from "../../state/projectClones";
 import { projectEnvironment } from "../../state/projects";
 import { sourceControlEnvironment } from "../../state/sourceControl";
@@ -117,7 +113,6 @@ import {
   isModelSelectionUnavailable,
   resolveSelectableModelSelection,
 } from "../../lib/modelOptions";
-import { deriveThreadTitleFromPrompt } from "../../lib/projectThreadStartTurn";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
@@ -462,6 +457,7 @@ export function NewTaskDraftScreen(props: {
     draftMessage: flow.prompt,
     ownerKey: flow.draftKey,
     environmentId: selectedProject?.environmentId ?? null,
+    threadShells: useThreadShells(),
     pullRequestProjectId: selectedEnvironmentServerConfig?.environment.capabilities.pullRequests
       ? (selectedProject?.id ?? null)
       : null,
@@ -1202,12 +1198,12 @@ export function NewTaskDraftScreen(props: {
       ) ?? flow.selectedModel;
     const workspaceMode = draft.workspaceSelection?.mode ?? flow.workspaceMode;
     const selectedBranchName = draft.workspaceSelection?.branch ?? flow.selectedBranchName;
-    const initialMessageText = trimThreadGoalWhitespace(draft.text);
+    const initialMessageText = draft.text.trim();
 
     if (
       attachmentBlockReason !== null ||
       !modelSelection ||
-      !hasVisibleThreadGoalText(initialMessageText) ||
+      initialMessageText.length === 0 ||
       flow.submitting ||
       (workspaceMode === "worktree" && !selectedBranchName)
     ) {
@@ -1244,19 +1240,6 @@ export function NewTaskDraftScreen(props: {
       Alert.alert(
         "Too many attachments",
         `Remove attachments until there are at most ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS}.`,
-      );
-      return;
-    }
-
-    // Goals live on existing threads; a /goal draft here has nothing to
-    // target yet, so keep everything and let the user send a message first.
-    // The initial message text is policy-trimmed so it classifies identically
-    // to this parse: a FEFF-joined draft stays an ordinary message instead of
-    // being trimmed into a rejected /goal command.
-    if (parseThreadGoalCommand(draft.text)) {
-      Alert.alert(
-        "Start the thread first",
-        "Thread goals need an existing thread. Send a message once, then set a goal with /goal. Your draft was kept.",
       );
       return;
     }
@@ -1299,7 +1282,10 @@ export function NewTaskDraftScreen(props: {
       // finds no work and ends the card within seconds.
       armAgentAwarenessLiveActivityForLocalWork({
         environmentId: selectedProject.environmentId,
-        threadTitle: deriveThreadTitleFromPrompt(initialMessageText),
+        threadTitle: deriveThreadTitleSeed({
+          text: initialMessageText,
+          attachments: draft.attachments,
+        }),
         projectTitle: selectedProject.title,
       });
     }
@@ -1736,6 +1722,7 @@ export function NewTaskDraftScreen(props: {
                         emphasized
                         renderIcon={(size) => (
                           <ProviderIcon
+                            iconUrl={flow.selectedModelOption?.providerIconUrl}
                             provider={flow.selectedModelOption?.providerDriver}
                             size={size}
                           />

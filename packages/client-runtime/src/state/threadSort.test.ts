@@ -1,7 +1,8 @@
-import { ProjectId, TurnId, type OrchestrationLatestTurn } from "@t3tools/contracts";
+import { ProjectId, RunId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  activeThreadAnchorTimestampMs,
   generateSpreadPinOrderKeys,
   getLatestThreadForProject,
   pinOrderKeyBetween,
@@ -15,6 +16,17 @@ import {
   type SettledThreadTimestampInput,
   type ThreadSortInput,
 } from "./threadSort.ts";
+
+describe("activeThreadAnchorTimestampMs", () => {
+  it("uses the later unsettle time when an old thread re-enters the active list", () => {
+    expect(
+      activeThreadAnchorTimestampMs({
+        createdAt: "2026-01-01T00:00:00.000Z",
+        unsettledAt: "2026-08-01T00:00:00.000Z",
+      }),
+    ).toBe(Date.parse("2026-08-01T00:00:00.000Z"));
+  });
+});
 
 type TestThread = { readonly id: string } & ThreadSortInput;
 
@@ -35,7 +47,7 @@ describe("resolveSettledThreadTimestamp", () => {
       resolveSettledThreadTimestamp({
         settledAt: "2026-03-09T10:00:00.000Z",
         latestUserMessageAt: "2026-03-09T11:00:00.000Z",
-        latestTurn: null,
+        latestRun: null,
         updatedAt: "2026-03-09T12:00:00.000Z",
       }),
     ).toBe("2026-03-09T10:00:00.000Z");
@@ -46,7 +58,7 @@ describe("resolveSettledThreadTimestamp", () => {
       resolveSettledThreadTimestamp({
         settledAt: "invalid",
         latestUserMessageAt: "2026-03-09T11:00:00.000Z",
-        latestTurn: null,
+        latestRun: null,
         updatedAt: "2026-03-09T12:00:00.000Z",
       }),
     ).toBe("2026-03-09T11:00:00.000Z");
@@ -54,7 +66,7 @@ describe("resolveSettledThreadTimestamp", () => {
       resolveSettledThreadTimestamp({
         settledAt: null,
         latestUserMessageAt: null,
-        latestTurn: null,
+        latestRun: null,
         updatedAt: "2026-03-09T12:00:00.000Z",
       }),
     ).toBe("2026-03-09T12:00:00.000Z");
@@ -66,13 +78,13 @@ describe("sortSettledThreads", () => {
     id: string;
     settledAt?: string | null;
     latestUserMessageAt?: string | null;
-    latestTurn?: OrchestrationLatestTurn | null;
+    latestRun?: SettledThreadTimestampInput["latestRun"];
     updatedAt?: string;
   }) => ({
     id: input.id,
     settledAt: input.settledAt ?? null,
     latestUserMessageAt: input.latestUserMessageAt ?? null,
-    latestTurn: input.latestTurn ?? null,
+    latestRun: input.latestRun ?? null,
     updatedAt: input.updatedAt ?? "2026-03-09T09:00:00.000Z",
   });
 
@@ -112,9 +124,9 @@ describe("sortSettledThreads", () => {
       settled({
         id: "completed-later",
         latestUserMessageAt: "2026-03-09T10:00:00.000Z",
-        latestTurn: {
-          turnId: TurnId.make("turn-1"),
-          state: "completed",
+        latestRun: {
+          runId: RunId.make("run-1"),
+          status: "completed",
           assistantMessageId: null,
           requestedAt: "2026-03-09T10:00:00.000Z",
           startedAt: "2026-03-09T10:00:00.000Z",
@@ -232,32 +244,6 @@ describe("sortThreads", () => {
     );
 
     expect(sorted.map((thread) => thread.id)).toEqual(["thread-1", "thread-2"]);
-  });
-
-  it("ignores server-authored origin messages when falling back to the latest user message", () => {
-    const sorted = sortThreads(
-      [
-        makeThread({
-          id: "thread-1",
-          latestUserMessageAt: "invalid-latest-user-message-at",
-          updatedAt: "2026-03-09T10:00:00.000Z",
-          messages: [
-            { role: "user", createdAt: "2026-03-09T10:05:00.000Z" },
-            { role: "user", createdAt: "2026-03-09T10:30:00.000Z", origin: "goal-continue" },
-          ],
-        }),
-        makeThread({
-          id: "thread-2",
-          createdAt: "2026-03-09T10:10:00.000Z",
-          updatedAt: "2026-03-09T10:10:00.000Z",
-        }),
-      ],
-      "updated_at",
-    );
-
-    // thread-1's real user message (10:05) is older than thread-2's updatedAt
-    // (10:10); the origin message at 10:30 must not count as the user speaking.
-    expect(sorted.map((thread) => thread.id)).toEqual(["thread-2", "thread-1"]);
   });
 });
 

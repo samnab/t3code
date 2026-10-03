@@ -1,45 +1,52 @@
-import { describe, expect, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 
-import {
-  EMPTY_PI_MODEL_CAPABILITIES,
-  thinkingCapabilitiesForPiModel,
-} from "./piThinkingCapabilities.ts";
+import { thinkingCapabilitiesForPiModel } from "./piThinkingCapabilities.ts";
 
 describe("thinkingCapabilitiesForPiModel", () => {
-  it("adverts off..high for reasoning models and extra levels only when mapped", () => {
+  it("gives every choice its real level id and tags Pi's default", () => {
     const capabilities = thinkingCapabilitiesForPiModel(
-      { reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-      "medium",
-    );
-    const descriptor = capabilities.optionDescriptors?.[0];
-    expect(descriptor?.id).toBe("thinking");
-    expect(
-      descriptor && "options" in descriptor ? descriptor.options.map((o) => o.id) : [],
-    ).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
-    const defaultOption =
-      descriptor && "options" in descriptor
-        ? descriptor.options.find((option) => "isDefault" in option && option.isDefault)
-        : undefined;
-    expect(defaultOption?.id).toBe("medium");
-  });
-
-  it("returns empty capabilities for non-reasoning models", () => {
-    expect(thinkingCapabilitiesForPiModel({ reasoning: false }, "high")).toEqual(
-      EMPTY_PI_MODEL_CAPABILITIES,
-    );
-  });
-
-  it("clamps an unknown default to the closest available level", () => {
-    const capabilities = thinkingCapabilitiesForPiModel(
-      { reasoning: true, thinkingLevelMap: null },
+      {
+        reasoning: true,
+        thinkingLevelMap: { off: null, xhigh: "extra_high", max: null },
+      },
       "xhigh",
     );
-    const descriptor = capabilities.optionDescriptors?.[0];
-    const defaultOption =
-      descriptor && "options" in descriptor
-        ? descriptor.options.find((option) => "isDefault" in option && option.isDefault)
-        : undefined;
-    // xhigh is not in this model's map; the closest advertised level is high.
-    expect(defaultOption?.id).toBe("high");
+    const descriptors = capabilities.optionDescriptors ?? [];
+    const thinking = descriptors[0];
+    assert.equal(thinking?.id, "thinking");
+    assert.equal(thinking?.type, "select");
+    if (thinking?.type !== "select") return;
+    assert.deepEqual(
+      thinking.options.map((option) => [option.id, option.label, option.isDefault === true]),
+      [
+        ["minimal", "Minimal", false],
+        ["low", "Low", false],
+        ["medium", "Medium", false],
+        ["high", "High", false],
+        ["xhigh", "Extra High", true],
+      ],
+    );
+  });
+
+  it("clamps Pi's default to each model's supported levels", () => {
+    const capabilities = thinkingCapabilitiesForPiModel(
+      {
+        reasoning: true,
+        thinkingLevelMap: { xhigh: "extra_high", max: null },
+      },
+      "max",
+    );
+    const thinking = capabilities.optionDescriptors?.[0];
+    assert.equal(thinking?.type, "select");
+    if (thinking?.type !== "select") return;
+    assert.deepInclude(thinking.options, {
+      id: "xhigh",
+      label: "Extra High",
+      isDefault: true,
+    });
+    assert.notInclude(
+      thinking.options.map((option) => option.id),
+      "max",
+    );
   });
 });

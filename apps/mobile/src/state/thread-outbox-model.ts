@@ -21,14 +21,10 @@ import {
   type RuntimeMode as RuntimeModeType,
   type ServerProvider,
 } from "@t3tools/contracts";
-import {
-  hasVisibleThreadGoalText,
-  parseThreadGoalCommand,
-  trimThreadGoalWhitespace,
-} from "@t3tools/shared/composerTrigger";
 import * as Schema from "effect/Schema";
 
 import { DraftComposerAttachmentSchema } from "../lib/composer-image-schema";
+import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import type { DraftComposerAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { resolveProviderInteractionMode } from "./legacy-plan-mode";
@@ -59,6 +55,7 @@ export const QueuedThreadMessageSchema = Schema.Struct({
   context: Schema.optional(OrchestrationMessageContext),
   attachments: Schema.Array(DraftComposerAttachmentSchema),
   modelSelection: Schema.optional(ModelSelection),
+  dispatchMode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
   // Present when the queued item creates a brand-new thread (pending task)
@@ -91,6 +88,13 @@ export interface QueuedThreadMessage {
   readonly modelSelection?: ModelSelectionType;
   readonly runtimeMode?: RuntimeModeType;
   readonly interactionMode?: ProviderInteractionModeType;
+  /**
+   * How this message should be delivered if a turn is still running when the
+   * outbox drains. Captured at enqueue time because the drain can fire long
+   * after the tap. Absent on rows written before follow-up behavior existed,
+   * which keep the previous always-queue delivery.
+   */
+  readonly dispatchMode?: ComposerDispatchMode;
   readonly creation?: QueuedThreadCreation;
   readonly createdAt: string;
 }
@@ -165,39 +169,19 @@ export function flattenQueuedThreadMessages(
   return Object.values(queues).flat();
 }
 
-/**
- * Queued entries whose text is a T3-local /goal command: they can never
- * deliver, so the thread's queued line shows them separately from messages
- * that will send automatically, with a way to remove them.
- */
-export function blockedQueuedThreadMessages(
-  messages: ReadonlyArray<QueuedThreadMessage>,
-): ReadonlyArray<QueuedThreadMessage> {
-  return messages.filter((message) => parseThreadGoalCommand(message.text) !== null);
-}
-
 export function threadOutboxRetryDelayMs(attempt: number): number {
   return Math.min(1_000 * 2 ** Math.max(0, attempt - 1), THREAD_OUTBOX_MAX_RETRY_DELAY_MS);
 }
 
-export type ThreadOutboxDeliveryAction = "wait" | "remove" | "send" | "blocked";
+export type ThreadOutboxDeliveryAction = "wait" | "remove" | "send";
 
 export function resolveThreadOutboxDeliveryAction(input: {
-  readonly text: string;
   readonly isCreation: boolean;
   readonly threadExists: boolean;
   readonly shellStatus: EnvironmentShellStatus;
   readonly environmentConnected: boolean;
   readonly threadBusy: boolean;
 }): ThreadOutboxDeliveryAction {
-  // A persisted or edited queued entry can carry T3-local /goal text past the
-  // live composer interception (offline outbox, pending-task edits, older app
-  // versions). It must never start a provider turn through either branch, so
-  // classify it before anything else: no send, no retry loop, and the entry
-  // stays queued with its text until the user edits or deletes it.
-  if (parseThreadGoalCommand(input.text) !== null) {
-    return "blocked";
-  }
   if (input.isCreation) {
     // A pending task creates its thread on delivery. If the thread already
     // exists the creation command went through and only cleanup remains.
@@ -217,7 +201,6 @@ export function resolveThreadOutboxDeliveryAction(input: {
 
 export type ThreadOutboxDispatchStep =
   | { readonly step: "wait" }
-  | { readonly step: "blocked" }
   | { readonly step: "remove" }
   | { readonly step: "retry" }
   | { readonly step: "restore"; readonly reason: string }
@@ -254,19 +237,6 @@ export function resolveThreadOutboxDispatchStep(input: {
   return oversized
     ? { step: "restore", reason: fileAttachmentTooLargeMessage(oversized.name, effectiveMaxBytes) }
     : { step: "send" };
-}
-
-/**
- * Queue text for a pending task built from a raw composer draft (offline
- * creates and pending-task edit flushes). Native String.trim strips U+FEFF,
- * which the /goal delimiter policy keeps as content, so it would reclassify
- * a FEFF-joined ordinary draft into "/goal" queue text that the drain blocks
- * forever. Null when nothing visible remains, so an invisible-only flush
- * never rewrites the queued row.
- */
-export function resolvePendingTaskDraftText(rawText: string): string | null {
-  const text = trimThreadGoalWhitespace(rawText);
-  return hasVisibleThreadGoalText(text) ? text : null;
 }
 
 /**

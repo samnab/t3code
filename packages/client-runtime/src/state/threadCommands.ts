@@ -1,13 +1,16 @@
+import type { ThreadId } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { Atom } from "effect/unstable/reactivity";
 import {
   WS_METHODS,
   type EnvironmentId,
-  type OrchestrationShellSnapshot,
+  type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
 
 import { createOptimisticThreadLifecycle } from "./threadLifecycle.ts";
-import { canSnooze } from "./threadSettled.ts";
+import * as DateTime from "effect/DateTime";
 
 import {
   createAtomCommandScheduler,
@@ -15,19 +18,24 @@ import {
   createEnvironmentRpcCommand,
 } from "./runtime.ts";
 import {
+  type ThreadCommandInput,
   type ArchiveThreadInput,
-  type CompactThreadContextInput,
+  type CancelQueuedRunInput,
   type CreateThreadInput,
   type DeleteThreadInput,
+  type EditQueuedRunInput,
   type InterruptThreadTurnInput,
+  type MarkThreadUnreadInput,
+  type ForkThreadFromRunInput,
+  type MergeThreadBackInput,
+  type PromoteQueuedRunInput,
+  type ReorderQueuedRunInput,
   type LinkThreadPullRequestInput,
   type RespondToThreadApprovalInput,
   type RespondToThreadUserInputInput,
   type DismissThreadUserInputInput,
   type RevertThreadCheckpointInput,
   type SetThreadInteractionModeInput,
-  type SetThreadVoiceNotificationsInput,
-  type SetThreadGoalLoopInput,
   type SetThreadRuntimeModeInput,
   type PinThreadInput,
   type ReorderPinnedThreadInput,
@@ -43,11 +51,19 @@ import {
   type UnsettleThreadInput,
   type UnsnoozeThreadInput,
   type UpdateThreadMetadataInput,
+  type VisitThreadInput,
   archiveThread,
-  compactThreadContext,
+  cancelQueuedRun,
   createThread,
   deleteThread,
+  editQueuedRun,
   interruptThreadTurn,
+  forkThreadFromRun,
+  markThreadUnread,
+  mergeThreadBack,
+  promoteQueuedRun,
+  reorderQueuedRun,
+  resumeThreadQueue,
   linkThreadPullRequest,
   respondToThreadApproval,
   respondToThreadUserInput,
@@ -55,8 +71,6 @@ import {
   revertThreadCheckpoint,
   setThreadInteractionMode,
   setThreadRuntimeMode,
-  setThreadVoiceNotifications,
-  setThreadGoalLoop,
   pinThread,
   reorderPinnedThread,
   reorderActiveThread,
@@ -71,15 +85,28 @@ import {
   unsettleThread,
   unsnoozeThread,
   updateThreadMetadata,
+  visitThread,
 } from "../operations/commands.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import * as ThreadHistoryController from "./threadHistoryController.ts";
+
+export type LoadEarlierThreadHistoryInput = {
+  readonly threadId: ThreadId;
+};
 
 export type {
   ArchiveThreadInput,
-  CompactThreadContextInput,
+  CancelQueuedRunInput,
   CreateThreadInput,
   DeleteThreadInput,
+  EditQueuedRunInput,
   InterruptThreadTurnInput,
+  MarkThreadUnreadInput,
+  ForkThreadFromRunInput,
+  MergeThreadBackInput,
+  PromoteQueuedRunInput,
+  ReorderQueuedRunInput,
   LinkThreadPullRequestInput,
   RespondToThreadApprovalInput,
   RespondToThreadUserInputInput,
@@ -87,8 +114,6 @@ export type {
   RevertThreadCheckpointInput,
   SetThreadInteractionModeInput,
   SetThreadRuntimeModeInput,
-  SetThreadVoiceNotificationsInput,
-  SetThreadGoalLoopInput,
   PinThreadInput,
   ReorderPinnedThreadInput,
   ReorderActiveThreadInput,
@@ -97,17 +122,19 @@ export type {
   SnoozeThreadInput,
   StartThreadTurnInput,
   StopThreadSessionInput,
+  ThreadCommandInput,
   UnarchiveThreadInput,
   UnlinkThreadPullRequestInput,
   UnpinThreadInput,
   UnsettleThreadInput,
   UnsnoozeThreadInput,
   UpdateThreadMetadataInput,
+  VisitThreadInput,
 } from "../operations/commands.ts";
 
 export function createThreadEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | Crypto.Crypto | R, E>,
-  snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationShellSnapshot | null>,
+  snapshotAtom: (environmentId: EnvironmentId) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
 ) {
   const scheduler = createAtomCommandScheduler();
   const concurrency = {
@@ -194,6 +221,18 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    visit: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:visit",
+      execute: (input: VisitThreadInput) => visitThread(input),
+      scheduler,
+      concurrency,
+    }),
+    markUnread: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:mark-unread",
+      execute: (input: MarkThreadUnreadInput) => markThreadUnread(input),
+      scheduler,
+      concurrency,
+    }),
     updateMetadata: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:update-metadata",
       execute: (input: UpdateThreadMetadataInput) => updateThreadMetadata(input),
@@ -221,18 +260,6 @@ export function createThreadEnvironmentAtoms<R, E>(
     setInteractionMode: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:set-interaction-mode",
       execute: (input: SetThreadInteractionModeInput) => setThreadInteractionMode(input),
-      scheduler,
-      concurrency,
-    }),
-    setVoiceNotifications: createEnvironmentCommand(runtime, {
-      label: "environment-data:commands:thread:set-voice-notifications",
-      execute: (input: SetThreadVoiceNotificationsInput) => setThreadVoiceNotifications(input),
-      scheduler,
-      concurrency,
-    }),
-    setGoalLoop: createEnvironmentCommand(runtime, {
-      label: "environment-data:commands:thread:set-goal-loop",
-      execute: (input: SetThreadGoalLoopInput) => setThreadGoalLoop(input),
       scheduler,
       concurrency,
     }),
@@ -278,57 +305,82 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
-    compactContext: createEnvironmentCommand(runtime, {
-      label: "environment-data:commands:thread:compact-context",
-      execute: (input: CompactThreadContextInput) => compactThreadContext(input),
+    forkFromRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:fork-from-run",
+      execute: (input: ForkThreadFromRunInput) => forkThreadFromRun(input),
+      scheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sourceThreadId]),
+      },
+    }),
+    mergeBack: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:merge-back",
+      execute: (input: MergeThreadBackInput) => mergeThreadBack(input),
+      scheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.sourceThreadId, input.targetThreadId]),
+      },
+    }),
+    resumeThreadQueue: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:resume-queue",
+      execute: (input: ThreadCommandInput) => resumeThreadQueue(input),
       scheduler,
       concurrency,
+    }),
+    reorderQueuedRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:reorder-queued-run",
+      execute: (input: ReorderQueuedRunInput) => reorderQueuedRun(input),
+      scheduler,
+      concurrency,
+    }),
+    promoteQueuedRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:promote-queued-run",
+      execute: (input: PromoteQueuedRunInput) => promoteQueuedRun(input),
+      scheduler,
+      concurrency,
+    }),
+    cancelQueuedRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:cancel-queued-run",
+      execute: (input: CancelQueuedRunInput) => cancelQueuedRun(input),
+      scheduler,
+      concurrency,
+    }),
+    editQueuedRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:edit-queued-run",
+      execute: (input: EditQueuedRunInput) => editQueuedRun(input),
+      scheduler,
+      concurrency,
+    }),
+    loadEarlierHistory: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:load-earlier-history",
+      execute: (input: LoadEarlierThreadHistoryInput) =>
+        Effect.gen(function* () {
+          const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+          const controller = yield* Effect.serviceOption(
+            ThreadHistoryController.ThreadHistoryController,
+          );
+          if (Option.isNone(controller)) {
+            return {
+              _tag: "noop",
+            } satisfies ThreadHistoryController.ThreadHistoryLoadEarlierResult;
+          }
+          return yield* controller.value.loadEarlier(
+            supervisor.target.environmentId,
+            input.threadId,
+          );
+        }),
+      scheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.threadId]),
+      },
     }),
     uploadFeedback: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:commands:thread:upload-feedback",
       tag: WS_METHODS.providerUploadFeedback,
-      scheduler,
-      concurrency,
-    }),
-    executionGoalGet: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:execution-goal-get",
-      tag: WS_METHODS.providerExecutionGoalGet,
-      scheduler,
-      concurrency,
-    }),
-    executionGoalPause: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:execution-goal-pause",
-      tag: WS_METHODS.providerExecutionGoalPause,
-      scheduler,
-      concurrency,
-    }),
-    executionGoalClear: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:execution-goal-clear",
-      tag: WS_METHODS.providerExecutionGoalClear,
-      scheduler,
-      concurrency,
-    }),
-    taskStop: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:task-stop",
-      tag: WS_METHODS.providerTaskStop,
-      scheduler,
-      concurrency,
-    }),
-    experimentPreview: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:experiment-preview",
-      tag: WS_METHODS.threadExperimentPreview,
-      scheduler,
-      concurrency,
-    }),
-    experimentStart: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:experiment-start",
-      tag: WS_METHODS.threadExperimentStart,
-      scheduler,
-      concurrency,
-    }),
-    experimentGet: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:experiment-get",
-      tag: WS_METHODS.threadExperimentGet,
       scheduler,
       concurrency,
     }),
@@ -339,14 +391,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     snapshotAtom: optimistic.snapshotAtom,
     settle: optimistic.wrap(commands.settle, (thread, _input, now, accepted) =>
       !accepted &&
-      (!canSnooze(thread, { now }) ||
-        thread.session?.status === "starting" ||
-        thread.session?.status === "running")
+      (thread.pendingRuntimeRequest !== null ||
+        ["preparing", "queued", "starting", "running", "waiting"].includes(thread.status))
         ? thread
         : {
             ...thread,
-            hasPendingApprovals: false,
-            hasPendingUserInput: false,
+            pendingRuntimeRequest: null,
             settledOverride: "settled",
             settledAt: thread.settledOverride === "settled" ? (thread.settledAt ?? now) : now,
             unsettledAt: null,
@@ -364,21 +414,30 @@ export function createThreadEnvironmentAtoms<R, E>(
       unsettledAt: thread.settledOverride === "active" ? (thread.unsettledAt ?? null) : now,
     })),
     snooze: optimistic.wrap(commands.snooze, (thread, input, now, accepted) =>
-      (!accepted && !canSnooze(thread, { now })) ||
-      !(Date.parse(input.snoozedUntil) > Date.parse(now))
+      (!accepted &&
+        (thread.pendingRuntimeRequest !== null ||
+          ["preparing", "queued", "starting"].includes(thread.status))) ||
+      !(Date.parse(input.snoozedUntil) > DateTime.toEpochMillis(now))
         ? thread
         : {
             ...thread,
-            hasPendingApprovals: false,
-            hasPendingUserInput: false,
-            snoozedUntil: input.snoozedUntil,
-            snoozedAt: thread.snoozedUntil === input.snoozedUntil ? (thread.snoozedAt ?? now) : now,
+            pendingRuntimeRequest: null,
+            snoozedUntil: DateTime.makeUnsafe(input.snoozedUntil),
+            snoozedAt:
+              thread.snoozedUntil != null &&
+              DateTime.formatIso(thread.snoozedUntil) === input.snoozedUntil
+                ? (thread.snoozedAt ?? now)
+                : now,
           },
     ),
     unsnooze: optimistic.wrap(commands.unsnooze, (thread) => ({
       ...thread,
       snoozedUntil: null,
       snoozedAt: null,
+    })),
+    setAutoSettle: optimistic.wrap(commands.setAutoSettle, (thread, input, now) => ({
+      ...thread,
+      autoSettleDisabledAt: input.enabled ? null : (thread.autoSettleDisabledAt ?? now),
     })),
     pin: optimistic.wrap(commands.pin, (thread, input, now) => ({
       ...thread,

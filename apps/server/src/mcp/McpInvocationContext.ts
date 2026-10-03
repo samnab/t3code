@@ -3,31 +3,19 @@ import {
   McpCapabilityUnavailableError,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
-  type RuntimeTaskId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-import { ExperimentMcpError, type ExperimentMcpIdentity } from "./ExperimentMcpModel.ts";
-
-export type McpCapability =
-  | "preview"
-  | "device"
-  | "pull-requests"
-  | "delegation"
-  | "experiment"
-  | "messaging";
-
-export interface AgentMessagingMcpBinding {
-  readonly agentId: RuntimeTaskId;
-  readonly parentThreadId: ThreadId;
-}
-
-export interface ExperimentMcpBinding {
-  readonly runId: string;
-  readonly generation: number;
-}
+const ALL_MCP_CAPABILITIES = [
+  "preview",
+  "orchestration",
+  "worktree",
+  "device",
+  "pull-requests",
+] as const;
+export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
@@ -35,8 +23,6 @@ export interface McpInvocationScope {
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
   readonly capabilities: ReadonlySet<McpCapability>;
-  readonly experiment?: ExperimentMcpBinding;
-  readonly agentMessaging?: AgentMessagingMcpBinding;
   readonly issuedAt: number;
 }
 
@@ -76,27 +62,3 @@ export const requireMcpCapability = <const C extends McpCapability>(
     ),
     Effect.withSpan("mcp.requireCapability"),
   );
-
-export const requireExperimentMcpInvocation = Effect.fn("mcp.requireExperimentInvocation")(
-  function* () {
-    const invocation = yield* McpInvocationContext;
-    if (
-      invocation.capabilities.size !== 1 ||
-      !invocation.capabilities.has("experiment") ||
-      invocation.experiment === undefined
-    ) {
-      return yield* new ExperimentMcpError({
-        code: "PROVIDER_EXPERIMENT_UNAUTHORIZED",
-        message: "MCP credential is not bound to an experiment run.",
-      });
-    }
-    const identity: ExperimentMcpIdentity = {
-      threadId: invocation.threadId,
-      providerInstanceId: invocation.providerInstanceId,
-      providerSessionId: invocation.providerSessionId,
-      runId: invocation.experiment.runId,
-      generation: invocation.experiment.generation,
-    };
-    return identity;
-  },
-);

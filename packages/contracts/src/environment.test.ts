@@ -50,16 +50,6 @@ describe("ExecutionEnvironmentDescriptor", () => {
     ).toBe(true);
   });
 
-  it("treats missing thread goals as unsupported and preserves advertisement", () => {
-    expect(decodeDescriptor(descriptor).capabilities.threadGoals).toBeUndefined();
-    expect(
-      decodeDescriptor({
-        ...descriptor,
-        capabilities: { ...descriptor.capabilities, threadGoals: true },
-      }).capabilities.threadGoals,
-    ).toBe(true);
-  });
-
   it("preserves the server's generic attachment upload limit", () => {
     expect(
       decodeDescriptor({
@@ -70,5 +60,21 @@ describe("ExecutionEnvironmentDescriptor", () => {
         },
       }).capabilities.fileAttachments,
     ).toEqual({ maxUploadBytes: 50 * 1024 * 1024 });
+  });
+
+  it("treats missing server-resolved command context as unsupported", () => {
+    expect(decodeDescriptor(descriptor).capabilities.serverResolvedCommandContext).toBeUndefined();
+  });
+
+  it("preserves advertised server-resolved command context", () => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: {
+          ...descriptor.capabilities,
+          serverResolvedCommandContext: true,
+        },
+      }).capabilities.serverResolvedCommandContext,
+    ).toBe(true);
   });
 });

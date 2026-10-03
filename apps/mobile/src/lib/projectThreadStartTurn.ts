@@ -1,29 +1,18 @@
 import {
   CommandId,
-  DEFAULT_PROVIDER_INTERACTION_MODE,
-  DEFAULT_RUNTIME_MODE,
   MessageId,
   ThreadId,
+  type ChatAttachment,
   type ModelSelection,
   type OrchestrationMessageContext,
   type ProjectId,
   type ProviderInteractionMode,
   type RuntimeMode,
 } from "@t3tools/contracts";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 
-import type { QueuedThreadCreation, QueuedThreadMessage } from "../state/thread-outbox-model";
 import type { UploadedMobileAttachment } from "./attachmentUpload";
-
-export function deriveThreadTitleFromPrompt(value: string): string {
-  const trimmed = assistantCitationsToPlainText(value).trim();
-  if (trimmed.length === 0) {
-    return "New thread";
-  }
-
-  const compact = trimmed.replace(/\s+/g, " ");
-  return compact.length <= 72 ? compact : `${compact.slice(0, 69).trimEnd()}...`;
-}
 
 export interface ProjectThreadStartTurnSpec {
   readonly projectId: ProjectId;
@@ -34,8 +23,8 @@ export interface ProjectThreadStartTurnSpec {
   readonly createdAt: string;
   readonly text: string;
   readonly context?: OrchestrationMessageContext;
-  /** Wire attachments from `prepareTurnAttachments`, in composer order. */
-  readonly uploadedAttachments: ReadonlyArray<UploadedMobileAttachment>;
+  /** New uploads or server-owned attachments from a cancelled setup. */
+  readonly uploadedAttachments: ReadonlyArray<UploadedMobileAttachment | ChatAttachment>;
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
@@ -53,10 +42,11 @@ export interface ProjectThreadStartTurnSpec {
  * offline outbox drain so both deliver identical commands.
  */
 export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpec) {
-  const title = deriveThreadTitleFromPrompt(spec.text);
+  const title = deriveThreadTitleSeed({ text: spec.text, attachments: spec.uploadedAttachments });
   const isWorktree = spec.workspaceMode === "worktree";
   return {
     commandId: CommandId.make(spec.commandId),
+    creationSource: "mobile" as const,
     threadId: ThreadId.make(spec.threadId),
     message: {
       messageId: MessageId.make(spec.messageId),
@@ -96,43 +86,12 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
   };
 }
 
-/**
- * The exact `thread.turn.start` payload the outbox drain sends for a queued
- * creation. The drain's delivery action classifies the queued text raw, so
- * the wire payload carries that same text unchanged — a native trim here
- * would strip a leading U+FEFF and deliver "/goal …" that the server decider
- * treats as a goal command instead of a turn. Null when the row never
- * carried a model selection.
- */
-export function buildQueuedCreationStartTurnInput(input: {
-  readonly message: QueuedThreadMessage;
-  readonly creation: QueuedThreadCreation;
-  readonly projectCwd: string;
-  /** Generated per delivery by the caller; unused for local mode. */
-  readonly worktreeBranchName: string;
-}) {
-  const { message, creation, projectCwd, worktreeBranchName } = input;
-  if (message.modelSelection === undefined) {
-    return null;
+export function deriveThreadTitleFromPrompt(value: string): string {
+  const trimmed = assistantCitationsToPlainText(value).trim();
+  if (trimmed.length === 0) {
+    return "New thread";
   }
-  return buildProjectThreadStartTurnInput({
-    projectId: creation.projectId,
-    projectCwd,
-    threadId: message.threadId,
-    commandId: message.commandId,
-    messageId: message.messageId,
-    createdAt: message.createdAt,
-    text: message.text,
-    // ponytail: new-task attachments are not yet uploaded through this seam;
-    // wire them once queued creations carry pre-uploaded attachments.
-    uploadedAttachments: [],
-    modelSelection: message.modelSelection,
-    runtimeMode: message.runtimeMode ?? DEFAULT_RUNTIME_MODE,
-    interactionMode: message.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
-    workspaceMode: creation.workspaceMode,
-    branch: creation.branch,
-    worktreePath: creation.worktreePath,
-    startFromOrigin: creation.startFromOrigin ?? false,
-    worktreeBranchName,
-  });
+
+  const compact = trimmed.replace(/\s+/g, " ");
+  return compact.length <= 72 ? compact : `${compact.slice(0, 69).trimEnd()}...`;
 }

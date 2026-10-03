@@ -22,11 +22,8 @@ export interface UseResizableWidthOptions {
    * Which edge of the host element carries the drag handle:
    *   - "left"  → panel grows leftward (right-anchored panels)
    *   - "right" → panel grows rightward (left-anchored panels)
-   *   - "top"   → panel grows upward (bottom-anchored panels), only valid with axis "y"
    */
-  readonly edge: "left" | "right" | "top";
-  /** Drag direction: "x" resizes width (default), "y" resizes height. */
-  readonly axis?: "x" | "y";
+  readonly edge: "left" | "right";
 }
 
 export interface ResizableWidthHandlers {
@@ -50,7 +47,7 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
   readonly width: number;
   readonly handlers: ResizableWidthHandlers;
 } {
-  const { storageKey, defaultWidth, minWidth, maxWidth, edge, axis = "x" } = options;
+  const { storageKey, defaultWidth, minWidth, maxWidth, edge } = options;
 
   const clamp = useCallback(
     (value: number): number => {
@@ -87,7 +84,6 @@ export function useResizableWidth(options: UseResizableWidthOptions): {
     () => ({
       width: clampedWidth,
       edge,
-      axis,
       resize(value) {
         const nextWidth = latestOptions.current.clamp(value);
         setWidthState({ storageKey, width: nextWidth });

@@ -1,5 +1,4 @@
-import type { ContextMenuItem, ThreadGoalLoop } from "@t3tools/contracts";
-import { isThreadGoalLoopActionAvailable } from "@t3tools/client-runtime/state/threadGoalEditor";
+import type { ContextMenuItem } from "@t3tools/contracts";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 
 /**
@@ -23,14 +22,6 @@ export type ThreadActionMenuId =
   | "unsnooze"
   | "rename"
   | "regenerate-title"
-  | "execution-goal"
-  | "pause-goal-loop"
-  | "resume-goal-loop"
-  | "continue-goal-loop"
-  | "restart-goal-loop"
-  | "stop-goal-loop"
-  | "delete-goal"
-  | "reload-agent"
   | "mark-unread"
   | "copy"
   | "copy-path"
@@ -57,10 +48,8 @@ export interface ThreadActionMenuState {
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
-  /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
+  /** Archive rejects a thread with an attached provider, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
-  /** A provider process exists and can be stopped without losing its native resume cursor. */
-  readonly hasReloadableSession: boolean;
   readonly supports: {
     readonly settlement: boolean;
     /** Server understands thread.auto-settle.set. */
@@ -69,12 +58,6 @@ export interface ThreadActionMenuState {
     readonly pinning: boolean;
     readonly titleRegeneration: boolean;
   };
-  /** The thread's live session provider exposes native execution goals. */
-  readonly executionGoal: boolean;
-  /** Saved T3 goal text, independent of whether a loop projection exists. */
-  readonly goal: string | null;
-  /** Server-driven goal loop state, when the server and thread have one. */
-  readonly goalLoop: ThreadGoalLoop | null;
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
 }
 
@@ -143,31 +126,6 @@ export function buildThreadActionMenuItems(
           },
         ]
       : []),
-    ...(isThreadGoalLoopActionAvailable(state.goalLoop, "pause")
-      ? [{ id: "pause-goal-loop" as const, label: "Pause goal loop", icon: "pause" }]
-      : isThreadGoalLoopActionAvailable(state.goalLoop, "resume")
-        ? [{ id: "resume-goal-loop" as const, label: "Resume goal loop", icon: "play" }]
-        : isThreadGoalLoopActionAvailable(state.goalLoop, "continue")
-          ? [{ id: "continue-goal-loop" as const, label: "Continue anyway", icon: "refresh-cw" }]
-          : isThreadGoalLoopActionAvailable(state.goalLoop, "reset")
-            ? [{ id: "restart-goal-loop" as const, label: "Restart goal", icon: "refresh-cw" }]
-            : []),
-    // Stop pauses the loop first and then interrupts the running turn, so it
-    // is only offered while a turn is actually active; delete clears the
-    // saved goal (stopping active goal work first).
-    ...(state.goalLoop !== null && state.isRunning
-      ? [{ id: "stop-goal-loop" as const, label: "Stop goal work", icon: "square" }]
-      : []),
-    ...(state.goal !== null
-      ? [
-          {
-            id: "delete-goal" as const,
-            label: "Delete goal",
-            icon: "trash",
-            destructive: true,
-          },
-        ]
-      : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
     ...(state.projectFilter
       ? [
@@ -202,28 +160,6 @@ export function buildThreadActionMenuItems(
                 checked: !state.autoSettleEnabled,
               },
             ],
-          },
-        ]
-      : []),
-    // Codex-owned live session state; always named in full so it can never
-    // read as the T3 thread goal above the composer.
-    ...(state.executionGoal
-      ? [
-          {
-            id: "execution-goal" as const,
-            label: "Codex execution goal…",
-            icon: "flag",
-          },
-        ]
-      : []),
-    ...(state.hasReloadableSession
-      ? [
-          {
-            id: "reload-agent" as const,
-            label: "Reload agent",
-            icon: "refresh-cw",
-            disabled: state.isRunning,
-            separatorBefore: true,
           },
         ]
       : []),

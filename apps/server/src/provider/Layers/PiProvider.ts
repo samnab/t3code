@@ -1,20 +1,12 @@
 /**
  * PiProvider — snapshot/probe layer for the Pi coding agent.
  *
- * Source: extracted from upstream T3 PR #7211
- * (`apps/server/src/provider/Layers/PiProvider.ts`, head
- * `a00565fbfc34a5fefd1222e1868f41e36cb02378`, MIT, author StiensWout),
- * adapted to the local `piRpc`/`piLaunchArgs` modules — see
- * `docs/fork/upstream-pr-ledger.md`.
- *
  * Health is probed with `pi --version`. Models, the user's default model, and
  * the user's commands (extension slash commands, prompt templates, skills)
  * are discovered through a short-lived ephemeral RPC session
  * (`pi --mode rpc --no-session`), so everything the user configured in
  * `~/.pi/agent` — custom providers, models.json entries, extensions, skills —
  * shows up in T3 without any hardcoded catalog.
- *
- * @module provider/Layers/PiProvider
  */
 import {
   type CustomModelSetting,
@@ -27,18 +19,22 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { buildPiRpcLaunch, resolvePiLaunchArgs } from "../piLaunchArgs.ts";
+import {
+  buildPiRpcLaunch,
+  resolvePiLaunchArgs,
+} from "../../orchestration-v2/Adapters/piT3McpInjection.ts";
 import {
   makePiRpcConnection,
   piRecordField as recordField,
   piRecordString as recordString,
-} from "../piRpc.ts";
+} from "../../orchestration-v2/Adapters/PiRpc.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -47,21 +43,27 @@ import {
   spawnAndCollect,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
-import { parsePiDiscoveredCommands, type PiDiscoveredCommands } from "../PiCommands.ts";
+import {
+  enrichProviderSnapshotWithVersionAdvisory,
+  type ProviderMaintenanceCapabilities,
+} from "../providerMaintenance.ts";
 import {
   EMPTY_PI_MODEL_CAPABILITIES,
   thinkingCapabilitiesForPiModel,
 } from "./piThinkingCapabilities.ts";
 import {
-  enrichProviderSnapshotWithVersionAdvisory,
-  type ProviderMaintenanceCapabilities,
-} from "../providerMaintenance.ts";
+  parsePiDiscoveredCommands,
+  withPiBuiltinSlashCommands,
+  type PiDiscoveredCommands,
+} from "../PiCommands.ts";
 
 const PI_PRESENTATION = {
   displayName: "Pi",
-  badgeLabel: "Early Access",
   showInteractionModeToggle: false,
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
+  // The adapter reports context usage from Pi's streaming usage while a
+  // turn runs, so clients can reserve the meter before the first settle.
+  reportsContextWindow: true,
   requiresNewThreadForModelChange: false,
 } as const;
 
@@ -133,7 +135,8 @@ const discoverPiViaRpc = (
     const launch = buildPiRpcLaunch({
       launchArgs,
       environment,
-      // Discovery should not create a durable Pi session.
+      mcpSession: undefined,
+      extensionPath: undefined,
       ephemeral: true,
     });
     const connection = yield* makePiRpcConnection({
@@ -142,6 +145,11 @@ const discoverPiViaRpc = (
       cwd,
       env: launch.env,
     });
+    yield* Stream.fromQueue(connection.events).pipe(
+      Stream.runDrain,
+      Effect.ignore,
+      Effect.forkScoped,
+    );
     const stateData = yield* connection.request({ type: "get_state" });
     const modelsData = yield* connection.request({ type: "get_available_models" });
     const commandsData = yield* connection
@@ -151,13 +159,11 @@ const discoverPiViaRpc = (
       modelsData,
       recordString(stateData, "thinkingLevel"),
     );
-    const { slashCommands, skills, extensionCommandNames } =
-      parsePiDiscoveredCommands(commandsData);
+    const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
     return {
       models: discoveredModels,
-      slashCommands,
+      slashCommands: withPiBuiltinSlashCommands(slashCommands),
       skills,
-      extensionCommandNames,
       authenticated: discoveredModels.length > 0,
     } satisfies PiDiscovery;
   }).pipe(Effect.scoped);

@@ -9,6 +9,7 @@ import {
   DownloadIcon,
   LockIcon,
   LockOpenIcon,
+  ExternalLinkIcon,
   PlusIcon,
   Trash2Icon,
   XIcon,
@@ -22,9 +23,11 @@ import {
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
   type ProviderInstanceId,
+  type AcpRegistryUrlAuthAction,
+  type EnvironmentId,
+  type ProjectId,
   type ProviderDriverKind,
   type ServerProvider,
-  type ProviderOptionSelections,
   type ServerProviderModel,
 } from "@t3tools/contracts";
 
@@ -35,10 +38,7 @@ import {
 } from "@t3tools/shared/model";
 import { cn } from "../../lib/utils";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
-import {
-  deriveProviderInstanceEntries,
-  normalizeProviderAccentColor,
-} from "../../providerInstances";
+import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
@@ -46,16 +46,14 @@ import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import type { DriverOption } from "./providerDriverMeta";
-import { ProviderSettingsForm } from "./ProviderSettingsForm";
+import type { DriverOption, ProviderEnvironmentFieldDefinition } from "./providerDriverMeta";
+import { deriveProviderSettingsFields, ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
-import { SETTINGS_PICKER_TRIGGER_CLASSNAME, SettingResetButton } from "./settingsLayout";
-import { ProviderModelPicker } from "../chat/ProviderModelPicker";
-import { TraitsPicker } from "../chat/TraitsPicker";
-import { ProviderInstanceIcon, providerInstanceInitials } from "../chat/ProviderInstanceIcon";
+import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import {
@@ -137,21 +135,10 @@ function readConfigCustomModels(config: unknown): ReadonlyArray<CustomModelDefin
   return readCustomModelEntries((config as Record<string, unknown>).customModels);
 }
 
-/**
- * Read Pi's `modelConcurrency` map from the opaque config blob. Only
- * positive safe integers survive; anything else means "no cap".
- */
-function readConfigModelConcurrency(config: unknown): Record<string, number> {
-  if (config === null || typeof config !== "object") return {};
-  const raw = (config as Record<string, unknown>).modelConcurrency;
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const caps: Record<string, number> = {};
-  for (const [slug, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) {
-      caps[slug] = value;
-    }
-  }
-  return caps;
+function readConfigString(config: unknown, key: string): string | null {
+  if (config === null || typeof config !== "object") return null;
+  const value = (config as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 /**
@@ -209,6 +196,102 @@ function ProviderAuthEmail(props: { readonly email: string | undefined }) {
       revealTooltip="Click to reveal email"
       hideTooltip="Click to hide email"
       className="max-w-full truncate"
+    />
+  );
+}
+
+export function readProviderEnvironmentVariable(
+  environment: ReadonlyArray<ProviderInstanceEnvironmentVariable> | undefined,
+  name: string,
+): ProviderInstanceEnvironmentVariable | undefined {
+  return environment?.find((variable) => variable.name === name);
+}
+
+export function providerEnvironmentWithoutNames(
+  environment: ReadonlyArray<ProviderInstanceEnvironmentVariable> | undefined,
+  names: ReadonlySet<string>,
+): ReadonlyArray<ProviderInstanceEnvironmentVariable> {
+  return (environment ?? []).filter((variable) => !names.has(variable.name));
+}
+
+export function nextProviderEnvironmentWithFieldValue(
+  environment: ReadonlyArray<ProviderInstanceEnvironmentVariable> | undefined,
+  field: ProviderEnvironmentFieldDefinition,
+  value: string,
+): ReadonlyArray<ProviderInstanceEnvironmentVariable> {
+  const trimmed = value.trim();
+  const next: ProviderInstanceEnvironmentVariable[] = [];
+  let found = false;
+
+  for (const variable of environment ?? []) {
+    if (variable.name !== field.name) {
+      next.push(variable);
+      continue;
+    }
+    found = true;
+    if (trimmed.length > 0) {
+      next.push({
+        name: variable.name,
+        value: trimmed,
+        sensitive: field.sensitive ?? true,
+      });
+    }
+  }
+
+  if (!found && trimmed.length > 0) {
+    next.push({
+      name: field.name,
+      value: trimmed,
+      sensitive: field.sensitive ?? true,
+    });
+  }
+
+  return next;
+}
+
+function ProviderEnvironmentFieldRow(props: {
+  readonly field: ProviderEnvironmentFieldDefinition;
+  readonly variable: ProviderInstanceEnvironmentVariable | undefined;
+  readonly idPrefix: string;
+  readonly onCommit: (field: ProviderEnvironmentFieldDefinition, value: string) => void;
+  readonly onRemove: (field: ProviderEnvironmentFieldDefinition) => void;
+}) {
+  const inputId = `${props.idPrefix}-environment-${props.field.name}`;
+  const value = props.variable?.valueRedacted ? "" : (props.variable?.value ?? "");
+  const placeholder = props.variable?.valueRedacted
+    ? "Stored secret - enter a new value to replace"
+    : props.field.placeholder;
+
+  return (
+    <SettingsRow
+      title={<label htmlFor={inputId}>{props.field.label}</label>}
+      description={props.field.description}
+      control={
+        <div className="flex w-full min-w-0 items-center gap-2 @min-[32rem]/settings-row:w-56">
+          <DraftInput
+            id={inputId}
+            size="sm"
+            className="min-w-0 flex-1"
+            type={props.field.sensitive === false ? undefined : "password"}
+            autoComplete="off"
+            value={value}
+            onCommit={(next) => props.onCommit(props.field, next)}
+            placeholder={placeholder}
+            spellCheck={false}
+          />
+          {props.variable ? (
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost-destructive"
+              onClick={() => props.onRemove(props.field)}
+              aria-label={`Clear ${props.field.label}`}
+            >
+              <XIcon className="size-3.5" />
+            </Button>
+          ) : null}
+        </div>
+      }
     />
   );
 }
@@ -420,15 +503,21 @@ interface ProviderInstanceCardProps {
   readonly onHiddenModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onFavoriteModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
-  /** Model + options a new draft on this instance starts from when nothing more specific picks one. */
-  readonly defaultModel: string | null;
-  readonly defaultOptions: ProviderOptionSelections;
-  readonly onDefaultModelChange: (model: string | null) => void;
-  readonly onDefaultOptionsChange: (options: ProviderOptionSelections) => void;
   readonly onRunUpdate?: (() => void) | undefined;
   readonly onInstallRecommended?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
+  readonly onAcceptUrlAuth?: ((action: AcpRegistryUrlAuthAction) => void) | undefined;
+  readonly environmentId?: EnvironmentId | undefined;
+  readonly acpProjects?:
+    | ReadonlyArray<{
+        readonly id: ProjectId;
+        readonly title: string;
+        readonly workspaceRoot: string;
+      }>
+    | undefined;
 }
+
+const EMPTY_ACP_PROJECTS: NonNullable<ProviderInstanceCardProps["acpProjects"]> = [];
 
 /**
  * Renders one provider instance as either a compact selectable list row or
@@ -437,7 +526,7 @@ interface ProviderInstanceCardProps {
  *
  * Behavior notes:
  *   - `liveProvider` is matched by the caller via `instanceId`; when no
- *     match is available (e.g. the server hasn't probed yet, or the
+ *     match is available (e.g. the server hasn't checked it yet, or the
  *     driver is not shipped by the current build) the card still renders
  *     with a neutral "checking" summary.
  *   - Unknown drivers (`driverOption === undefined`) get a read-only
@@ -469,13 +558,12 @@ export function ProviderInstanceCard({
   onHiddenModelsChange,
   onFavoriteModelsChange,
   onModelOrderChange,
-  defaultModel,
-  defaultOptions,
-  onDefaultModelChange,
-  onDefaultOptionsChange,
   onRunUpdate,
   onInstallRecommended,
   isUpdating = false,
+  onAcceptUrlAuth,
+  environmentId,
+  acpProjects = EMPTY_ACP_PROJECTS,
 }: ProviderInstanceCardProps) {
   const enabled = resolveProviderInstanceEnabled(instance);
   const compatibility = enabled ? liveProvider?.compatibilityAdvisory : undefined;
@@ -507,7 +595,7 @@ export function ProviderInstanceCard({
     compatibility.status !== "unknown";
   const VersionAdvisoryIcon = hasCompatibilityWarning ? AlertTriangleIcon : ArrowUpCircleIcon;
   const onRunVersionAction = versionAdvisory?.targetVersion ? onInstallRecommended : onRunUpdate;
-  const FallbackIconComponent = driverOption?.icon;
+  const urlAuthAction = liveProvider?.auth.action;
   const displayName =
     instance.displayName?.trim() || driverOption?.label || String(instance.driver);
   const accentColor = normalizeProviderAccentColor(instance.accentColor);
@@ -539,30 +627,13 @@ export function ProviderInstanceCard({
     : null;
   const customModels =
     instance.driver === "antigravity" ? [] : readConfigCustomModels(instance.config);
-  // Pi-only per-model turn caps; absent on every other driver.
-  const modelConcurrency =
-    driverKind === "pi" ? readConfigModelConcurrency(instance.config) : undefined;
-  // Server-returned models may lag behind settings writes. Treat probe
+  // Server-returned models may lag behind settings writes. Treat server
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
   const modelsForDisplay = deriveProviderModelsForDisplay({
     liveModels: liveProvider?.models,
     customModels,
   });
-  // Single-instance entry for the "Default model" picker below, built from
-  // the live provider snapshot so it carries the same icon/status metadata
-  // as the composer's own picker. Absent until the server has probed this
-  // instance at least once.
-  const defaultModelEntry = liveProvider
-    ? deriveProviderInstanceEntries([liveProvider])[0]
-    : undefined;
-  const resolvedDefaultModel =
-    defaultModel && modelsForDisplay.some((model) => model.slug === defaultModel)
-      ? defaultModel
-      : (modelsForDisplay.find((model) => model.isDefault)?.slug ??
-        modelsForDisplay[0]?.slug ??
-        null);
-
   const updateDisplayName = (value: string) => {
     const trimmed = value.trim();
     const { displayName: _omit, ...rest } = instance;
@@ -602,40 +673,7 @@ export function ProviderInstanceCard({
       "customModels",
       next.map(toCustomModelSetting),
     );
-    // Removing a custom model removes its row. A cap keyed to a slug that no
-    // longer has one (custom gone and not probe-reported) could never be
-    // cleared or matched by the adapter — prune it in this same write.
-    const builtInSlugs = new Set(
-      modelsForDisplay.filter((model) => !model.isCustom).map((model) => model.slug),
-    );
-    const removedSlugs = customModels
-      .filter((entry) => !next.some((candidate) => candidate.slug === entry.slug))
-      .map((entry) => entry.slug)
-      .filter((slug) => !builtInSlugs.has(slug));
-    if (removedSlugs.length > 0) {
-      const caps = readConfigModelConcurrency(nextConfig);
-      if (removedSlugs.some((slug) => caps[slug] !== undefined)) {
-        for (const slug of removedSlugs) delete caps[slug];
-        if (Object.keys(caps).length > 0) nextConfig.modelConcurrency = caps;
-        else delete nextConfig.modelConcurrency;
-      }
-    }
     const { config: _omit, ...rest } = instance;
-    onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
-  };
-
-  /** Whole-map replacement; an empty map drops the key entirely (unlimited). */
-  const updateModelConcurrency = (next: Readonly<Record<string, number>>) => {
-    const entries = Object.entries(next);
-    const { modelConcurrency: _omit, ...configWithout } =
-      instance.config !== null && typeof instance.config === "object"
-        ? (instance.config as Record<string, unknown>)
-        : {};
-    const nextConfig =
-      entries.length > 0
-        ? nextConfigBlobWithValue(configWithout, "modelConcurrency", Object.fromEntries(entries))
-        : configWithout;
-    const { config: _drop, ...rest } = instance;
     onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
   };
 
@@ -648,28 +686,41 @@ export function ProviderInstanceCard({
         : (rest as ProviderInstanceConfig),
     );
   };
+  // Drivers that need a named secret (Cursor's API key) get a dedicated field;
+  // the generic editor only shows the remaining variables.
+  const environmentFields = driverOption?.environmentFields ?? [];
+  const environmentFieldNames = new Set(environmentFields.map((field) => field.name));
+  const genericEnvironment = providerEnvironmentWithoutNames(
+    instance.environment,
+    environmentFieldNames,
+  );
+  const updateGenericEnvironment = (
+    environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
+  ) => {
+    const dedicatedEnvironment = (instance.environment ?? []).filter((variable) =>
+      environmentFieldNames.has(variable.name),
+    );
+    updateEnvironment([...dedicatedEnvironment, ...environment]);
+  };
+  const updateEnvironmentField = (field: ProviderEnvironmentFieldDefinition, value: string) => {
+    updateEnvironment(nextProviderEnvironmentWithFieldValue(instance.environment, field, value));
+  };
+  const removeEnvironmentField = (field: ProviderEnvironmentFieldDefinition) => {
+    updateEnvironment(providerEnvironmentWithoutNames(instance.environment, new Set([field.name])));
+  };
 
-  const titleIconNode = driverKind ? (
+  const titleIconNode = (
     <ProviderInstanceIcon
-      driverKind={driverKind}
+      driverKind={driverKind ?? instance.driver}
       displayName={displayName}
       accentColor={accentColor}
+      acpRegistryAgentId={readConfigString(instance.config, "agentId") ?? undefined}
+      acpRegistryIconUrl={readConfigString(instance.config, "registryIconUrl") ?? undefined}
       showBadge={Boolean(accentColor)}
       className="size-5"
       iconClassName="size-4 text-foreground/80"
       badgeClassName="right-[-0.125rem] bottom-[-0.125rem] h-3 min-w-3 px-0.5 text-5xs"
     />
-  ) : FallbackIconComponent ? (
-    <span className="inline-flex size-5 shrink-0 items-center justify-center">
-      <FallbackIconComponent className="size-4 text-foreground/80" aria-hidden />
-    </span>
-  ) : (
-    <span
-      className="inline-flex size-5 shrink-0 items-center justify-center text-3xs font-semibold leading-none text-foreground/80"
-      aria-hidden
-    >
-      {providerInstanceInitials(displayName)}
-    </span>
   );
 
   const titleTailNode = headerAction ? (
@@ -968,14 +1019,39 @@ export function ProviderInstanceCard({
         <SettingsRow
           title="Display name"
           status={
-            <ProviderStatusDiagnostic detail={statusDiagnostic}>
-              <div
-                tabIndex={statusDiagnostic ? 0 : undefined}
-                className="flex min-w-0 flex-wrap items-baseline gap-x-1.5"
-              >
-                {editorStatusNode}
-              </div>
-            </ProviderStatusDiagnostic>
+            <>
+              <ProviderStatusDiagnostic detail={statusDiagnostic}>
+                <div
+                  tabIndex={statusDiagnostic ? 0 : undefined}
+                  className="flex min-w-0 flex-wrap items-baseline gap-x-1.5"
+                >
+                  {editorStatusNode}
+                </div>
+              </ProviderStatusDiagnostic>
+              {urlAuthAction && onAcceptUrlAuth ? (
+                <div className="grid max-w-xl gap-1.5 pt-1 text-xs">
+                  <p>{urlAuthAction.message}</p>
+                  <code className="break-all text-2xs">{urlAuthAction.url}</code>
+                  <Button
+                    render={
+                      <a
+                        href={urlAuthAction.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => onAcceptUrlAuth(urlAuthAction)}
+                      />
+                    }
+                    size="xs"
+                    variant="outline"
+                    className="w-fit"
+                    disabled={readOnly}
+                  >
+                    <ExternalLinkIcon />
+                    Continue authentication
+                  </Button>
+                </div>
+              ) : null}
+            </>
           }
           control={
             <div
@@ -1007,7 +1083,31 @@ export function ProviderInstanceCard({
         />
       </SettingsSection>
 
-      {setup ? <SettingsSection title="Setup">{setup}</SettingsSection> : null}
+      {setup || environmentFields.length > 0 ? (
+        <SettingsSection title="Setup">
+          {setup}
+          <div
+            inert={readOnly}
+            aria-disabled={readOnly || undefined}
+            className={readOnly ? "opacity-50 select-none" : undefined}
+          >
+            {environmentFields.length > 0 ? (
+              <>
+                {environmentFields.map((field) => (
+                  <ProviderEnvironmentFieldRow
+                    key={field.name}
+                    field={field}
+                    variable={readProviderEnvironmentVariable(instance.environment, field.name)}
+                    idPrefix={`provider-instance-${instanceId}`}
+                    onCommit={updateEnvironmentField}
+                    onRemove={removeEnvironmentField}
+                  />
+                ))}
+              </>
+            ) : null}
+          </div>
+        </SettingsSection>
+      ) : null}
 
       {instance.driver === "codex" && readCodexSetupMode(instance.config) === "managed" ? (
         <div
@@ -1024,7 +1124,7 @@ export function ProviderInstanceCard({
             {runtime ?? runtimeFields}
           </FoldedSettingsSection>
         </div>
-      ) : (
+      ) : !driverOption || deriveProviderSettingsFields(driverOption).length > 0 ? (
         <SettingsSection
           title="Runtime"
           inert={readOnly}
@@ -1033,7 +1133,7 @@ export function ProviderInstanceCard({
         >
           {runtimeFields}
         </SettingsSection>
-      )}
+      ) : null}
 
       <SettingsSection
         title="Environment"
@@ -1042,9 +1142,18 @@ export function ProviderInstanceCard({
         className={readOnly ? "opacity-50 select-none" : undefined}
       >
         <ProviderEnvironmentSection
-          environment={instance.environment ?? []}
-          onChange={updateEnvironment}
+          environment={genericEnvironment}
+          onChange={updateGenericEnvironment}
         />
+        {environmentId !== undefined && liveProvider?.driver === "acpRegistry" ? (
+          <AcpSessionManagementSection
+            environmentId={environmentId}
+            instanceId={instanceId}
+            provider={liveProvider}
+            projects={acpProjects}
+            readOnly={readOnly}
+          />
+        ) : null}
       </SettingsSection>
 
       {driverOption !== undefined ? (
@@ -1059,58 +1168,6 @@ export function ProviderInstanceCard({
               Favorites, visibility, and ordering are saved on this device. Custom models are saved
               on the selected environment.
             </p>
-            {driverKind ? (
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-2.5">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium">Default model</div>
-                  <div className="text-xs text-muted-foreground">
-                    New threads on this provider start here.
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center justify-end gap-1.5">
-                  {defaultModel !== null ? (
-                    <SettingResetButton
-                      label="default model"
-                      onClick={() => {
-                        onDefaultModelChange(null);
-                        onDefaultOptionsChange([]);
-                      }}
-                    />
-                  ) : null}
-                  {defaultModelEntry && resolvedDefaultModel ? (
-                    <>
-                      <ProviderModelPicker
-                        activeInstanceId={instanceId}
-                        model={resolvedDefaultModel}
-                        lockedProvider={driverKind}
-                        instanceEntries={[defaultModelEntry]}
-                        modelOptionsByInstance={new Map([[instanceId, defaultModelEntry.models]])}
-                        triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                        onInstanceModelChange={(_instanceId, model) => onDefaultModelChange(model)}
-                      />
-                      <TraitsPicker
-                        provider={driverKind}
-                        models={defaultModelEntry.models}
-                        model={resolvedDefaultModel}
-                        prompt=""
-                        onPromptChange={() => {}}
-                        modelOptions={defaultOptions}
-                        allowPromptInjectedEffort={false}
-                        planModeEnabled={false}
-                        triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                        onModelOptionsChange={(nextOptions) =>
-                          onDefaultOptionsChange(nextOptions ?? [])
-                        }
-                      />
-                    </>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">
-                      Waiting for provider status…
-                    </span>
-                  )}
-                </div>
-              </div>
-            ) : null}
             <ProviderModelsSection
               instanceId={instanceId}
               driverKind={driverKind}
@@ -1119,9 +1176,6 @@ export function ProviderInstanceCard({
               hiddenModels={hiddenModels}
               favoriteModels={favoriteModels}
               modelOrder={modelOrder}
-              {...(modelConcurrency !== undefined
-                ? { modelConcurrency, onModelConcurrencyChange: updateModelConcurrency }
-                : {})}
               onChange={updateCustomModels}
               onHiddenModelsChange={onHiddenModelsChange}
               onFavoriteModelsChange={onFavoriteModelsChange}

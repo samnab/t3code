@@ -14,7 +14,6 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { AtomRegistry } from "effect/unstable/reactivity";
-import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 import * as RpcClientError from "effect/unstable/rpc/RpcClientError";
 import * as Socket from "effect/unstable/socket/Socket";
 import { onTestFinished, vi } from "vite-plus/test";
@@ -76,15 +75,12 @@ vi.mock("expo-file-system", () => {
   };
 });
 
-import { buildQueuedCreationStartTurnInput } from "../lib/projectThreadStartTurn";
 import {
-  blockedQueuedThreadMessages,
   decodeQueuedThreadMessage,
   encodeQueuedThreadMessage,
   groupQueuedThreadMessages,
   isQueuedThreadCreationSendable,
   modelSelectionsEqual,
-  resolvePendingTaskDraftText,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxDispatchStep,
   resolveThreadOutboxFailureAction,
@@ -100,13 +96,6 @@ import {
   type ThreadOutboxLoadResult,
   type ThreadOutboxStorage,
 } from "./thread-outbox-storage";
-
-// The creation payload seam transitively reaches expo-crypto (attachment
-// ids), which imports react-native's Flow sources — unparseable in node.
-vi.mock("expo-crypto", () => ({
-  getRandomBytes: vi.fn(() => new Uint8Array(16)),
-  randomUUID: vi.fn(() => "00000000-0000-4000-8000-000000000000"),
-}));
 
 function queuedMessage(input: {
   readonly environmentId?: string;
@@ -146,6 +135,15 @@ describe("thread outbox", () => {
           },
         ],
       },
+    };
+    expect(
+      decodeQueuedThreadMessage(JSON.parse(JSON.stringify(encodeQueuedThreadMessage(message)))),
+    ).toEqual(message);
+  });
+  it("retains queue mode when a queued provider switch reloads from storage", () => {
+    const message: QueuedThreadMessage = {
+      ...queuedMessage({ messageId: "queued-switch", createdAt: "2026-09-17T09:00:00.000Z" }),
+      dispatchMode: "queue",
     };
     expect(
       decodeQueuedThreadMessage(JSON.parse(JSON.stringify(encodeQueuedThreadMessage(message)))),
@@ -1303,7 +1301,6 @@ describe("thread outbox", () => {
   it("only removes a missing-thread message after shell synchronization is live", () => {
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: false,
         threadExists: false,
         shellStatus: "synchronizing",
@@ -1313,7 +1310,6 @@ describe("thread outbox", () => {
     ).toBe("wait");
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: false,
         threadExists: false,
         shellStatus: "live",
@@ -1323,7 +1319,6 @@ describe("thread outbox", () => {
     ).toBe("remove");
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: false,
         threadExists: true,
         shellStatus: "live",
@@ -1336,7 +1331,6 @@ describe("thread outbox", () => {
   it("sends existing-thread messages whenever connected so queued messages can steer", () => {
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: false,
         threadExists: true,
         shellStatus: "live",
@@ -1346,7 +1340,6 @@ describe("thread outbox", () => {
     ).toBe("send");
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: false,
         threadExists: true,
         shellStatus: "live",
@@ -1356,200 +1349,9 @@ describe("thread outbox", () => {
     ).toBe("wait");
   });
 
-  it("blocks T3-local /goal text from both delivery branches before anything sends", () => {
-    // A persisted or edited outbox entry can carry /goal text past the live
-    // composer interception. It must never drain into a provider turn — not
-    // through the existing-thread branch nor through thread creation — and it
-    // must stay queued (never sent, never discarded) for the user to fix.
-    const goalTexts = ["/goal ship it", "/goal", "/goal clear", "  /goal ship it  "];
-    for (const text of goalTexts) {
-      expect(
-        resolveThreadOutboxDeliveryAction({
-          text,
-          isCreation: false,
-          threadExists: true,
-          shellStatus: "live",
-          environmentConnected: true,
-          threadBusy: false,
-        }),
-      ).toBe("blocked");
-      expect(
-        resolveThreadOutboxDeliveryAction({
-          text,
-          isCreation: true,
-          threadExists: false,
-          shellStatus: "live",
-          environmentConnected: true,
-          threadBusy: false,
-        }),
-      ).toBe("blocked");
-    }
-    // Blocked wins even while offline, so a later reconnect cannot drain it.
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        text: "/goal ship it",
-        isCreation: true,
-        threadExists: false,
-        shellStatus: "empty",
-        environmentConnected: false,
-        threadBusy: false,
-      }),
-    ).toBe("blocked");
-  });
-
-  it("separates blocked /goal entries for the queued line and removes them through the existing removal path", async () => {
-    // The blocked affordance at the queued line needs the blocked subset in
-    // queue order, and removal goes through the same manager.remove path the
-    // pending-task list uses. Ordinary queued entries stay untouched.
-    const goalA = {
-      ...queuedMessage({ messageId: "goal-a", createdAt: "2026-06-08T10:00:01.000Z" }),
-      text: "/goal ship it",
-    };
-    const ordinary = queuedMessage({
-      messageId: "message-2",
-      createdAt: "2026-06-08T10:00:02.000Z",
-    });
-    const goalB = {
-      ...queuedMessage({ messageId: "goal-b", createdAt: "2026-06-08T10:00:03.000Z" }),
-      text: "/goal",
-    };
-
-    expect(blockedQueuedThreadMessages([goalA, ordinary, goalB])).toEqual([goalA, goalB]);
-
-    const registry = AtomRegistry.make();
-    const stored = new Map<MessageId, QueuedThreadMessage>();
-    const storage: ThreadOutboxStorage = {
-      load: async () => ({ messages: [...stored.values()], errors: [] }),
-      write: async (message) => {
-        stored.set(message.messageId, message);
-      },
-      remove: async (message) => {
-        stored.delete(message.messageId);
-      },
-    };
-    const manager = createThreadOutboxManager({ registry, storage });
-    await manager.enqueue(goalA);
-    await manager.enqueue(ordinary);
-    await manager.enqueue(goalB);
-
-    await manager.remove(goalA);
-    const remaining = registry.get(manager.queuedMessagesByThreadKeyAtom)[
-      "environment-1:thread-1"
-    ]!;
-    expect(blockedQueuedThreadMessages(remaining)).toEqual([goalB]);
-    expect(remaining).toEqual([ordinary, goalB]);
-    registry.dispose();
-  });
-
-  it("keeps sending ordinary queued text through both delivery branches", () => {
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        text: "ship the login fix",
-        isCreation: false,
-        threadExists: true,
-        shellStatus: "live",
-        environmentConnected: true,
-        threadBusy: false,
-      }),
-    ).toBe("send");
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        text: "ship the login fix",
-        isCreation: true,
-        threadExists: false,
-        shellStatus: "live",
-        environmentConnected: true,
-        threadBusy: false,
-      }),
-    ).toBe("send");
-    // A prompt that merely mentions /goal mid-text is an ordinary prompt.
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        text: "please run /goal now",
-        isCreation: false,
-        threadExists: true,
-        shellStatus: "live",
-        environmentConnected: true,
-        threadBusy: false,
-      }),
-    ).toBe("send");
-  });
-
-  it("keeps a FEFF-joined /goal draft ordinary from the offline builder through the queued row", () => {
-    // buildPendingTaskMessage (offline creates and pending-task edit flushes)
-    // resolves its queue text through this exact seam. Native String.trim
-    // strips U+FEFF, which the /goal delimiter policy keeps as content, so
-    // the queued row would become "/goal ship it" — blocked forever.
-    const text = resolvePendingTaskDraftText("\uFEFF/goal ship it");
-    expect(text).toBe("\uFEFF/goal ship it");
-    expect(parseThreadGoalCommand(text ?? "")).toBeNull();
-    // Ordinary drafts keep the same shape the send path produces.
-    expect(resolvePendingTaskDraftText("  ship it  ")).toBe("ship it");
-    // An invisible-only flush (FEFF/zero-width edits) builds no queue text,
-    // so the stale queued payload is never rewritten with nothing.
-    expect(resolvePendingTaskDraftText("\uFEFF")).toBeNull();
-    expect(resolvePendingTaskDraftText(" \u200B\u2060 ")).toBeNull();
-  });
-
-  it("drains queued creations with the queued text unchanged from classification to the wire", () => {
-    // The drain's delivery action classifies the raw queued text; the wire
-    // payload comes from this exact seam and must carry the same bytes. A
-    // native trim at the drain would strip the FEFF and deliver "/goal ship
-    // it", which the server decider treats as a goal command, not a turn.
-    const queuedRow = {
-      ...queuedMessage({ messageId: "message-1", createdAt: "2026-06-08T10:00:01.000Z" }),
-      text: "\uFEFF/goal ship it",
-      modelSelection: {
-        instanceId: ProviderInstanceId.make("codex"),
-        model: "gpt-5.4",
-      },
-      creation: {
-        projectId: ProjectId.make("project-1"),
-        workspaceMode: "local",
-        branch: null,
-        worktreePath: null,
-      },
-    } satisfies QueuedThreadMessage;
-
-    expect(blockedQueuedThreadMessages([queuedRow])).toEqual([]);
-    expect(
-      resolveThreadOutboxDeliveryAction({
-        text: queuedRow.text,
-        isCreation: true,
-        threadExists: false,
-        shellStatus: "live",
-        environmentConnected: true,
-        threadBusy: false,
-      }),
-    ).toBe("send");
-
-    const input = buildQueuedCreationStartTurnInput({
-      message: queuedRow,
-      creation: queuedRow.creation,
-      projectCwd: "/repo",
-      worktreeBranchName: "t3/tmp-branch",
-    });
-    expect(input?.message.text).toBe("\uFEFF/goal ship it");
-    expect(parseThreadGoalCommand(input?.message.text ?? "")).toBeNull();
-
-    // A row that never carried a model selection never reaches the wire.
-    expect(
-      buildQueuedCreationStartTurnInput({
-        message: { ...queuedRow, modelSelection: undefined },
-        creation: queuedRow.creation,
-        projectCwd: "/repo",
-        worktreeBranchName: "t3/tmp-branch",
-      }),
-    ).toBeNull();
-    // An invisible-only row cannot be enqueued through the builder seam, and
-    // the drain's send gate keeps any stale one queued as a no-op.
-    expect(isQueuedThreadCreationSendable({ ...queuedRow, text: "\uFEFF" })).toBe(false);
-  });
-
   it("sends queued creations once connected and live, removing already-created ones", () => {
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: true,
         threadExists: false,
         shellStatus: "cached",
@@ -1561,7 +1363,6 @@ describe("thread outbox", () => {
     // simply not be visible yet — sending now could duplicate the thread.
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: true,
         threadExists: false,
         shellStatus: "synchronizing",
@@ -1571,7 +1372,6 @@ describe("thread outbox", () => {
     ).toBe("wait");
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: true,
         threadExists: false,
         shellStatus: "live",
@@ -1581,7 +1381,6 @@ describe("thread outbox", () => {
     ).toBe("send");
     expect(
       resolveThreadOutboxDeliveryAction({
-        text: "ship it",
         isCreation: true,
         threadExists: true,
         shellStatus: "live",

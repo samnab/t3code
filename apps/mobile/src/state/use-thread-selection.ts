@@ -4,9 +4,19 @@ import { useMemo, useRef, useState } from "react";
 import {
   EnvironmentId,
   ThreadId,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2ThreadShell,
   type ScopedProjectRef,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
+import {
+  presentThreadShell,
+  type EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/shell";
+import {
+  deriveLatestThreadRun,
+  deriveThreadRuntime,
+} from "@t3tools/client-runtime/state/thread-execution";
 import * as Option from "effect/Option";
 
 import { scopedThreadKey } from "../lib/scopedEntities";
@@ -22,7 +32,6 @@ import {
   useRemoteEnvironmentRuntime,
   useSavedRemoteConnection,
 } from "./use-remote-environment-registry";
-import { threadDetailToShell } from "./thread-selection";
 import { useThreadOutboxMessages } from "./use-thread-outbox";
 type ThreadSelectionRouteParams = {
   readonly environmentId?: string | string[];
@@ -35,6 +44,79 @@ function firstRouteParam(value: string | string[] | undefined): string | null {
   }
 
   return value ?? null;
+}
+
+function latestUserMessageAt(
+  projection: OrchestrationV2ThreadProjection,
+): OrchestrationV2ThreadShell["latestUserMessageAt"] {
+  for (let index = projection.messages.length - 1; index >= 0; index -= 1) {
+    const message = projection.messages[index];
+    if (message?.role === "user") {
+      return message.createdAt;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Builds an optimistic thread shell from the detail projection for the window
+ * where the shell list has not materialized the thread yet (e.g. a thread that
+ * was just created from this device).
+ */
+function threadDetailToShell(
+  environmentId: EnvironmentId,
+  projection: OrchestrationV2ThreadProjection,
+): EnvironmentThreadShell {
+  const thread = projection.thread;
+  const latestRun = deriveLatestThreadRun(projection);
+  const runtime = deriveThreadRuntime(projection);
+  const pendingRequest =
+    projection.runtimeRequests.find((request) => request.status === "pending") ?? null;
+  return presentThreadShell(environmentId, {
+    id: thread.id,
+    projectId: thread.projectId,
+    title: thread.title,
+    providerInstanceId: thread.providerInstanceId,
+    modelSelection: thread.modelSelection,
+    runtimeMode: thread.runtimeMode,
+    interactionMode: thread.interactionMode,
+    branch: thread.branch,
+    worktreePath: thread.worktreePath,
+    linkedPullRequest: thread.linkedPullRequest ?? null,
+    pullRequests: thread.pullRequests,
+    branchPullRequest: thread.branchPullRequest ?? null,
+    activeProviderThreadId: thread.activeProviderThreadId,
+    lineage: thread.lineage,
+    forkedFrom: thread.forkedFrom,
+    createdBy: thread.createdBy,
+    creationSource: thread.creationSource,
+    latestRunId: latestRun?.runId ?? null,
+    activeRunId: runtime?.activeRunId ?? null,
+    status: runtime?.status ?? "idle",
+    pendingRuntimeRequest:
+      pendingRequest === null
+        ? null
+        : { id: pendingRequest.id, kind: pendingRequest.kind, createdAt: pendingRequest.createdAt },
+    latestVisibleMessage: null,
+    latestUserMessageAt: latestUserMessageAt(projection),
+    hasActionableProposedPlan: false,
+    itemCount: projection.turnItems.length,
+    visibleItemCount: projection.visibleTurnItems.length,
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
+    archivedAt: thread.archivedAt,
+    settledOverride: thread.settledOverride,
+    settledAt: thread.settledAt,
+    unsettledAt: thread.unsettledAt,
+    activeOrderKey: thread.activeOrderKey,
+    autoSettleDisabledAt: thread.autoSettleDisabledAt,
+    pinnedAt: thread.pinnedAt,
+    pinOrderKey: thread.pinOrderKey,
+    snoozedUntil: thread.snoozedUntil ?? null,
+    snoozedAt: thread.snoozedAt ?? null,
+    deletedAt: thread.deletedAt,
+  });
 }
 
 function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefined) {
@@ -84,9 +166,14 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
     pendingCreation.outcome?.kind === "delivered"
       ? selectedThreadRef
       : null;
+  const [previousCreation, setPreviousCreation] = useState<PendingThreadCreation | null>(null);
+  // Normal selection is shell-only. Detail readers subscribe separately; only
+  // optimistic creation needs the projection here until its prompt arrives.
+  const needsDetail =
+    selectedThreadShell === null || pendingCreation !== null || previousCreation !== null;
   const selectedThreadDetailState = useEnvironmentThread(
-    selectedThreadDetailRef?.environmentId ?? null,
-    selectedThreadDetailRef?.threadId ?? null,
+    needsDetail ? (selectedThreadDetailRef?.environmentId ?? null) : null,
+    needsDetail ? (selectedThreadDetailRef?.threadId ?? null) : null,
   );
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const selectedThread = useMemo(
@@ -99,7 +186,6 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
           : null),
     [pendingCreation, selectedThreadDetail, selectedThreadRef, selectedThreadShell],
   );
-  const [previousCreation, setPreviousCreation] = useState<PendingThreadCreation | null>(null);
   const selectedThreadCreation = resolvePendingThreadCreation({
     threadKey: selectedThreadKey,
     pending: pendingCreation,
@@ -129,7 +215,7 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
       selectedThreadRef,
       selectedThread,
       selectedThreadCreation,
-      selectedThreadDetailState,
+      selectedThreadDetailRef,
       selectedThreadProject,
       selectedEnvironmentConnection,
       selectedEnvironmentRuntime,
@@ -139,7 +225,7 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
       selectedEnvironmentRuntime,
       selectedThread,
       selectedThreadCreation,
-      selectedThreadDetailState,
+      selectedThreadDetailRef,
       selectedThreadProject,
       selectedThreadRef,
     ],

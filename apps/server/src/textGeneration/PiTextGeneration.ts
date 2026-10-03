@@ -1,31 +1,24 @@
 /**
  * PiTextGeneration — commit messages, PR content, branch names, and thread
  * titles generated through an ephemeral `pi --mode rpc --no-session` process.
- *
- * Source: extracted from upstream T3 PR #7211
- * (`apps/server/src/textGeneration/PiTextGeneration.ts`, head
- * `a00565fbfc34a5fefd1222e1868f41e36cb02378`, MIT, author StiensWout),
- * adapted to the local `piRpc`/`piLaunchArgs` modules — see
- * `docs/fork/upstream-pr-ledger.md`.
- *
  * No session file is written; the user's Pi configuration (default model,
- * auth, custom providers) still applies. Extensions and tools are disabled
- * because no user is present to answer a dialog and background text
- * generation is read-only.
- *
- * @module textGeneration/PiTextGeneration
+ * auth, custom providers) still applies.
  */
-import { TextGenerationError, type ModelSelection, type PiSettings } from "@t3tools/contracts";
-import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
-import { extractJsonObject } from "@t3tools/shared/schemaJson";
-import * as Option from "effect/Option";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
-import { buildPiRpcLaunch, resolvePiLaunchArgs } from "../provider/piLaunchArgs.ts";
-import { makePiRpcConnection, parsePiModelSlug } from "../provider/piRpc.ts";
+import { TextGenerationError, type ModelSelection, type PiSettings } from "@t3tools/contracts";
+import { formatGeneratedBranchName, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { extractJsonObject } from "@t3tools/shared/schemaJson";
+
+import { makePiRpcConnection, parsePiModelSlug } from "../orchestration-v2/Adapters/PiRpc.ts";
+import {
+  buildPiRpcLaunch,
+  resolvePiLaunchArgs,
+} from "../orchestration-v2/Adapters/piT3McpInjection.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -77,6 +70,8 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       const launch = buildPiRpcLaunch({
         launchArgs: resolvedLaunchArgs.args,
         environment,
+        mcpSession: undefined,
+        extensionPath: undefined,
         ephemeral: true,
         // No user is present to answer a text-generation extension dialog.
         disableExtensions: true,
@@ -85,6 +80,9 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       });
       const connection = yield* makePiRpcConnection({
         command: piSettings.binaryPath || "pi",
+        // Extensions and tools are disabled because no user is present to
+        // answer a dialog and background text generation is read-only. User
+        // model config and auth still apply.
         args: launch.args,
         cwd,
         env: launch.env,
@@ -94,11 +92,11 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
         // `customModels` accepts arbitrary strings, so an unusable slug is
         // rejected rather than skipped: running Pi's default model here would
         // report success for a model the caller never asked for.
-        const parsed = parsePiModelSlug(String(modelSelection.model));
+        const parsed = parsePiModelSlug(modelSelection.model);
         if (parsed === null) {
           return yield* new TextGenerationError({
             operation,
-            detail: `Pi model '${String(modelSelection.model)}' must use provider/model format.`,
+            detail: `Pi model '${modelSelection.model}' must use provider/model format.`,
           });
         }
         yield* connection.request({
@@ -130,15 +128,16 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       }
       const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson));
       return yield* decodeOutput(extractJsonObject(text)).pipe(
-        Effect.catchTag("SchemaError", (cause) =>
-          Effect.fail(
-            new TextGenerationError({
-              operation,
-              detail: "Pi returned invalid structured output.",
-              cause,
-            }),
-          ),
-        ),
+        Effect.catchTags({
+          SchemaError: (cause) =>
+            Effect.fail(
+              new TextGenerationError({
+                operation,
+                detail: "Pi returned invalid structured output.",
+                cause,
+              }),
+            ),
+        }),
       );
     }).pipe(
       Effect.timeoutOption(PI_TIMEOUT_MS),
@@ -215,6 +214,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       const { prompt, outputSchema } = buildBranchNamePrompt({
         message: input.message,
         attachments: input.attachments,
+        naming: input.naming,
       });
       const generated = yield* runPiJson({
         operation: "generateBranchName",
@@ -224,7 +224,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
         modelSelection: input.modelSelection,
       });
       return {
-        branch: sanitizeBranchFragment(generated.branch),
+        branch: formatGeneratedBranchName(generated.branch, input.naming),
       };
     });
 

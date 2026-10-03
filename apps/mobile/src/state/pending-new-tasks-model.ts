@@ -1,5 +1,4 @@
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
-import { parseThreadGoalCommand } from "@t3tools/shared/composerTrigger";
 
 import { deriveThreadTitleFromPrompt } from "../lib/projectThreadStartTurn";
 import type { QueuedThreadCreation, QueuedThreadMessage } from "./thread-outbox-model";
@@ -27,8 +26,6 @@ export interface PendingQueuedTask {
   readonly createdAt: string;
   readonly message: QueuedThreadMessage;
   readonly creation: QueuedThreadCreation;
-  /** True when the queued text is a T3-local /goal command: it can never send. */
-  readonly blocked: boolean;
 }
 
 export interface PendingDraftTask {
@@ -82,7 +79,6 @@ export function buildPendingNewTasks(input: {
       createdAt: message.createdAt,
       message,
       creation: message.creation,
-      blocked: parseThreadGoalCommand(message.text) !== null,
     });
   }
   for (const [draftKey, draft] of Object.entries(input.drafts)) {

@@ -34,20 +34,26 @@ See [images and videos](#images-and-videos-in-messages) for previewing and savin
 
 ## Send while the agent is working
 
-On web and desktop, a message sent during a running turn waits at the end of the conversation as a
-dashed bubble. It goes out on its own when the agent finishes its next tool
-call, or when the turn ends, even while you have another thread open. Use the arrow under the bubble to send it right
-away, or the X to move it back into the composer. Stop returns every queued
-message to the composer.
-
-In **Settings → General → Follow-up behavior**, choose **Queue** to keep this
-behavior or **Steer** to send new messages immediately. This setting applies to
-the current client. Messages already queued keep their place.
+On web and desktop, choose **Settings → General → Follow-up behavior** to queue
+new messages for a later turn or steer the running turn immediately. The setting
+applies to this client; already queued messages keep their place. Queued messages
+are saved on the server and can be edited, reordered, or removed above the composer.
+`Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux uses the opposite action:
+it steers when your default is Queue and queues when your default is Steer.
 
 Use `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` on Windows and Linux to send
-the oldest queued message now. Change `thread.steerQueuedMessage` in
-**Settings → Keybindings** to use another shortcut. It leaves the current draft
-in the composer and waits if the agent needs an approval or an answer.
+the oldest queued message as a steer. This leaves the current draft intact and
+requires an active turn that supports steering. Change
+`thread.steerQueuedMessage` in **Settings → Keybindings** to use another shortcut.
+
+Press `Option+Up` on macOS or `Alt+Up` on Windows and Linux with the cursor at the
+start of the composer to edit the most recently queued message. Change
+`thread.editQueuedMessage` to use another shortcut.
+
+Mobile has the same choice under **Settings → Follow-ups**. While a turn is
+running the send button shows which action it will take. Long-press it to use the
+other action for a single message, or hold `Cmd` while sending from a hardware
+keyboard. The button only offers Steer when the running agent supports it.
 
 ## Queue messages offline on mobile
 
@@ -68,14 +74,7 @@ T3 Code remembers your provider, model, and model options for new threads. A
 project's configured model takes precedence; resetting that project setting
 returns to the remembered selection.
 
-In Settings → Providers, each provider instance can also have its own default model and options
-(such as effort). New threads on that provider start from its configured default when nothing more
-specific — an explicit choice, a project default — already picked one. Clear the default from the
-same place to fall back to T3 Code's built-in default.
-
-Model options shown as provider defaults remain display values until you choose them in T3 Code.
-T3 Code only sends options you selected explicitly, so leaving reasoning level or service tier
-unset uses the provider's own configuration.
+Leaving reasoning level or service tier unset uses the provider's own configuration.
 
 ## Quote an assistant response
 
@@ -115,7 +114,8 @@ On web and desktop, choose **Edit from here** beneath a sent message to rewind
 the conversation to before that message. Choose **Revert and keep changes** to
 leave workspace files as they are, or **Revert files too** to restore them as well.
 File restore is only offered for threads running in a worktree, and it is
-refused when another thread or agent session also uses that directory, since
+refused when another thread or agent session also uses that directory, a folder
+inside it, or a folder that contains it, since
 restoring would erase their changes. A thread that works in the project directory
 rewinds the conversation only. The selected prompt and its attachments return to the composer for editing and
 resending. Any unsent draft stays above the restored prompt.
@@ -150,19 +150,29 @@ awake; it can sleep normally once recording stops.
 Transcription runs on your device. T3 Code deletes the temporary audio after
 transcription or cancellation; only the message text is sent when you submit.
 
-## Agent voice notifications
+## Queued messages
 
-The composer footer has a **Voice on / Voice off** control next to the access mode. It sets whether
-the coding agent T3 Code starts for that thread announces itself out loud — T3 Code passes the
-choice to the agent as the `T3_VOICE_NOTIFICATIONS` environment variable (`1` or `0`), and the
-agent's own notification hooks decide what to say; T3 Code itself stays silent. New threads start
-with voice on. The setting is per thread and takes effect the next time the thread starts an agent
-session.
+On web and desktop, the composer shows **Interrupt** while the agent is working and the draft is
+empty. Adding text or attachments replaces it with a steer arrow. Click it to send a message into
+the active turn, or press `Enter` on desktop. Hold `Cmd` on macOS or `Ctrl` on Windows and Linux to
+switch the button to a queue icon. Click while holding that key, or press `Cmd+Enter` or
+`Ctrl+Enter` on desktop, to queue the message for after the active turn.
 
-On desktop, press `Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux from a new thread to
-start it in the background. T3 Code opens another new thread and shows an **Open** action for the
-thread that started. The new thread keeps the selected workspace mode and base branch. If **New
-worktree** is selected, each background thread creates its own worktree.
+Queued messages appear above the composer. Rows show a thumbnail of any attached image alongside
+the text. Drag a row by its handle to reorder it, use the handle's arrow keys, promote the message
+to a steer, or remove it.
+
+If the server restarts, saved queued messages keep their order and are held. Press
+**Resume** in an empty composer on web or desktop, or **Resume queue** in the queue
+sheet on mobile, to continue. You can edit, reorder, or remove held messages without starting them.
+
+The pencil on a queued row opens that message in the composer for editing. The original message
+stays in the queue until you save, and its row is highlighted while you edit. The message's
+attachments appear above the text with a remove control, and new images can be added the usual way.
+The checkmark saves the queued message in place; **Cancel** on its row leaves it unchanged. Whatever
+you had typed in the composer before starting the edit is restored afterwards. If the queued
+message starts or is removed while you are editing, the edit ends: changed content moves into the
+composer when it is empty, and is discarded otherwise.
 
 ## Commands and skills
 
@@ -199,6 +209,13 @@ pull requests in the current project's repository. Continue typing digits to fil
 by any part of its pull request numbers. A complete number is also resolved directly, even when that
 pull request is older than the recent list. Type a single word after `#` to search pull requests in
 the repository by text. Choose a result to insert it as a chip.
+
+Another thread can be context too. Type `@` followed by part of its title to pick one from
+the same server, or on web and desktop drag a thread out of the sidebar and drop it on the
+composer; a multi-selection drops together. The chip shows the thread's current title and
+opens it when selected. Your prompt only carries a reference: the agent reads the thread's
+history on demand, so attaching a long thread costs nothing until the agent looks. Attaching a
+thread does not change it, and the agent cannot send messages to it unless you ask.
 
 Images keep their thumbnail shelf above the text and also get a chip at your cursor, so you can
 say exactly which image you mean. Deleting an image chip leaves the image on the shelf; removing
@@ -259,141 +276,3 @@ automatically. HTML previews cannot access your T3 Code session.
 
 On mobile, select a PDF attachment or link to open it. iOS uses the native viewer;
 Android opens a compatible installed file viewer.
-
-## Thread goals
-
-Set a goal for the current thread with `/goal` followed by a short description, for example
-`/goal ship the login fix`, or use the target button in the composer controls. Picking `/goal`
-from the slash menu switches the input into goal mode directly, the same as selecting the target
-button. Once a goal is set, the goal appears in a compact strip above the composer, and the button
-becomes a compact pill showing the goal's first line. Select the pill to switch the chat input into
-goal mode: the input changes colour, and sending writes the goal instead of a message. Select the
-pill again to go back. On mobile, the goal pill lives in the thread composer's toolbar and opens a
-goal editor as a bottom sheet. Sending `/goal` on its own
-fills in the current goal for editing, and `/goal clear` removes it. The `mod+shift+g` shortcut
-toggles goal mode without leaving the keyboard. Pressing Esc while typing in goal mode leaves goal
-mode and keeps whatever you typed.
-Goals are T3 Code state: they are stored with the thread and stay in sync across your devices.
-The word `clear` is reserved, so a goal cannot literally be `clear`. A goal needs at least one
-visible character and fits within 1,024 characters. This is separate from a Codex execution
-goal, which Codex itself tracks in a live session — see
-[Codex](./providers-codex.md#codex-execution-goals).
-
-#### Goal loop
-
-On servers that support it, setting a goal also starts a goal loop: T3 Code adds the goal to each
-turn it sends the agent and keeps starting follow-up turns until the agent reports the goal done,
-says it is stuck, or you step in. This works the same way with every provider, including Codex.
-Codex's separate provider-native execution goals remain available through the
-[Codex execution-goal panel](./providers-codex.md#codex-execution-goals).
-
-Pause, resume, **Continue anyway**, and **Restart** change the loop between turns; they do not
-interrupt the turn already running. **Stop goal work** pauses the loop and interrupts that turn
-immediately. The goal pill shows the loop's state:
-
-- A running loop shows an iteration count, such as `3/10`.
-- **Paused** holds the loop without losing progress; select the pause button on the pill, or pause
-  it from the thread's menu. The running turn and any children it already started may finish, but
-  no new turn starts after it. Their results stay pending until you resume.
-- **Blocked** means the agent reported it cannot continue; the pill's tooltip shows why. Resume
-  clears the block.
-- **Capped** means the loop reached its 10-turn ceiling. Select **Continue anyway** on the pill to
-  set the count back to zero. Pending child results are kept and delivered after you continue.
-- **Complete** means the agent reported the goal done.
-
-The goal strip's menu gathers pause, resume, **Continue anyway**, **Restart** for a completed loop,
-**Stop goal work**, editing, and **Delete goal**. The thread's menu has the same lifecycle and
-delete controls; editing stays in the goal strip. Stop pauses the loop and interrupts the running
-turn, so it takes effect immediately, but keeps the goal so you can resume later; delete stops
-goal-driven work the same way and then removes the goal from the thread. The composer's regular
-stop button pauses a running goal loop first for the same reason — stopping mid-goal never restarts
-it. On mobile, the goal editor sheet carries the same controls.
-
-A newly set goal starts its first turn on its own when the thread is idle. If a turn is already
-running, the goal starts as soon as that turn ends. A resume or a **Continue anyway** also starts
-the next turn on its own — you do not have to send a message — and the agent picks up from where the
-loop stopped rather than re-reading the reply that paused or blocked it. Clearing the goal with
-`/goal clear`, or the pill, stops the loop along with it.
-
-Children started through T3 Code are required work for that goal. The loop waits for them to
-finish, delivers their results before starting a general continuation, and only accepts completion
-after those results have been delivered. Automatically started result turns count toward the
-iteration ceiling. A completion reported by the final allowed turn still completes the goal
-instead of leaving it capped.
-
-You can send a `/goal` command while a turn is running — setting, editing, and clearing a goal are
-thread state, not messages to the agent, so the composer sends them instead of queueing them.
-
-#### Goal experiments
-
-Goal experiments let an agent try measured changes inside a fixed set of files. Add
-`.auto/config.json` to a clean repository on a dedicated, unprotected branch:
-
-```json
-{
-  "version": 1,
-  "branch": "experiment/faster-startup",
-  "files": ["src/startup.ts"],
-  "evaluator": {
-    "argv": ["node", "scripts/measure-startup.mjs"],
-    "metric": "milliseconds",
-    "direction": "lower",
-    "minimumImprovement": 5
-  },
-  "checks": [["vp", "test", "run", "src/startup.test.ts"]],
-  "limits": {
-    "maxExperiments": 8,
-    "maxApplyBytes": 262144,
-    "maxOutputBytes": 65536,
-    "evaluatorTimeoutSeconds": 60,
-    "checkTimeoutSeconds": 120,
-    "maxTotalSeconds": 900
-  },
-  "protectedBranches": ["main"]
-}
-```
-
-Run `/goal experiment <objective>` on an existing connected thread without attachments. T3 Code
-shows the exact branch, HEAD, approved files, commands, metric, provider support, digest, and limits
-it read from the server. Nothing starts until you select **Confirm and start**. A changed or expired
-preview is rejected, so review a fresh preview instead of approving stale settings.
-
-Experiments fail closed on providers that cannot enforce the restricted experiment tool set. A run
-measures its baseline first, then keeps only candidates that improve the configured metric by at
-least `minimumImprovement` and pass every check. Rejected candidates are restored. The goal control
-shows the phase, baseline and best values, experiment count, elapsed time, and last error. You can
-pause or clear an active run. Reaching `maxExperiments` or `maxTotalSeconds`, failing, or completing
-is terminal; resume and **Continue anyway** cannot reset those limits.
-
-## Subscription usage limits
-
-Providers that bill against a subscription report how much of each usage window you have spent.
-Open the context meter next to the composer to see them under **Usage limits**: one row per
-window, with the share used and when it resets.
-
-- **Claude** reports its 5-hour window, its weekly window, and the per-model weekly windows.
-- **Codex** reports its two rolling windows.
-- **GLM (through Pi)** reports its 5-hour window when a z.ai key is configured.
-
-The rows come from the provider itself, so a window only appears once that provider has reported
-it in the open thread. Providers without subscription limits show nothing.
-
-## Compact context
-
-When a thread's context grows, you can ask the provider to compact it: summarize the conversation
-so far and continue with the summary. On web and desktop, choose **Compact context** in the
-context meter next to the composer. On mobile, it lives in the composer's expanded toolbar.
-
-How the request is made depends on the provider:
-
-- **Claude** sends `/compact` as a normal message through the composer.
-- **Codex and Pi** use the provider's own compaction protocol. T3 Code only asks the provider to
-  compact; the provider writes the summary itself, and T3 Code never edits, stores, or chooses a
-  summary or a summary model.
-- **Cursor, Grok, and OpenCode** do not expose manual compaction in T3 Code, so the control stays
-  hidden for them.
-
-Compaction needs an idle thread: it cannot start while a turn is running, while an approval or
-input request is waiting, or while you have an unsent draft. When it finishes, the thread shows a
-**Context compacted** activity. If the provider refuses or the request fails, the thread shows the
-failure instead of pretending the context was compacted.

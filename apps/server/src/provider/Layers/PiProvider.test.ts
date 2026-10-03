@@ -1,114 +1,80 @@
-// @effect-diagnostics nodeBuiltinImport:off - the fake pi fixture drives a real stdio process through Node spawn and filesystem APIs.
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { describe, expect, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import * as Schema from "effect/Schema";
-import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { PiSettings } from "@t3tools/contracts";
+import { checkPiProviderStatus, MINIMUM_PI_VERSION } from "./PiProvider.ts";
 
-import { ServerConfig } from "../../config.ts";
-import { checkPiProviderStatus } from "./PiProvider.ts";
+const encoder = new TextEncoder();
 
-const decodePiSettings = Schema.decodeSync(PiSettings);
+function processHandle(input: {
+  readonly stdout?: string;
+  readonly stderr?: string;
+  readonly exitCode?: number;
+}) {
+  const bytes = (value: string | undefined) =>
+    value === undefined || value.length === 0
+      ? Stream.empty
+      : Stream.succeed(encoder.encode(value));
+  return ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(900_000_001),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(input.exitCode ?? 0)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: bytes(input.stdout),
+    stderr: bytes(input.stderr),
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+}
 
-const FIXTURE_SCRIPT_PATH = NodePath.join(import.meta.dirname, "../testUtils/fake-pi.mjs");
+function piProbeSpawner(version: string) {
+  return ChildProcessSpawner.make((command) => {
+    const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+    return Effect.succeed(
+      args.includes("--version")
+        ? processHandle({ stdout: `pi ${version}\n` })
+        : processHandle({ stderr: "RPC startup failed", exitCode: 1 }),
+    );
+  });
+}
 
-const testLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
-  Layer.provideMerge(NodeServices.layer),
-);
+const settings = {
+  enabled: true,
+  binaryPath: "pi",
+  launchArgs: "",
+  customModels: [],
+} as const;
 
-const makeFixture = (): string => {
-  const fixtureRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pi-provider-test-"));
-  const scriptPath = NodePath.join(fixtureRoot, "fake-pi.mjs");
-  NodeFS.writeFileSync(scriptPath, NodeFS.readFileSync(FIXTURE_SCRIPT_PATH, "utf8"));
-  const shimPath = NodePath.join(fixtureRoot, "pi");
-  NodeFS.writeFileSync(shimPath, `#!/bin/sh\nexec node "${scriptPath}" "$@"\n`);
-  NodeFS.chmodSync(shimPath, 0o755);
-  NodeFS.writeFileSync(NodePath.join(fixtureRoot, "received.ndjson"), "");
-  process.env.FAKE_PI_LOG = NodePath.join(fixtureRoot, "received.ndjson");
-  process.env.FAKE_PI_SESSION_FILE = `${fixtureRoot}/native-session.jsonl`;
-  delete process.env.FAKE_PI_VETO;
-  delete process.env.FAKE_PI_BUSY;
-  delete process.env.FAKE_PI_VERSION;
-  return shimPath;
-};
-
-const provideTestEnv = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.provide(testLayer));
-
-describe("checkPiProviderStatus", () => {
-  it.live("reports a disabled provider without probing", () =>
+describe("PiProvider", () => {
+  it.effect("requires the first published Pi version with entries and settlement hooks", () =>
     Effect.gen(function* () {
-      const shimPath = makeFixture();
-      const snapshot = yield* checkPiProviderStatus(
-        decodePiSettings({ enabled: false, binaryPath: shimPath }),
+      const snapshot = yield* checkPiProviderStatus(settings).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, piProbeSpawner("0.80.3")),
       );
-      expect(snapshot.enabled).toBe(false);
-      expect(snapshot.installed).toBe(false);
-      expect(snapshot.models.map((model) => model.slug)).toContain("default");
-    }).pipe(provideTestEnv),
+      assert.equal(snapshot.status, "error");
+      assert.equal(snapshot.version, "0.80.3");
+      assert.include(snapshot.message ?? "", `Pi ${MINIMUM_PI_VERSION} or newer`);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.live("discovers models, commands, and skills through the ephemeral RPC process", () =>
+  it.effect("keeps compatible Pi selectable when optional discovery fails", () =>
     Effect.gen(function* () {
-      const shimPath = makeFixture();
-      const snapshot = yield* checkPiProviderStatus(
-        decodePiSettings({ enabled: true, binaryPath: shimPath }),
+      const snapshot = yield* checkPiProviderStatus(settings).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, piProbeSpawner("0.84.3")),
       );
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.version).toBe("1.2.3");
-      expect(snapshot.status).toBe("ready");
-      expect(snapshot.auth).toEqual({ status: "authenticated", type: "pi" });
-
-      // Native Pi model catalog is preserved verbatim as provider/model slugs.
-      const slugs = snapshot.models.map((model) => model.slug);
-      expect(slugs).toContain("zai/glm-5");
-      expect(slugs).toContain("zai/glm-5-flash");
-      const glm = snapshot.models.find((model) => model.slug === "zai/glm-5");
-      expect(glm?.name).toBe("GLM 5");
-      // The reasoning model advertises the thinking ladder including the
-      // mapped xhigh level; the flash model does not.
-      const glmOptions = glm?.capabilities?.optionDescriptors?.find(
-        (descriptor) => descriptor.id === "thinking" && "options" in descriptor,
+      assert.equal(snapshot.status, "ready");
+      assert.equal(snapshot.auth.status, "unknown");
+      assert.deepEqual(
+        snapshot.models.map((model) => model.slug),
+        ["default"],
       );
-      const thinkingValues =
-        glmOptions && "options" in glmOptions ? glmOptions.options.map((option) => option.id) : [];
-      expect(thinkingValues).toContain("xhigh");
-      const flash = snapshot.models.find((model) => model.slug === "zai/glm-5-flash");
-      expect(flash?.capabilities?.optionDescriptors ?? []).toHaveLength(0);
-
-      expect(snapshot.slashCommands.map((command) => command.name)).toContain("review");
-      const research = snapshot.skills.find((skill) => skill.name === "research");
-      expect(research?.scope).toBe("user");
-    }).pipe(provideTestEnv),
-  );
-
-  it.live("rejects a Pi binary older than the minimum supported version", () =>
-    Effect.gen(function* () {
-      const shimPath = makeFixture();
-      process.env.FAKE_PI_VERSION = "0.7.0";
-      const snapshot = yield* checkPiProviderStatus(
-        decodePiSettings({ enabled: true, binaryPath: shimPath }),
-      );
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.version).toBe("0.7.0");
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.message).toContain("unsupported");
-    }).pipe(provideTestEnv),
-  );
-
-  it.live("reports a missing binary as not installed", () =>
-    Effect.gen(function* () {
-      const snapshot = yield* checkPiProviderStatus(
-        decodePiSettings({ enabled: true, binaryPath: "/nonexistent/pi-binary" }),
-      );
-      expect(snapshot.installed).toBe(false);
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.message).toContain("not installed");
-    }).pipe(provideTestEnv),
+      assert.include(snapshot.message ?? "", "could not refresh its models and commands");
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

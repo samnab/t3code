@@ -6,9 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
-  CodexSettings,
   DEFAULT_SERVER_SETTINGS,
-  PiSettings,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -21,123 +19,32 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
-const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
-const decodePiSettings = Schema.decodeUnknownSync(PiSettings);
 
-describe("CodexSettings maximum concurrent subagents", () => {
-  it("uses Codex's default when no override is configured", () => {
-    expect(decodeCodexSettings({}).maxConcurrentSubagents).toBe("");
+describe("ServerSettings response streaming", () => {
+  it("defaults to paragraph buffering", () => {
+    expect(decodeServerSettings({}).responseStreamingMode).toBe("paragraph");
   });
 
-  it.each(["1", "20", "9007199254740991"])("accepts a positive safe integer: %s", (value) => {
-    expect(decodeCodexSettings({ maxConcurrentSubagents: value }).maxConcurrentSubagents).toBe(
-      value,
-    );
-    expect(
-      decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: value } } }),
-    ).toBeDefined();
-  });
-
-  it.each(["0", "-1", "1.5", "1e3", "9007199254740992", "9999999999999999"])(
-    "rejects an invalid concurrency count: %s",
-    (value) => {
-      expect(() => decodeCodexSettings({ maxConcurrentSubagents: value })).toThrow();
-      expect(() =>
-        decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: value } } }),
-      ).toThrow();
+  it.each(["turn", "paragraph"])(
+    "round-trips %s as an environment setting and project override",
+    (responseStreamingMode) => {
+      const input = {
+        responseStreamingMode,
+        projectSettingsOverrides: { project: { responseStreamingMode } },
+      };
+      expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
     },
   );
 
-  it("trims and accepts an empty patch value to clear the override", () => {
-    expect(
-      decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: " 20 " } } }),
-    ).toMatchObject({ providers: { codex: { maxConcurrentSubagents: "20" } } });
-    expect(
-      decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: "  " } } }),
-    ).toMatchObject({ providers: { codex: { maxConcurrentSubagents: "" } } });
-  });
-});
-
-describe("PiSettings model concurrency", () => {
-  it("defaults to an empty map when not configured", () => {
-    expect(decodePiSettings({}).modelConcurrency).toEqual({});
-  });
-
-  it.each([1, 4, 9007199254740991])("accepts a positive safe integer cap: %s", (cap) => {
-    expect(decodePiSettings({ modelConcurrency: { "zai/glm-5": cap } }).modelConcurrency).toEqual({
-      "zai/glm-5": cap,
-    });
-    expect(
-      decodeServerSettingsPatch({ providers: { pi: { modelConcurrency: { "zai/glm-5": cap } } } }),
-    ).toBeDefined();
-  });
-
-  it.each([0, -1, 1.5, 9007199254740992])("rejects an invalid cap: %s", (cap) => {
-    expect(() => decodePiSettings({ modelConcurrency: { "zai/glm-5": cap } })).toThrow();
-    expect(() =>
-      decodeServerSettingsPatch({ providers: { pi: { modelConcurrency: { "zai/glm-5": cap } } } }),
-    ).toThrow();
-  });
-
-  it("keeps the patch key optional so other Pi settings round-trip untouched", () => {
-    expect(decodeServerSettingsPatch({ providers: { pi: { launchArgs: "--x" } } })).toMatchObject({
-      providers: { pi: { launchArgs: "--x" } },
-    });
-  });
-});
-
-describe("ServerSettings optimizer configuration", () => {
-  it("defaults all project optimizers off and optimizer endpoints to their standard values", () => {
-    const settings = decodeServerSettings({
-      projectOptimizerOverrides: {
-        "project-one": { rtk: true },
-      },
-    });
-
-    expect(settings.projectOptimizerOverrides).toEqual({
-      "project-one": { rtk: true, headroom: false, cbm: false },
-    });
-    expect(settings.optimizerBinaryPaths.cbm).toBe("codebase-memory-mcp");
-    expect(settings.headroomProxyUrl).toBe("http://127.0.0.1:6767");
-  });
-
-  it("accepts partial updates, entry removal, and a CBM path override", () => {
-    const patch = decodeServerSettingsPatch({
-      projectOptimizerOverrides: {
-        "project-one": { cbm: true },
-        "project-two": null,
-      },
-      optimizerBinaryPaths: { cbm: "  /opt/cbm  " },
-    });
-
-    expect(patch).toEqual({
-      projectOptimizerOverrides: {
-        "project-one": { cbm: true },
-        "project-two": null,
-      },
-      optimizerBinaryPaths: { cbm: "/opt/cbm" },
-    });
-  });
-
-  it.each([
-    "http://127.0.0.1:8787",
-    "http://127.0.0.1:8787/",
-    "http://localhost:8787",
-    "http://[::1]:8787",
-  ])("accepts a local Headroom proxy origin: %s", (headroomProxyUrl) => {
-    expect(decodeServerSettingsPatch({ headroomProxyUrl }).headroomProxyUrl).toBe(headroomProxyUrl);
-  });
-
-  it.each([
-    "https://127.0.0.1:8787",
-    "http://192.168.1.10:8787",
-    "http://example.com:8787",
-    "http://user@127.0.0.1:8787",
-    "http://127.0.0.1:8787/stats",
-    "http://127.0.0.1:8787?mode=cache",
-    "http://127.0.0.1:8787#status",
-  ])("rejects an unsafe Headroom proxy URL: %s", (headroomProxyUrl) => {
-    expect(() => decodeServerSettingsPatch({ headroomProxyUrl })).toThrow();
+  it.each(["token", "unsupported"])("rejects %s in settings snapshots and writes", (mode) => {
+    for (const input of [
+      { responseStreamingMode: mode },
+      { projectSettingsOverrides: { project: { responseStreamingMode: mode } } },
+    ]) {
+      expect(() => decodeServerSettings(input)).toThrow();
+      expect(() => decodeServerSettingsPatch(input)).toThrow();
+    }
   });
 });
 
@@ -451,6 +358,15 @@ describe("ClientSettings load balancing", () => {
     expect(decodeClientSettingsPatch({ loadBalancingEnabled }).loadBalancingEnabled).toBe(
       loadBalancingEnabled,
     );
+  });
+});
+
+describe("ClientSettings composer context strip", () => {
+  it("defaults to draft-only and accepts a persistent strip preference", () => {
+    expect(decodeClientSettings({}).persistComposerContextStrip).toBe(false);
+    expect(
+      decodeClientSettingsPatch({ persistComposerContextStrip: true }).persistComposerContextStrip,
+    ).toBe(true);
   });
 });
 
@@ -976,6 +892,42 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
+describe("ServerSettings Cursor legacy settings", () => {
+  it("preserves V1 Cursor CLI settings when reading and writing shared settings", () => {
+    const decoded = decodeServerSettings({
+      providers: {
+        cursor: {
+          enabled: true,
+          binaryPath: "cursor-agent",
+          apiEndpoint: "http://127.0.0.1:3774",
+        },
+      },
+    });
+
+    expect(decoded.providers.cursor.enabled).toBe(true);
+    expect(encodeServerSettings(decoded).providers?.cursor).toMatchObject({
+      binaryPath: "cursor-agent",
+      apiEndpoint: "http://127.0.0.1:3774",
+    });
+  });
+
+  it("ignores obsolete Cursor CLI settings in patches", () => {
+    const patch = decodeServerSettingsPatch({
+      providers: {
+        cursor: {
+          enabled: true,
+          binaryPath: "cursor-agent",
+          apiEndpoint: "http://127.0.0.1:3774",
+        },
+      },
+    });
+
+    expect(patch.providers?.cursor?.enabled).toBe(true);
+    expect(patch.providers?.cursor).not.toHaveProperty("binaryPath");
+    expect(patch.providers?.cursor).not.toHaveProperty("apiEndpoint");
+  });
+});
+
 describe("ServerSettings.sourceControlWritingStyle", () => {
   it("defaults all style settings for legacy configs", () => {
     const settings = decodeServerSettings({});
@@ -1129,4 +1081,27 @@ it("validates remote device hosts and rejects ambiguous host ids", () => {
     decodeDeviceHostSettings({ deviceHosts: [{ ...host, target: "-oProxyCommand=bad" }] }),
   ).toThrow();
   expect(() => decodeDeviceHostSettings({ deviceHosts: [{ ...host, port: 0 }] })).toThrow();
+});
+
+describe("branch naming settings", () => {
+  it("defaults existing settings to the t3code static prefix", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      branchNamingMode: "static",
+      branchNamePrefix: "t3code",
+      branchNameInstructions: "",
+    });
+  });
+  it.each(["static", "semantic", "custom"])(
+    "round-trips %s and project overrides",
+    (branchNamingMode) => {
+      const naming = {
+        branchNamingMode,
+        branchNamePrefix: "team/",
+        branchNameInstructions: "Include the issue ID.",
+      };
+      const input = { ...naming, projectSettingsOverrides: { project: naming } };
+      expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+      expect(decodeServerSettingsPatch(input)).toEqual(input);
+    },
+  );
 });

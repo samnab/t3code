@@ -14,17 +14,8 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
-import { ProviderExecutionGoalStatus } from "./provider.ts";
 import { ProviderUsageLimitsUpdate } from "./providerUsageLimits.ts";
-import {
-  ProviderApprovalOption,
-  SubagentRunCapabilities,
-  SubagentRunControlAvailability,
-  SubagentRunHistoryAvailability,
-  SubagentRunRuntimeFamily,
-  SubagentRunStatus,
-  SubagentRunTerminalReason,
-} from "./orchestration.ts";
+import { ProviderApprovalOption } from "./providerPolicy.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
@@ -166,7 +157,6 @@ const ThreadStartedType = Schema.Literal("thread.started");
 const ThreadStateChangedType = Schema.Literal("thread.state.changed");
 const ThreadMetadataUpdatedType = Schema.Literal("thread.metadata.updated");
 const ThreadTokenUsageUpdatedType = Schema.Literal("thread.token-usage.updated");
-const ThreadGoalUpdatedType = Schema.Literal("thread.goal.updated");
 const ThreadRealtimeStartedType = Schema.Literal("thread.realtime.started");
 const ThreadRealtimeItemAddedType = Schema.Literal("thread.realtime.item-added");
 const ThreadRealtimeAudioDeltaType = Schema.Literal("thread.realtime.audio.delta");
@@ -287,6 +277,12 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
   autoCompactThreshold: Schema.optional(PositiveInt),
+  cost: Schema.optional(
+    Schema.Struct({
+      amount: Schema.Number.check(Schema.isFinite()),
+      currency: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(32)),
+    }),
+  ),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 
@@ -545,85 +541,17 @@ export const TaskRunHandles = Schema.Struct({
 export type TaskRunHandles = typeof TaskRunHandles.Type;
 
 /**
- * Watch-loop task types: Monitor-tool tasks plus background shells (a shell
- * that outlives its turn is in practice a watch loop). Canonical single copy —
- * the server liveness registry, ingestion's agentKind stamp, and the client
- * fold's legacy fallback all classify with these sets.
- */
-export const MONITOR_TASK_TYPES: ReadonlySet<string> = new Set([
-  "monitor",
-  "monitor_mcp",
-  "local_bash",
-  "shell",
-]);
-/** Task types that are neither agents nor watch loops (plan-mode bookkeeping). */
-export const INERT_TASK_TYPES: ReadonlySet<string> = new Set(["plan", "dream"]);
-
-/**
- * Agent-vs-background classification, stamped by ingestion as `agentKind` so
- * persisted rows are self-describing. A deliberate denylist: the SDK's
- * agent-flavored type names drift (subagent, local_agent, local_workflow, …)
- * and an allowlist silently dropped real subagents when "local_agent"
- * appeared. A task launched from inside a subagent (agentId set) is
- * agent-internal background work UNLESS it is itself agent-flavored — a
- * nested agent can outlive its parent and stays in the roster.
- */
-export function classifyTaskAgentKind(input: {
-  readonly taskType?: string | undefined;
-  readonly agentId?: string | undefined;
-}): "agent" | "background" {
-  const { taskType, agentId } = input;
-  const nonAgentType =
-    taskType !== undefined && (MONITOR_TASK_TYPES.has(taskType) || INERT_TASK_TYPES.has(taskType));
-  if (agentId !== undefined && agentId.trim().length > 0) {
-    return taskType === undefined || nonAgentType ? "background" : "agent";
-  }
-  return nonAgentType ? "background" : "agent";
-}
-
-/**
  * Optional agent-identity linkage carried on every task lifecycle payload.
  * Repeated on progress and terminal rows (not just start) so client folds can
  * reconstruct an agent even when its start row aged out of activity retention.
  * All fields optional: old emitters and old rows decode unchanged.
  */
-export const SubagentRunEvidence = Schema.Struct({
-  runId: RuntimeTaskId,
-  // Stamped by T3 ingestion after a durable global reservation.
-  runNumber: Schema.optional(PositiveInt),
-  parentRunId: Schema.optional(RuntimeTaskId),
-  runtimeFamily: SubagentRunRuntimeFamily,
-  harness: Schema.optional(TrimmedNonEmptyStringSchema),
-  provider: ProviderDriverKind,
-  providerInstanceId: Schema.optional(ProviderInstanceId),
-  ownerId: Schema.optional(TrimmedNonEmptyStringSchema),
-  ownerEpoch: Schema.optional(TrimmedNonEmptyStringSchema),
-  nativeRunId: Schema.optional(TrimmedNonEmptyStringSchema),
-  activationId: Schema.optional(TrimmedNonEmptyStringSchema),
-  /**
-   * Phase 1.5 binding evidence: snapshot-derived run birth the enhanced
-   * manager attached to the allocating run upsert. Metadata only — never a
-   * transcript body — and validated only as part of the five-member binding
-   * tuple.
-   */
-  runBirth: Schema.optional(TrimmedNonEmptyStringSchema),
-  /** Identifies the exact producer run upsert that caused the allocation. */
-  upsertSequence: Schema.optional(PositiveInt),
-  status: SubagentRunStatus,
-  terminalReason: Schema.optional(SubagentRunTerminalReason),
-  controlAvailability: SubagentRunControlAvailability,
-  historyAvailability: SubagentRunHistoryAvailability,
-  capabilities: SubagentRunCapabilities,
-  startedAt: IsoDateTime,
-});
-export type SubagentRunEvidence = typeof SubagentRunEvidence.Type;
-
 const taskAgentLinkageFields = {
   /** SDK task_type (subagent/shell/monitor/local_workflow/…), repeated on
    * every row so folds can classify without the start row. */
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
   /**
-   * Server-stamped classification (classifyTaskAgentKind at ingestion).
+   * Server-stamped classification, set at ingestion.
    * Clients trust this stamp outright; rows without it (legacy, pre-stamp)
    * fall back to client-side heuristics.
    */
@@ -639,8 +567,6 @@ const taskAgentLinkageFields = {
   model: Schema.optional(TrimmedNonEmptyStringSchema),
   /** Reasoning effort when known (e.g. "high"). Open string: provider vocabularies differ. */
   effort: Schema.optional(TrimmedNonEmptyStringSchema),
-  /** True when the run started while the provider's fast mode was on. */
-  fastMode: Schema.optional(Schema.Boolean),
   toolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
   parentAgentId: Schema.optional(TrimmedNonEmptyStringSchema),
   workflowName: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -658,8 +584,6 @@ const taskAgentLinkageFields = {
    * belongs in the Agents surface, never the parent timeline.
    */
   timelineBypass: Schema.optional(Schema.Boolean),
-  /** T3-owned identity and bounded provenance for durable run inventory. */
-  subagentRun: Schema.optional(SubagentRunEvidence),
 } as const;
 
 export const TaskAgentLinkage = Schema.Struct(taskAgentLinkageFields);
@@ -779,7 +703,6 @@ const AccountUpdatedPayload = Schema.Struct({
 export type AccountUpdatedPayload = typeof AccountUpdatedPayload.Type;
 
 /**
-
  * Adapters normalise their native rate-limit payload at the boundary so the
  * consumer that folds it into the provider snapshot never sees driver shapes.
  */
@@ -921,25 +844,6 @@ const ProviderRuntimeThreadTokenUsageUpdatedEvent = Schema.Struct({
 });
 export type ProviderRuntimeThreadTokenUsageUpdatedEvent =
   typeof ProviderRuntimeThreadTokenUsageUpdatedEvent.Type;
-
-/**
- * The provider reported its own execution goal changed. `status: null` means
- * the provider cleared the goal. Never persisted as canonical goal history —
- * `NativeGoalReactor` only mirrors it onto the T3 goal loop's state.
- */
-const ThreadGoalUpdatedPayload = Schema.Struct({
-  status: Schema.NullOr(ProviderExecutionGoalStatus),
-  objective: Schema.optional(TrimmedNonEmptyStringSchema),
-});
-export type ThreadGoalUpdatedPayload = typeof ThreadGoalUpdatedPayload.Type;
-
-const ProviderRuntimeThreadGoalUpdatedEvent = Schema.Struct({
-  ...ProviderRuntimeEventBase.fields,
-  type: ThreadGoalUpdatedType,
-  payload: ThreadGoalUpdatedPayload,
-});
-export type ProviderRuntimeThreadGoalUpdatedEvent =
-  typeof ProviderRuntimeThreadGoalUpdatedEvent.Type;
 
 const ProviderRuntimeThreadRealtimeStartedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
@@ -1249,7 +1153,6 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeThreadStateChangedEvent,
   ProviderRuntimeThreadMetadataUpdatedEvent,
   ProviderRuntimeThreadTokenUsageUpdatedEvent,
-  ProviderRuntimeThreadGoalUpdatedEvent,
   ProviderRuntimeThreadRealtimeStartedEvent,
   ProviderRuntimeThreadRealtimeItemAddedEvent,
   ProviderRuntimeThreadRealtimeAudioDeltaEvent,

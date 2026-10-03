@@ -34,7 +34,6 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   type FilesystemBrowseResult,
-  type OptimizerId,
   type ProjectId,
   type SourceControlDiscoveryResult,
   type SourceControlProviderKind,
@@ -54,8 +53,6 @@ import {
   FolderGit2Icon,
   FolderIcon,
   FolderPlusIcon,
-  GaugeIcon,
-  GitPullRequestArrowIcon,
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
@@ -103,6 +100,7 @@ import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment } from "../state/filesystem";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
+import { serverEnvironment } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -192,12 +190,12 @@ import {
   ThreadCommandSubtitle,
 } from "./ThreadCommandSubtitle";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
+import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
 import {
-  primaryServerKeybindingsAtom,
-  primaryServerProvidersAtom,
-  serverEnvironment,
-} from "../state/server";
-import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
+  applyProviderInstanceSettings,
+  deriveProviderInstanceEntries,
+  type ProviderInstanceEntry,
+} from "../providerInstances";
 import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
 import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "./ui/command";
 import { Button } from "./ui/button";
@@ -217,58 +215,6 @@ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { readPullRequestListPreferences } from "~/components/pullRequest/pullRequestListPreferences";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
-
-const APPEARANCE_OPTIONS = [
-  { mode: "system", label: "System", icon: MonitorIcon },
-  { mode: "light", label: "Light", icon: SunIcon },
-  { mode: "dark", label: "Dark", icon: MoonIcon },
-] as const;
-
-function notifyThemeSaveFailure(): void {
-  toastManager.add(
-    stackedThreadToast({
-      type: "error",
-      title: "Couldn't save theme selection",
-      description: "Try again.",
-    }),
-  );
-}
-
-function projectFavicon(project: Project) {
-  return <ProjectFavicon project={project} className="size-4" />;
-}
-
-function ProjectSearchDescription(props: {
-  readonly environmentLabels: ReadonlyArray<string>;
-  readonly grouped: boolean;
-  readonly location: {
-    readonly kind: "local" | "remote";
-    readonly label: string;
-    readonly machine: EnvironmentMachineKind;
-  };
-  readonly workspaceRoot: string;
-}) {
-  if (!props.grouped) {
-    return (
-      <span className="flex min-w-0 items-center gap-1">
-        <span className="inline-flex min-w-0 items-center gap-1">
-          {props.location.kind === "remote" ? (
-            <EnvironmentMachineIcon
-              aria-hidden
-              kind={props.location.machine}
-              className={COMMAND_PALETTE_META_ICON_CLASS}
-            />
-          ) : null}
-          <span className="truncate">{props.location.label}</span>
-        </span>
-        <CommandPaletteMetaDot />
-        <span className="truncate">{props.workspaceRoot}</span>
-      </span>
-    );
-  }
-
-  return <span className="truncate">{props.environmentLabels.join(" · ")}</span>;
-}
 
 function getEnvironmentBrowsePlatform(os: string | null | undefined): string {
   if (os === "windows") {
@@ -385,6 +331,10 @@ function remoteProjectSourceIcon(source: AddProjectRemoteSource, className: stri
   }
 }
 
+function projectFaviconIcon(project: Project): ReactNode {
+  return <ProjectFavicon project={project} className={ITEM_ICON_CLASS} />;
+}
+
 function remoteProjectInputPlaceholder(flow: AddProjectCloneFlow | null): string | null {
   if (!flow) return null;
   if (flow.step === "confirm") return null;
@@ -486,6 +436,26 @@ function overlayModeForCommand(command: string | null): SearchOverlayMode | null
   return command in OVERLAY_MODE_BY_COMMAND
     ? OVERLAY_MODE_BY_COMMAND[command as keyof typeof OVERLAY_MODE_BY_COMMAND]
     : null;
+}
+
+const APPEARANCE_OPTIONS = [
+  { mode: "system", label: "System", icon: MonitorIcon },
+  { mode: "light", label: "Light", icon: SunIcon },
+  { mode: "dark", label: "Dark", icon: MoonIcon },
+] as const;
+
+function notifyThemeSaveFailure(): void {
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Couldn't save theme selection",
+      description: "Try again.",
+    }),
+  );
+}
+
+function projectFavicon(project: Project) {
+  return <ProjectFavicon project={project} className="size-4" />;
 }
 
 export function CommandPalette({ children }: { children: ReactNode }) {
@@ -739,10 +709,6 @@ function OpenCommandPaletteDialog(props: {
   const cloneRepository = useAtomCommand(sourceControlEnvironment.cloneRepository, {
     reportFailure: false,
   });
-  const updateOptimizerSettings = useAtomCommand(serverEnvironment.updateSettings, {
-    label: "project optimizer setting",
-    reportFailure: true,
-  });
   const startProjectClone = useAtomCommand(sourceControlEnvironment.startProjectClone, {
     reportFailure: false,
   });
@@ -836,10 +802,17 @@ function OpenCommandPaletteDialog(props: {
   const providerEntryByEnvironmentAndInstanceId = useMemo(() => {
     const map = new Map<string, ProviderInstanceEntry>();
     for (const environment of environments) {
+      const serverConfig = environment.serverConfig;
       const environmentProviders =
-        environment.serverConfig?.providers ??
+        serverConfig?.providers ??
         (environment.environmentId === primaryEnvironmentId ? providers : []);
-      for (const entry of deriveProviderInstanceEntries(environmentProviders)) {
+      const derived = deriveProviderInstanceEntries(environmentProviders);
+      // Settings fill the ACP registry identity (agent id, icon URL) the
+      // derived entries alone do not carry.
+      const entries = serverConfig
+        ? applyProviderInstanceSettings(derived, serverConfig.settings)
+        : derived;
+      for (const entry of entries) {
         map.set(`${environment.environmentId}:${entry.instanceId}`, entry);
       }
     }
@@ -1310,7 +1283,7 @@ function OpenCommandPaletteDialog(props: {
             />
           );
         },
-        icon: projectFavicon,
+        icon: projectFaviconIcon,
         runProject: openProjectFromSearch,
       }),
     [
@@ -1362,7 +1335,7 @@ function OpenCommandPaletteDialog(props: {
               </span>
             );
           },
-          icon: projectFavicon,
+          icon: projectFaviconIcon,
           runProject: async (project) => {
             const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
             const contextualRefBelongsToGroup =
@@ -1417,7 +1390,7 @@ function OpenCommandPaletteDialog(props: {
         renderTrailingContent: (thread) => <ThreadRowTrailingStatus thread={thread} />,
         renderDescription: (thread, { projectTitle }) => {
           const modelInstanceId =
-            thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+            thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId;
           const providerEntry =
             providerEntryByEnvironmentAndInstanceId.get(
               `${thread.environmentId}:${modelInstanceId}`,
@@ -1434,8 +1407,10 @@ function OpenCommandPaletteDialog(props: {
               isCurrent={thread.id === activeThreadId}
               driverKind={providerEntry?.driverKind ?? null}
               providerDisplayName={
-                thread.session?.providerName ?? providerEntry?.displayName ?? modelInstanceId
+                thread.runtime?.providerName ?? providerEntry?.displayName ?? modelInstanceId
               }
+              acpRegistryAgentId={providerEntry?.acpRegistryAgentId}
+              acpRegistryIconUrl={providerEntry?.acpRegistryIconUrl}
             />
           );
         },
@@ -1465,6 +1440,7 @@ function OpenCommandPaletteDialog(props: {
       activeThreadId,
       clientSettings.sidebarThreadSortOrder,
       navigate,
+      projectCwdById,
       projectByKey,
       projectEnvironmentLocationById,
       projectTitleById,
@@ -1997,7 +1973,7 @@ function OpenCommandPaletteDialog(props: {
       // Failures throw into executeItem's error toast.
       run: async () => {
         const { environmentId } = thread;
-        if (thread.session && thread.session.status !== "stopped") {
+        if (thread.runtime !== null) {
           const stopped = await stopThreadSession({
             environmentId,
             input: { threadId: thread.id },
@@ -2016,7 +1992,7 @@ function OpenCommandPaletteDialog(props: {
         const refreshed = await refreshProviders({
           environmentId,
           input: {
-            instanceId: thread.session?.providerInstanceId ?? thread.modelSelection.instanceId,
+            instanceId: thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId,
             cwd: thread.worktreePath ?? project.workspaceRoot,
             fresh: true,
           },
@@ -2298,77 +2274,6 @@ function OpenCommandPaletteDialog(props: {
         });
       },
     });
-
-    const contextualOptimizerTarget =
-      (contextualProjectRef
-        ? contextualProjectGroup.memberProjects.find(
-            (member) =>
-              member.environmentId === contextualProjectRef.environmentId &&
-              member.id === contextualProjectRef.projectId,
-          )
-        : null) ?? contextualProjectGroup.memberProjects[0];
-    const contextualOptimizerEnvironment = contextualOptimizerTarget
-      ? environments.find(
-          (environment) => environment.environmentId === contextualOptimizerTarget.environmentId,
-        )
-      : undefined;
-    if (contextualOptimizerTarget) {
-      const optimizerLabels: Readonly<Record<OptimizerId, string>> = {
-        rtk: "RTK",
-        headroom: "Headroom",
-        cbm: "Codebase Memory",
-      };
-      const optimizerItems: CommandPaletteActionItem[] = (
-        Object.keys(optimizerLabels) as OptimizerId[]
-      ).map((id) => {
-        const enabled =
-          contextualOptimizerEnvironment?.serverConfig?.settings.projectOptimizerOverrides[
-            contextualOptimizerTarget.id
-          ]?.[id] === true;
-        return {
-          kind: "action",
-          value: `action:project-optimizer:${contextualOptimizerTarget.environmentId}:${contextualOptimizerTarget.id}:${id}`,
-          searchTerms: [
-            "optimizer",
-            id,
-            optimizerLabels[id],
-            enabled ? "disable off" : "enable on",
-            contextualProjectGroup.displayName,
-          ],
-          title: `${enabled ? "Disable" : "Enable"} ${optimizerLabels[id]}`,
-          description: enabled ? "Enabled for the next session" : "Off",
-          icon: <GaugeIcon className={ITEM_ICON_CLASS} />,
-          disabled: contextualOptimizerEnvironment?.connection.phase !== "connected",
-          run: async () => {
-            await updateOptimizerSettings({
-              environmentId: contextualOptimizerTarget.environmentId,
-              input: {
-                patch: {
-                  projectOptimizerOverrides: {
-                    [contextualOptimizerTarget.id]: { [id]: !enabled },
-                  },
-                },
-              },
-            });
-          },
-        };
-      });
-      actionItems.push({
-        kind: "submenu",
-        value: "action:project-optimizers",
-        searchTerms: [
-          "project optimizer optimizers RTK Headroom Codebase Memory CBM enable disable toggle",
-          contextualProjectGroup.displayName,
-        ],
-        title: "Project optimizers",
-        description: contextualProjectGroup.displayName,
-        icon: <GaugeIcon className={ITEM_ICON_CLASS} />,
-        addonIcon: <GaugeIcon className={ADDON_ICON_CLASS} />,
-        groups: [
-          { value: "project-optimizers", label: "Project optimizers", items: optimizerItems },
-        ],
-      });
-    }
   }
 
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
@@ -3548,4 +3453,36 @@ function OpenCommandPaletteDialog(props: {
       />
     </CommandPaletteContent>
   );
+}
+
+function ProjectSearchDescription(props: {
+  readonly environmentLabels: ReadonlyArray<string>;
+  readonly grouped: boolean;
+  readonly location: {
+    readonly kind: "local" | "remote";
+    readonly label: string;
+    readonly machine: EnvironmentMachineKind;
+  };
+  readonly workspaceRoot: string;
+}) {
+  if (!props.grouped) {
+    return (
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="inline-flex min-w-0 items-center gap-1">
+          {props.location.kind === "remote" ? (
+            <EnvironmentMachineIcon
+              aria-hidden
+              kind={props.location.machine}
+              className={COMMAND_PALETTE_META_ICON_CLASS}
+            />
+          ) : null}
+          <span className="truncate">{props.location.label}</span>
+        </span>
+        <CommandPaletteMetaDot />
+        <span className="truncate">{props.workspaceRoot}</span>
+      </span>
+    );
+  }
+
+  return <span className="truncate">{props.environmentLabels.join(" · ")}</span>;
 }

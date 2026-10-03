@@ -23,6 +23,7 @@ function provider(input: {
   provider?: ProviderDriverKind;
   instanceId: string;
   models?: ReadonlyArray<string>;
+  supportsTextGeneration?: boolean;
 }): ServerProvider {
   const driver =
     input.provider ??
@@ -32,6 +33,9 @@ function provider(input: {
   return {
     instanceId: ProviderInstanceId.make(input.instanceId),
     driver,
+    ...(input.supportsTextGeneration === undefined
+      ? {}
+      : { supportsTextGeneration: input.supportsTextGeneration }),
     enabled: true,
     installed: true,
     version: null,
@@ -219,8 +223,6 @@ describe("instance-scoped model selection", () => {
         [ProviderInstanceId.make("claudeAgent")]: {
           hiddenModels: ["claude-opus-4-6"],
           modelOrder: [],
-          defaultModel: null,
-          defaultOptions: [],
         },
       },
     };
@@ -269,8 +271,6 @@ describe("instance-scoped model selection", () => {
         [ProviderInstanceId.make("claudeAgent")]: {
           hiddenModels: [],
           modelOrder: ["claude-haiku-4-5", "claude-opus-4-6"],
-          defaultModel: null,
-          defaultOptions: [],
         },
       },
     };
@@ -298,8 +298,6 @@ describe("instance-scoped model selection", () => {
         [ProviderInstanceId.make("claudeAgent")]: {
           hiddenModels: ["claude-opus-4-6"],
           modelOrder: [],
-          defaultModel: null,
-          defaultOptions: [],
         },
       },
     };
@@ -473,8 +471,6 @@ describe("instance-scoped model selection", () => {
           [instanceId]: {
             hiddenModels: [missingModel],
             modelOrder: [],
-            defaultModel: null,
-            defaultOptions: [],
           },
         },
       };
@@ -705,12 +701,7 @@ describe("instance-scoped model selection", () => {
     const hiddenSettings: UnifiedSettings = {
       ...settings,
       providerModelPreferences: {
-        [instanceId]: {
-          hiddenModels: [nativeModel],
-          modelOrder: [],
-          defaultModel: null,
-          defaultOptions: [],
-        },
+        [instanceId]: { hiddenModels: [nativeModel], modelOrder: [] },
       },
     };
     expect(
@@ -824,6 +815,31 @@ describe("instance-scoped model selection", () => {
     });
   });
 
+  it("self-heals a persisted selection pointing at a text-generation-incapable instance", () => {
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("acpRegistry"),
+        instanceId: "acp_gemini",
+        models: ["default"],
+        supportsTextGeneration: false,
+      }),
+      provider({
+        instanceId: "codex",
+        models: ["gpt-5.6-luna"],
+      }),
+    ];
+    const settings: UnifiedSettings = {
+      ...settingsWithProviderInstances(),
+      textGenerationModelSelection: {
+        instanceId: ProviderInstanceId.make("acp_gemini"),
+        model: "default",
+      },
+    };
+
+    expect(resolveAppModelSelectionState(settings, providers).instanceId).toBe(
+      ProviderInstanceId.make("codex"),
+    );
+  });
   it("does not select a provider that cannot generate system text", () => {
     const instanceId = ProviderInstanceId.make("antigravity");
     const unsupported = {

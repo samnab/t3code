@@ -14,11 +14,7 @@ export function deriveTimelineMinimapItems(
   const items: TimelineMinimapItem[] = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    if (
-      row?.kind !== "message" ||
-      row.message.role !== "user" ||
-      row.message.origin !== undefined
-    ) {
+    if (row?.kind !== "message" || row.message.role !== "user") {
       continue;
     }
 

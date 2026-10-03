@@ -16,7 +16,6 @@ describe("ProviderSettingsForm helpers", () => {
       "binaryPath",
       "homePath",
       "shadowHomePath",
-      "maxConcurrentSubagents",
       "launchArgs",
     ]);
   });
@@ -34,6 +33,34 @@ describe("ProviderSettingsForm helpers", () => {
       description: "Stored in plain text on disk.",
       control: "password",
     });
+  });
+
+  it("uses a dedicated environment field instead of legacy Cursor CLI settings", () => {
+    const cursor = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("cursor")];
+
+    expect(cursor).toBeDefined();
+    expect(deriveProviderSettingsFields(cursor!)).toEqual([]);
+    expect(cursor?.environmentFields).toEqual([
+      {
+        name: "CURSOR_API_KEY",
+        label: "Cursor API key",
+        description: "Optional. Overrides browser sign-in for this provider.",
+        placeholder: "Paste API key",
+        sensitive: true,
+      },
+    ]);
+  });
+
+  it("exposes ACP Registry as an instance-only configurable driver", () => {
+    const acpRegistry = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("acpRegistry")];
+
+    expect(acpRegistry).toBeDefined();
+    expect(acpRegistry?.hasDefaultInstance).toBe(false);
+    expect(deriveProviderSettingsFields(acpRegistry!).map((field) => field.key)).toEqual([
+      "agentId",
+      "commandPath",
+      "authMethodId",
+    ]);
   });
 
   it("derives a select control with its choices for the Antigravity sign-in method", () => {

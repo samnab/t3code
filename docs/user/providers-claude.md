@@ -43,13 +43,6 @@ T3 Code uses the Claude configuration on the connected server.
 
 ## Compact long conversations
 
-On web and desktop, when you return to an older Claude thread with a large context, T3 Code
-offers to compact the conversation before you continue. You can also select **Compact context**
-from the context meter (or the composer toolbar's compact control on mobile). On every client, you
-can enter `/compact` in the message composer, and
-Claude can show its own resume prompt when you continue an old session. T3 Code sends `/compact`
-as a normal message; Claude writes the summary itself.
-
 Set **Auto-compact after** in the Claude provider settings to an integer between
 `100000` and `1000000`. For example, `300000` asks Claude to summarize at about
 300,000 tokens. This changes when compaction happens, not the model's context

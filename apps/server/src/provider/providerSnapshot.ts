@@ -2,9 +2,9 @@ import type {
   CustomModelSetting,
   ProviderDriverKind,
   ModelCapabilities,
+  RuntimeMode,
   ServerProvider,
   ServerProviderAuth,
-  ServerProviderExecutionGoal,
   ServerProviderSkill,
   ServerProviderSlashCommand,
   ServerProviderModel,
@@ -66,9 +66,8 @@ export interface ServerProviderPresentation {
   readonly badgeLabel?: string;
   readonly showInteractionModeToggle?: boolean;
   readonly reportsContextWindow?: boolean;
+  readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
   readonly requiresNewThreadForModelChange?: boolean;
-  /** Whether the provider exposes native execution goals; absent = unsupported. */
-  readonly executionGoal?: ServerProviderExecutionGoal;
   readonly supportsConversationRollback?: boolean;
 }
 
@@ -229,11 +228,11 @@ export function buildServerProvider(input: {
     ...(typeof input.presentation.reportsContextWindow === "boolean"
       ? { reportsContextWindow: input.presentation.reportsContextWindow }
       : {}),
+    ...(input.presentation.supportedRuntimeModes === undefined
+      ? {}
+      : { supportedRuntimeModes: [...input.presentation.supportedRuntimeModes] }),
     ...(typeof input.presentation.requiresNewThreadForModelChange === "boolean"
       ? { requiresNewThreadForModelChange: input.presentation.requiresNewThreadForModelChange }
-      : {}),
-    ...(input.presentation.executionGoal !== undefined
-      ? { executionGoal: input.presentation.executionGoal }
       : {}),
     enabled: input.enabled,
     installed: input.probe.installed,

@@ -10,9 +10,15 @@ In **Settings → General → Send shortcut**, choose whether Enter sends, requi
 inserts a new line. This applies to the web and desktop composer at desktop widths.
 
 **Follow-up behavior** chooses Queue or Steer while the agent runs. Use
-`mod+Enter` to do the opposite for one message. When sending requires `mod+Enter`,
-use `mod+Shift+Enter` for the opposite action. In a new thread, `mod+Enter` keeps
-starting the thread in the background.
+`mod+Enter` to do the opposite for one message, even when the send shortcut
+requires a modifier. In a new thread, `mod+Alt+Enter` starts the thread in the
+background and opens a fresh composer. Change either shortcut in
+**Settings → Keybindings** under **Composer: Opposite Queue or Steer Action** or
+**Composer: Start in Background**. These bindings take priority over the send
+shortcut. Click the send button to use the configured follow-up behavior.
+
+When an active turn has queued messages, `mod+Shift+Enter` sends the first as a
+steer. Change it under **Queue: Send First Queued Message as Steer** in Keybindings.
 
 Use `mod+shift+m` to choose a model and `mod+shift+h` to choose a host.
 Use `mod+shift+e` for effort, `mod+shift+a` for access mode, `mod+shift+x` for the
@@ -84,7 +90,8 @@ Join modifiers and a key with `+`, such as `mod+shift+d` or `ctrl+l`.
 ## When conditions
 
 Available context keys are `terminalFocus`, `terminalOpen`, `previewFocus`,
-`previewOpen`, `modelPickerOpen`, `usagePageOpen`, `editableFocus`, `isWeb`, and `isDesktop`.
+`previewOpen`, `modelPickerOpen`, `usagePageOpen`, `composerFocus`, `composerDraft`,
+`turnRunning`, `editableFocus`, `isWeb`, and `isDesktop`.
 `editableFocus` is true while a text field, the composer, or another editor has
 the keyboard. `isWeb` is true in a browser tab. `isDesktop` is true in the
 desktop app. Unknown keys evaluate to `false`.
@@ -99,44 +106,6 @@ Combine keys with `!` for not, `&&` for and, `||` for or, and parentheses:
 ```json
 { "key": "mod+j", "command": "terminal.toggle", "when": "terminalOpen && !terminalFocus" }
 ```
-
-`rightPanel.toggleMaximized` maximizes or restores the open right panel. It has no default shortcut,
-so add one in **Settings** → **Keybindings** if you want to use it.
-
-`thread.copyReference` copies the active thread's pull request link, or its thread ID when no pull
-request is available. Its default shortcut is `mod+shift+c`, and it does not replace terminal copy
-while the terminal has focus.
-
-`thread.settle` settles the active thread or restores it when it is already settled. Its default
-shortcut is `mod+shift+s`, and it does not run while the terminal has focus.
-
-`thread.pin` pins the active thread to the pinned section of the sidebar, or unpins it when it is
-already pinned. Its default shortcut is `mod+shift+p`, and it does not run while the terminal has
-focus. See [Organizing threads](./thread-sidebar.md) for how pinned threads are ordered.
-
-`composer.goalMode` toggles the composer between goal mode and normal message mode when a thread
-goal control is available. Its default shortcut is `mod+shift+u`, and it does not run while the
-terminal has focus. See [Thread goals](./composer.md#thread-goals).
-
-The command palette searches settings, active thread titles, projects, branches, user messages, and
-final agent responses across connected environments. A setting result opens its exact control or
-section. Message matches show one labeled excerpt while keeping the thread's project, branch, and
-machine context visible. Message search begins after two characters and uses SQLite's ASCII
-case-insensitive matching.
-
-The full command list and the current defaults are shown in **Settings** → **Keybindings**, which
-always matches the build you are running. Use that rather than a copied list.
-
-Note that `chat.new` and `chat.newLocal` both create a thread through the same path. A new thread
-inherits the project you were in, along with model and mode selections. Branch, worktree, and
-environment mode always come from your configured defaults, not from the thread you were looking
-at. To keep a worktree, use the explicit "new thread in this worktree" action in the branch
-toolbar. The only difference between the two commands: with the current sidebar and more than one
-project, `chat.new` opens a project chooser first.
-
-Background submission from a new thread is the exception. `mod+enter` starts that thread and opens
-another new thread with the same workspace mode and base branch. **New worktree** remains selected,
-but the new thread does not reuse the worktree created for the thread that just started.
 
 ## Precedence
 

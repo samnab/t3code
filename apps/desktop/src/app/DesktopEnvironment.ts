@@ -1,4 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off - fork stage label must read synchronously before app ready, see readDesktopForkStageLabel below.
+// @effect-diagnostics nodeBuiltinImport:off - fork stage label must be read before Electron is ready.
+import * as NodeFS from "node:fs";
 import type {
   DesktopAppBranding,
   DesktopAppStageLabel,
@@ -11,7 +12,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as NodeFS from "node:fs";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
@@ -88,8 +88,6 @@ export class DesktopEnvironment extends Context.Service<
     readonly linuxWmClass: string;
     readonly linuxApplicationsDir: string;
     readonly appImagePath: Option.Option<string>;
-    readonly userDataDirName: string;
-    readonly legacyUserDataDirName: string;
     readonly defaultDesktopSettings: DesktopAppSettings.DesktopSettings;
     readonly runtimeInfo: DesktopRuntimeInfo;
     readonly resolvePickFolderDefaultPath: (rawOptions: unknown) => Option.Option<string>;
@@ -158,9 +156,7 @@ function resolveDesktopRuntimeInfo(input: {
   };
 }
 
-// Synchronous so Electron's `ready` event cannot fire (and so the Clerk
-// bridge's protocol.registerSchemesAsPrivileged, which must run before
-// `ready`, is never raced) while this awaits an async read.
+/** Reads the package stamp synchronously because Electron branding is needed before app readiness. */
 export function readDesktopForkStageLabel(packageJsonPath: string): boolean {
   try {
     const raw = NodeFS.readFileSync(packageJsonPath, "utf8");
@@ -197,10 +193,6 @@ const make = Effect.fn("desktop.environment.make")(function* (
     input.isPackaged && input.platform === "win32"
       ? path.join(input.resourcesPath, "server.asar")
       : appRoot;
-  // The packaged package.json is stamped with t3codeStageLabel by
-  // scripts/build-desktop-artifact.ts (T3CODE_DESKTOP_STAGE_LABEL) for fork
-  // builds that want their own visible branding, distinct from an official
-  // Alpha/Nightly install.
   const isFork = input.isPackaged
     ? readDesktopForkStageLabel(path.join(appRoot, "package.json"))
     : false;
@@ -216,22 +208,6 @@ const make = Effect.fn("desktop.environment.make")(function* (
     joinPath: path.join,
     t3Home: config.t3Home,
   });
-  // An explicit T3CODE_HOME (outside development) gets its own userData dir
-  // name so two installs sharing the default profile don't collide on the
-  // single-instance lock or renderer localStorage. Reusing that same name as
-  // the "legacy" name makes the legacy-migration check in
-  // DesktopAppIdentity.resolveUserDataPath a no-op (it just finds itself),
-  // rather than accidentally migrating from the shared legacy profile.
-  const explicitT3HomeDirName = Option.map(
-    Option.filter(config.t3Home, () => !isDevelopment),
-    (t3Home) => `t3code-${path.basename(t3Home).replace(/[^A-Za-z0-9._-]/g, "_")}`,
-  );
-  const userDataDirName = Option.getOrElse(explicitT3HomeDirName, () =>
-    isDevelopment ? "t3code-dev" : "t3code",
-  );
-  const legacyUserDataDirName = Option.getOrElse(explicitT3HomeDirName, () =>
-    isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)",
-  );
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
     "applications",
@@ -288,8 +264,6 @@ const make = Effect.fn("desktop.environment.make")(function* (
     linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
-    userDataDirName,
-    legacyUserDataDirName,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),
     runtimeInfo: resolveDesktopRuntimeInfo({
       platform: input.platform,

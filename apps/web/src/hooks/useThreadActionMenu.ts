@@ -1,28 +1,22 @@
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
-import { scopeProjectRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import {
-  deleteThreadGoalWork,
-  stopThreadGoalWork,
-} from "@t3tools/client-runtime/state/threadGoalEditor";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 
 import { resolveSnoozePresets } from "../components/Sidebar.snooze";
-import { openExecutionGoalDialog } from "../components/chat/CodexExecutionGoalDialog";
 import {
   buildThreadActionMenuItems,
   type ThreadActionMenuId,
 } from "../components/threadActionMenu.logic";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
-import { runThreadGoalMutation } from "../lib/threadGoalMutation";
 import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
@@ -32,7 +26,6 @@ import {
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsTitleRegeneration,
   readThreadShell,
-  readThreadSupportsExecutionGoal,
   useProjects,
 } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
@@ -43,7 +36,7 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
-import { useUiStateStore } from "../uiStateStore";
+import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
@@ -99,19 +92,12 @@ export function useThreadActionMenu(input: {
     setThreadAutoSettle,
     archiveThread,
     deleteThread,
+    markThreadUnread,
   } = useThreadActions();
-  const reloadAgent = useAtomCommand(threadEnvironment.stopSession, "reload agent");
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
-  const setThreadGoalLoop = useAtomCommand(threadEnvironment.setGoalLoop, {
-    reportFailure: false,
-  });
-  const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, {
-    reportFailure: false,
-  });
   const handleNewThread = useNewThreadHandler();
-  const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -157,8 +143,6 @@ export function useThreadActionMenu(input: {
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
         const items = buildThreadActionMenuItems({
           branch: thread.branch ?? null,
-          // The chat header has no project-scoped thread list behind the
-          // menu, so the "Filter by project" affordance is sidebar-only.
           projectFilter: null,
           isPinned: thread.pinnedAt != null,
           isSettled: supports.settlement && thread.settledOverride === "settled",
@@ -166,14 +150,8 @@ export function useThreadActionMenu(input: {
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
-          isRunning:
-            thread.session?.status === "starting" ||
-            (thread.session?.status === "running" && thread.session.activeTurnId != null),
-          hasReloadableSession: thread.session !== null && thread.session.status !== "stopped",
+          isRunning: !threadRuntimeCanArchive(thread.runtime),
           supports,
-          executionGoal: readThreadSupportsExecutionGoal(threadRef),
-          goal: thread.goal ?? null,
-          goalLoop: thread.goalLoop ?? null,
           snoozePresets,
         });
         const clicked = await settlePromise(() => api.contextMenu.show(items, position));
@@ -268,145 +246,8 @@ export function useThreadActionMenu(input: {
             );
             return;
           case "mark-unread":
-            markThreadUnread(scopedThreadKey(threadRef), thread.latestTurn?.completedAt);
+            markThreadUnread(threadRef);
             return;
-          case "execution-goal":
-            openExecutionGoalDialog(threadRef);
-            return;
-          case "pause-goal-loop":
-            await runThreadGoalMutation(threadRef, () =>
-              reportFailure("Failed to pause goal loop", () =>
-                setThreadGoalLoop({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, action: "pause" },
-                }),
-              ),
-            );
-            return;
-          case "resume-goal-loop":
-            await runThreadGoalMutation(threadRef, () =>
-              reportFailure("Failed to resume goal loop", () =>
-                setThreadGoalLoop({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, action: "resume" },
-                }),
-              ),
-            );
-            return;
-          case "continue-goal-loop":
-          case "restart-goal-loop":
-            await runThreadGoalMutation(threadRef, () =>
-              reportFailure(
-                action === "continue-goal-loop"
-                  ? "Failed to continue goal loop"
-                  : "Failed to restart goal loop",
-                () =>
-                  setThreadGoalLoop({
-                    environmentId: threadRef.environmentId,
-                    input: { threadId: threadRef.threadId, action: "reset" },
-                  }),
-              ),
-            );
-            return;
-          case "stop-goal-loop":
-            // Pause the loop before interrupting, or the interrupted turn's
-            // completion hands straight into the loop's next continuation.
-            await stopThreadGoalWork({
-              loop: thread.goalLoop ?? null,
-              pauseGoalLoop: async () => {
-                const result = await setThreadGoalLoop({
-                  environmentId: threadRef.environmentId,
-                  input: { threadId: threadRef.threadId, action: "pause" },
-                });
-                if (result._tag === "Failure") {
-                  if (!isAtomCommandInterrupted(result)) {
-                    failureToast("Failed to pause goal loop", squashAtomCommandFailure(result));
-                  }
-                  return false;
-                }
-                return true;
-              },
-              interruptActiveTurn: async () => {
-                const result = await interruptThreadTurn({
-                  environmentId: threadRef.environmentId,
-                  input: {
-                    threadId: threadRef.threadId,
-                    ...(thread.session?.activeTurnId
-                      ? { turnId: thread.session.activeTurnId }
-                      : {}),
-                  },
-                });
-                if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                  failureToast("Failed to stop goal work", squashAtomCommandFailure(result));
-                }
-                return result._tag === "Success";
-              },
-            });
-            return;
-          case "delete-goal":
-            await runThreadGoalMutation(threadRef, () =>
-              deleteThreadGoalWork({
-                loop: thread.goalLoop ?? null,
-                pauseGoalLoop: async () => {
-                  const result = await setThreadGoalLoop({
-                    environmentId: threadRef.environmentId,
-                    input: { threadId: threadRef.threadId, action: "pause" },
-                  });
-                  if (result._tag === "Failure") {
-                    if (!isAtomCommandInterrupted(result)) {
-                      failureToast("Failed to pause goal loop", squashAtomCommandFailure(result));
-                    }
-                    return false;
-                  }
-                  return true;
-                },
-                interruptActiveTurn: async () => {
-                  if (!thread.session?.activeTurnId) return true;
-                  const result = await interruptThreadTurn({
-                    environmentId: threadRef.environmentId,
-                    input: { threadId: threadRef.threadId, turnId: thread.session.activeTurnId },
-                  });
-                  // An interrupt failure still clears: removing the goal is
-                  // the point; the turn merely finishes on its own.
-                  if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                    failureToast("Failed to stop goal work", squashAtomCommandFailure(result));
-                  }
-                  return true;
-                },
-                clearGoal: async () => {
-                  const result = await updateThreadMetadata({
-                    environmentId: threadRef.environmentId,
-                    input: { threadId: threadRef.threadId, goal: null },
-                  });
-                  if (result._tag === "Failure") {
-                    if (!isAtomCommandInterrupted(result)) {
-                      failureToast("Failed to delete goal", squashAtomCommandFailure(result));
-                    }
-                    return false;
-                  }
-                  return true;
-                },
-              }),
-            );
-            return;
-          case "reload-agent": {
-            const result = await reloadAgent({
-              environmentId: threadRef.environmentId,
-              input: { threadId: threadRef.threadId },
-            });
-            if (result._tag === "Failure") {
-              if (!isAtomCommandInterrupted(result)) {
-                failureToast("Failed to reload agent", squashAtomCommandFailure(result));
-              }
-              return;
-            }
-            toastManager.add({
-              type: "success",
-              title: "Agent reloaded",
-              description: "The next message will resume in a fresh agent process.",
-            });
-            return;
-          }
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;
             if (!workspacePath) {
@@ -499,7 +340,6 @@ export function useThreadActionMenu(input: {
       projectCwd,
       projectGroupingSettings,
       projects,
-      reloadAgent,
       router,
       setThreadAutoSettle,
       settleThread,
@@ -509,8 +349,6 @@ export function useThreadActionMenu(input: {
       unsettleThread,
       unsnoozeThread,
       updateThreadMetadata,
-      setThreadGoalLoop,
-      interruptThreadTurn,
     ],
   );
 

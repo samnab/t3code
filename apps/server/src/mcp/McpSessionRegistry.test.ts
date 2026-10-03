@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, RuntimeTaskId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/unstable/http";
 import * as NetAddress from "effect/unstable/net/NetAddress";
@@ -48,6 +48,9 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
 
     const resolved = yield* registry.resolve(token);
     expect(resolved?.threadId).toBe(threadId);
+    expect(resolved?.capabilities).toEqual(
+      new Set(["preview", "orchestration", "worktree", "pull-requests"]),
+    );
 
     yield* registry.revokeThread(threadId);
     expect(yield* registry.resolve(token)).toBeUndefined();
@@ -79,9 +82,23 @@ it.effect("always grants pull-requests and gates browser and device access indep
         .resolve(issued.config.authorizationHeader.replace(/^Bearer\s+/, ""))
         .pipe(Effect.map((scope) => [...(scope?.capabilities ?? [])].sort()));
 
-    expect(yield* capabilitiesOf(withPreview)).toEqual(["preview", "pull-requests"]);
-    expect(yield* capabilitiesOf(withoutPreview)).toEqual(["pull-requests"]);
-    expect(yield* capabilitiesOf(withDevice)).toEqual(["device", "pull-requests"]);
+    expect(yield* capabilitiesOf(withPreview)).toEqual([
+      "orchestration",
+      "preview",
+      "pull-requests",
+      "worktree",
+    ]);
+    expect(yield* capabilitiesOf(withoutPreview)).toEqual([
+      "orchestration",
+      "pull-requests",
+      "worktree",
+    ]);
+    expect(yield* capabilitiesOf(withDevice)).toEqual([
+      "device",
+      "orchestration",
+      "pull-requests",
+      "worktree",
+    ]);
   }),
 );
 
@@ -161,147 +178,5 @@ it.effect("does not keep credentials of other threads alive", () =>
     timestamp += 2;
 
     expect(yield* registry.resolve(token)).toBeUndefined();
-  }),
-);
-
-it.effect("binds only explicitly granted MCP capabilities to the credential", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000);
-    const issued = yield* registry.issue({
-      threadId: ThreadId.make("delegation-only"),
-      providerInstanceId: ProviderInstanceId.make("codex"),
-      capabilities: ["delegation"],
-    });
-    const scope = yield* registry.resolve(
-      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
-    );
-    expect(scope?.capabilities.has("delegation")).toBe(true);
-    expect(scope?.capabilities.has("preview")).toBe(false);
-  }),
-);
-
-it.effect("issues a child-only messaging credential with a stable team binding", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000);
-    const threadId = ThreadId.make("child-thread");
-    const agentId = RuntimeTaskId.make("native-agent-1");
-    const parentThreadId = ThreadId.make("parent-thread");
-    const issued = yield* registry.issue({
-      threadId,
-      providerInstanceId: ProviderInstanceId.make("claude"),
-      capabilities: ["messaging"],
-      agentMessaging: { agentId, parentThreadId },
-    });
-
-    expect(issued.config.endpoint).toBe("http://127.0.0.1:43123/mcp/agent");
-    const scope = yield* registry.resolve(
-      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
-    );
-    expect(scope).toMatchObject({
-      threadId,
-      providerInstanceId: ProviderInstanceId.make("claude"),
-      agentMessaging: { agentId, parentThreadId },
-    });
-    expect(scope === undefined ? [] : [...scope.capabilities]).toEqual(["messaging"]);
-  }),
-);
-
-it.effect("replaces a thread credential with an experiment-only run binding", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000);
-    const threadId = ThreadId.make("experiment-thread");
-    const oldCredential = yield* registry.issue({
-      threadId,
-      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-      capabilities: ["preview", "delegation"],
-    });
-    const experimentCredential = yield* registry.issueExperiment({
-      threadId,
-      providerInstanceId: ProviderInstanceId.make("claudeAgent-restricted"),
-      providerSessionId: "provider-session-restricted",
-      runId: "experiment-run-7",
-      generation: 4,
-    });
-
-    expect(experimentCredential.config.endpoint).toBe("http://127.0.0.1:43123/mcp/experiment");
-    expect(
-      yield* registry.resolve(oldCredential.config.authorizationHeader.replace(/^Bearer\s+/, "")),
-    ).toBeUndefined();
-
-    const scope = yield* registry.resolve(
-      experimentCredential.config.authorizationHeader.replace(/^Bearer\s+/, ""),
-    );
-    expect(scope).toMatchObject({
-      threadId,
-      providerInstanceId: ProviderInstanceId.make("claudeAgent-restricted"),
-      providerSessionId: "provider-session-restricted",
-      experiment: { runId: "experiment-run-7", generation: 4 },
-    });
-    expect(scope).toBeDefined();
-    expect(scope === undefined ? [] : [...scope.capabilities]).toEqual(["experiment"]);
-  }),
-);
-
-it.effect("mints the experiment provider session pin when the caller omits it", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000);
-    const threadId = ThreadId.make("experiment-thread-fresh-pin");
-    const issued = yield* registry.issueExperiment({
-      threadId,
-      providerInstanceId: ProviderInstanceId.make("pi"),
-      runId: "experiment-run-fresh-pin",
-      generation: 2,
-    });
-
-    expect(issued.config.providerSessionId.length).toBeGreaterThan(0);
-    const scope = yield* registry.resolve(
-      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
-    );
-    expect(scope?.providerSessionId).toBe(issued.config.providerSessionId);
-  }),
-);
-
-it.effect("revokes an experiment credential by its provider session", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000);
-    const issued = yield* registry.issueExperiment({
-      threadId: ThreadId.make("experiment-thread-revoked"),
-      providerInstanceId: ProviderInstanceId.make("pi"),
-      providerSessionId: "experiment-provider-session",
-      runId: "experiment-run-revoked",
-      generation: 1,
-    });
-    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
-
-    yield* registry.revokeProviderSession("different-session");
-    expect(yield* registry.resolve(token)).toBeDefined();
-    yield* registry.revokeProviderSession("experiment-provider-session");
-    expect(yield* registry.resolve(token)).toBeUndefined();
-  }),
-);
-
-it.effect("revokes the prior generation when an experiment is rearmed with identical ids", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000);
-    const binding = {
-      threadId: ThreadId.make("experiment-thread-rearm"),
-      providerInstanceId: ProviderInstanceId.make("codex"),
-      providerSessionId: "experiment-provider-session-reused",
-      runId: "experiment-run-reused",
-    };
-    const stale = yield* registry.issueExperiment({ ...binding, generation: 1 });
-    const current = yield* registry.issueExperiment({ ...binding, generation: 2 });
-
-    expect(
-      yield* registry.resolve(stale.config.authorizationHeader.replace(/^Bearer\s+/, "")),
-    ).toBeUndefined();
-    expect(
-      yield* registry.resolve(current.config.authorizationHeader.replace(/^Bearer\s+/, "")),
-    ).toMatchObject({
-      threadId: binding.threadId,
-      providerInstanceId: binding.providerInstanceId,
-      providerSessionId: binding.providerSessionId,
-      experiment: { runId: binding.runId, generation: 2 },
-    });
   }),
 );

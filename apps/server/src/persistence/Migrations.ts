@@ -10,6 +10,8 @@
 
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -57,28 +59,17 @@ import Migration0042 from "./Migrations/042_ProjectionThreadLinkedPullRequest.ts
 import Migration0043 from "./Migrations/043_ProjectionThreadsUnsettledAt.ts";
 import Migration0044 from "./Migrations/044_ClearAutomaticProjectModelDefaults.ts";
 import Migration0045 from "./Migrations/045_ProjectionProjectsAutoPull.ts";
-import Migration0046 from "./Migrations/046_ProjectionSubagentRuns.ts";
-import Migration0047 from "./Migrations/047_ProjectionThreadGoal.ts";
-import Migration0048 from "./Migrations/048_ProjectionSubagentTranscripts.ts";
-import Migration0049 from "./Migrations/049_ProjectionThreadsVoiceNotifications.ts";
-import Migration0050 from "./Migrations/050_ProjectionThreadGoalLoop.ts";
-import Migration0051 from "./Migrations/051_NativeChildRuns.ts";
-import Migration0052 from "./Migrations/052_ProjectionThreadMessagesOrigin.ts";
-import Migration0053 from "./Migrations/053_RepairAutomaticSettlementTimestamps.ts";
-import Migration0054 from "./Migrations/054_ProjectionProjectIcon.ts";
-import Migration0055 from "./Migrations/055_ProjectionThreadBranchPullRequest.ts";
-import Migration0056 from "./Migrations/056_ProjectionThreadsActiveOrderKey.ts";
-import Migration0057 from "./Migrations/057_ThreadExperiments.ts";
-import Migration0058 from "./Migrations/058_NativeChildRunOptions.ts";
-import Migration0059 from "./Migrations/059_NativeChildMessaging.ts";
-import Migration0060 from "./Migrations/060_NativeChildDeliveryBatches.ts";
-import Migration0061 from "./Migrations/061_ProjectionThreadPullRequests.ts";
-import Migration0062 from "./Migrations/062_ProjectionThreadMessageContext.ts";
-import Migration0063 from "./Migrations/063_ProjectionThreadTitleState.ts";
-import Migration0064 from "./Migrations/064_ProjectionProjectsSchedules.ts";
-import Migration0065 from "./Migrations/065_PullRequestFilesViewed.ts";
-import Migration0066 from "./Migrations/066_ProjectionSubagentRunsFastMode.ts";
-import Migration0067 from "./Migrations/067_ProjectionThreadsAutoSettleDisabledAt.ts";
+import Migration0046 from "./Migrations/046_RepairAutomaticSettlementTimestamps.ts";
+import Migration0047 from "./Migrations/047_ProjectionProjectIcon.ts";
+import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts";
+import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
+import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
+import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
+import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
+import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
+import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
+import Migration0055 from "./Migrations/055_OrchestrationV2.ts";
+import Migration0056 from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -90,7 +81,7 @@ import Migration0067 from "./Migrations/067_ProjectionThreadsAutoSettleDisabledA
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  */
-const migrationEntries = [
+export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],
@@ -136,28 +127,19 @@ const migrationEntries = [
   [43, "ProjectionThreadsUnsettledAt", Migration0043],
   [44, "ClearAutomaticProjectModelDefaults", Migration0044],
   [45, "ProjectionProjectsAutoPull", Migration0045],
-  [46, "ProjectionSubagentRuns", Migration0046],
-  [47, "ProjectionThreadGoal", Migration0047],
-  [48, "ProjectionSubagentTranscripts", Migration0048],
-  [49, "ProjectionThreadsVoiceNotifications", Migration0049],
-  [50, "ProjectionThreadGoalLoop", Migration0050],
-  [51, "NativeChildRuns", Migration0051],
-  [52, "ProjectionThreadMessagesOrigin", Migration0052],
-  [53, "RepairAutomaticSettlementTimestamps", Migration0053],
-  [54, "ProjectionProjectIcon", Migration0054],
-  [55, "ProjectionThreadBranchPullRequest", Migration0055],
-  [56, "ProjectionThreadsActiveOrderKey", Migration0056],
-  [57, "ThreadExperiments", Migration0057],
-  [58, "NativeChildRunOptions", Migration0058],
-  [59, "NativeChildMessaging", Migration0059],
-  [60, "NativeChildDeliveryBatches", Migration0060],
-  [61, "ProjectionThreadPullRequests", Migration0061],
-  [62, "ProjectionThreadMessageContext", Migration0062],
-  [63, "ProjectionThreadTitleState", Migration0063],
-  [64, "ProjectionProjectsSchedules", Migration0064],
-  [65, "PullRequestFilesViewed", Migration0065],
-  [66, "ProjectionSubagentRunsFastMode", Migration0066],
-  [67, "ProjectionThreadsAutoSettleDisabledAt", Migration0067],
+  [46, "RepairAutomaticSettlementTimestamps", Migration0046],
+  [47, "ProjectionProjectIcon", Migration0047],
+  [48, "ProjectionThreadBranchPullRequest", Migration0048],
+  [49, "ProjectionThreadsActiveOrderKey", Migration0049],
+  [50, "ProjectionThreadPullRequests", Migration0050],
+  [51, "ProjectionThreadMessageContext", Migration0051],
+  [52, "ProjectionThreadTitleState", Migration0052],
+  [53, "PullRequestFilesViewed", Migration0053],
+  [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
+  // Released as 53 and 54 in V2 previews; reconcileV2PreviewMigration preserves their ledger.
+  // Preserve this migration's schema. Future V2 schema changes need new migrations.
+  [55, "OrchestrationV2", Migration0055],
+  [56, "RemoveRedundantProjectionIndexes", Migration0056],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -194,10 +176,42 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
+  const previewMigrations =
+    toMigrationInclusive === undefined || toMigrationInclusive >= 55
+      ? yield* reconcileV2PreviewMigration()
+      : [];
+  const executedMigrations = [
+    ...previewMigrations,
+    ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
+  ];
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
+
+  // The migrator keys on migration_id: a database that recorded a different
+  // migration under a shared id (local or fork builds) keeps that id and
+  // silently skips this build's migration at it. Surface the divergence so the
+  // skipped schema change is diagnosable.
+  const sql = yield* SqlClient.SqlClient;
+  const recorded = yield* sql<{
+    readonly migration_id: number;
+    readonly name: string;
+  }>`SELECT migration_id, name FROM effect_sql_migrations`;
+  const manifestNames = new Map<number, string>(migrationEntries.map(([id, name]) => [id, name]));
+  const divergent = recorded.flatMap((row) => {
+    const expected = manifestNames.get(row.migration_id);
+    if (expected === undefined) {
+      return [`${row.migration_id}:${row.name} (unknown to this build)`];
+    }
+    return expected === row.name
+      ? []
+      : [`${row.migration_id}:${row.name} (this build: ${expected})`];
+  });
+  if (divergent.length > 0) {
+    yield* Effect.logWarning(
+      "Database migration history diverges from this build; recorded migration ids are skipped, not reconciled by name.",
+    ).pipe(Effect.annotateLogs({ divergent }));
+  }
   return executedMigrations;
 });
