@@ -109,7 +109,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-execution";
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
 import { deriveThreadBackgroundWork } from "@t3tools/client-runtime/state/thread-background-work";
-import { deriveTurnOutputThroughput } from "@t3tools/client-runtime/state/tokenThroughput";
+import { deriveRunOutputThroughput } from "@t3tools/client-runtime/state/tokenThroughput";
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
@@ -2065,18 +2065,12 @@ export default function ChatView(props: ChatViewProps) {
   );
   const activeTurnOutputThroughput = useMemo(() => {
     if (serverProjection === null || serverLatestRun === null) return null;
-    for (const turn of serverProjection.providerTurns.toReversed()) {
-      const node = serverProjection.nodes.find((candidate) => candidate.id === turn.nodeId);
-      if (
-        node?.runId !== serverLatestRun.runId ||
-        turn.providerThreadId !== serverProjection.thread.activeProviderThreadId
-      ) {
-        continue;
-      }
-      const throughput = deriveTurnOutputThroughput(turn);
-      if (throughput !== null) return throughput;
-    }
-    return null;
+    return deriveRunOutputThroughput({
+      providerTurns: serverProjection.providerTurns,
+      nodes: serverProjection.nodes,
+      runId: serverLatestRun.runId,
+      providerThreadId: serverProjection.thread.activeProviderThreadId,
+    });
   }, [serverLatestRun, serverProjection]);
   const serverActivityRun = useMemo(
     () => (serverProjection === null ? null : deriveThreadActivityRun(serverProjection)),
