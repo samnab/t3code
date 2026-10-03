@@ -1509,105 +1509,6 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
     }).pipe(Effect.provide(Layer.fresh(TestLayer))),
   );
 
-  it.effect("delivers a command's events ahead of the work its wakeup releases", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      const eventStore = yield* EventStore.EventStoreV2;
-      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
-      const outbox = yield* EffectOutbox.EffectOutboxV2;
-      // Stands in for the effect worker an outbox notification wakes: it writes
-      // its own, later event the moment the outbox is notified.
-      const wokenWork = yield* Ref.make<Effect.Effect<void>>(Effect.void);
-      const sqlProvided = Layer.succeed(SqlClient.SqlClient, sql);
-      const sinkLayer = Layer.fresh(EventSink.layerFromStores).pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            sqlProvided,
-            Layer.succeed(EventStore.EventStoreV2, eventStore),
-            Layer.succeed(ProjectionStore.ProjectionStoreV2, projectionStore),
-            Layer.succeed(CommandReceiptStore.CommandReceiptStoreV2, receipts),
-            Layer.succeed(EffectOutbox.EffectOutboxV2, {
-              ...outbox,
-              notifyAvailable: (count?: number) =>
-                Effect.flatMap(Ref.get(wokenWork), (work) => work).pipe(
-                  Effect.andThen(outbox.notifyAvailable(count)),
-                ),
-            }),
-            ProjectStore.layer.pipe(Layer.provide(sqlProvided)),
-            TurnItemPositionStore.layer.pipe(Layer.provide(sqlProvided)),
-          ),
-        ),
-      );
-
-      yield* Effect.gen(function* () {
-        const eventSink = yield* EventSink.EventSinkV2;
-        const now = yield* DateTime.now;
-        const commandId = CommandId.make("command:foundation-wake-ordering");
-        const threadId = ThreadId.make("thread:foundation-wake-ordering");
-        const thread = makeThread(threadId, now);
-        const metadataEvent = (id: string, title: string): OrchestrationV2DomainEvent => ({
-          id: EventId.make(id),
-          type: "thread.metadata-updated",
-          threadId,
-          occurredAt: now,
-          payload: { ...thread, title },
-        });
-
-        const delivered: Array<number> = [];
-        const subscribed = yield* Deferred.make<void>();
-        const deliveredWokenEvent = yield* Deferred.make<void>();
-        const subscriber = yield* Stream.runForEach(eventSink.stream({ threadId }), (stored) =>
-          Effect.suspend(() => {
-            delivered.push(stored.sequence);
-            return delivered.length < 3
-              ? Deferred.succeed(subscribed, undefined)
-              : Deferred.succeed(deliveredWokenEvent, undefined);
-          }),
-        ).pipe(Effect.forkChild);
-
-        yield* eventSink.write({
-          events: [threadCreatedEvent({ id: "event:foundation-wake-ordering", thread, now })],
-        });
-        yield* Deferred.await(subscribed);
-        yield* Ref.set(
-          wokenWork,
-          eventSink
-            .write({ events: [metadataEvent("event:foundation-wake-ordering:woken", "Woken")] })
-            .pipe(Effect.asVoid, Effect.orDie),
-        );
-
-        const committed = yield* eventSink.commitCommand({
-          commandId,
-          threadId,
-          commandType: "foundation.wake-ordering",
-          acceptedAt: now,
-          events: [metadataEvent("event:foundation-wake-ordering:command", "Committed")],
-          effects: [
-            {
-              id: "effect:foundation-wake-ordering",
-              commandId,
-              threadId,
-              request: { type: "terminal.cleanup" as const },
-            },
-          ],
-        });
-        assert.isTrue(committed.committed);
-        yield* Deferred.await(deliveredWokenEvent);
-        yield* Fiber.interrupt(subscriber);
-
-        // Subscribers discard events at or below their cursor, so a later event
-        // reaching them first costs them the command's events for good.
-        assert.lengthOf(delivered, 3);
-        assert.deepEqual(
-          delivered,
-          [...delivered].sort((left, right) => left - right),
-        );
-      }).pipe(Effect.provide(sinkLayer));
-      // Fresh state: the command leaves an unclaimed effect row behind.
-    }).pipe(Effect.provide(Layer.fresh(TestLayer))),
-  );
-
   it.effect("does not publish a stale provider start after an interrupt wins", () =>
     Effect.gen(function* () {
       const eventSink = yield* EventSink.EventSinkV2;
@@ -2401,6 +2302,76 @@ it.layer(TestLayer)("orchestration V2 foundation persistence", (it) => {
           workerId: "cancellation-wakeup-worker",
         });
       }
+    }).pipe(Effect.provide(Layer.fresh(effectOutboxProvided))),
+  );
+
+  it.effect("keeps later thread effects behind an earlier effect waiting to retry", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const workerId = "retry-order-worker";
+      const commandId = CommandId.make("command:foundation-retry-order");
+      const threadId = ThreadId.make("thread:foundation-retry-order");
+      yield* outbox.enqueue([
+        {
+          id: "effect:foundation-retry-order:z-rollback",
+          commandId,
+          threadId,
+          request: {
+            type: "provider-thread.rollback",
+            providerThreadId: ProviderThreadId.make("provider-thread:foundation-retry-order"),
+            checkpointId: CheckpointId.make("checkpoint:foundation-retry-order"),
+            scopeId: CheckpointScopeId.make("scope:foundation-retry-order"),
+          },
+        },
+      ]);
+      const rollback = yield* outbox.claimNext({ workerId, leaseDurationMs: 30_000 });
+      assert.isTrue(Option.isSome(rollback));
+      if (Option.isNone(rollback)) return;
+      yield* outbox.retry({
+        effectId: rollback.value.id,
+        workerId,
+        error: "rollback failed once",
+        delayMs: 60_000,
+      });
+
+      // A turn the user starts during the rollback's backoff must not run first,
+      // even when its timestamp ties and its id sorts first.
+      yield* outbox.enqueue([
+        {
+          id: "effect:foundation-retry-order:a-start",
+          commandId: CommandId.make("command:foundation-retry-order:start"),
+          threadId,
+          request: { type: "provider-turn.start", runId: RunId.make("run:foundation-retry-order") },
+        },
+        {
+          id: "effect:foundation-retry-order:b-title",
+          commandId: CommandId.make("command:foundation-retry-order:title"),
+          threadId,
+          request: { type: "thread-title.generate", kind: { type: "regenerate" } },
+        },
+      ]);
+      const title = yield* outbox.claimNext({ workerId, leaseDurationMs: 30_000 });
+      assert.equal(Option.getOrUndefined(title)?.id, "effect:foundation-retry-order:b-title");
+      const blocked = yield* outbox.claimNext({ workerId, leaseDurationMs: 30_000 });
+      assert.isTrue(Option.isNone(blocked));
+      const nextClaimable = yield* outbox.nextClaimableAt;
+      assert.isTrue(Option.isSome(nextClaimable));
+      if (Option.isSome(nextClaimable)) {
+        assert.equal(
+          DateTime.formatIso(nextClaimable.value),
+          (yield* outbox.get(rollback.value.id)).pipe(Option.getOrThrow).availableAt,
+        );
+      }
+
+      yield* outbox.cancelUnsettled({
+        threadId,
+        effectTypes: ["provider-thread.rollback"],
+        reason: "Test cleanup.",
+      });
+      const unblocked = yield* outbox.claimNext({ workerId, leaseDurationMs: 30_000 });
+      assert.equal(Option.getOrUndefined(unblocked)?.id, "effect:foundation-retry-order:a-start");
+      yield* outbox.succeed({ effectId: "effect:foundation-retry-order:a-start", workerId });
+      yield* outbox.succeed({ effectId: "effect:foundation-retry-order:b-title", workerId });
     }).pipe(Effect.provide(Layer.fresh(effectOutboxProvided))),
   );
 
@@ -3322,4 +3293,91 @@ it.live("keeps claiming new work after repeated idle periods", () =>
       }
     }).pipe(Effect.provide(workerLayer), Effect.scoped);
   }).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("publishes live events in commit order across concurrent writers", () =>
+  Effect.gen(function* () {
+    const firstCommitted = yield* Deferred.make<void>();
+    const releaseFirst = yield* Deferred.make<void>();
+    // The first writer's post-commit wakeup stands in for any scheduler yield
+    // between its commit and its publish.
+    const pausingOutbox = Layer.effect(
+      EffectOutbox.EffectOutboxV2,
+      Effect.gen(function* () {
+        const delegate = yield* EffectOutbox.EffectOutboxV2;
+        return EffectOutbox.EffectOutboxV2.of({
+          ...delegate,
+          notifyAvailable: (count) =>
+            Deferred.succeed(firstCommitted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseFirst)),
+              Effect.andThen(delegate.notifyAvailable(count)),
+            ),
+        });
+      }),
+    ).pipe(Layer.provide(effectOutboxProvided));
+    const eventSinkLayer = EventSink.layerFromStores.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          storesProvided,
+          pausingOutbox,
+          commandReceiptStoreProvided,
+          ProjectStore.layer.pipe(Layer.provide(databaseLayer)),
+          TurnItemPositionStore.layer.pipe(Layer.provide(databaseLayer)),
+        ),
+      ),
+    );
+
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const first = makeThread(ThreadId.make("thread:foundation-publish-order:first"), now);
+      const second = makeThread(ThreadId.make("thread:foundation-publish-order:second"), now);
+      const published = yield* eventSink
+        .stream({ afterSequence: yield* eventSink.latestSequence() })
+        .pipe(Stream.take(2), Stream.runCollect, Effect.forkScoped({ startImmediately: true }));
+
+      const firstWrite = yield* eventSink
+        .writeWithEffects({
+          events: [
+            threadCreatedEvent({ id: "event:foundation-publish-order:first", thread: first, now }),
+          ],
+          effects: [
+            {
+              id: "effect:foundation-publish-order:first",
+              commandId: CommandId.make("command:foundation-publish-order:first"),
+              threadId: first.id,
+              request: { type: "terminal.cleanup" },
+            },
+          ],
+        })
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(firstCommitted);
+      // The second writer commits after the first. It may run as far as it can
+      // before the first writer resumes.
+      const secondWrite = yield* eventSink
+        .write({
+          events: [
+            threadCreatedEvent({
+              id: "event:foundation-publish-order:second",
+              thread: second,
+              now,
+            }),
+          ],
+        })
+        .pipe(
+          Effect.provideService(Scheduler.MaxOpsBeforeYield, Number.POSITIVE_INFINITY),
+          Effect.forkScoped,
+        );
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(releaseFirst, undefined);
+      yield* Fiber.join(firstWrite);
+      yield* Fiber.join(secondWrite);
+
+      const sequences = Array.from(yield* Fiber.join(published), (stored) => stored.sequence);
+      assert.deepEqual(
+        sequences,
+        [...sequences].sort((left, right) => left - right),
+      );
+    }).pipe(Effect.provide(eventSinkLayer));
+  }).pipe(Effect.provide(databaseLayer)),
 );
