@@ -277,6 +277,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
                 binaryPath: effective.config.binaryPath,
                 homePath: effective.config.homePath,
                 launchArgs: effective.config.launchArgs,
+                maxConcurrentSubagents: config.maxConcurrentSubagents,
                 cwd,
                 environment: effective.environment,
               }),

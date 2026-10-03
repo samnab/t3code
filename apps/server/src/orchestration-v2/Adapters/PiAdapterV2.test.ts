@@ -310,13 +310,18 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   } satisfies FakePi;
 });
 
-const makeAdapter = Effect.fnUntraced(function* (fake: FakePi, launchArgs = "", forkFake?: FakePi) {
+const makeAdapter = Effect.fnUntraced(function* (
+  fake: FakePi,
+  launchArgs = "",
+  forkFake?: FakePi,
+  modelConcurrency: Readonly<Record<string, number>> = {},
+) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   return makePiAdapterV2({
     instanceId: PI_INSTANCE_ID,
-    settings: { enabled: true, binaryPath: "pi", launchArgs, customModels: [] },
+    settings: { enabled: true, binaryPath: "pi", launchArgs, customModels: [], modelConcurrency },
     environment: {},
     spawner:
       forkFake === undefined
@@ -332,14 +337,12 @@ const makeAdapter = Effect.fnUntraced(function* (fake: FakePi, launchArgs = "", 
   });
 });
 
-const openRuntime = Effect.fnUntraced(function* (
-  fake: FakePi,
+const openAdapterRuntime = Effect.fnUntraced(function* (
+  adapter: ReturnType<typeof makePiAdapterV2>,
   model = "default",
   threadId = THREAD_ID,
   providerSessionId = SESSION_ID,
-  forkFake?: FakePi,
 ) {
-  const adapter = yield* makeAdapter(fake, "", forkFake);
   const runtime = yield* adapter.openSession({
     threadId,
     providerSessionId,
@@ -359,6 +362,47 @@ const openRuntime = Effect.fnUntraced(function* (
       }
     });
   return { runtime, takeEvent };
+});
+
+const openRuntime = Effect.fnUntraced(function* (
+  fake: FakePi,
+  model = "default",
+  threadId = THREAD_ID,
+  providerSessionId = SESSION_ID,
+  forkFake?: FakePi,
+) {
+  const adapter = yield* makeAdapter(fake, "", forkFake);
+  return yield* openAdapterRuntime(adapter, model, threadId, providerSessionId);
+});
+
+const makeMultiSessionAdapter = Effect.fnUntraced(function* (
+  fakes: ReadonlyArray<FakePi>,
+  modelConcurrency: Readonly<Record<string, number>>,
+) {
+  const idAllocator = yield* IdAllocator.IdAllocatorV2;
+  const serverConfig = yield* ServerConfig.ServerConfig;
+  const fileSystem = yield* FileSystem.FileSystem;
+  let nextFake = 0;
+  return makePiAdapterV2({
+    instanceId: PI_INSTANCE_ID,
+    settings: {
+      enabled: true,
+      binaryPath: "pi",
+      launchArgs: "",
+      customModels: [],
+      modelConcurrency,
+    },
+    environment: {},
+    spawner: ChildProcessSpawner.make((command) => {
+      const fake = fakes[nextFake++];
+      return fake === undefined
+        ? Effect.die("Pi test opened more sessions than configured")
+        : fake.spawner.spawn(command);
+    }),
+    fileSystem,
+    idAllocator,
+    serverConfig,
+  });
 });
 
 const makeAppThread = Effect.fnUntraced(function* (model: string, threadId = THREAD_ID) {
@@ -421,6 +465,36 @@ const startTurn = Effect.fnUntraced(function* (
   });
 });
 
+const CAPPED_MODEL = "zai/glm-5";
+const SECOND_THREAD_ID = ThreadId.make("thread-pi-test-second");
+const SECOND_SESSION_ID = ProviderSessionId.make("provider-session-pi-test-second");
+
+const openConcurrentRuntimes = Effect.fnUntraced(function* (
+  modelConcurrency: Readonly<Record<string, number>>,
+) {
+  const firstFake = yield* makeFakePi;
+  const secondFake = yield* makeFakePi;
+  const adapter = yield* makeMultiSessionAdapter([firstFake, secondFake], modelConcurrency);
+  const first = yield* openAdapterRuntime(adapter, CAPPED_MODEL, THREAD_ID, SESSION_ID);
+  const second = yield* openAdapterRuntime(
+    adapter,
+    CAPPED_MODEL,
+    SECOND_THREAD_ID,
+    SECOND_SESSION_ID,
+  );
+  const firstProviderThread = yield* first.runtime.ensureThread({
+    threadId: THREAD_ID,
+    modelSelection: modelSelection(CAPPED_MODEL),
+    runtimePolicy,
+  });
+  const secondProviderThread = yield* second.runtime.ensureThread({
+    threadId: SECOND_THREAD_ID,
+    modelSelection: modelSelection(CAPPED_MODEL),
+    runtimePolicy,
+  });
+  return { firstFake, secondFake, first, second, firstProviderThread, secondProviderThread };
+});
+
 const expectModelFailure = (errorMessage: string) =>
   Effect.gen(function* () {
     const fake = yield* makeFakePi;
@@ -461,6 +535,123 @@ const expectModelFailure = (errorMessage: string) =>
   }).pipe(Effect.scoped, Effect.provide(testLayer));
 
 describe("PiAdapterV2", () => {
+  it.effect("waits for a capped model slot until the active turn completes", () =>
+    Effect.gen(function* () {
+      const setup = yield* openConcurrentRuntimes({ [CAPPED_MODEL]: 1 });
+      yield* startTurn(setup.first.runtime, setup.firstProviderThread, CAPPED_MODEL);
+      yield* setup.firstFake.takeRequest("prompt");
+
+      const waiting = yield* startTurn(
+        setup.second.runtime,
+        setup.secondProviderThread,
+        CAPPED_MODEL,
+        [],
+        "Second turn",
+        undefined,
+        1,
+        SECOND_THREAD_ID,
+      ).pipe(Effect.forkChild);
+      yield* setup.secondFake.takeRequest("set_model");
+      yield* Effect.yieldNow;
+      assert.isUndefined(waiting.pollUnsafe());
+      assert.isFalse(setup.secondFake.allRequests().some((request) => request.type === "prompt"));
+
+      yield* setup.firstFake.emit({ type: "agent_start" });
+      yield* setup.firstFake.emit({ type: "agent_settled" });
+      yield* setup.first.takeEvent((event) => event.type === "turn.terminal");
+      yield* Fiber.join(waiting);
+      yield* setup.secondFake.takeRequest("prompt");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("releases a capped model slot when the active turn is interrupted", () =>
+    Effect.gen(function* () {
+      const setup = yield* openConcurrentRuntimes({ [CAPPED_MODEL]: 1 });
+      yield* startTurn(setup.first.runtime, setup.firstProviderThread, CAPPED_MODEL);
+      yield* setup.firstFake.takeRequest("prompt");
+      const running = yield* setup.first.takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      if (running.type !== "provider_turn.updated") return yield* Effect.die("unreachable");
+
+      const waiting = yield* startTurn(
+        setup.second.runtime,
+        setup.secondProviderThread,
+        CAPPED_MODEL,
+        [],
+        "Second turn",
+        undefined,
+        1,
+        SECOND_THREAD_ID,
+      ).pipe(Effect.forkChild);
+      yield* setup.secondFake.takeRequest("set_model");
+      yield* setup.first.runtime.interruptTurn({
+        providerThread: setup.firstProviderThread,
+        providerTurnId: running.providerTurn.id,
+      });
+      yield* setup.firstFake.takeRequest("abort");
+      yield* setup.firstFake.emit({ type: "agent_settled" });
+      yield* setup.first.takeEvent(
+        (event) => event.type === "turn.terminal" && event.status === "interrupted",
+      );
+
+      yield* Fiber.join(waiting);
+      yield* setup.secondFake.takeRequest("prompt");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("releases a capped model slot when Pi rejects the active turn", () =>
+    Effect.gen(function* () {
+      const setup = yield* openConcurrentRuntimes({ [CAPPED_MODEL]: 1 });
+      yield* startTurn(setup.first.runtime, setup.firstProviderThread, CAPPED_MODEL);
+      yield* setup.firstFake.takeRequest("prompt");
+      const waiting = yield* startTurn(
+        setup.second.runtime,
+        setup.secondProviderThread,
+        CAPPED_MODEL,
+        [],
+        "Second turn",
+        undefined,
+        1,
+        SECOND_THREAD_ID,
+      ).pipe(Effect.forkChild);
+      yield* setup.secondFake.takeRequest("set_model");
+
+      yield* setup.firstFake.emit({
+        type: "response",
+        command: "prompt",
+        success: false,
+        error: "prompt rejected",
+      });
+      yield* setup.first.takeEvent(
+        (event) => event.type === "turn.terminal" && event.status === "failed",
+      );
+      yield* Fiber.join(waiting);
+      yield* setup.secondFake.takeRequest("prompt");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("does not block an uncapped model while a capped model is active", () =>
+    Effect.gen(function* () {
+      const setup = yield* openConcurrentRuntimes({ [CAPPED_MODEL]: 1 });
+      yield* startTurn(setup.first.runtime, setup.firstProviderThread, CAPPED_MODEL);
+      yield* setup.firstFake.takeRequest("prompt");
+
+      yield* startTurn(
+        setup.second.runtime,
+        setup.secondProviderThread,
+        "anthropic/claude-sonnet-4-5",
+        [],
+        "Uncapped turn",
+        undefined,
+        1,
+        SECOND_THREAD_ID,
+      );
+      yield* setup.secondFake.takeRequest("prompt");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("stops provider-initiated work that has no T3 turn owner", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

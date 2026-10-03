@@ -153,7 +153,12 @@ it.layer(testLayer)("CodexDriver", (it) => {
           displayName: "Restored account",
           enabled: true,
           environment: [{ name: "OPENAI_API_KEY", value: "ambient-key", sensitive: true }],
-          config: { ...CodexDriver.defaultConfig(), setupMode: "managed", homePath: sharedHome },
+          config: {
+            ...CodexDriver.defaultConfig(),
+            setupMode: "managed",
+            homePath: sharedHome,
+            maxConcurrentSubagents: "20",
+          },
         }).pipe(
           Effect.provideService(
             CodexAdapterV2.CodexAppServerClientFactory,
@@ -223,6 +228,7 @@ it.layer(testLayer)("CodexDriver", (it) => {
         const launch = launches[0]!;
         expect(launch.settings.binaryPath).toBe(executable.executablePath);
         expect(launch.settings.launchArgs).toContain("openai_token_sharing");
+        expect(launch.settings.maxConcurrentSubagents).toBe("20");
         expect(launch.environment.ACCESS_TOKEN).toBe("dummy-owned-access");
         expect(launch.environment.OPENAI_API_KEY).toBeUndefined();
         expect(launch.environment.CODEX_HOME).toBe(launch.settings.homePath);

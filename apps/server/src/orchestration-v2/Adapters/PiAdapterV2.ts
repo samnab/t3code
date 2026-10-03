@@ -51,6 +51,7 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -328,6 +329,8 @@ interface ActivePiTurn {
   activeCompaction: PiCompactionState | null;
   activeProviderRetry: PiProviderRetryState | null;
   failure: ReturnType<typeof makeProviderFailure> | null;
+  /** Per-model adapter permit held from admission through terminalization. */
+  readonly slot: PiTurnSlot | null;
   /** Session-tree refs read just before Stop terminates Pi, when no read is possible later. */
   stopTreeRefs?: PiTurnTreeRefs | null;
 }
@@ -365,12 +368,35 @@ interface PiThreadState {
   activeTurn: ActivePiTurn | null;
 }
 
+interface PiTurnSlot {
+  readonly model: string;
+  readonly semaphore: Semaphore.Semaphore;
+  released: boolean;
+}
+
 // ── adapter ───────────────────────────────────────────────────
 
 export function makePiAdapterV2(
   options: PiAdapterV2Options,
 ): ProviderAdapter.ProviderAdapterV2Shape {
   const { idAllocator } = options;
+  const modelSemaphores = new Map<string, Semaphore.Semaphore>();
+
+  const acquireTurnSlot = (model: string | undefined): Effect.Effect<PiTurnSlot | null> => {
+    if (model === undefined) return Effect.succeed(null);
+    const cap = options.settings.modelConcurrency[model];
+    if (cap === undefined) return Effect.succeed(null);
+    const semaphore = modelSemaphores.get(model) ?? Semaphore.makeUnsafe(cap);
+    modelSemaphores.set(model, semaphore);
+    return semaphore.take(1).pipe(Effect.as({ model, semaphore, released: false }));
+  };
+
+  const releaseTurnSlot = (slot: PiTurnSlot | null) =>
+    Effect.suspend(() => {
+      if (slot === null || slot.released) return Effect.void;
+      slot.released = true;
+      return slot.semaphore.release(1).pipe(Effect.asVoid);
+    });
 
   const protocolError = (detail: string, payload?: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
@@ -469,6 +495,7 @@ export function makePiAdapterV2(
       // dialog's own resolution updates.
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
+      yield* Effect.addFinalizer(() => releaseTurnSlot(threadState?.activeTurn?.slot ?? null));
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
       // User Stop intentionally tears down this RPC process after aborting.
@@ -1401,109 +1428,111 @@ export function makePiAdapterV2(
         const turn = state.activeTurn;
         if (turn === null) return;
         state.activeTurn = null;
-        const completedAt = yield* DateTime.now;
-        yield* completeOpenStreamItems(turn);
-        if (turn.activeCompaction !== null) {
-          const status = turn.interrupted
-            ? "cancelled"
-            : turn.failure === null
-              ? "completed"
-              : "failed";
-          yield* emitCompaction(turn, turn.activeCompaction, status);
-          turn.activeCompaction = null;
-        }
-        if (turn.activeProviderRetry !== null) {
-          if (turn.interrupted) {
-            yield* emitProviderRetry(turn, turn.activeProviderRetry, "interrupted", completedAt);
-            turn.activeProviderRetry = null;
-          } else if (turn.failure === null) {
-            yield* emitProviderRetry(turn, turn.activeProviderRetry, "completed", completedAt);
-            turn.activeProviderRetry = null;
+        yield* Effect.gen(function* () {
+          const completedAt = yield* DateTime.now;
+          yield* completeOpenStreamItems(turn);
+          if (turn.activeCompaction !== null) {
+            const status = turn.interrupted
+              ? "cancelled"
+              : turn.failure === null
+                ? "completed"
+                : "failed";
+            yield* emitCompaction(turn, turn.activeCompaction, status);
+            turn.activeCompaction = null;
           }
-        }
-        yield* cancelPendingPrompts(completedAt);
-        const treeRefs =
-          turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
-        const tokenUsage = readUsage
-          ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
-          : undefined;
-        const failure = turn.interrupted ? null : turn.failure;
-        yield* emit({
-          type: "provider_turn.updated",
-          driver: PI_PROVIDER,
-          threadId: turn.turnInput.threadId,
-          providerTurn: {
-            ...turn.providerTurn,
-            ...(treeRefs?.turnStartEntryId == null
-              ? {}
-              : { nativeTurnRef: providerRef(treeRefs.turnStartEntryId) }),
-            status: turn.interrupted ? "interrupted" : failure !== null ? "failed" : "completed",
-            completedAt,
-            ...(tokenUsage === undefined ? {} : { tokenUsage }),
-          },
-        });
-        yield* updateProviderThread(state, {
-          status: "idle",
-          ...(treeRefs?.leafId == null
-            ? {}
-            : { nativeConversationHeadRef: providerRef(treeRefs.leafId) }),
-        });
-        yield* updateProviderSession(
-          failure !== null ? "error" : "ready",
-          failure?.message ?? null,
-        );
-        if (failure !== null) {
-          const failureItemId = `terminal-failure:${turn.providerTurn.id}`;
           if (turn.activeProviderRetry !== null) {
-            yield* emitProviderRetry(
-              turn,
-              { ...turn.activeProviderRetry, failure },
-              "failed",
+            if (turn.interrupted) {
+              yield* emitProviderRetry(turn, turn.activeProviderRetry, "interrupted", completedAt);
+              turn.activeProviderRetry = null;
+            } else if (turn.failure === null) {
+              yield* emitProviderRetry(turn, turn.activeProviderRetry, "completed", completedAt);
+              turn.activeProviderRetry = null;
+            }
+          }
+          yield* cancelPendingPrompts(completedAt);
+          const treeRefs =
+            turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
+          const tokenUsage = readUsage
+            ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
+            : undefined;
+          const failure = turn.interrupted ? null : turn.failure;
+          yield* emit({
+            type: "provider_turn.updated",
+            driver: PI_PROVIDER,
+            threadId: turn.turnInput.threadId,
+            providerTurn: {
+              ...turn.providerTurn,
+              ...(treeRefs?.turnStartEntryId == null
+                ? {}
+                : { nativeTurnRef: providerRef(treeRefs.turnStartEntryId) }),
+              status: turn.interrupted ? "interrupted" : failure !== null ? "failed" : "completed",
               completedAt,
-            );
+              ...(tokenUsage === undefined ? {} : { tokenUsage }),
+            },
+          });
+          yield* updateProviderThread(state, {
+            status: "idle",
+            ...(treeRefs?.leafId == null
+              ? {}
+              : { nativeConversationHeadRef: providerRef(treeRefs.leafId) }),
+          });
+          yield* updateProviderSession(
+            failure !== null ? "error" : "ready",
+            failure?.message ?? null,
+          );
+          if (failure !== null) {
+            const failureItemId = `terminal-failure:${turn.providerTurn.id}`;
+            if (turn.activeProviderRetry !== null) {
+              yield* emitProviderRetry(
+                turn,
+                { ...turn.activeProviderRetry, failure },
+                "failed",
+                completedAt,
+              );
+            } else {
+              yield* emit({
+                type: "turn_item.updated",
+                driver: PI_PROVIDER,
+                turnItem: {
+                  ...baseItemFields(turn, failureItemId, completedAt, completedAt),
+                  status: "failed",
+                  title: null,
+                  completedAt,
+                  type: "error",
+                  failure,
+                },
+              });
+            }
+            yield* emit({
+              type: "turn.terminal",
+              driver: PI_PROVIDER,
+              providerThreadId: state.providerThread.id,
+              providerTurnId: turn.providerTurn.id,
+              runOrdinal: turn.turnInput.runOrdinal,
+              failureItemOrdinal: itemOrdinal(turn, failureItemId),
+              status: "failed",
+              failure,
+              ...(turn.activeProviderRetry === null
+                ? {}
+                : {
+                    retry: turn.activeProviderRetry.retry,
+                    retryStartedAt: turn.activeProviderRetry.startedAt,
+                  }),
+              threadDisposition: "reusable",
+            });
           } else {
             yield* emit({
-              type: "turn_item.updated",
+              type: "turn.terminal",
               driver: PI_PROVIDER,
-              turnItem: {
-                ...baseItemFields(turn, failureItemId, completedAt, completedAt),
-                status: "failed",
-                title: null,
-                completedAt,
-                type: "error",
-                failure,
-              },
+              providerThreadId: state.providerThread.id,
+              providerTurnId: turn.providerTurn.id,
+              runOrdinal: turn.turnInput.runOrdinal,
+              status: turn.interrupted ? "interrupted" : "completed",
+              failure: null,
+              threadDisposition: "reusable",
             });
           }
-          yield* emit({
-            type: "turn.terminal",
-            driver: PI_PROVIDER,
-            providerThreadId: state.providerThread.id,
-            providerTurnId: turn.providerTurn.id,
-            runOrdinal: turn.turnInput.runOrdinal,
-            failureItemOrdinal: itemOrdinal(turn, failureItemId),
-            status: "failed",
-            failure,
-            ...(turn.activeProviderRetry === null
-              ? {}
-              : {
-                  retry: turn.activeProviderRetry.retry,
-                  retryStartedAt: turn.activeProviderRetry.startedAt,
-                }),
-            threadDisposition: "reusable",
-          });
-        } else {
-          yield* emit({
-            type: "turn.terminal",
-            driver: PI_PROVIDER,
-            providerThreadId: state.providerThread.id,
-            providerTurnId: turn.providerTurn.id,
-            runOrdinal: turn.turnInput.runOrdinal,
-            status: turn.interrupted ? "interrupted" : "completed",
-            failure: null,
-            threadDisposition: "reusable",
-          });
-        }
+        }).pipe(Effect.ensuring(releaseTurnSlot(turn.slot)));
       });
 
       // ── event pump ────────────────────────────────────────
@@ -2302,6 +2331,13 @@ export function makePiAdapterV2(
               compactCommand === null
                 ? yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments)
                 : null;
+            const turnModel =
+              turnInput.modelSelection.model === PI_INHERIT_MODEL_SLUG
+                ? baselineModel === null
+                  ? undefined
+                  : `${baselineModel.provider}/${baselineModel.modelId}`
+                : turnInput.modelSelection.model;
+            const slot = yield* acquireTurnSlot(turnModel);
             const startedAt = yield* DateTime.now;
             const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;
             const providerTurn: OrchestrationV2ProviderTurn = {
@@ -2341,6 +2377,7 @@ export function makePiAdapterV2(
               activeCompaction: null,
               activeProviderRetry: null,
               failure: null,
+              slot,
             };
             // Only the install/send/start-event boundary excludes the event
             // pump. Earlier correlated requests must leave the pump free so
@@ -2382,10 +2419,12 @@ export function makePiAdapterV2(
               }
             }).pipe(
               sessionEventPermit.withPermits(1),
-              Effect.tapError(() =>
-                Effect.sync(() => {
-                  if (state.activeTurn === activeTurn) state.activeTurn = null;
-                }),
+              Effect.onExit((exit) =>
+                Exit.isSuccess(exit)
+                  ? Effect.void
+                  : Effect.sync(() => {
+                      if (state.activeTurn === activeTurn) state.activeTurn = null;
+                    }).pipe(Effect.andThen(releaseTurnSlot(slot))),
               ),
             );
             // Pi acks `prompt` only after slash-command expansion completes,

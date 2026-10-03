@@ -367,6 +367,7 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   readonly binaryPath: string;
   readonly homePath?: string | undefined;
   readonly launchArgs?: string | undefined;
+  readonly maxConcurrentSubagents?: string | undefined;
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv | undefined;
 }) {
@@ -382,7 +383,7 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   };
   const spawnCommand = yield* resolveSpawnCommand(
     input.binaryPath,
-    codexAppServerArgs(input.launchArgs),
+    codexAppServerArgs(input.launchArgs, input.maxConcurrentSubagents),
     { env: environment, extendEnv: true },
   );
   const child = yield* spawner
@@ -417,6 +418,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly launchArgs?: string;
+  readonly maxConcurrentSubagents?: string;
   readonly cwd: string;
   readonly customModels?: ReadonlyArray<CustomModelSetting>;
   readonly environment?: NodeJS.ProcessEnv;
@@ -485,6 +487,7 @@ export const probeCodexSkillsForCwd = Effect.fn("probeCodexSkillsForCwd")(functi
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly launchArgs?: string;
+  readonly maxConcurrentSubagents?: string;
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv;
 }) {
@@ -571,6 +574,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly binaryPath: string;
     readonly homePath?: string;
     readonly launchArgs?: string;
+    readonly maxConcurrentSubagents?: string;
     readonly cwd: string;
     readonly customModels: ReadonlyArray<CustomModelSetting>;
     readonly environment?: NodeJS.ProcessEnv;
@@ -612,6 +616,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     binaryPath: codexSettings.binaryPath,
     homePath: codexSettings.homePath,
     launchArgs: resolveCodexLaunchArgs(codexSettings.launchArgs, resolvedEnvironment),
+    maxConcurrentSubagents: codexSettings.maxConcurrentSubagents,
     cwd: process.cwd(),
     customModels: codexSettings.customModels,
     environment: resolvedEnvironment,

@@ -7,6 +7,7 @@ import {
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
+  PositiveInt,
   ProjectId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -580,6 +581,20 @@ function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fields>(
   );
 }
 
+// Empty, or a positive integer that can be represented exactly by JavaScript.
+const CODEX_MAX_CONCURRENT_SUBAGENTS_PATTERN = /^(?:|[1-9]\d*)$/;
+const CODEX_MAX_CONCURRENT_SUBAGENTS_SAFE_INTEGER = Schema.makeFilter<string>((value) => {
+  if (value === "") return undefined;
+  const count = Number(value);
+  return Number.isSafeInteger(count) && count > 0
+    ? undefined
+    : "Expected a positive safe integer or an empty value.";
+});
+const CodexMaxConcurrentSubagents = TrimmedString.check(
+  Schema.isPattern(CODEX_MAX_CONCURRENT_SUBAGENTS_PATTERN),
+  CODEX_MAX_CONCURRENT_SUBAGENTS_SAFE_INTEGER,
+);
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     setupMode: Schema.optionalKey(Schema.Literals(["managed", "existing"])).pipe(
@@ -619,6 +634,18 @@ export const CodexSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    maxConcurrentSubagents: CodexMaxConcurrentSubagents.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Maximum concurrent subagents",
+        description:
+          "Maximum number of child subagents. The primary session is not included. Applies to new sessions. Leave blank to use Codex's default.",
+        providerSettingsForm: {
+          placeholder: "e.g. 4",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     launchArgs: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
@@ -632,7 +659,7 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "shadowHomePath", "maxConcurrentSubagents", "launchArgs"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -752,6 +779,9 @@ export const GrokSettings = makeProviderSettingsSchema(
 );
 export type GrokSettings = typeof GrokSettings.Type;
 
+/** Per-model concurrent active-turn caps for Pi. Missing keys are unlimited. */
+export const PiModelConcurrency = Schema.Record(TrimmedNonEmptyString, PositiveInt);
+
 /**
  * Antigravity ACP auth methods. Personal and Enterprise open a Google sign-in
  * in the browser. The API key and Agent Platform methods take credentials from
@@ -857,6 +887,10 @@ export const PiSettings = makeProviderSettingsSchema(
     ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    modelConcurrency: PiModelConcurrency.pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
@@ -1513,6 +1547,7 @@ const CodexSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
+  maxConcurrentSubagents: Schema.optionalKey(CodexMaxConcurrentSubagents),
   launchArgs: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
@@ -1556,6 +1591,7 @@ const PiSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   launchArgs: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
+  modelConcurrency: Schema.optionalKey(PiModelConcurrency),
 });
 
 const OpenCodeSettingsPatch = Schema.Struct({

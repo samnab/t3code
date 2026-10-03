@@ -102,6 +102,7 @@ export const makeCodexManagedRuntime = Effect.fn("makeCodexManagedRuntime")(func
         setupMode: "managed",
         binaryPath: executable.executablePath,
         homePath,
+        maxConcurrentSubagents: options.config.maxConcurrentSubagents,
         launchArgs: managedCodexLaunchArgs,
       }),
       environment,

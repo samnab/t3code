@@ -1398,6 +1398,7 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
             command: input.settings.binaryPath || "codex",
             args: codexAppServerArgs(
               resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
+              input.settings.maxConcurrentSubagents,
             ),
             env: environment,
           });
@@ -1570,12 +1571,16 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                     }),
                 ),
               );
+        const resolvedSettings = resolvedRuntime?.config ?? adapterOptions.settings;
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
           providerSessionId: input.providerSessionId,
           runtimePolicy: input.runtimePolicy,
-          settings: resolvedRuntime?.config ?? adapterOptions.settings,
+          settings: {
+            ...resolvedSettings,
+            maxConcurrentSubagents: adapterOptions.settings.maxConcurrentSubagents,
+          },
           environment: resolvedRuntime?.environment ?? adapterOptions.environment,
         });
         const additionalContextByThread = yield* Ref.make(

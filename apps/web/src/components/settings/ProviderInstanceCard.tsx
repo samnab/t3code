@@ -135,6 +135,18 @@ function readConfigCustomModels(config: unknown): ReadonlyArray<CustomModelDefin
   return readCustomModelEntries((config as Record<string, unknown>).customModels);
 }
 
+/** Ignore malformed opaque values until the server schema reports them. */
+export function readConfigModelConcurrency(config: unknown): Record<string, number> {
+  if (config === null || typeof config !== "object") return {};
+  const raw = (config as Record<string, unknown>).modelConcurrency;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const caps: Record<string, number> = {};
+  for (const [slug, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) caps[slug] = value;
+  }
+  return caps;
+}
+
 function readConfigString(config: unknown, key: string): string | null {
   if (config === null || typeof config !== "object") return null;
   const value = (config as Record<string, unknown>)[key];
@@ -627,6 +639,8 @@ export function ProviderInstanceCard({
     : null;
   const customModels =
     instance.driver === "antigravity" ? [] : readConfigCustomModels(instance.config);
+  const modelConcurrency =
+    driverKind === "pi" ? readConfigModelConcurrency(instance.config) : undefined;
   // Server-returned models may lag behind settings writes. Treat server
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
@@ -673,7 +687,33 @@ export function ProviderInstanceCard({
       "customModels",
       next.map(toCustomModelSetting),
     );
+    const builtInSlugs = new Set(
+      modelsForDisplay.filter((model) => !model.isCustom).map((model) => model.slug),
+    );
+    const removedSlugs = customModels
+      .filter((entry) => !next.some((candidate) => candidate.slug === entry.slug))
+      .map((entry) => entry.slug)
+      .filter((slug) => !builtInSlugs.has(slug));
+    if (removedSlugs.length > 0) {
+      const caps = readConfigModelConcurrency(nextConfig);
+      for (const slug of removedSlugs) delete caps[slug];
+      if (Object.keys(caps).length > 0) nextConfig.modelConcurrency = caps;
+      else delete nextConfig.modelConcurrency;
+    }
     const { config: _omit, ...rest } = instance;
+    onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
+  };
+
+  const updateModelConcurrency = (next: Readonly<Record<string, number>>) => {
+    const { modelConcurrency: _omit, ...configWithout } =
+      instance.config !== null && typeof instance.config === "object"
+        ? (instance.config as Record<string, unknown>)
+        : {};
+    const nextConfig =
+      Object.keys(next).length > 0
+        ? nextConfigBlobWithValue(configWithout, "modelConcurrency", next)
+        : configWithout;
+    const { config: _drop, ...rest } = instance;
     onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
   };
 
@@ -1176,6 +1216,9 @@ export function ProviderInstanceCard({
               hiddenModels={hiddenModels}
               favoriteModels={favoriteModels}
               modelOrder={modelOrder}
+              {...(modelConcurrency === undefined
+                ? {}
+                : { modelConcurrency, onModelConcurrencyChange: updateModelConcurrency })}
               onChange={updateCustomModels}
               onHiddenModelsChange={onHiddenModelsChange}
               onFavoriteModelsChange={onFavoriteModelsChange}

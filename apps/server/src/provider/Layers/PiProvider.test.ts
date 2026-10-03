@@ -49,6 +49,7 @@ const settings = {
   binaryPath: "pi",
   launchArgs: "",
   customModels: [],
+  modelConcurrency: {},
 } as const;
 
 describe("PiProvider", () => {

@@ -6,7 +6,9 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  CodexSettings,
   DEFAULT_SERVER_SETTINGS,
+  PiSettings,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -19,6 +21,58 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
+const decodePiSettings = Schema.decodeUnknownSync(PiSettings);
+
+describe("CodexSettings maximum concurrent subagents", () => {
+  it("defaults to Codex's concurrency and accepts legacy settings with a cap", () => {
+    expect(decodeCodexSettings({}).maxConcurrentSubagents).toBe("");
+    expect(decodeCodexSettings({ maxConcurrentSubagents: "20" }).maxConcurrentSubagents).toBe("20");
+    expect(
+      decodeServerSettings({ providers: { codex: { maxConcurrentSubagents: "20" } } }).providers
+        .codex.maxConcurrentSubagents,
+    ).toBe("20");
+  });
+
+  it.each(["0", "-1", "1.5", "1e3", "9007199254740992"])(
+    "rejects an invalid concurrency count: %s",
+    (value) => {
+      expect(() => decodeCodexSettings({ maxConcurrentSubagents: value })).toThrow();
+      expect(() =>
+        decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: value } } }),
+      ).toThrow();
+    },
+  );
+
+  it("trims and accepts an empty patch value to clear the override", () => {
+    expect(
+      decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: " 20 " } } }),
+    ).toMatchObject({ providers: { codex: { maxConcurrentSubagents: "20" } } });
+    expect(
+      decodeServerSettingsPatch({ providers: { codex: { maxConcurrentSubagents: "  " } } }),
+    ).toMatchObject({ providers: { codex: { maxConcurrentSubagents: "" } } });
+  });
+});
+
+describe("PiSettings model concurrency", () => {
+  it("defaults to unlimited and accepts legacy settings with per-model caps", () => {
+    expect(decodePiSettings({}).modelConcurrency).toEqual({});
+    expect(decodePiSettings({ modelConcurrency: { "zai/glm-5": 4 } }).modelConcurrency).toEqual({
+      "zai/glm-5": 4,
+    });
+    expect(
+      decodeServerSettings({ providers: { pi: { modelConcurrency: { "zai/glm-5": 4 } } } })
+        .providers.pi.modelConcurrency,
+    ).toEqual({ "zai/glm-5": 4 });
+  });
+
+  it.each([0, -1, 1.5, 9007199254740992])("rejects an invalid cap: %s", (cap) => {
+    expect(() => decodePiSettings({ modelConcurrency: { "zai/glm-5": cap } })).toThrow();
+    expect(() =>
+      decodeServerSettingsPatch({ providers: { pi: { modelConcurrency: { "zai/glm-5": cap } } } }),
+    ).toThrow();
+  });
+});
 
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {

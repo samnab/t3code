@@ -740,6 +740,7 @@ describe("CodexAdapterV2 process spawning", () => {
             }),
             settings: {
               ...DEFAULT_CODEX_SETTINGS,
+              maxConcurrentSubagents: "20",
               launchArgs: " --strict-config -c model_reasoning_summary=detailed ",
             },
             environment,
@@ -750,8 +751,25 @@ describe("CodexAdapterV2 process spawning", () => {
       yield* open({ T3CODE_CODEX_LAUNCH_ARGS: " --enable env-feature " });
 
       assert.deepEqual(spawnedArgs, [
-        ["app-server", "--strict-config", "-c", "model_reasoning_summary=detailed"],
-        ["app-server", "--enable", "env-feature"],
+        [
+          "app-server",
+          "--strict-config",
+          "-c",
+          "model_reasoning_summary=detailed",
+          "-c",
+          "agents.max_concurrent_threads_per_session=20",
+          "-c",
+          "features.multi_agent_v2.max_concurrent_threads_per_session=21",
+        ],
+        [
+          "app-server",
+          "--enable",
+          "env-feature",
+          "-c",
+          "agents.max_concurrent_threads_per_session=20",
+          "-c",
+          "features.multi_agent_v2.max_concurrent_threads_per_session=21",
+        ],
       ]);
     }).pipe(Effect.provideService(HostProcessPlatform, "linux")),
   );

@@ -16,6 +16,7 @@ describe("ProviderSettingsForm helpers", () => {
       "binaryPath",
       "homePath",
       "shadowHomePath",
+      "maxConcurrentSubagents",
       "launchArgs",
     ]);
   });

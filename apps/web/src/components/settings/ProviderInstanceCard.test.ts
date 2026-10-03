@@ -13,10 +13,19 @@ import {
   nextProviderEnvironmentWithFieldValue,
   providerEnvironmentWithoutNames,
   ProviderInstanceCard,
+  readConfigModelConcurrency,
   readProviderEnvironmentVariable,
 } from "./ProviderInstanceCard";
 
 describe("deriveProviderModelsForDisplay", () => {
+  it("reads only positive safe Pi model caps", () => {
+    expect(
+      readConfigModelConcurrency({
+        modelConcurrency: { "zai/glm-5": 4, zero: 0, fraction: 1.5, text: "2" },
+      }),
+    ).toEqual({ "zai/glm-5": 4 });
+  });
+
   it("uses current config custom models instead of stale live custom rows", () => {
     const liveModels: ReadonlyArray<ServerProviderModel> = [
       {
