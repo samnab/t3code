@@ -149,6 +149,9 @@ import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts
 import * as ResourceMonitorBinary from "./resourceTelemetry/ResourceMonitorBinary.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as CbmIndexService from "./optimizer/CbmIndexService.ts";
+import * as OptimizerProbeService from "./optimizer/OptimizerProbeService.ts";
+import * as SessionOptimizerAttachments from "./optimizer/SessionOptimizerAttachments.ts";
 import {
   OrchestrationEventInfrastructureLayerLive,
   OrchestrationV2ProductionLayerLive,
@@ -196,6 +199,24 @@ const PtyAdapterLive = NodePtyAdapter.layer;
 const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(SqlitePersistence.layerConfig),
+);
+
+const CbmIndexLayerLive = CbmIndexService.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSettingsLayerLive),
+);
+
+const OptimizerProbeLayerLive = OptimizerProbeService.layer.pipe(
+  Layer.provideMerge(CbmIndexLayerLive),
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(ServerSettingsLayerLive),
+);
+
+const OptimizerLayerLive = SessionOptimizerAttachments.layer.pipe(
+  Layer.provideMerge(OptimizerProbeLayerLive),
+  Layer.provideMerge(CbmIndexLayerLive),
+  Layer.provideMerge(ProjectionStoreV2.layer),
+  Layer.provideMerge(ServerSettingsLayerLive),
 );
 
 const NativeTelemetryLayerLive = NativeTelemetryClient.layer.pipe(
@@ -544,6 +565,7 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
   ),
   Layer.provideMerge(ProviderRegistryLive),
+  Layer.provideMerge(OptimizerLayerLive),
   // The instance registry is the new routing keystone — text generation,
   // adapter lookup, and runtime ingestion all resolve `ProviderInstanceId`
   // through this layer. Built-in drivers come from `BUILT_IN_DRIVERS`;

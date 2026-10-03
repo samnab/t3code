@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -48,8 +49,12 @@ import {
   removeAntigravitySessionFiles,
 } from "../acp/AntigravitySessionFiles.ts";
 import * as IdAllocator from "../../orchestration-v2/IdAllocator.ts";
+import * as SessionOptimizerAttachments from "../../optimizer/SessionOptimizerAttachments.ts";
 import * as ProviderContinuationRequests from "../../orchestration-v2/ProviderContinuationRequests.ts";
-import { makeAntigravityAdapterV2 } from "../../orchestration-v2/Adapters/AntigravityAdapterV2.ts";
+import {
+  makeAntigravityAdapterV2,
+  type AntigravityAdapterRuntimeInput,
+} from "../../orchestration-v2/Adapters/AntigravityAdapterV2.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeAntigravityProvider } from "../Layers/AntigravityProvider.ts";
@@ -101,6 +106,9 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
       const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
+      const sessionOptimizers = yield* Effect.serviceOption(
+        SessionOptimizerAttachments.SessionOptimizerAttachments,
+      );
       const settings = { ...config, enabled } satisfies AntigravitySettings;
       const auth: AntigravityAuthConfig = {
         authMethod: settings.authMethod,
@@ -161,7 +169,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         );
 
       const makeRuntime = Effect.fn("AntigravityDriver.makeRuntime")(function* (
-        input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner">,
+        input: AntigravityAdapterRuntimeInput,
       ): Effect.fn.Return<
         AcpSessionRuntime["Service"],
         AcpError | ProviderSetupError,
@@ -242,7 +250,10 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
             installation: executable,
             profile,
             cwd: input.cwd,
-            baseEnv: withAgentDeviceEnvironment(processEnvironment, input),
+            baseEnv: {
+              ...withAgentDeviceEnvironment(processEnvironment, input),
+              ...input.processEnvironment,
+            },
             auth,
             runtimeTempDirectory,
           }),
@@ -425,6 +436,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
             : Effect.void;
         },
         continuationRequests,
+        ...(Option.isSome(sessionOptimizers) ? { sessionOptimizers: sessionOptimizers.value } : {}),
         nativeLogging: (threadId) =>
           makeNativeLogger({
             nativeEventLogger: loggers.native,

@@ -87,6 +87,7 @@ import { expandHomePath } from "../../pathExpansion.ts";
 import {
   buildCodexAdditionalContext,
   buildCodexDeveloperInstructions,
+  buildCodexRtkAdditionalContext,
 } from "../../provider/CodexDeveloperInstructions.ts";
 import {
   describeMcpElicitation,
@@ -111,6 +112,8 @@ import {
   withVoiceNotificationsEnv,
 } from "../../provider/ProviderInstanceEnvironment.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as HeadroomRouting from "../../optimizer/HeadroomRouting.ts";
+import * as SessionOptimizerAttachments from "../../optimizer/SessionOptimizerAttachments.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -704,6 +707,7 @@ export function buildCodexTurnStartParams(input: {
   readonly hasT3Mcp?: boolean;
   readonly browserToolsAvailable?: boolean;
   readonly deviceToolsAvailable?: boolean;
+  readonly rtkEnabled?: boolean;
   /** ChatGPT token sharing does not accept service tiers. */
   readonly omitServiceTier?: boolean;
 }) {
@@ -731,16 +735,18 @@ export function buildCodexTurnStartParams(input: {
       input.hasT3Mcp !== true
         ? undefined
         : buildCodexDeveloperInstructions(input.runtimePolicy.interactionMode);
-    const additionalContext =
-      input.hasT3Mcp === true
+    const additionalContext = {
+      ...(input.hasT3Mcp === true
         ? buildCodexAdditionalContext(
             { model: input.modelSelection.model, reasoningEffort: effort ?? "medium" },
             {
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
             },
+            input.rtkEnabled ?? false,
           )
-        : undefined;
+        : buildCodexRtkAdditionalContext(input.rtkEnabled ?? false)),
+    };
     const collaborationMode: CodexSchema.ClientRequest__CollaborationMode | undefined =
       input.runtimePolicy.interactionMode !== "plan" && developerInstructions === undefined
         ? undefined
@@ -758,7 +764,7 @@ export function buildCodexTurnStartParams(input: {
     return yield* decodeCodexTurnStartParamsWithCollaborationMode({
       threadId: input.nativeThreadId,
       input: input.codexInput,
-      ...(additionalContext ? { additionalContext } : {}),
+      ...(Object.keys(additionalContext).length === 0 ? {} : { additionalContext }),
       cwd: input.runtimePolicy.cwd,
       model: input.modelSelection.model,
       // Model catalogues can default summaries to "none". Request them on every
@@ -1180,6 +1186,7 @@ export interface CodexAppServerClientFactoryShape {
     readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
     readonly settings: CodexSettings;
     readonly environment: NodeJS.ProcessEnv;
+    readonly extraArgs?: ReadonlyArray<string>;
   }) => Effect.Effect<
     CodexClient.CodexAppServerClient["Service"],
     ProviderAdapterOpenSessionError,
@@ -1281,7 +1288,7 @@ const makeCodexAppServerClientFactoryCommandLayer = (
             const scope = yield* Scope.Scope;
             const command = yield* makeCodexAppServerSpawnCommand({
               command: options.command,
-              args: [...(options.args ?? [])],
+              args: [...(options.args ?? []), ...(input.extraArgs ?? [])],
               ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
               ...(options.env === undefined ? {} : { env: options.env, extendEnv: true }),
             });
@@ -1402,7 +1409,7 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
             args: codexAppServerArgs(
               resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
               input.settings.maxConcurrentSubagents,
-            ),
+            ).concat(input.extraArgs ?? []),
             env: environment,
           });
           const handle = yield* spawner.spawn(command).pipe(
@@ -1455,7 +1462,11 @@ export const createCodexAdapterV2 = (
     const fileSystem = yield* FileSystem.FileSystem;
     const hostEnvironment = yield* HostProcessEnvironment;
     const idAllocator = yield* IdAllocatorV2;
+    const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
+    const sessionOptimizers = yield* Effect.serviceOption(
+      SessionOptimizerAttachments.SessionOptimizerAttachments,
+    );
     const homeLayout = yield* resolveCodexHomeLayout(config);
 
     yield* materializeCodexShadowHome(homeLayout).pipe(
@@ -1483,9 +1494,11 @@ export const createCodexAdapterV2 = (
       environment: mergeProviderInstanceEnvironment(environment, hostEnvironment),
       clientFactory,
       fileSystem,
+      path,
       idAllocator,
       serverConfig,
       continuationRequests,
+      ...(Option.isSome(sessionOptimizers) ? { sessionOptimizers: sessionOptimizers.value } : {}),
       ...hooks,
     });
   });
@@ -1500,7 +1513,7 @@ export const CodexAdapterV2Driver: ProviderAdapterDriver<CodexSettings, CodexAda
 const layer: Layer.Layer<
   ProviderAdapterV2,
   never,
-  CodexAppServerClientFactory | FileSystem.FileSystem | IdAllocatorV2 | ServerConfig
+  CodexAppServerClientFactory | FileSystem.FileSystem | IdAllocatorV2 | Path.Path | ServerConfig
 > = Layer.effect(
   ProviderAdapterV2,
   Effect.gen(function* () {
@@ -1509,7 +1522,11 @@ const layer: Layer.Layer<
     const fileSystem = yield* FileSystem.FileSystem;
     const hostEnvironment = yield* HostProcessEnvironment;
     const idAllocator = yield* IdAllocatorV2;
+    const path = yield* Path.Path;
     const serverConfig = yield* ServerConfig;
+    const sessionOptimizers = yield* Effect.serviceOption(
+      SessionOptimizerAttachments.SessionOptimizerAttachments,
+    );
 
     return makeCodexAdapterV2({
       instanceId: CODEX_DEFAULT_INSTANCE_ID,
@@ -1517,9 +1534,11 @@ const layer: Layer.Layer<
       environment: hostEnvironment,
       clientFactory,
       fileSystem,
+      path,
       idAllocator,
       serverConfig,
       continuationRequests,
+      ...(Option.isSome(sessionOptimizers) ? { sessionOptimizers: sessionOptimizers.value } : {}),
     });
   }),
 );
@@ -1537,8 +1556,10 @@ export interface CodexAdapterV2Options {
    */
   readonly resolveRuntime?: Effect.Effect<CodexEffectiveRuntime, ProviderSetupError, Scope.Scope>;
   readonly fileSystem: FileSystem.FileSystem;
+  readonly path?: Path.Path;
   readonly idAllocator: IdAllocatorV2Shape;
   readonly serverConfig: ServerConfig["Service"];
+  readonly sessionOptimizers?: SessionOptimizerAttachments.SessionOptimizerAttachments["Service"];
   /**
    * Sink for post-settle background command completions so the orchestrator
    * can start a continuation run. Optional: adapters that omit it keep
@@ -1546,6 +1567,27 @@ export interface CodexAdapterV2Options {
    */
   readonly continuationRequests?: {
     readonly offer: (request: ProviderContinuationRequest) => Effect.Effect<void>;
+  };
+}
+
+export function codexOptimizerLaunchConfig(
+  attachment: SessionOptimizerAttachments.SessionOptimizerAttachmentDescriptor | undefined,
+  baseEnvironment: NodeJS.ProcessEnv,
+): {
+  readonly environment: NodeJS.ProcessEnv;
+  readonly extraArgs: ReadonlyArray<string>;
+} {
+  return {
+    environment: {
+      ...baseEnvironment,
+      ...attachment?.headroom?.environment,
+    },
+    extraArgs: [
+      ...(attachment?.headroom?.codexAppServerArgs ?? []),
+      ...(attachment?.cbm === undefined
+        ? []
+        : SessionOptimizerAttachments.buildCodexCbmAppServerArgs(attachment.cbm)),
+    ],
   };
 }
 
@@ -1575,6 +1617,27 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                 ),
               );
         const resolvedSettings = resolvedRuntime?.config ?? adapterOptions.settings;
+        const baseEnvironment = resolvedRuntime?.environment ?? adapterOptions.environment;
+        const optimizerAttachments =
+          adapterOptions.sessionOptimizers === undefined || adapterOptions.path === undefined
+            ? undefined
+            : yield* adapterOptions.sessionOptimizers.resolve({
+                threadId: input.threadId,
+                cwd: input.runtimePolicy.cwd,
+                capabilities: { rtk: true, headroom: true, cbm: true },
+                resolveHeadroom: (proxyUrl) =>
+                  HeadroomRouting.resolveProviderHeadroomSessionRouting({
+                    provider: "codex",
+                    proxyUrl,
+                    config: resolvedSettings,
+                    ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
+                    environment: baseEnvironment,
+                  }).pipe(
+                    Effect.provideService(FileSystem.FileSystem, adapterOptions.fileSystem),
+                    Effect.provideService(Path.Path, adapterOptions.path),
+                  ),
+              });
+        const optimizerLaunch = codexOptimizerLaunchConfig(optimizerAttachments, baseEnvironment);
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
@@ -1585,9 +1648,10 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             maxConcurrentSubagents: adapterOptions.settings.maxConcurrentSubagents,
           },
           environment: withVoiceNotificationsEnv(
-            resolvedRuntime?.environment ?? adapterOptions.environment,
+            optimizerLaunch.environment,
             input.runtimePolicy.voiceNotifications,
           ),
+          extraArgs: optimizerLaunch.extraArgs,
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<
@@ -5556,6 +5620,9 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                 hasT3Mcp: mcpSession !== undefined,
                 browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
                 deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
+                rtkEnabled:
+                  SessionOptimizerAttachments.readSessionOptimizerAttachments(turnInput.threadId)
+                    ?.rtk !== undefined,
                 omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               });
               yield* Ref.update(pendingRootTurns, (current) => {
