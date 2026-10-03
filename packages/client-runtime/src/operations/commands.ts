@@ -170,6 +170,8 @@ interface StartThreadBootstrap {
     readonly modelSelection: ModelSelection;
     readonly runtimeMode: RuntimeMode;
     readonly interactionMode: ProviderInteractionMode;
+    readonly goal?: ThreadGoal | null;
+    readonly voiceNotifications?: boolean;
     readonly branch: string | null;
     readonly worktreePath: string | null;
     readonly createdAt: string;
@@ -741,6 +743,10 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       modelSelection: input.modelSelection ?? thread.modelSelection,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
+      ...(bootstrap?.goal === undefined ? {} : { goal: bootstrap.goal }),
+      ...(bootstrap?.voiceNotifications === undefined
+        ? {}
+        : { voiceNotifications: bootstrap.voiceNotifications }),
       workspaceStrategy,
       initialMessage: {
         messageId: input.message.messageId,

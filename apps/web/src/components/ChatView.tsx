@@ -3,6 +3,7 @@ import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
   resolveBackgroundDraftWorkspaceOptions,
   resolveDraftHeroState,
+  resolveDraftThreadCreationSettings,
   shouldDockDraftHeroForSubmission,
   resolveVisibleWorktreeSetup,
   resolveWorktreeSetupProgress,
@@ -9103,6 +9104,10 @@ export default function ChatView(props: ChatViewProps) {
                       modelSelection: target.selection,
                       runtimeMode,
                       interactionMode: target.interactionMode,
+                      ...resolveDraftThreadCreationSettings({
+                        goal: composerGoal,
+                        voiceNotifications: composerVoiceNotifications,
+                      }),
                       branch: activeThreadBranch,
                       worktreePath: null,
                       createdAt: messageCreatedAt,
@@ -9427,6 +9432,10 @@ export default function ChatView(props: ChatViewProps) {
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode: sendInteractionMode,
+                      ...resolveDraftThreadCreationSettings({
+                        goal: composerGoal,
+                        voiceNotifications: composerVoiceNotifications,
+                      }),
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
@@ -9524,41 +9533,6 @@ export default function ChatView(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
-        if (isLocalDraftThread) {
-          const stagedSettingsResults = await Promise.all([
-            ...(composerGoal === null
-              ? []
-              : [
-                  setThreadGoal({
-                    environmentId,
-                    input: { threadId: threadIdForSend, goal: ThreadGoal.make(composerGoal) },
-                  }),
-                ]),
-            ...(composerVoiceNotifications === null
-              ? []
-              : [
-                  setThreadVoiceNotifications({
-                    environmentId,
-                    input: {
-                      threadId: threadIdForSend,
-                      voiceNotifications: composerVoiceNotifications,
-                    },
-                  }),
-                ]),
-          ]);
-          const stagedSettingsFailure = stagedSettingsResults.find(
-            (result) => result._tag === "Failure" && !isAtomCommandInterrupted(result),
-          );
-          if (stagedSettingsFailure?._tag === "Failure") {
-            const error = squashAtomCommandFailure(stagedSettingsFailure);
-            setThreadError(
-              threadIdForSend,
-              error instanceof Error
-                ? error.message
-                : "The thread started, but its staged settings could not be applied.",
-            );
-          }
-        }
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
         // the sending thread's panel clears.

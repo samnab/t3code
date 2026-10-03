@@ -22,6 +22,7 @@ import {
   type ThreadContextRecord,
   type ThreadId,
   type ThreadLinkedPullRequest,
+  ThreadGoal,
   type RunId,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
@@ -71,6 +72,17 @@ export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
+
+/** Settings staged on a draft must be part of its create command, before its first run opens. */
+export function resolveDraftThreadCreationSettings(input: {
+  readonly goal: string | null;
+  readonly voiceNotifications: boolean | null;
+}) {
+  return {
+    ...(input.goal === null ? {} : { goal: ThreadGoal.make(input.goal) }),
+    ...(input.voiceNotifications === null ? {} : { voiceNotifications: input.voiceNotifications }),
+  };
+}
 
 export function agentControlledBrowserCloseConfirmation(
   surfaces: readonly RightPanelSurface[],

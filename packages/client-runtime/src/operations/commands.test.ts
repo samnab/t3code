@@ -431,6 +431,8 @@ describe("V2 environment commands", () => {
             modelSelection: v2Projection.thread.modelSelection,
             runtimeMode: "full-access",
             interactionMode: "default",
+            goal: "Ship the launch fix",
+            voiceNotifications: false,
             branch: "feature",
             worktreePath: "/workspace/project-worktrees/feature",
             createdAt: "2026-06-20T00:00:00.000Z",
@@ -442,6 +444,8 @@ describe("V2 environment commands", () => {
         threadId: v2ThreadId,
         title: "Continue here",
         generateTitle: true,
+        goal: "Ship the launch fix",
+        voiceNotifications: false,
         workspaceStrategy: {
           type: "existing_worktree",
           worktreePath: "/workspace/project-worktrees/feature",
