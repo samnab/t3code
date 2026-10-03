@@ -41,6 +41,34 @@ describe("applyShellStreamEvent", () => {
     expect(next.threads[2]).toBe(threads[2]);
   });
 
+  it("keeps goal-loop and voice fields from shell thread updates", () => {
+    const updated = {
+      ...v2ThreadShell,
+      goal: "Finish M4",
+      goalLoop: {
+        state: "paused" as const,
+        mode: "t3" as const,
+        iterations: 2,
+        maxIterations: 10,
+        reason: null,
+        updatedAt: v2ThreadShell.updatedAt,
+      },
+      voiceNotifications: false,
+    };
+    const next = applyShellStreamEvent(v2ShellSnapshot, {
+      kind: "thread.updated",
+      sequence: 1,
+      location: "active",
+      thread: updated,
+    });
+
+    expect(next.threads[0]).toMatchObject({
+      goal: "Finish M4",
+      goalLoop: { state: "paused", iterations: 2 },
+      voiceNotifications: false,
+    });
+  });
+
   it("ignores stale project updates without mutating the snapshot", () => {
     const snapshotWithProject = {
       ...v2ShellSnapshot,

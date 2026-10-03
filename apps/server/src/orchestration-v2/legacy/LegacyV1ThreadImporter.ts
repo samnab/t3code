@@ -16,6 +16,8 @@ import {
   type OrchestrationV2TurnItem,
   ProjectId,
   ProviderInstanceId,
+  ThreadGoal,
+  ThreadGoalLoopJson,
   ThreadId,
   ThreadLinkedPullRequest,
   ThreadPullRequestLink,
@@ -60,6 +62,9 @@ interface LegacyThreadRow {
   readonly linked_pull_request_json: string | null;
   readonly branch_pull_request_json: string | null;
   readonly active_order_key: string | null;
+  readonly goal: string | null;
+  readonly goal_loop_json: string | null;
+  readonly voice_notifications: number | null;
   readonly deleted_at: string | null;
 }
 
@@ -123,6 +128,8 @@ const decodeModelSelection = Schema.decodeUnknownOption(ModelSelection);
 const decodeAttachments = Schema.decodeUnknownOption(Schema.Array(ChatAttachment));
 const decodePullRequests = Schema.decodeUnknownOption(Schema.Array(ThreadPullRequestLink));
 const decodeLinkedPullRequest = Schema.decodeUnknownOption(ThreadLinkedPullRequest);
+const decodeThreadGoal = Schema.decodeUnknownOption(ThreadGoal);
+const decodeThreadGoalLoop = Schema.decodeUnknownOption(ThreadGoalLoopJson);
 const decodeStoredThread = Schema.decodeUnknownOption(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
 );
@@ -159,6 +166,16 @@ function linkedPullRequestFor(row: LegacyThreadRow) {
 function branchPullRequestFor(row: LegacyThreadRow) {
   if (row.branch_pull_request_json === null) return null;
   return Option.getOrNull(decodeLinkedPullRequest(parseJson(row.branch_pull_request_json)));
+}
+
+function goalFor(row: LegacyThreadRow) {
+  if (row.goal === null) return null;
+  return Option.getOrNull(decodeThreadGoal(row.goal));
+}
+
+function goalLoopFor(row: LegacyThreadRow) {
+  if (row.goal_loop_json === null) return null;
+  return Option.getOrNull(decodeThreadGoalLoop(parseJson(row.goal_loop_json)));
 }
 
 function runtimeModeFor(value: string): OrchestrationV2AppThread["runtimeMode"] {
@@ -234,6 +251,9 @@ function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
     unsettledAt: nullableDateTime(row.unsettled_at),
     snoozedUntil: nullableDateTime(row.snoozed_until),
     snoozedAt: nullableDateTime(row.snoozed_at),
+    goal: goalFor(row),
+    goalLoop: goalLoopFor(row),
+    voiceNotifications: row.voice_notifications !== 0,
     pinnedAt: nullableDateTime(row.pinned_at),
     autoSettleDisabledAt: nullableDateTime(row.auto_settle_disabled_at),
     pinOrderKey: row.pin_order_key?.trim() || null,
@@ -442,6 +462,18 @@ const make = Effect.gen(function* () {
 
   const reconcileShellsBase = Effect.gen(function* () {
     const now = DateTime.formatIso(yield* DateTime.now);
+    const legacyThreadColumns = new Set(
+      (yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`).map(
+        (column) => column.name,
+      ),
+    );
+    const legacyGoal = legacyThreadColumns.has("goal") ? sql`thread.goal` : sql`NULL`;
+    const legacyGoalLoop = legacyThreadColumns.has("goal_loop_json")
+      ? sql`thread.goal_loop_json`
+      : sql`NULL`;
+    const legacyVoiceNotifications = legacyThreadColumns.has("voice_notifications")
+      ? sql`thread.voice_notifications`
+      : sql`1`;
     const repairRows = yield* sql<LegacyRepairRow>`
       SELECT
         thread.thread_id,
@@ -467,6 +499,9 @@ const make = Effect.gen(function* () {
         thread.linked_pull_request_json,
         thread.branch_pull_request_json,
         thread.active_order_key,
+        ${legacyGoal} AS goal,
+        ${legacyGoalLoop} AS goal_loop_json,
+        ${legacyVoiceNotifications} AS voice_notifications,
         thread.deleted_at,
         projection.payload_json
       FROM orchestration_v2_legacy_imports AS legacy_import
@@ -483,6 +518,9 @@ const make = Effect.gen(function* () {
          OR json_type(projection.payload_json, '$.pullRequests') IS NULL
          OR json_type(projection.payload_json, '$.branchPullRequest') IS NULL
          OR json_type(projection.payload_json, '$.activeOrderKey') IS NULL
+         OR json_type(projection.payload_json, '$.goal') IS NULL
+         OR json_type(projection.payload_json, '$.goalLoop') IS NULL
+         OR json_type(projection.payload_json, '$.voiceNotifications') IS NULL
       ORDER BY thread.created_at ASC, thread.thread_id ASC
     `;
     let repairedThreadCount = 0;
@@ -491,6 +529,11 @@ const make = Effect.gen(function* () {
       if (Option.isNone(decoded)) continue;
       const current = decoded.value;
       const legacy = importedThread(row);
+      const storedPayload = parseJson(row.payload_json);
+      const hasStoredField = (field: string) =>
+        typeof storedPayload === "object" &&
+        storedPayload !== null &&
+        Object.prototype.hasOwnProperty.call(storedPayload, field);
       const legacyPullRequests = legacy.pullRequests ?? [];
       const repaired: OrchestrationV2AppThread = {
         ...current,
@@ -527,6 +570,11 @@ const make = Effect.gen(function* () {
             : current.branchPullRequest,
         activeOrderKey:
           current.activeOrderKey === undefined ? legacy.activeOrderKey : current.activeOrderKey,
+        goal: hasStoredField("goal") ? current.goal : legacy.goal,
+        goalLoop: hasStoredField("goalLoop") ? current.goalLoop : legacy.goalLoop,
+        voiceNotifications: hasStoredField("voiceNotifications")
+          ? current.voiceNotifications
+          : legacy.voiceNotifications,
       };
       // Later schema additions can require another repair for the same thread.
       const repairId = yield* randomUuidV4;
@@ -571,6 +619,9 @@ const make = Effect.gen(function* () {
         thread.linked_pull_request_json,
         thread.branch_pull_request_json,
         thread.active_order_key,
+        ${legacyGoal} AS goal,
+        ${legacyGoalLoop} AS goal_loop_json,
+        ${legacyVoiceNotifications} AS voice_notifications,
         thread.deleted_at
       FROM projection_threads AS thread
       WHERE NOT EXISTS (

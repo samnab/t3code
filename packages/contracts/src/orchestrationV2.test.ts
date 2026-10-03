@@ -24,7 +24,9 @@ import {
 import {
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
+  OrchestrationV2AppThread,
   OrchestrationV2Command,
+  OrchestrationV2InternalCommand,
   OrchestrationV2LimitRecoveryUpdate,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderCapabilities,
@@ -57,6 +59,10 @@ const LegacySubscribeThreadInput = Schema.Struct({
 const decodeLegacyShellStreamItem = Schema.decodeUnknownSync(LegacyShellStreamItem);
 const decodeLegacySubscribeThreadInput = Schema.decodeUnknownSync(LegacySubscribeThreadInput);
 const decodeOrchestrationV2Command = Schema.decodeUnknownSync(OrchestrationV2Command);
+const decodeOrchestrationV2AppThread = Schema.decodeUnknownSync(OrchestrationV2AppThread);
+const decodeOrchestrationV2InternalCommand = Schema.decodeUnknownSync(
+  OrchestrationV2InternalCommand,
+);
 const decodeOrchestrationV2TurnItem = Schema.decodeUnknownSync(OrchestrationV2TurnItem);
 const decodeOrchestrationV2TurnItemJson = Schema.decodeUnknownSync(OrchestrationV2TurnItemJson);
 const encodeOrchestrationV2TurnItemJson = Schema.encodeSync(OrchestrationV2TurnItemJson);
@@ -90,6 +96,40 @@ const decodeOrchestrationV2SubscribeThreadInput = Schema.decodeUnknownSync(
 );
 
 describe("orchestration V2 contracts", () => {
+  it("defaults goal-loop and voice fields on historical app threads", () => {
+    const thread = decodeOrchestrationV2AppThread({
+      createdBy: "user",
+      creationSource: "web",
+      id: "thread-legacy",
+      projectId: "project-legacy",
+      title: "Legacy thread",
+      providerInstanceId: "codex",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: "thread-legacy",
+      },
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      lastVisitedAt: null,
+      deletedAt: null,
+    });
+
+    expect(thread.goal).toBeNull();
+    expect(thread.goalLoop).toBeNull();
+    expect(thread.voiceNotifications).toBe(true);
+  });
+
   it("carries command failure metadata through runtime and JSON schemas without output text", () => {
     const base = {
       id: "command-item",
@@ -416,6 +456,83 @@ describe("orchestration V2 contracts", () => {
       throw new Error(`Expected run.created, received ${event.type}.`);
     }
     expect(event.payload.id).toBe(RunId.make("run-1"));
+  });
+
+  it("decodes thread goal-loop and voice commands and events", () => {
+    const setGoal = decodeOrchestrationV2Command({
+      type: "thread.metadata.update",
+      commandId: "command-goal-set",
+      threadId: "thread-1",
+      goal: "Ship orchestration v2",
+    });
+    const clearGoal = decodeOrchestrationV2Command({
+      type: "thread.metadata.update",
+      commandId: "command-goal-clear",
+      threadId: "thread-1",
+      goal: null,
+    });
+    const pause = decodeOrchestrationV2Command({
+      type: "thread.goal.loop",
+      commandId: "command-goal-pause",
+      threadId: "thread-1",
+      action: "pause",
+    });
+    const voice = decodeOrchestrationV2Command({
+      type: "thread.voice-notifications.set",
+      commandId: "command-voice",
+      threadId: "thread-1",
+      voiceNotifications: false,
+    });
+    const sync = decodeOrchestrationV2InternalCommand({
+      type: "thread.goal.loop",
+      commandId: "command-goal-sync",
+      threadId: "thread-1",
+      action: "sync",
+      state: "running",
+      mode: "native",
+      goalLoopGuard: { updatedAt: now },
+    });
+    const loopEvent = decodeOrchestrationV2DomainEvent({
+      id: "event-goal-loop",
+      type: "thread.goal-loop-updated",
+      threadId: "thread-1",
+      occurredAt: now,
+      payload: {
+        threadId: "thread-1",
+        loop: {
+          state: "idle",
+          mode: "t3",
+          iterations: 0,
+          maxIterations: 10,
+          reason: null,
+          updatedAt: now,
+        },
+        resumed: true,
+      },
+    });
+    const voiceEvent = decodeOrchestrationV2DomainEvent({
+      id: "event-voice",
+      type: "thread.voice-notifications-set",
+      threadId: "thread-1",
+      occurredAt: now,
+      payload: { threadId: "thread-1", voiceNotifications: false, updatedAt: now },
+    });
+
+    expect(setGoal).toMatchObject({ goal: "Ship orchestration v2" });
+    expect(clearGoal).toMatchObject({ goal: null });
+    expect(pause).toMatchObject({ action: "pause" });
+    expect(voice).toMatchObject({ voiceNotifications: false });
+    expect(sync).toMatchObject({ action: "sync", state: "running", mode: "native" });
+    expect(loopEvent.type).toBe("thread.goal-loop-updated");
+    expect(voiceEvent.type).toBe("thread.voice-notifications-set");
+    expect(() =>
+      decodeOrchestrationV2Command({
+        type: "thread.goal.loop",
+        commandId: "command-goal-sync-client",
+        threadId: "thread-1",
+        action: "sync",
+      }),
+    ).toThrow();
   });
 
   it("decodes app-owned delegated task commands", () => {
@@ -1035,6 +1152,9 @@ describe("orchestration V2 contracts", () => {
     });
 
     expect(shell.pendingBackgroundTasks).toEqual([]);
+    expect(shell.goal).toBeNull();
+    expect(shell.goalLoop).toBeNull();
+    expect(shell.voiceNotifications).toBe(true);
   });
 });
 

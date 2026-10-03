@@ -341,6 +341,8 @@ export const layer: Layer.Layer<
     const normalize: ProviderEventIngestorV2Shape["normalize"] = (input) =>
       Effect.gen(function* () {
         switch (input.event.type) {
+          case "account.rate-limits.updated":
+            return [];
           case "app_thread.created":
             return [
               yield* makeDomainEvent(input, {

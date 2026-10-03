@@ -130,6 +130,8 @@ export function shouldPublishAgentAwarenessEvent(
     case "turn-item.updated":
       return isTurnItemPayload(event.payload) && turnItemUpdateCanEndBackgroundWork(event.payload);
     case "message.updated":
+    case "thread.goal-loop-updated":
+    case "thread.voice-notifications-set":
     case "plan.updated":
     case "checkpoint-scope.created":
     case "checkpoint.captured":

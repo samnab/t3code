@@ -185,6 +185,20 @@ export function applyOrchestrationV2ProjectionEvent(
     case "thread.visited":
     case "thread.marked-unread":
       return { ...projection, thread: event.payload };
+    case "thread.goal-loop-updated":
+      return {
+        ...base,
+        thread: { ...base.thread, goalLoop: event.payload.loop, updatedAt: event.occurredAt },
+      };
+    case "thread.voice-notifications-set":
+      return {
+        ...base,
+        thread: {
+          ...base.thread,
+          voiceNotifications: event.payload.voiceNotifications,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
     case "run.created":
     case "run.updated": {
       const next = { ...base, runs: upsertEntity(base.runs, event.payload) };

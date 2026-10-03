@@ -27,6 +27,7 @@ import {
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
+  ProviderUsageLimitsUpdate,
   RuntimeMode,
   RuntimeRequestId,
   RunAttemptId,
@@ -76,6 +77,11 @@ export const ProviderAdapterV2SessionStatus = Schema.Literals([
 export type ProviderAdapterV2SessionStatus = typeof ProviderAdapterV2SessionStatus.Type;
 
 export const ProviderAdapterV2Event = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("account.rate-limits.updated"),
+    driver: ProviderDriverKind,
+    payload: Schema.Struct({ limits: ProviderUsageLimitsUpdate }),
+  }),
   Schema.Struct({
     type: Schema.Literal("app_thread.created"),
     driver: ProviderDriverKind,

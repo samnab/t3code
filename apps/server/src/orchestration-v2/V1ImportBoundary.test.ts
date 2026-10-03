@@ -89,3 +89,24 @@ it("keeps the legacy importer out of reach of new code", () => {
     "serverRuntimeStartup.ts",
   ]);
 });
+
+it("keeps archived fork message origin and fork tables outside the V1 importer", () => {
+  const importer = relativeSources.find(
+    ({ path }) => path === "orchestration-v2/legacy/LegacyV1ThreadImporter.ts",
+  );
+  assert.isDefined(importer);
+  assert.notMatch(importer.source, /\borigin\b/);
+  for (const table of [
+    "subagent_run_number_reservations",
+    "projection_subagent_runs",
+    "subagent_transcript_items",
+    "subagent_transcript_evictions",
+    "native_child_runs",
+    "native_child_messages",
+    "native_child_delivery_batches",
+    "native_child_delivery_batch_runs",
+    "thread_experiments",
+  ]) {
+    assert.notInclude(importer.source, table, table);
+  }
+});

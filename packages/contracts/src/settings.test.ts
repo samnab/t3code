@@ -146,6 +146,40 @@ describe("storage cleanup settings", () => {
   });
 });
 
+describe("ClientSettings provider model defaults", () => {
+  it("decodes fork defaults into providerModelPreferences and defaults older entries", () => {
+    const codex = ProviderInstanceId.make("codex");
+    const claudeAgent = ProviderInstanceId.make("claudeAgent");
+    const decoded = decodeClientSettings({
+      providerModelPreferences: {
+        codex: {
+          hiddenModels: ["gpt-old"],
+          modelOrder: ["gpt-5.6-sol"],
+          defaultModel: "gpt-5.6-sol",
+          defaultOptions: [{ id: "reasoningEffort", value: "high" }],
+        },
+        claudeAgent: { hiddenModels: [], modelOrder: [] },
+      },
+    });
+
+    expect(decoded.providerModelPreferences[codex]).toEqual({
+      hiddenModels: ["gpt-old"],
+      modelOrder: ["gpt-5.6-sol"],
+      defaultModel: "gpt-5.6-sol",
+      defaultOptions: [{ id: "reasoningEffort", value: "high" }],
+    });
+    expect(decoded.providerModelPreferences[claudeAgent]).toEqual({
+      hiddenModels: [],
+      modelOrder: [],
+      defaultModel: null,
+      defaultOptions: [],
+    });
+    expect(encodeClientSettings(decoded).providerModelPreferences).toMatchObject({
+      codex: { defaultModel: "gpt-5.6-sol" },
+    });
+  });
+});
+
 describe("ClientSettings rich text composer", () => {
   it("enables rich text for new and existing settings without a saved preference", () => {
     expect(decodeClientSettings({}).composerRichTextEnabled).toBe(true);

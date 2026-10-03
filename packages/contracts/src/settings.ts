@@ -430,6 +430,12 @@ export const ClientSettingsSchema = Schema.Struct({
         Schema.withDecodingDefault(Effect.succeed([])),
       ),
       modelOrder: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+      defaultModel: Schema.optional(Schema.NullOr(Schema.String)).pipe(
+        Schema.withDecodingDefault(Effect.succeed(null)),
+      ),
+      defaultOptions: Schema.optional(ProviderOptionSelections).pipe(
+        Schema.withDecodingDefault(Effect.succeed([])),
+      ),
     }),
   ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   pullRequestMergeMethodOverrides: Schema.Record(
@@ -1794,6 +1800,12 @@ export const ClientSettingsPatch = Schema.Struct({
           Schema.withDecodingDefault(Effect.succeed([])),
         ),
         modelOrder: Schema.Array(Schema.String).pipe(
+          Schema.withDecodingDefault(Effect.succeed([])),
+        ),
+        defaultModel: Schema.optional(Schema.NullOr(Schema.String)).pipe(
+          Schema.withDecodingDefault(Effect.succeed(null)),
+        ),
+        defaultOptions: Schema.optional(ProviderOptionSelections).pipe(
           Schema.withDecodingDefault(Effect.succeed([])),
         ),
       }),

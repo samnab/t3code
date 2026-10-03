@@ -50,6 +50,105 @@ const testLayer = Layer.mergeAll(
 );
 
 it.effect(
+  "round-trips goal, goal-loop and voice notification controls through the projection",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("thread:goal-voice-controls");
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("goal-voice:create"),
+        threadId,
+        projectId: ProjectId.make("project:goal-voice-controls"),
+        title: "Goal controls",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        goal: "First goal",
+        voiceNotifications: false,
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      let thread = yield* projections.getThread(threadId);
+      assert.equal(thread.goal, "First goal");
+      assert.equal(thread.goalLoop?.state, "idle");
+      assert.equal(thread.voiceNotifications, false);
+
+      const setGoal = yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("goal-voice:set-goal"),
+        threadId,
+        goal: "Second goal",
+      });
+      assert.deepEqual(
+        setGoal.storedEvents.map((stored) => stored.event.type),
+        ["thread.metadata-updated", "thread.goal-loop-updated"],
+      );
+
+      yield* orchestrator.dispatch({
+        type: "thread.goal.loop",
+        commandId: CommandId.make("goal-voice:pause"),
+        threadId,
+        action: "pause",
+      });
+      thread = yield* projections.getThread(threadId);
+      assert.equal(thread.goalLoop?.state, "paused");
+
+      yield* orchestrator.dispatch({
+        type: "thread.goal.loop",
+        commandId: CommandId.make("goal-voice:resume"),
+        threadId,
+        action: "resume",
+      });
+      thread = yield* projections.getThread(threadId);
+      const guardedAt = thread.goalLoop?.updatedAt;
+      assert.ok(guardedAt);
+      yield* orchestrator.dispatch({
+        type: "thread.goal.loop",
+        commandId: CommandId.make("goal-voice:sync"),
+        threadId,
+        action: "sync",
+        state: "running",
+        mode: "native",
+        goalLoopGuard: { updatedAt: guardedAt },
+      });
+
+      yield* orchestrator.dispatch({
+        type: "thread.voice-notifications.set",
+        commandId: CommandId.make("goal-voice:voice"),
+        threadId,
+        voiceNotifications: true,
+      });
+      thread = yield* projections.getThread(threadId);
+      assert.equal(thread.goalLoop?.state, "running");
+      assert.equal(thread.goalLoop?.mode, "native");
+      assert.equal(thread.voiceNotifications, true);
+      const shell = yield* projections.getThreadShell(threadId);
+      assert.equal(shell?.goal, "Second goal");
+      assert.equal(shell?.goalLoop?.state, "running");
+      assert.equal(shell?.voiceNotifications, true);
+
+      const clearGoal = yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("goal-voice:clear-goal"),
+        threadId,
+        goal: null,
+      });
+      assert.deepEqual(
+        clearGoal.storedEvents.map((stored) => stored.event.type),
+        ["thread.metadata-updated", "thread.goal-loop-updated"],
+      );
+      thread = yield* projections.getThread(threadId);
+      assert.isNull(thread.goal);
+      assert.isNull(thread.goalLoop);
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect(
   "dispatches metadata, queue resume and request controls without hydrating unrelated history",
   () =>
     Effect.gen(function* () {

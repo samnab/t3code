@@ -27,6 +27,7 @@ import {
   RunId,
   RuntimeRequestId,
   ScheduledTaskId,
+  THREAD_GOAL_MAX_CHARS,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
@@ -353,6 +354,47 @@ export const OrchestrationV2LimitRecoveryUpdate = Schema.Struct({
 );
 export type OrchestrationV2LimitRecoveryUpdate = typeof OrchestrationV2LimitRecoveryUpdate.Type;
 
+/** The durable, user-facing objective attached to one thread. */
+export const ThreadGoal = TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_GOAL_MAX_CHARS));
+export type ThreadGoal = typeof ThreadGoal.Type;
+
+export const ThreadGoalLoopState = Schema.Literals([
+  "idle",
+  "running",
+  "paused",
+  "blocked",
+  "completed",
+  "capped",
+]);
+export type ThreadGoalLoopState = typeof ThreadGoalLoopState.Type;
+
+export const ThreadGoalLoopMode = Schema.Literals(["native", "t3", "unsupported"]);
+export type ThreadGoalLoopMode = typeof ThreadGoalLoopMode.Type;
+
+export const THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS = 10;
+export const THREAD_GOAL_LOOP_MAX_ITERATIONS_CEILING = 50;
+
+/** Standard goals use T3's provider-neutral continuation loop. */
+export const resolveThreadGoalLoopMode = (
+  _provider: string | null | undefined,
+): ThreadGoalLoopMode => "t3";
+
+export const ThreadGoalLoop = Schema.Struct({
+  state: ThreadGoalLoopState,
+  mode: ThreadGoalLoopMode,
+  iterations: NonNegativeInt,
+  maxIterations: PositiveInt,
+  reason: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  updatedAt: Schema.DateTimeUtc,
+});
+export type ThreadGoalLoop = typeof ThreadGoalLoop.Type;
+
+export const ThreadGoalLoopJson = ThreadGoalLoop.mapFields((fields) => ({
+  ...fields,
+  updatedAt: Schema.DateTimeUtcFromString,
+}));
+export type ThreadGoalLoopJson = typeof ThreadGoalLoopJson.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -396,6 +438,15 @@ export const OrchestrationV2AppThread = Schema.Struct({
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  goalLoop: Schema.optional(Schema.NullOr(ThreadGoalLoop)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  voiceNotifications: Schema.optional(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1478,6 +1529,21 @@ const OrchestrationV2EventBase = Schema.Struct({
   occurredAt: Schema.DateTimeUtc,
 });
 
+export const ThreadGoalLoopUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  loop: Schema.NullOr(ThreadGoalLoop),
+  /** A worker may start or resume continuation work for this loop generation. */
+  resumed: Schema.optional(Schema.Boolean),
+});
+export type ThreadGoalLoopUpdatedPayload = typeof ThreadGoalLoopUpdatedPayload.Type;
+
+export const ThreadVoiceNotificationsSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  voiceNotifications: Schema.Boolean,
+  updatedAt: Schema.DateTimeUtc,
+});
+export type ThreadVoiceNotificationsSetPayload = typeof ThreadVoiceNotificationsSetPayload.Type;
+
 export const OrchestrationV2DomainEvent = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -1509,6 +1575,16 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.provider-switched",
     ]),
     payload: OrchestrationV2AppThread,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.goal-loop-updated"),
+    payload: ThreadGoalLoopUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("thread.voice-notifications-set"),
+    payload: ThreadVoiceNotificationsSetPayload,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -1722,6 +1798,15 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  goal: Schema.optional(Schema.NullOr(ThreadGoal)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  goalLoop: Schema.optional(Schema.NullOr(ThreadGoalLoop)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  voiceNotifications: Schema.optional(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   /** Omitted by servers that predate thread pinning. */
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1819,6 +1904,9 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  goalLoop: Schema.optional(Schema.NullOr(ThreadGoalLoopJson)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
@@ -2228,6 +2316,9 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  goalLoop: Schema.optional(Schema.NullOr(ThreadGoalLoopJson)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -2256,6 +2347,18 @@ const OrchestrationV2JsonEventBaseFields = {
   ...OrchestrationV2EventBase.fields,
   occurredAt: Schema.DateTimeUtcFromString,
 } as const;
+
+const ThreadGoalLoopUpdatedPayloadJson = ThreadGoalLoopUpdatedPayload.mapFields((fields) => ({
+  ...fields,
+  loop: Schema.NullOr(ThreadGoalLoopJson),
+}));
+
+const ThreadVoiceNotificationsSetPayloadJson = ThreadVoiceNotificationsSetPayload.mapFields(
+  (fields) => ({
+    ...fields,
+    updatedAt: Schema.DateTimeUtcFromString,
+  }),
+);
 
 export const OrchestrationV2RawProviderEventJson = OrchestrationV2RawProviderEvent.mapFields(
   (fields) => ({
@@ -2296,6 +2399,16 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.provider-switched",
     ]),
     payload: OrchestrationV2AppThreadJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.goal-loop-updated"),
+    payload: ThreadGoalLoopUpdatedPayloadJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("thread.voice-notifications-set"),
+    payload: ThreadVoiceNotificationsSetPayloadJson,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -2412,6 +2525,35 @@ export const OrchestrationV2StoredEventJson = Schema.Struct({
 });
 export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
 
+export const ThreadGoalLoopClientCommand = Schema.Struct({
+  type: Schema.Literal("thread.goal.loop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  action: Schema.Literals(["pause", "resume", "continue", "complete", "block", "reset"]),
+  reason: Schema.optional(TrimmedNonEmptyString),
+});
+export type ThreadGoalLoopClientCommand = typeof ThreadGoalLoopClientCommand.Type;
+
+export const ThreadVoiceNotificationsSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.voice-notifications.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  voiceNotifications: Schema.Boolean,
+});
+export type ThreadVoiceNotificationsSetCommand = typeof ThreadVoiceNotificationsSetCommand.Type;
+
+export const ThreadGoalLoopSyncCommand = Schema.Struct({
+  type: Schema.Literal("thread.goal.loop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  action: Schema.Literal("sync"),
+  reason: Schema.optional(TrimmedNonEmptyString),
+  state: Schema.optional(ThreadGoalLoopState),
+  mode: Schema.optional(ThreadGoalLoopMode),
+  goalLoopGuard: Schema.optional(Schema.Struct({ updatedAt: Schema.DateTimeUtc })),
+});
+export type ThreadGoalLoopSyncCommand = typeof ThreadGoalLoopSyncCommand.Type;
+
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
@@ -2423,6 +2565,8 @@ export const OrchestrationV2Command = Schema.Union([
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
+    goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+    voiceNotifications: Schema.optional(Schema.Boolean),
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
     importedNativeThread: Schema.optional(
@@ -2555,7 +2699,11 @@ export const OrchestrationV2Command = Schema.Union([
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
     /** Link (object) or unlink (null) a pull request (#8160); absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+    /** Null clears the goal; omission preserves it. */
+    goal: Schema.optional(Schema.NullOr(ThreadGoal)),
   }),
+  ThreadGoalLoopClientCommand,
+  ThreadVoiceNotificationsSetCommand,
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.link"),
     commandId: CommandId,
@@ -2836,7 +2984,8 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * `OrchestrationV2Command`, the `dispatchCommand` payload, so no client can
  * send them.
  */
-const OrchestrationV2InternalCommand = Schema.Union([
+export const OrchestrationV2InternalCommand = Schema.Union([
+  ThreadGoalLoopSyncCommand,
   /** Records that the provider rollback `requestId` failed for good. */
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback.fail"),

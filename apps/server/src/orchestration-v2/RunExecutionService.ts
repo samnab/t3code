@@ -367,6 +367,9 @@ export function routeProviderEvent(
   });
 
   switch (event.type) {
+    case "account.rate-limits.updated":
+      // Account-scoped telemetry is not owned by an individual run.
+      return [false, state];
     case "provider_session.updated":
       // The session manager persists process-wide status once for every
       // attached app thread before broadcasting the adapter event.

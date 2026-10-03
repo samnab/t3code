@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  EventId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
@@ -157,6 +158,37 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     const next = applyOrchestrationV2ProjectionEvent(emptyProjection, event);
     expect(next?.thread.archivedAt).toEqual(archivedAt);
     expect(next?.updatedAt).toEqual(archivedAt);
+  });
+
+  it("applies goal-loop and voice notification updates to thread state", () => {
+    const updatedAt = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");
+    const withGoalLoop = applyOrchestrationV2ProjectionEvent(emptyProjection, {
+      id: EventId.make("event-goal-loop"),
+      type: "thread.goal-loop-updated",
+      threadId,
+      occurredAt: updatedAt,
+      payload: {
+        threadId,
+        loop: {
+          state: "running",
+          mode: "t3",
+          iterations: 1,
+          maxIterations: 10,
+          reason: null,
+          updatedAt,
+        },
+      },
+    });
+    const withVoice = applyOrchestrationV2ProjectionEvent(withGoalLoop, {
+      id: EventId.make("event-voice"),
+      type: "thread.voice-notifications-set",
+      threadId,
+      occurredAt: updatedAt,
+      payload: { threadId, voiceNotifications: false, updatedAt },
+    });
+
+    expect(withVoice?.thread.goalLoop).toMatchObject({ state: "running", iterations: 1 });
+    expect(withVoice?.thread.voiceNotifications).toBe(false);
   });
 
   it("ignores events for another thread", () => {

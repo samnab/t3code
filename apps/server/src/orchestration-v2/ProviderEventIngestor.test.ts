@@ -24,6 +24,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -32,6 +33,7 @@ import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { ProviderAdapterV2Event } from "./ProviderAdapter.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import { makeProviderFailure } from "./ProviderFailure.ts";
 import {
@@ -63,6 +65,31 @@ const modelSelection = {
   model: "gpt-5.4",
 } satisfies ModelSelection;
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
+
+it("decodes account usage-limit updates on the v2 provider event boundary", () => {
+  const event = Schema.decodeUnknownSync(ProviderAdapterV2Event)({
+    type: "account.rate-limits.updated",
+    driver: "codex",
+    payload: {
+      limits: {
+        windows: [
+          {
+            id: "primary",
+            kind: "session",
+            label: "Session",
+            usedPercent: 25,
+            resetsAt: "2026-10-02T12:00:00.000Z",
+          },
+        ],
+      },
+    },
+  });
+
+  assert.strictEqual(event.type, "account.rate-limits.updated");
+  if (event.type === "account.rate-limits.updated") {
+    assert.strictEqual(event.payload.limits.windows[0]?.id, "primary");
+  }
+});
 
 function threadCreatedEvent(
   now: DateTime.Utc,

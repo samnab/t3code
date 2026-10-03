@@ -249,6 +249,9 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
         DateTime.makeUnsafe("2026-01-02T00:00:00.000Z"),
       );
       assert.equal(shellProjection.thread.pinOrderKey, "m");
+      assert.isNull(shellProjection.thread.goal);
+      assert.isNull(shellProjection.thread.goalLoop);
+      assert.isTrue(shellProjection.thread.voiceNotifications);
       assert.deepEqual(
         shellProjection.thread.snoozedUntil,
         DateTime.makeUnsafe("2026-02-01T00:00:00.000Z"),
@@ -527,6 +530,96 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
         ORDER BY sequence
       `;
       assert.deepStrictEqual(eventsAfterRestart, eventsBeforeRetry);
+    }),
+  );
+
+  it.effect("imports and repairs fork goal-loop and voice metadata when its columns exist", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("thread:legacy-fork-metadata");
+
+      const columns = new Set(
+        (yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`).map(
+          (column) => column.name,
+        ),
+      );
+      if (!columns.has("goal")) yield* sql`ALTER TABLE projection_threads ADD COLUMN goal TEXT`;
+      if (!columns.has("goal_loop_json"))
+        yield* sql`ALTER TABLE projection_threads ADD COLUMN goal_loop_json TEXT`;
+      if (!columns.has("voice_notifications"))
+        yield* sql`ALTER TABLE projection_threads ADD COLUMN voice_notifications INTEGER`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (
+          'project:legacy-fork-metadata',
+          'Fork metadata project',
+          '/tmp/legacy-fork-metadata',
+          '[]',
+          '2026-01-01T00:00:00.000Z',
+          '2026-01-01T00:00:00.000Z'
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at, goal, goal_loop_json,
+          voice_notifications
+        ) VALUES (
+          ${threadId},
+          'project:legacy-fork-metadata',
+          'Fork metadata',
+          '{"instanceId":"codex","model":"gpt-5.4"}',
+          'full-access',
+          'default',
+          '2026-01-01T00:00:00.000Z',
+          '2026-01-02T00:00:00.000Z',
+          'Finish the port',
+          '{"kind":"standard","state":"paused","mode":"t3","iterations":3,"maxIterations":10,"reason":"Waiting","experiment":null,"updatedAt":"2026-01-02T00:00:00.000Z"}',
+          0
+        )
+      `;
+
+      assert.deepStrictEqual(yield* importer.reconcileShells, {
+        importedThreadCount: 1,
+        importedMessageCount: 0,
+      });
+      let thread = yield* projections.getThread(threadId);
+      assert.equal(thread.goal, "Finish the port");
+      assert.deepInclude(thread.goalLoop, {
+        state: "paused",
+        mode: "t3",
+        iterations: 3,
+        maxIterations: 10,
+        reason: "Waiting",
+      });
+      assert.isFalse(thread.voiceNotifications);
+
+      yield* sql`
+        UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_remove(
+          payload_json,
+          '$.goal',
+          '$.goalLoop',
+          '$.voiceNotifications'
+        )
+        WHERE thread_id = ${threadId}
+      `;
+      assert.deepStrictEqual(yield* importer.reconcileShells, {
+        importedThreadCount: 1,
+        importedMessageCount: 0,
+      });
+      thread = yield* projections.getThread(threadId);
+      assert.equal(thread.goal, "Finish the port");
+      assert.equal(thread.goalLoop?.state, "paused");
+      assert.isFalse(thread.voiceNotifications);
+      assert.deepStrictEqual(yield* importer.reconcileShells, {
+        importedThreadCount: 0,
+        importedMessageCount: 0,
+      });
     }),
   );
 });

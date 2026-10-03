@@ -43,7 +43,12 @@ import {
   type ProviderSessionId,
   RunId,
   ThreadLinkedPullRequest,
+  THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
+  type ThreadGoalLoop,
+  type ThreadGoalLoopClientCommand,
+  type ThreadGoalLoopSyncCommand,
   ThreadId,
+  resolveThreadGoalLoopMode,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
@@ -336,6 +341,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.visit":
     case "thread.mark-unread":
     case "thread.metadata.update":
+    case "thread.goal.loop":
+    case "thread.voice-notifications.set":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
     case "thread.pull-request-link.sync":
@@ -373,6 +380,20 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.merge_back":
       return command.targetThreadId;
   }
+}
+
+function initialThreadGoalLoop(
+  updatedAt: DateTime.Utc,
+  providerInstanceId: ProviderInstanceId,
+): ThreadGoalLoop {
+  return {
+    state: "idle",
+    mode: resolveThreadGoalLoopMode(providerInstanceId),
+    iterations: 0,
+    maxIterations: THREAD_GOAL_LOOP_DEFAULT_MAX_ITERATIONS,
+    reason: null,
+    updatedAt,
+  };
 }
 
 function pendingThreadTitleGenerationEffect(
@@ -2063,6 +2084,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       settledAt: null,
       snoozedUntil: null,
       snoozedAt: null,
+      goal: command.goal ?? null,
+      goalLoop: null,
+      voiceNotifications: command.voiceNotifications ?? true,
       lastVisitedAt: null,
       deletedAt: null,
     };
@@ -2074,6 +2098,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: thread,
     });
+    if (command.goal != null) {
+      yield* emitEvent({
+        type: "thread.goal-loop-updated",
+        threadId: command.threadId,
+        providerInstanceId: command.modelSelection.instanceId,
+        occurredAt: now,
+        payload: {
+          threadId: command.threadId,
+          loop: initialThreadGoalLoop(now, command.modelSelection.instanceId),
+        },
+      });
+    }
     if (command.importedNativeThread !== undefined) {
       yield* emitEvent({
         type: "provider-thread.updated",
@@ -2148,6 +2184,140 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       providerInstanceId: thread.providerInstanceId,
       occurredAt: yield* DateTime.now,
       payload: movesForward ? { ...thread, lastVisitedAt: visitedAt.value } : thread,
+    });
+  });
+
+  const dispatchThreadGoalLoop = Effect.fn("orchestrationV2.dispatch.threadGoalLoop")(function* (
+    command: ThreadGoalLoopClientCommand | ThreadGoalLoopSyncCommand,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const thread = yield* projectionStore
+      .getThread(command.threadId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+    if (thread.deletedAt !== null || thread.goal == null) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} does not have an active goal.`,
+      });
+    }
+
+    const now = yield* DateTime.now;
+    const loop = thread.goalLoop ?? initialThreadGoalLoop(now, thread.providerInstanceId);
+    if (
+      command.action === "sync" &&
+      command.goalLoopGuard !== undefined &&
+      (thread.goalLoop == null ||
+        DateTime.toEpochMillis(thread.goalLoop.updatedAt) !==
+          DateTime.toEpochMillis(command.goalLoopGuard.updatedAt) ||
+        (thread.goalLoop.state !== "idle" && thread.goalLoop.state !== "running"))
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} no longer has the active goal generation required by this automatic update.`,
+      });
+    }
+
+    const updatedLoop = (() => {
+      const update = (patch: Partial<ThreadGoalLoop>): ThreadGoalLoop => ({
+        ...loop,
+        reason: null,
+        ...patch,
+        updatedAt: now,
+      });
+      switch (command.action) {
+        case "pause":
+          return update({ state: "paused" });
+        case "resume":
+          if (loop.state === "completed") return null;
+          return update({ state: "idle" });
+        case "continue":
+          if (loop.state === "completed") return null;
+          return loop.iterations >= loop.maxIterations
+            ? update({ state: "capped", reason: `Reached ${loop.maxIterations} iterations.` })
+            : update({ state: "running", iterations: loop.iterations + 1 });
+        case "complete":
+          return update({ state: "completed" });
+        case "block":
+          return update({
+            state: "blocked",
+            ...(command.reason === undefined ? {} : { reason: command.reason }),
+          });
+        case "reset":
+          return update({ state: "idle", iterations: 0 });
+        case "sync":
+          return update({
+            ...(command.state === undefined ? {} : { state: command.state }),
+            ...(command.mode === undefined ? {} : { mode: command.mode }),
+            ...(command.reason === undefined ? {} : { reason: command.reason }),
+          });
+      }
+    })();
+    if (updatedLoop === null) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} has a completed goal loop.`,
+      });
+    }
+
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "thread.goal-loop-updated",
+      threadId: command.threadId,
+      providerInstanceId: thread.providerInstanceId,
+      occurredAt: now,
+      payload: {
+        threadId: command.threadId,
+        loop: updatedLoop,
+        ...((command.action === "resume" || command.action === "reset") && {
+          resumed: true,
+        }),
+      },
+    });
+  });
+
+  const dispatchThreadVoiceNotificationsSet = Effect.fn(
+    "orchestrationV2.dispatch.threadVoiceNotificationsSet",
+  )(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.voice-notifications.set" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const thread = yield* projectionStore
+      .getThread(command.threadId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+    if (thread.deletedAt !== null) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is deleted.`,
+      });
+    }
+    const now = yield* DateTime.now;
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "thread.voice-notifications-set",
+      threadId: command.threadId,
+      providerInstanceId: thread.providerInstanceId,
+      occurredAt: now,
+      payload: {
+        threadId: command.threadId,
+        voiceNotifications: command.voiceNotifications,
+        updatedAt: now,
+      },
     });
   });
 
@@ -2659,6 +2829,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 : {}),
             ...(command.branch === undefined ? {} : { branch: command.branch }),
             ...(command.worktreePath === undefined ? {} : { worktreePath: command.worktreePath }),
+            ...(command.goal === undefined ? {} : { goal: command.goal }),
             ...(command.linkedPullRequest === undefined
               ? {}
               : {
@@ -2914,6 +3085,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: updatedThread,
     });
+
+    if (
+      command.type === "thread.metadata.update" &&
+      command.goal !== undefined &&
+      command.goal !== thread.goal
+    ) {
+      const nextLoop =
+        command.goal === null
+          ? null
+          : thread.goalLoop == null
+            ? initialThreadGoalLoop(now, thread.providerInstanceId)
+            : {
+                ...thread.goalLoop,
+                state: thread.goalLoop.state === "paused" ? ("paused" as const) : ("idle" as const),
+                iterations: 0,
+                reason: null,
+                updatedAt: now,
+              };
+      if (nextLoop !== null || thread.goalLoop !== null) {
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.goal-loop-updated",
+          threadId: command.threadId,
+          providerInstanceId: updatedThread.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            threadId: command.threadId,
+            loop: nextLoop,
+            ...(nextLoop?.state === "idle" ? { resumed: true } : {}),
+          },
+        });
+      }
+    }
 
     if (command.type === "thread.metadata.update" && command.regenerateTitle === true) {
       yield* Ref.update(effects, (existing) => [
@@ -9038,6 +9244,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "thread.visit":
         yield* dispatchThreadVisit(command, events);
+        break;
+      case "thread.goal.loop":
+        yield* dispatchThreadGoalLoop(command, events);
+        break;
+      case "thread.voice-notifications.set":
+        yield* dispatchThreadVoiceNotificationsSet(command, events);
         break;
       case "thread.auto-settle": {
         // Automatic settlement (#8600): the sweep evaluated a shell snapshot,

@@ -668,6 +668,20 @@ export function applyToProjection(
         ...projection,
         thread: event.payload,
       };
+    case "thread.goal-loop-updated":
+      return {
+        ...base,
+        thread: { ...base.thread, goalLoop: event.payload.loop },
+      };
+    case "thread.voice-notifications-set":
+      return {
+        ...base,
+        thread: {
+          ...base.thread,
+          voiceNotifications: event.payload.voiceNotifications,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
     case "run.created":
     case "run.updated":
       return withLocalVisibleTurnItems({
@@ -1404,6 +1418,9 @@ export function threadShellFromProjection(
     unsettledAt: projection.thread.unsettledAt ?? null,
     snoozedUntil: projection.thread.snoozedUntil ?? null,
     snoozedAt: projection.thread.snoozedAt ?? null,
+    goal: projection.thread.goal ?? null,
+    goalLoop: projection.thread.goalLoop ?? null,
+    voiceNotifications: projection.thread.voiceNotifications ?? true,
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
@@ -1628,6 +1645,9 @@ function shellFromState(input: {
     unsettledAt: input.state.thread.unsettledAt ?? null,
     snoozedUntil: input.state.thread.snoozedUntil ?? null,
     snoozedAt: input.state.thread.snoozedAt ?? null,
+    goal: input.state.thread.goal ?? null,
+    goalLoop: input.state.thread.goalLoop ?? null,
+    voiceNotifications: input.state.thread.voiceNotifications ?? true,
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
@@ -1729,6 +1749,37 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 archived_at = excluded.archived_at,
                 deleted_at = excluded.deleted_at,
                 payload_json = excluded.payload_json
+            `;
+            break;
+          }
+          case "thread.goal-loop-updated":
+          case "thread.voice-notifications-set": {
+            const rows = yield* sql<PayloadRow>`
+              SELECT payload_json
+              FROM orchestration_v2_projection_threads
+              WHERE thread_id = ${event.threadId}
+              LIMIT 1
+            `;
+            const row = rows[0];
+            if (row === undefined) {
+              return yield* new ProjectionStoreThreadNotFoundError({ threadId: event.threadId });
+            }
+            const thread = yield* decodeThreadPayload(row.payload_json);
+            const updatedThread: OrchestrationV2AppThread =
+              event.type === "thread.goal-loop-updated"
+                ? { ...thread, goalLoop: event.payload.loop, updatedAt: event.occurredAt }
+                : {
+                    ...thread,
+                    voiceNotifications: event.payload.voiceNotifications,
+                    updatedAt: event.payload.updatedAt,
+                  };
+            const payloadJson = yield* encodeThreadPayload(updatedThread);
+            yield* sql`
+              UPDATE orchestration_v2_projection_threads
+              SET
+                updated_at = ${stringField(parseEncodedPayload(payloadJson), "updatedAt")},
+                payload_json = ${payloadJson}
+              WHERE thread_id = ${event.threadId}
             `;
             break;
           }
@@ -2508,6 +2559,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           event.type !== "thread.visited" &&
           event.type !== "thread.marked-unread" &&
           event.type !== "thread.metadata-updated" &&
+          event.type !== "thread.goal-loop-updated" &&
+          event.type !== "thread.voice-notifications-set" &&
           event.type !== "thread.runtime-mode-updated" &&
           event.type !== "thread.interaction-mode-updated" &&
           event.type !== "thread.model-selection-updated" &&
