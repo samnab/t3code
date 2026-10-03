@@ -13,6 +13,7 @@ import {
   type ServerProviderModel,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ThreadProjection,
+  orchestrationV2RunWorkStartedAt,
   type ThreadId,
 } from "@t3tools/contracts";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -25,6 +26,7 @@ import {
   type ThreadRunSummary,
   type ThreadRuntimeSummary,
 } from "./models.ts";
+import { formatSubagentDisplayTitle } from "./subagentDisplay.ts";
 
 const ACTIVITY_RUN_STATUSES = new Set(["preparing", "starting", "running", "waiting"]);
 const INTERRUPTIBLE_RUN_STATUSES = new Set(["preparing", "starting", "running"]);
@@ -212,6 +214,9 @@ export function deriveThreadRuntime(
   const usageLimitedRun = presentedUsageLimitRun(projection);
   const latestRunProjection = presentedLatestRun(projection);
   const activityRun = deriveThreadActivityRun(projection);
+  const liveActivityRun = latestMatchingRun(projection, (run) =>
+    ACTIVITY_RUN_STATUSES.has(run.status),
+  );
   if (latestRun === null && projection.thread.activeProviderThreadId === null) return null;
   const activeRunId =
     latestMatchingRun(projection, (run) => INTERRUPTIBLE_RUN_STATUSES.has(run.status))?.id ?? null;
@@ -231,9 +236,9 @@ export function deriveThreadRuntime(
         : (activityRun?.status ?? "idle"),
     activeRunId,
     activityStartedAt:
-      activityRun !== null && ACTIVITY_RUN_STATUSES.has(activityRun.status)
-        ? (activityRun.startedAt ?? activityRun.requestedAt)
-        : null,
+      liveActivityRun === null
+        ? null
+        : DateTime.formatIso(orchestrationV2RunWorkStartedAt(liveActivityRun)),
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
     ...threadErrorSummary(
@@ -295,13 +300,17 @@ export function presentPendingBackgroundWork(
   const items = tasks
     .map((task): PendingBackgroundWorkItem => {
       const description = task.description?.trim();
+      const label =
+        task.kind === "subagent" && description !== undefined
+          ? formatSubagentDisplayTitle(description).trim()
+          : description;
       return {
         taskId: task.taskId,
         kind: task.kind,
         label:
-          description === undefined || description.length === 0
+          label === undefined || label.length === 0
             ? BACKGROUND_WORK_KINDS[task.kind].singular
-            : description,
+            : label,
         childThreadId: task.kind === "subagent" ? task.childThreadId : undefined,
       };
     })
