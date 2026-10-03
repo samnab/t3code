@@ -17,6 +17,7 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
+import { readThreadGoalState } from "@t3tools/client-runtime/state/thread-goal-editor";
 import type { EnvironmentMachineKind } from "@t3tools/contracts";
 import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import type { MenuAction } from "@react-native-menu/menu";
@@ -51,6 +52,7 @@ import {
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
 import { ThreadSearchMatchExcerpt } from "./thread-search-match";
+import { mobileGoalLoopStatus } from "./thread-goal-loop";
 
 /**
  * Thread List v2 renders one flat native list: rich edge-to-edge rows for
@@ -585,6 +587,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   // The timestamp is precomputed on the list item (same stamps the settled
   // tail sorts by) so a minute tick only re-renders rows that draw it.
   const timeLabel = props.timeLabel;
+  const goalState = readThreadGoalState(thread);
+  const goalLoopStatus = mobileGoalLoopStatus(goalState.goalLoop);
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
@@ -967,6 +971,39 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       >
         {thread.title}
       </Text>
+      {goalState.goal !== null ? (
+        <View className="mt-1 flex-row items-center gap-1.5">
+          <SymbolView
+            name="flag"
+            size={11}
+            tintColorClassName={rowAppearance.mutedIconTintClassName}
+            type="monochrome"
+          />
+          <Text
+            className={cn(
+              "min-w-0 flex-1 text-xs",
+              selected
+                ? selectedThreadRowColors.mutedForegroundClassName
+                : rowAppearance.mutedForegroundClassName,
+            )}
+            numberOfLines={1}
+          >
+            {goalState.goal}
+          </Text>
+          {goalLoopStatus ? (
+            <Text
+              className={cn(
+                "text-xs tabular-nums",
+                selected
+                  ? selectedThreadRowColors.mutedForegroundClassName
+                  : rowAppearance.tertiaryForegroundClassName,
+              )}
+            >
+              {goalLoopStatus}
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
       {props.searchMatch ? (
         <View className="mt-1">
           <ThreadSearchMatchExcerpt
@@ -1051,6 +1088,18 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         ) : (
           <View className="flex-1" />
         )}
+        {thread.pendingBackgroundTasks.length > 0 ? (
+          <Text
+            className={cn(
+              "text-xs tabular-nums",
+              selected
+                ? selectedThreadRowColors.mutedForegroundClassName
+                : rowAppearance.tertiaryForegroundClassName,
+            )}
+          >
+            {thread.pendingBackgroundTasks.length} background
+          </Text>
+        ) : null}
         {pr ? (
           <View className="flex-row items-center gap-1" accessibilityLabel={pr.accessibilityLabel}>
             <SymbolView

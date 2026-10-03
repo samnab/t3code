@@ -2187,6 +2187,7 @@ describe("mobile composer drafts", () => {
         worktreePath: null,
         startFromOrigin: false,
       },
+      voiceNotifications: false,
     };
 
     expect(

@@ -41,6 +41,7 @@ describe("project thread title", () => {
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
+      voiceNotifications: false,
       workspaceMode: "local",
       branch: null,
       worktreePath: null,
@@ -51,6 +52,7 @@ describe("project thread title", () => {
     expect(input.titleSeed).toBe("Image: photo.png");
     expect(input.bootstrap.createThread.title).toBe(input.titleSeed);
     expect(input.message.attachments).toEqual(uploadedAttachments);
+    expect(input.bootstrap.createThread.voiceNotifications).toBe(false);
   });
 
   it.each([

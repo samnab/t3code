@@ -36,6 +36,7 @@ const creation: QueuedThreadMessage = {
   ],
   modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
   runtimeMode: "full-access",
+  voiceNotifications: false,
   creation: {
     projectId: ProjectId.make("project-1"),
     workspaceMode: "worktree",
@@ -167,6 +168,7 @@ describe("pendingThreadCreationShell", () => {
       modelSelection: creation.modelSelection,
       runtimeMode: "full-access",
       interactionMode: "default",
+      voiceNotifications: false,
       branch: "main",
       worktreePath: null,
       latestRun: null,
