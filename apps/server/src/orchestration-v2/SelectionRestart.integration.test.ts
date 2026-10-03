@@ -58,13 +58,7 @@ const handoffSelection = {
   instanceId: handoffProviderInstanceId,
   model: "handoff-model",
 } satisfies ModelSelection;
-const pooledCapabilities: OrchestrationV2ProviderCapabilities = {
-  ...CodexProviderCapabilitiesV2,
-  sessions: {
-    ...CodexProviderCapabilitiesV2.sessions,
-    supportsMultipleProviderThreadsPerSession: true,
-  },
-};
+const pooledCapabilities: OrchestrationV2ProviderCapabilities = CodexProviderCapabilitiesV2;
 const exclusiveCapabilities: OrchestrationV2ProviderCapabilities = {
   ...CodexProviderCapabilitiesV2,
   sessions: {
