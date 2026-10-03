@@ -92,7 +92,7 @@ model_provider = "other"
             HEADROOM_PROXY_URL: "http://127.0.0.1:8787",
             OPENAI_BASE_URL: "http://127.0.0.1:8787/v1",
           },
-          codexAppServerArgs: ["-c", 'openai_base_url="http://127.0.0.1:8787/v1"'],
+          codexBaseUrl: "http://127.0.0.1:8787/v1",
         });
         expect(
           yield* resolveHeadroomSessionRouting({

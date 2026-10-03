@@ -33,7 +33,8 @@ export interface SessionCbmAttachment {
 
 export interface SessionHeadroomAttachment {
   readonly environment: Readonly<Record<string, string>>;
-  readonly codexAppServerArgs?: ReadonlyArray<string>;
+  /** Codex routes per thread: `openai_base_url` in the thread's config overrides. */
+  readonly codexBaseUrl?: string;
 }
 
 export interface SessionOptimizerAttachmentDescriptor {
@@ -165,22 +166,6 @@ export function removeSessionOptimizerAttachment(threadId: ThreadId, optimizer: 
     return;
   }
   attachmentsByThread.set(threadId, { ...current, attached, ready });
-}
-
-export function buildCodexCbmAppServerArgs(
-  attachment: SessionCbmAttachment,
-): ReadonlyArray<string> {
-  const prefix = `mcp_servers.${CBM_MCP_SERVER_NAME}`;
-  return [
-    "-c",
-    `${prefix}.command=${JSON.stringify(attachment.command)}`,
-    "-c",
-    `${prefix}.args=${JSON.stringify(attachment.args)}`,
-    ...Object.entries(attachment.env).flatMap(([name, value]) => [
-      "-c",
-      `${prefix}.env.${name}=${JSON.stringify(value)}`,
-    ]),
-  ];
 }
 
 const make = Effect.gen(function* () {
