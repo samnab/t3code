@@ -1,6 +1,4 @@
 import {
-  ClientSettingsSchema,
-  type ClientSettings,
   LegacyClientSettings,
   type LegacyClientSettings as LegacyClientSettingsType,
 } from "@t3tools/contracts";
@@ -15,7 +13,8 @@ function hasWindow(): boolean {
 
 // Reads through LegacyClientSettings so the retired device-local
 // providerModelPreferences survives decoding for the one-time migration to
-// server settings. Writes re-encode with ClientSettingsSchema, dropping it.
+// server settings. Writes keep it while pending; the caller omits it once
+// migrated.
 export function readBrowserClientSettings(): LegacyClientSettingsType | null {
   if (!hasWindow()) {
     return null;
@@ -24,10 +23,10 @@ export function readBrowserClientSettings(): LegacyClientSettingsType | null {
   return getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, LegacyClientSettings);
 }
 
-export function writeBrowserClientSettings(settings: ClientSettings): void {
+export function writeBrowserClientSettings(settings: LegacyClientSettingsType): void {
   if (!hasWindow()) {
     return;
   }
 
-  setLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, settings, ClientSettingsSchema);
+  setLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, settings, LegacyClientSettings);
 }

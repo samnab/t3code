@@ -1,5 +1,4 @@
 import {
-  ClientSettingsSchema,
   type ClientSettings,
   LegacyClientSettings,
   type LegacyClientSettings as LegacyClientSettingsType,
@@ -17,13 +16,13 @@ import * as Ref from "effect/Ref";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 
-const ClientSettingsJson = fromLenientJson(ClientSettingsSchema);
+const ClientSettingsJson = fromLenientJson(LegacyClientSettings);
 const decodeClientSettingsDocument = Schema.decodeEffect(
   fromLenientJson(Schema.Record(Schema.String, Schema.Unknown)),
 );
-// Reads decode the legacy view so the retired device-local
-// providerModelPreferences reaches the one-time migration; writes encode
-// ClientSettingsSchema, dropping it from the file.
+// Reads and writes use the legacy view: the retired device-local
+// providerModelPreferences stays in the file until the one-time migration to
+// server settings succeeds, and the renderer stops sending it afterwards.
 const decodeClientSettingsValue = Schema.decodeUnknownEffect(LegacyClientSettings);
 const decodeClientSettingsJson = Effect.fnUntraced(function* (raw: string) {
   const document = yield* decodeClientSettingsDocument(raw);
@@ -76,7 +75,7 @@ export class DesktopClientSettings extends Context.Service<
       DesktopClientSettingsReadError
     >;
     readonly set: (
-      settings: ClientSettings,
+      settings: LegacyClientSettingsType,
     ) => Effect.Effect<void, DesktopClientSettingsWriteError>;
   }
 >()("@t3tools/desktop/settings/DesktopClientSettings") {}
@@ -106,7 +105,7 @@ const readClientSettings = (
     }),
     Effect.flatMap(
       Option.match({
-        onNone: () => Effect.succeed(Option.none<ClientSettings>()),
+        onNone: () => Effect.succeed(Option.none<LegacyClientSettingsType>()),
         onSome: (raw) =>
           decodeClientSettingsJson(raw).pipe(
             Effect.asSome,
@@ -134,7 +133,7 @@ const writeClientSettings = Effect.fnUntraced(function* (input: {
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
   readonly settingsPath: string;
-  readonly settings: ClientSettings;
+  readonly settings: LegacyClientSettingsType;
   readonly suffix: string;
 }): Effect.fn.Return<void, DesktopClientSettingsWriteError> {
   const directory = input.path.dirname(input.settingsPath);

@@ -24,6 +24,8 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -186,6 +188,11 @@ const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
   .annotate(Tool.Destructive, false);
 const ThreadConfigureTool = Tool.make("t3_thread_configure", {
   ...commandTool,
+  dependencies: [
+    ...commandTool.dependencies,
+    ProviderRegistry.ProviderRegistry,
+    ServerSettings.ServerSettingsService,
+  ],
   description:
     "Set this calling thread's provider, model and options with the existing selection command. This does not change permission modes or other threads. Use orchestrator_capabilities to choose a selection.",
   parameters: Schema.Struct({ modelSelection: ModelSelection }),

@@ -752,6 +752,13 @@ describe("OrchestratorMcpService provider resolution", () => {
       };
       let delegated = false;
       const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const catalog = yield* Ref.make([
+        providerSnapshot({
+          instanceId: codexInstanceId,
+          driver: ProviderDriverKind.make("codex"),
+          models: [hidden, visible],
+        }),
+      ]);
       const dependencies = Layer.mergeAll(
         NodeServices.layer,
         unusedDelegationPolicyLayer,
@@ -784,13 +791,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             ),
         }),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([
-            providerSnapshot({
-              instanceId: codexInstanceId,
-              driver: ProviderDriverKind.make("codex"),
-              models: [hidden, visible],
-            }),
-          ]),
+          getProviders: Ref.get(catalog),
         }),
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
@@ -830,6 +831,25 @@ describe("OrchestratorMcpService provider resolution", () => {
         const commands = yield* Ref.get(dispatched);
         const request = commands[0] as { modelSelection: { model: string } };
         assert.equal(request.modelSelection.model, hidden);
+
+        // An empty catalog (failed discovery) must not let a hidden model through.
+        yield* Ref.set(catalog, [
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            models: [],
+          }),
+        ]);
+        const emptyCatalogRejection = yield* service
+          .delegateTask(scope, {
+            task: "Summarize the diff.",
+            target: { providerInstanceId: codexInstanceId, model: hidden },
+            mode: "async",
+            clientRequestId: "delegate-hidden-3",
+          })
+          .pipe(Effect.flip);
+        assert.equal(emptyCatalogRejection.code, "model_unavailable");
+        assert.include(emptyCatalogRejection.message, "hidden");
       }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
     }),
   );

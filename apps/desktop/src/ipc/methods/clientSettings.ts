@@ -1,4 +1,4 @@
-import { ClientSettingsSchema, LegacyClientSettings } from "@t3tools/contracts";
+import { LegacyClientSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -12,8 +12,8 @@ export const getClientSettings = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.GET_CLIENT_SETTINGS_CHANNEL,
   payload: Schema.Void,
   // LegacyClientSettings keeps the retired device-local
-  // providerModelPreferences readable for the one-time migration to server
-  // settings; writes go through ClientSettingsSchema and drop it.
+  // providerModelPreferences until the one-time migration to server settings
+  // succeeds; the renderer omits it on writes afterwards.
   result: Schema.NullOr(LegacyClientSettings),
   handler: Effect.fn("desktop.ipc.clientSettings.get")(function* () {
     const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
@@ -23,7 +23,7 @@ export const getClientSettings = DesktopIpc.makeIpcMethod({
 
 export const setClientSettings = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.SET_CLIENT_SETTINGS_CHANNEL,
-  payload: ClientSettingsSchema,
+  payload: LegacyClientSettings,
   result: Schema.Void,
   handler: Effect.fn("desktop.ipc.clientSettings.set")(function* (settings) {
     const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;

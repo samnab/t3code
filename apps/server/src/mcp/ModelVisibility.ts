@@ -27,22 +27,21 @@ export function visibleProviderModels(
 }
 
 /**
- * Why `selection` names a model the user hid, or null when it is visible
- * (or the provider does not list the model, in which case advertisement
- * checks own the verdict — mirroring how option validation skips
- * unlisted models).
+ * Why `selection` names a model the user hid, null when it is visible. Checks the
+ * configured hidden list directly so an empty or incomplete catalog (for example
+ * failed Pi discovery) cannot let a hidden model through; only a model the
+ * catalog marks custom is exempt.
  */
 export function hiddenModelMessage(input: {
   readonly settings: Pick<ServerSettings, "providerModelPreferences">;
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly selection: ModelSelection;
 }): string | null {
-  const provider = input.providers.find(
-    (candidate) => candidate.instanceId === input.selection.instanceId,
-  );
-  if (provider === undefined || provider.models.length === 0) return null;
-  const model = provider.models.find((candidate) => candidate.slug === input.selection.model);
-  if (model === undefined || model.isCustom) return null;
-  if (!hiddenModelSlugs(input.settings, input.selection.instanceId).has(model.slug)) return null;
-  return `Model ${model.slug} is hidden on provider instance ${input.selection.instanceId} (Settings → Providers). Unhide it there or pick a model from orchestrator_capabilities.`;
+  const { instanceId, model } = input.selection;
+  if (!hiddenModelSlugs(input.settings, instanceId).has(model)) return null;
+  const listed = input.providers
+    .find((candidate) => candidate.instanceId === instanceId)
+    ?.models.find((candidate) => candidate.slug === model);
+  if (listed?.isCustom === true) return null;
+  return `Model ${model} is hidden on provider instance ${instanceId} (Settings → Providers). Unhide it there or pick a model from orchestrator_capabilities.`;
 }

@@ -18,7 +18,6 @@ import {
   T3_PROJECT_FILE_NAME,
   ThreadId,
 } from "@t3tools/contracts";
-import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { sanitizeNewRefName } from "@t3tools/shared/git";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
@@ -548,7 +547,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     projectDefaultSelection: projectDefaultModelSelection,
     carriedSelection: stickyModelSelection,
     shouldCarrySelection: true,
-    settings: DEFAULT_UNIFIED_SETTINGS,
+    settings: selectedEnvironmentServerConfig?.settings ?? DEFAULT_SERVER_SETTINGS,
   });
   const modelOptions = useMemo(
     () =>
