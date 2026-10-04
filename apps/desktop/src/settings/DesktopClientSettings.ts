@@ -1,4 +1,8 @@
-import { ClientSettingsSchema, type ClientSettings } from "@t3tools/contracts";
+import {
+  type ClientSettings,
+  LegacyClientSettings,
+  type LegacyClientSettings as LegacyClientSettingsType,
+} from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -12,11 +16,14 @@ import * as Ref from "effect/Ref";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 
-const ClientSettingsJson = fromLenientJson(ClientSettingsSchema);
+const ClientSettingsJson = fromLenientJson(LegacyClientSettings);
 const decodeClientSettingsDocument = Schema.decodeEffect(
   fromLenientJson(Schema.Record(Schema.String, Schema.Unknown)),
 );
-const decodeClientSettingsValue = Schema.decodeUnknownEffect(ClientSettingsSchema);
+// Reads and writes use the legacy view: the retired device-local
+// providerModelPreferences stays in the file until the one-time migration to
+// server settings succeeds, and the renderer stops sending it afterwards.
+const decodeClientSettingsValue = Schema.decodeUnknownEffect(LegacyClientSettings);
 const decodeClientSettingsJson = Effect.fnUntraced(function* (raw: string) {
   const document = yield* decodeClientSettingsDocument(raw);
   // Select the shape before validation so invalid legacy settings cannot become defaults.
@@ -63,9 +70,12 @@ export class DesktopClientSettingsWriteError extends Schema.TaggedError<DesktopC
 export class DesktopClientSettings extends Context.Service<
   DesktopClientSettings,
   {
-    readonly get: Effect.Effect<Option.Option<ClientSettings>, DesktopClientSettingsReadError>;
+    readonly get: Effect.Effect<
+      Option.Option<LegacyClientSettingsType>,
+      DesktopClientSettingsReadError
+    >;
     readonly set: (
-      settings: ClientSettings,
+      settings: LegacyClientSettingsType,
     ) => Effect.Effect<void, DesktopClientSettingsWriteError>;
   }
 >()("@t3tools/desktop/settings/DesktopClientSettings") {}
@@ -73,7 +83,7 @@ export class DesktopClientSettings extends Context.Service<
 const readClientSettings = (
   fileSystem: FileSystem.FileSystem,
   settingsPath: string,
-): Effect.Effect<Option.Option<ClientSettings>, DesktopClientSettingsReadError> =>
+): Effect.Effect<Option.Option<LegacyClientSettingsType>, DesktopClientSettingsReadError> =>
   fileSystem.readFileString(settingsPath).pipe(
     Effect.asSome,
     Effect.catchTags({
@@ -95,7 +105,7 @@ const readClientSettings = (
     }),
     Effect.flatMap(
       Option.match({
-        onNone: () => Effect.succeed(Option.none<ClientSettings>()),
+        onNone: () => Effect.succeed(Option.none<LegacyClientSettingsType>()),
         onSome: (raw) =>
           decodeClientSettingsJson(raw).pipe(
             Effect.asSome,
@@ -123,7 +133,7 @@ const writeClientSettings = Effect.fnUntraced(function* (input: {
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
   readonly settingsPath: string;
-  readonly settings: ClientSettings;
+  readonly settings: LegacyClientSettingsType;
   readonly suffix: string;
 }): Effect.fn.Return<void, DesktopClientSettingsWriteError> {
   const directory = input.path.dirname(input.settingsPath);

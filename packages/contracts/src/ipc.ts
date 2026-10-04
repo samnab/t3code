@@ -21,7 +21,11 @@ import type {
 import { AuthAccessTokenResult, AuthSessionState, AuthWebSocketTicketResult } from "./auth.ts";
 import { AdvertisedEndpoint } from "./remoteAccess.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
-import { type ClientSettings, type QuitConfirmationMode, SnapShotShortcut } from "./settings.ts";
+import {
+  type LegacyClientSettings,
+  type QuitConfirmationMode,
+  SnapShotShortcut,
+} from "./settings.ts";
 import type { EditorId } from "./editor.ts";
 
 import type {
@@ -1144,8 +1148,8 @@ export interface DesktopBridge {
   getLocalEnvironmentEnabled?: () => boolean;
   setLocalEnvironmentEnabled?: (enabled: boolean) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
-  getClientSettings: () => Promise<ClientSettings | null>;
-  setClientSettings: (settings: ClientSettings) => Promise<void>;
+  getClientSettings: () => Promise<LegacyClientSettings | null>;
+  setClientSettings: (settings: LegacyClientSettings) => Promise<void>;
   getConnectionCatalog?: () => Promise<string | null>;
   setConnectionCatalog?: (catalog: string) => Promise<boolean>;
   clearConnectionCatalog?: () => Promise<void>;
@@ -1385,7 +1389,7 @@ export interface LocalApi {
     close: () => Promise<void>;
   };
   persistence: {
-    getClientSettings: () => Promise<ClientSettings | null>;
-    setClientSettings: (settings: ClientSettings) => Promise<void>;
+    getClientSettings: () => Promise<LegacyClientSettings | null>;
+    setClientSettings: (settings: LegacyClientSettings) => Promise<void>;
   };
 }

@@ -68,8 +68,10 @@ import {
 } from "../orchestration-v2/SubagentProjection.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as DelegationPolicy from "./DelegationPolicy.ts";
+import { hiddenModelMessage, hiddenModelSlugs, visibleProviderModels } from "./ModelVisibility.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -756,6 +758,7 @@ const make = Effect.gen(function* () {
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const delegationPolicy = yield* DelegationPolicy.DelegationPolicy;
 
@@ -890,6 +893,11 @@ const make = Effect.gen(function* () {
     readonly providers: ReadonlyArray<ServerProvider>;
   }): Effect.Effect<ResolvedTarget, OrchestratorMcpFailure> =>
     Effect.gen(function* () {
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError((error) =>
+          failure("orchestration_error", `Unable to read server settings: ${error.message}`),
+        ),
+      );
       const requestedInstanceId = input.target?.providerInstanceId;
       const requestedDriver = input.target?.driverKind;
       const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
@@ -954,11 +962,25 @@ const make = Effect.gen(function* () {
 
       const inheritedSelection = input.parent.thread.modelSelection;
       const requestedModel = input.target?.model;
+      // Hidden models are a user preference the server enforces: an agent
+      // asking for one by name is rejected, and an unspecified model never
+      // defaults to one. Inheriting the parent's model stays allowed even
+      // when hidden — the user picked it for the parent thread.
+      const hidden = hiddenModelSlugs(settings, instanceId);
+      const visibleModels = visibleProviderModels(provider, hidden);
+      const preference = settings.providerModelPreferences[instanceId];
+      const preferredDefault =
+        preference?.defaultModel !== undefined &&
+        preference.defaultModel !== null &&
+        !hidden.has(preference.defaultModel) &&
+        visibleModels.some((candidate) => candidate.slug === preference.defaultModel)
+          ? preference.defaultModel
+          : undefined;
       const model =
         requestedModel ??
         (instanceId === inheritedSelection.instanceId
           ? inheritedSelection.model
-          : provider?.models[0]?.slug);
+          : (preferredDefault ?? visibleModels[0]?.slug));
       if (model === undefined) {
         return yield* failure(
           "model_unavailable",
@@ -975,6 +997,16 @@ const make = Effect.gen(function* () {
           "model_unavailable",
           `Model ${requestedModel} is not advertised by provider ${instanceId}.`,
         );
+      }
+      if (requestedModel !== undefined) {
+        const hiddenReason = hiddenModelMessage({
+          settings,
+          providers: input.providers,
+          selection: { instanceId, model: requestedModel },
+        });
+        if (hiddenReason !== null) {
+          return yield* failure("model_unavailable", hiddenReason);
+        }
       }
 
       const requestedOptions = input.target?.options;
@@ -1314,6 +1346,11 @@ const make = Effect.gen(function* () {
         yield* requireCapability(scope);
         const parent = yield* loadProjection(scope.threadId);
         const providers = yield* loadProviders;
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError((error) =>
+            failure("orchestration_error", `Unable to read server settings: ${error.message}`),
+          ),
+        );
         const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
         return {
           parentThreadId: scope.threadId,
@@ -1330,14 +1367,16 @@ const make = Effect.gen(function* () {
               providerInstanceId: provider.instanceId,
               driverKind: provider.driver,
               displayName: provider?.displayName ?? null,
-              models:
-                provider?.models.map((model) => ({
-                  id: model.slug,
-                  label: model.name ?? null,
-                  ...(model.capabilities?.optionDescriptors === undefined
-                    ? {}
-                    : { options: model.capabilities.optionDescriptors }),
-                })) ?? [],
+              models: visibleProviderModels(
+                provider,
+                hiddenModelSlugs(settings, provider.instanceId),
+              ).map((model) => ({
+                id: model.slug,
+                label: model.name ?? null,
+                ...(model.capabilities?.optionDescriptors === undefined
+                  ? {}
+                  : { options: model.capabilities.optionDescriptors }),
+              })),
               canRunChildTask: constraints.length === 0,
               canRunCrossProviderChildTask: constraints.length === 0,
               constraints: [...constraints],
@@ -1972,6 +2011,7 @@ export const layer: Layer.Layer<
   | ThreadManagementService.ThreadManagementService
   | ProviderRegistry.ProviderRegistry
   | ProviderAdapterRegistry.ProviderAdapterRegistryV2
+  | ServerSettings.ServerSettingsService
   | ScheduledTaskService.ScheduledTaskService
   | DelegationPolicy.DelegationPolicy
 > = Layer.effect(OrchestratorMcpService, make);

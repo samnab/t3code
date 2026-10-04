@@ -21,6 +21,9 @@ import {
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
+import { hiddenModelMessage } from "../../ModelVisibility.ts";
+import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import { ThreadToolkit } from "./tools.ts";
 
 function queueEntry(
@@ -180,6 +183,22 @@ export const ThreadToolkitHandlersLive = ThreadToolkit.toLayer({
         threads,
         projection: { thread },
       } = yield* readWritableThread();
+      // An agent may not switch a thread to a model the user hid.
+      const hiddenReason = hiddenModelMessage({
+        settings: yield* (yield* ServerSettings.ServerSettingsService).getSettings.pipe(
+          Effect.mapError(unavailable),
+        ),
+        providers: yield* (yield* ProviderRegistry.ProviderRegistry).getProviders.pipe(
+          Effect.mapError(unavailable),
+        ),
+        selection: input.modelSelection,
+      });
+      if (hiddenReason !== null) {
+        return yield* new OrchestratorMcpFailure({
+          code: "model_unavailable",
+          message: hiddenReason,
+        });
+      }
       const type = modelSelectionCommandType(thread.providerInstanceId, input.modelSelection);
       const result = yield* threads
         .dispatch({

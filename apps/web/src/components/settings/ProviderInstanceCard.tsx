@@ -1287,8 +1287,8 @@ export function ProviderInstanceCard({
               </SettingsRow>
             ) : null}
             <p className="mb-3 text-xs text-muted-foreground">
-              Favorites, visibility, and ordering are saved on this device. Custom models are saved
-              on the selected environment.
+              Favorites are saved on this device. Visibility, ordering, defaults, and custom models
+              are saved on the selected environment, and agents can only pick visible models.
             </p>
             <ProviderModelsSection
               instanceId={instanceId}

@@ -298,6 +298,34 @@ export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
 export type ChatWidth = typeof ChatWidth.Type;
 
+/**
+ * Per-provider-instance model preferences: hidden models, ordering, the
+ * default model, and its options. Server-authoritative (part of
+ * `ServerSettings`) because the server is what enforces them — agents must
+ * not be able to pick a model the user hid. Instance ids are
+ * per-environment, so these values deliberately do not join
+ * `SHARED_SERVER_SETTING_KEYS`.
+ */
+export const ProviderModelPreferencesMap = Schema.Record(
+  ProviderInstanceId,
+  Schema.Struct({
+    hiddenModels: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+    modelOrder: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+    defaultModel: Schema.optional(Schema.NullOr(Schema.String)).pipe(
+      Schema.withDecodingDefault(Effect.succeed(null)),
+    ),
+    defaultOptions: Schema.optional(ProviderOptionSelections).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+    ),
+  }),
+);
+export type ProviderModelPreferencesMap = typeof ProviderModelPreferencesMap.Type;
+/** The map with the whole-settings default; stored settings always carry it. */
+export const ProviderModelPreferences = ProviderModelPreferencesMap.pipe(
+  Schema.withDecodingDefault(Effect.succeed({})),
+);
+export type ProviderModelPreferences = typeof ProviderModelPreferences.Type;
+
 export const ClientSettingsSchema = Schema.Struct({
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
@@ -428,21 +456,6 @@ export const ClientSettingsSchema = Schema.Struct({
       model: TrimmedNonEmptyString,
     }),
   ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-  providerModelPreferences: Schema.Record(
-    ProviderInstanceId,
-    Schema.Struct({
-      hiddenModels: Schema.Array(Schema.String).pipe(
-        Schema.withDecodingDefault(Effect.succeed([])),
-      ),
-      modelOrder: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-      defaultModel: Schema.optional(Schema.NullOr(Schema.String)).pipe(
-        Schema.withDecodingDefault(Effect.succeed(null)),
-      ),
-      defaultOptions: Schema.optional(ProviderOptionSelections).pipe(
-        Schema.withDecodingDefault(Effect.succeed([])),
-      ),
-    }),
-  ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   pullRequestMergeMethodOverrides: Schema.Record(
     TrimmedNonEmptyString,
     PullRequestMergeMethod,
@@ -513,6 +526,19 @@ export const ClientSettingsSchema = Schema.Struct({
   wordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
+
+/**
+ * Client settings as persisted by older clients, which kept
+ * `providerModelPreferences` device-locally. The field now lives in
+ * `ServerSettings`; this decode-only view lets the persistence layers hand
+ * the legacy value to the one-time web/desktop migration before it is
+ * dropped. Never written back.
+ */
+export const LegacyClientSettings = Schema.Struct({
+  ...ClientSettingsSchema.fields,
+  providerModelPreferences: Schema.optionalKey(ProviderModelPreferencesMap),
+});
+export type LegacyClientSettings = typeof LegacyClientSettings.Type;
 
 export const DEFAULT_CLIENT_SETTINGS: ClientSettings = Schema.decodeSync(ClientSettingsSchema)({});
 
@@ -1310,6 +1336,13 @@ export const ServerSettings = Schema.Struct({
   defaultModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /**
+   * Which models each provider instance hides, plus ordering and defaults.
+   * Lives here (not in client settings) so agent-facing surfaces —
+   * `orchestrator_capabilities`, `delegate_task`, thread launches — respect
+   * what the user hid. Custom models are never hidden.
+   */
+  providerModelPreferences: ProviderModelPreferences,
   defaultRuntimeMode: RuntimeMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE)),
   ),
@@ -1700,6 +1733,9 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   headroomProxyUrl: Schema.optionalKey(HeadroomProxyUrl),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  // Whole-map replacement, like `providerInstances`: entries removed on the
+  // client (an instance reset to no preferences) must not survive a merge.
+  providerModelPreferences: Schema.optionalKey(ProviderModelPreferencesMap),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
   /**
    * Per-project entry replacement: each entry replaces that project's whole
@@ -1838,25 +1874,6 @@ export const ClientSettingsPatch = Schema.Struct({
       Schema.Struct({
         provider: ProviderInstanceId,
         model: TrimmedNonEmptyString,
-      }),
-    ),
-  ),
-  providerModelPreferences: Schema.optionalKey(
-    Schema.Record(
-      ProviderInstanceId,
-      Schema.Struct({
-        hiddenModels: Schema.Array(Schema.String).pipe(
-          Schema.withDecodingDefault(Effect.succeed([])),
-        ),
-        modelOrder: Schema.Array(Schema.String).pipe(
-          Schema.withDecodingDefault(Effect.succeed([])),
-        ),
-        defaultModel: Schema.optional(Schema.NullOr(Schema.String)).pipe(
-          Schema.withDecodingDefault(Effect.succeed(null)),
-        ),
-        defaultOptions: Schema.optional(ProviderOptionSelections).pipe(
-          Schema.withDecodingDefault(Effect.succeed([])),
-        ),
       }),
     ),
   ),

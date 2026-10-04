@@ -8,6 +8,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   DEFAULT_SERVER_SETTINGS,
+  LegacyClientSettings,
   PiSettings,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -229,11 +230,11 @@ describe("storage cleanup settings", () => {
   });
 });
 
-describe("ClientSettings provider model defaults", () => {
+describe("ServerSettings provider model defaults", () => {
   it("decodes fork defaults into providerModelPreferences and defaults older entries", () => {
     const codex = ProviderInstanceId.make("codex");
     const claudeAgent = ProviderInstanceId.make("claudeAgent");
-    const decoded = decodeClientSettings({
+    const decoded = decodeServerSettings({
       providerModelPreferences: {
         codex: {
           hiddenModels: ["gpt-old"],
@@ -257,9 +258,28 @@ describe("ClientSettings provider model defaults", () => {
       defaultModel: null,
       defaultOptions: [],
     });
-    expect(encodeClientSettings(decoded).providerModelPreferences).toMatchObject({
+    expect(encodeServerSettings(decoded).providerModelPreferences).toMatchObject({
       codex: { defaultModel: "gpt-5.6-sol" },
     });
+    expect(decodeServerSettings({}).providerModelPreferences).toEqual({});
+    expect(
+      decodeServerSettingsPatch({
+        providerModelPreferences: { codex: { hiddenModels: ["gpt-old"], modelOrder: [] } },
+      }).providerModelPreferences,
+    ).toMatchObject({ codex: { hiddenModels: ["gpt-old"] } });
+  });
+
+  it("keeps the retired client-local key decodable for the one-time migration", () => {
+    const decoded = decodeClientSettings({});
+    expect("providerModelPreferences" in decoded).toBe(false);
+    const decodeLegacyClientSettings = Schema.decodeSync(LegacyClientSettings);
+    const legacy = decodeLegacyClientSettings({
+      providerModelPreferences: { codex: { hiddenModels: ["gpt-old"], modelOrder: [] } },
+    });
+    expect(legacy.providerModelPreferences?.[ProviderInstanceId.make("codex")]).toMatchObject({
+      hiddenModels: ["gpt-old"],
+    });
+    expect(decodeLegacyClientSettings({}).providerModelPreferences).toBe(undefined);
   });
 });
 

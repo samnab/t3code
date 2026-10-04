@@ -5,8 +5,11 @@ import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageInt
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import { newCommandId, readCaller, readMutationCaller, unavailable } from "../../threadAccess.ts";
+import { hiddenModelMessage } from "../../ModelVisibility.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
@@ -77,6 +80,23 @@ export const ProjectHandlersLive = ProjectToolkit.toLayer({
               ),
             )).projectId
           : (input.projectId ?? caller.projectId);
+      // An agent-named model must be visible; inheriting the caller's
+      // selection stays allowed even when hidden (the user picked it).
+      if (input.modelSelection !== undefined) {
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const providers = yield* ProviderRegistry.ProviderRegistry;
+        const hiddenReason = hiddenModelMessage({
+          settings: yield* settings.getSettings.pipe(Effect.mapError(unavailable)),
+          providers: yield* providers.getProviders.pipe(Effect.mapError(unavailable)),
+          selection: input.modelSelection,
+        });
+        if (hiddenReason !== null) {
+          return yield* new OrchestratorMcpFailure({
+            code: "model_unavailable",
+            message: hiddenReason,
+          });
+        }
+      }
       const result = yield* ThreadMessageIntake.launchThread({
         commandId,
         threadId,
