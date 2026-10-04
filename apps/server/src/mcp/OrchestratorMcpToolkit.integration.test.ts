@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   EventId,
   IsoDateTime,
@@ -53,6 +54,7 @@ import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/Cod
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   type ProviderAdapterV2Event,
   ProviderAdapterProtocolError,
@@ -471,6 +473,10 @@ const unusedDelegationPolicyLayer = Layer.mock(DelegationPolicy.DelegationPolicy
   resolve: () => Effect.die("delegation policy is unused in this test"),
 });
 
+const unusedServerSettingsLayer = Layer.mock(ServerSettings.ServerSettingsService)({
+  getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+});
+
 describe("orchestrator MCP toolkit", () => {
   it.live(
     "delegates cross-provider tasks, polls and cancels children, and creates ordinary threads",
@@ -637,6 +643,7 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(providerRegistryLayer),
             Layer.provide(scheduledTaskStubLayer),
             Layer.provide(unusedDelegationPolicyLayer),
+            Layer.provide(unusedServerSettingsLayer),
             Layer.provide(NodeServices.layer),
           );
 
@@ -3555,6 +3562,7 @@ describe("orchestrator MCP toolkit", () => {
           Layer.provide(providerRegistryLayer),
           Layer.provide(unusedScheduledTaskStubLayer),
           Layer.provide(unusedDelegationPolicyLayer),
+          Layer.provide(unusedServerSettingsLayer),
           Layer.provide(NodeServices.layer),
         );
 

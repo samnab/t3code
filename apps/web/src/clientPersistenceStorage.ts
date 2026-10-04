@@ -1,4 +1,9 @@
-import { ClientSettingsSchema, type ClientSettings } from "@t3tools/contracts";
+import {
+  ClientSettingsSchema,
+  type ClientSettings,
+  LegacyClientSettings,
+  type LegacyClientSettings as LegacyClientSettingsType,
+} from "@t3tools/contracts";
 
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 
@@ -8,12 +13,15 @@ function hasWindow(): boolean {
   return typeof window !== "undefined";
 }
 
-export function readBrowserClientSettings(): ClientSettings | null {
+// Reads through LegacyClientSettings so the retired device-local
+// providerModelPreferences survives decoding for the one-time migration to
+// server settings. Writes re-encode with ClientSettingsSchema, dropping it.
+export function readBrowserClientSettings(): LegacyClientSettingsType | null {
   if (!hasWindow()) {
     return null;
   }
 
-  return getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, ClientSettingsSchema);
+  return getLocalStorageItem(CLIENT_SETTINGS_STORAGE_KEY, LegacyClientSettings);
 }
 
 export function writeBrowserClientSettings(settings: ClientSettings): void {

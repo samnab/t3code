@@ -1,4 +1,9 @@
-import { ClientSettingsSchema, type ClientSettings } from "@t3tools/contracts";
+import {
+  ClientSettingsSchema,
+  type ClientSettings,
+  LegacyClientSettings,
+  type LegacyClientSettings as LegacyClientSettingsType,
+} from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -16,7 +21,10 @@ const ClientSettingsJson = fromLenientJson(ClientSettingsSchema);
 const decodeClientSettingsDocument = Schema.decodeEffect(
   fromLenientJson(Schema.Record(Schema.String, Schema.Unknown)),
 );
-const decodeClientSettingsValue = Schema.decodeUnknownEffect(ClientSettingsSchema);
+// Reads decode the legacy view so the retired device-local
+// providerModelPreferences reaches the one-time migration; writes encode
+// ClientSettingsSchema, dropping it from the file.
+const decodeClientSettingsValue = Schema.decodeUnknownEffect(LegacyClientSettings);
 const decodeClientSettingsJson = Effect.fnUntraced(function* (raw: string) {
   const document = yield* decodeClientSettingsDocument(raw);
   // Select the shape before validation so invalid legacy settings cannot become defaults.
@@ -63,7 +71,10 @@ export class DesktopClientSettingsWriteError extends Schema.TaggedError<DesktopC
 export class DesktopClientSettings extends Context.Service<
   DesktopClientSettings,
   {
-    readonly get: Effect.Effect<Option.Option<ClientSettings>, DesktopClientSettingsReadError>;
+    readonly get: Effect.Effect<
+      Option.Option<LegacyClientSettingsType>,
+      DesktopClientSettingsReadError
+    >;
     readonly set: (
       settings: ClientSettings,
     ) => Effect.Effect<void, DesktopClientSettingsWriteError>;
@@ -73,7 +84,7 @@ export class DesktopClientSettings extends Context.Service<
 const readClientSettings = (
   fileSystem: FileSystem.FileSystem,
   settingsPath: string,
-): Effect.Effect<Option.Option<ClientSettings>, DesktopClientSettingsReadError> =>
+): Effect.Effect<Option.Option<LegacyClientSettingsType>, DesktopClientSettingsReadError> =>
   fileSystem.readFileString(settingsPath).pipe(
     Effect.asSome,
     Effect.catchTags({

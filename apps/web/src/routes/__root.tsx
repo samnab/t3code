@@ -50,7 +50,10 @@ import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { isElectron } from "../env";
 import { applyAppearanceFontVariables } from "~/appearanceFonts";
 import { applyAppearanceContrast } from "~/appearanceContrast";
-import { useClientSettings } from "../hooks/useSettings";
+import {
+  useClientSettings,
+  useLegacyProviderModelPreferencesMigration,
+} from "../hooks/useSettings";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKeyFromPath,
@@ -137,6 +140,7 @@ function RootRouteNotFoundView() {
 
 function RootRouteView() {
   useEffect(() => installDesktopPasteAsText(window.desktopBridge, window), []);
+  useLegacyProviderModelPreferencesMigration();
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";

@@ -57,9 +57,6 @@ function pickExplicitWorkspaceOptions(options: NewThreadWorkspaceOptions | undef
 export function useNewThreadHandler() {
   const environmentServerConfigs = useAtomValue(environmentServerConfigsAtom);
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  const providerModelPreferences = useClientSettings(
-    (settings) => settings.providerModelPreferences,
-  );
   const router = useRouter();
   const getCurrentRouteTarget = useCallback(() => {
     const currentRouteParams = router.state.matches[router.state.matches.length - 1]?.params ?? {};
@@ -140,6 +137,8 @@ export function useNewThreadHandler() {
       );
       const projectDefaultModelSelection = projectSettings.settings.defaultModelSelection;
       const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
+      // Model preferences live on the target environment's server now, so
+      // resolve against the same settings snapshot that provides its defaults.
       const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
         resolveNewThreadModelSelection({
           projectDefaultSelection: projectDefaultModelSelection ?? null,
@@ -147,7 +146,7 @@ export function useNewThreadHandler() {
           shouldCarrySelection:
             currentRouteTarget?.kind !== "draft" ||
             currentRouteTarget.draftId !== destinationDraftId,
-          settings: { providerModelPreferences },
+          settings: { providerModelPreferences: targetServerSettings.providerModelPreferences },
         });
       // The shared resolver owns the priority order. The t3.json read is
       // skipped entirely when a higher-priority source decides, and its
@@ -434,13 +433,7 @@ export function useNewThreadHandler() {
         return { draftId, threadId };
       })();
     },
-    [
-      environmentServerConfigs,
-      getCurrentRouteTarget,
-      projectGroupingSettings,
-      providerModelPreferences,
-      router,
-    ],
+    [environmentServerConfigs, getCurrentRouteTarget, projectGroupingSettings, router],
   );
 }
 

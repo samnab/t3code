@@ -9,7 +9,7 @@
  * access is intentionally named as such so environment-sensitive consumers
  * cannot silently read the wrong server's settings.
  */
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useAtomValue } from "@effect/atom-react";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -23,6 +23,7 @@ import {
   type ClientSettings,
   DEFAULT_CLIENT_SETTINGS,
   type EnvironmentIdentificationMode,
+  type ProviderModelPreferences,
   type UnifiedSettings,
 } from "@t3tools/contracts/settings";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
@@ -42,7 +43,11 @@ import {
 import * as Struct from "effect/Struct";
 import { toastManager } from "~/components/ui/toast";
 import { isHostedStaticApp } from "~/hostedPairing";
-import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
+import {
+  primaryServerConfigAtom,
+  primaryServerSettingsAtom,
+  serverEnvironment,
+} from "~/state/server";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useTheme } from "./useTheme";
@@ -58,6 +63,13 @@ let clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
 let clientSettingsHydrationStatus: ClientSettingsHydrationStatus = "pending";
 let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
+/**
+ * The retired device-local `providerModelPreferences` captured from persisted
+ * client settings during hydration, until the one-time migration (see
+ * {@link useLegacyProviderModelPreferencesMigration}) consumes it. Undefined
+ * once there is nothing left to migrate.
+ */
+let legacyProviderModelPreferences: ProviderModelPreferences | undefined;
 let clientSettingsPersistenceQueue: Promise<void> = Promise.resolve();
 let deferredClientSettingsPatchCount = 0;
 
@@ -135,7 +147,13 @@ async function hydrateClientSettings(): Promise<void> {
         return;
       }
       if (persistedSettings) {
-        replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, ...persistedSettings });
+        const { providerModelPreferences: legacyPreferences, ...persistedClientSettings } =
+          persistedSettings;
+        legacyProviderModelPreferences =
+          legacyPreferences !== undefined && Object.keys(legacyPreferences).length > 0
+            ? legacyPreferences
+            : undefined;
+        replaceClientSettingsSnapshot({ ...DEFAULT_CLIENT_SETTINGS, ...persistedClientSettings });
       }
       setClientSettingsHydrationStatus("ready");
     } catch (error) {
@@ -515,6 +533,38 @@ export function useUpdatePrimarySettings() {
   return useUpdateSettingsTarget(usePrimaryEnvironment()?.environmentId ?? null);
 }
 
+/**
+ * One-time migration: `providerModelPreferences` moved from device-local
+ * client settings to server settings (the server enforces hidden models for
+ * agents). After both stores are readable, uploads the legacy value to the
+ * primary environment when its server has none, then rewrites client
+ * settings so persistence drops the local copy either way. Runs at most once
+ * per session.
+ */
+export function useLegacyProviderModelPreferencesMigration(): void {
+  const hydrated = useClientSettingsHydrated();
+  const primaryEnvironment = usePrimaryEnvironment();
+  const primaryConfig = useAtomValue(primaryServerConfigAtom);
+  const primarySettings = useAtomValue(primaryServerSettingsAtom);
+  const updatePrimarySettings = useUpdatePrimarySettings();
+  useEffect(() => {
+    if (!hydrated || legacyProviderModelPreferences === undefined) return;
+    // No primary environment or config not loaded yet: retry when it is. A
+    // hosted static app has no primary server, so the local copy simply
+    // stays until a primary exists.
+    if (primaryEnvironment === null || primaryConfig === null) return;
+    const legacy = legacyProviderModelPreferences;
+    legacyProviderModelPreferences = undefined;
+    void (async () => {
+      if (Object.keys(primarySettings.providerModelPreferences).length === 0) {
+        await updatePrimarySettings({ providerModelPreferences: legacy });
+      }
+      // Re-persist without the legacy key so the stored document drops it.
+      await persistClientSettingsUpdate((current) => current);
+    })();
+  }, [hydrated, primaryEnvironment, primaryConfig, primarySettings, updatePrimarySettings]);
+}
+
 export function useUpdateClientSettings() {
   return useCallback((patch: ClientSettingsPatch) => {
     return persistClientSettingsPatch(patch);
@@ -523,6 +573,7 @@ export function useUpdateClientSettings() {
 
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
+  legacyProviderModelPreferences = undefined;
   clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
   clientSettingsHydrationStatus = "pending";
   clientSettingsHydrationPromise = null;

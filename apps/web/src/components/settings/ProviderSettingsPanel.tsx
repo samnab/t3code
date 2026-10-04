@@ -957,7 +957,8 @@ export function EnvironmentProviderSettings({
     const defaultModel = next.defaultModel ?? null;
     const defaultOptions = next.defaultOptions ?? [];
     const rest = withoutProviderInstanceKey(settings.providerModelPreferences, instanceId);
-    updateClientSettings({
+    // Server-side so agents on this environment cannot pick hidden models.
+    updateSettings({
       providerModelPreferences:
         hiddenModels.length === 0 &&
         modelOrder.length === 0 &&

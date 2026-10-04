@@ -13,6 +13,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
+import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
+import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
@@ -21,6 +24,13 @@ import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.t
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { ProjectHandlersLive } from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
+
+const unusedServerSettingsLayer = Layer.mock(ServerSettings.ServerSettingsService)({
+  getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+});
+const unusedProviderRegistryLayer = Layer.mock(ProviderRegistry.ProviderRegistry)({
+  getProviders: Effect.succeed([]),
+});
 
 it.effect("attributes a launched thread's first message to the calling thread", () =>
   Effect.gen(function* () {
@@ -42,6 +52,8 @@ it.effect("attributes a launched thread's first message to the calling thread", 
     let launchedSender: ThreadId | undefined;
     const dependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      unusedServerSettingsLayer,
+      unusedProviderRegistryLayer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         threadId: sourceThreadId,
@@ -104,6 +116,8 @@ it.effect("launches a scratch thread into the Scratch project", () =>
     const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
     const dependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      unusedServerSettingsLayer,
+      unusedProviderRegistryLayer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         threadId: sourceThreadId,
@@ -192,6 +206,8 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
     };
     const dependencies = Layer.mergeAll(
       NodeCrypto.layer,
+      unusedServerSettingsLayer,
+      unusedProviderRegistryLayer,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId: EnvironmentId.make("environment"),
         threadId: sourceThreadId,

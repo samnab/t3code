@@ -323,17 +323,46 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(editor?.props.instanceId).toBe(customId);
   });
 
+  it("saves favorite models on this device without changing the selected server", () => {
+    atoms.providers = [provider()];
+    const panel = renderPanel();
+    const editor = visitElements(
+      panel,
+      (element) => element.props.instanceId === codexId && element.props.mode === "editor",
+    );
+    expect(editor).not.toBeNull();
+    if (!editor) throw new Error("Provider editor was not rendered");
+    (editor.props.onFavoriteModelsChange as (models: string[]) => void)(["chosen"]);
+    expect(settingsState.updateClientSettings).toHaveBeenCalledExactlyOnceWith({
+      favorites: [{ provider: codexId, model: "chosen" }],
+    });
+    expect(settingsState.updateSettings).not.toHaveBeenCalled();
+  });
+
+  const fullPreferenceEntry = (entry: { hiddenModels: string[]; modelOrder: string[] }) => ({
+    ...entry,
+    defaultModel: null,
+    defaultOptions: [],
+  });
+
   it.each([
-    ["onFavoriteModelsChange", { favorites: [{ provider: codexId, model: "chosen" }] }],
     [
       "onHiddenModelsChange",
-      { providerModelPreferences: { [codexId]: { hiddenModels: ["chosen"], modelOrder: [] } } },
+      {
+        providerModelPreferences: {
+          [codexId]: fullPreferenceEntry({ hiddenModels: ["chosen"], modelOrder: [] }),
+        },
+      },
     ],
     [
       "onModelOrderChange",
-      { providerModelPreferences: { [codexId]: { hiddenModels: [], modelOrder: ["chosen"] } } },
+      {
+        providerModelPreferences: {
+          [codexId]: fullPreferenceEntry({ hiddenModels: [], modelOrder: ["chosen"] }),
+        },
+      },
     ],
-  ])("saves %s on this device without changing the selected server", (action, expected) => {
+  ])("saves %s on the selected environment so agents respect it", (action, expected) => {
     atoms.providers = [provider()];
     const panel = renderPanel();
     const editor = visitElements(
@@ -343,8 +372,8 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(editor).not.toBeNull();
     if (!editor) throw new Error("Provider editor was not rendered");
     (editor.props[action] as (models: string[]) => void)(["chosen"]);
-    expect(settingsState.updateClientSettings).toHaveBeenCalledExactlyOnceWith(expected);
-    expect(settingsState.updateSettings).not.toHaveBeenCalled();
+    expect(settingsState.updateSettings).toHaveBeenCalledExactlyOnceWith(expected);
+    expect(settingsState.updateClientSettings).not.toHaveBeenCalled();
   });
 
   it("does not substitute another account when the requested instance was removed", () => {

@@ -364,6 +364,9 @@ export function applyServerSettingsPatch(
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
       : {}),
+    ...(patch.providerModelPreferences !== undefined
+      ? { providerModelPreferences: patch.providerModelPreferences }
+      : {}),
     ...(projectSettingsOverridesPatch !== undefined
       ? {
           projectSettingsOverrides: Object.fromEntries(
