@@ -97,6 +97,7 @@ export function useThreadActionMenu(input: {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const reloadAgent = useAtomCommand(threadEnvironment.stopSession, { reportFailure: false });
   const handleNewThread = useNewThreadHandler();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
@@ -151,6 +152,7 @@ export function useThreadActionMenu(input: {
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
           isRunning: !threadRuntimeCanArchive(thread.runtime),
+          hasReloadableSession: thread.runtime !== null,
           supports,
           snoozePresets,
         });
@@ -248,6 +250,24 @@ export function useThreadActionMenu(input: {
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
+          case "reload-agent": {
+            const result = await reloadAgent({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (result._tag === "Failure") {
+              if (!isAtomCommandInterrupted(result)) {
+                failureToast("Failed to reload agent", squashAtomCommandFailure(result));
+              }
+              return;
+            }
+            toastManager.add({
+              type: "success",
+              title: "Agent reloaded",
+              description: "The next message will resume in a fresh agent process.",
+            });
+            return;
+          }
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;
             if (!workspacePath) {
@@ -348,6 +368,7 @@ export function useThreadActionMenu(input: {
       timestampFormat,
       unsettleThread,
       unsnoozeThread,
+      reloadAgent,
       updateThreadMetadata,
     ],
   );

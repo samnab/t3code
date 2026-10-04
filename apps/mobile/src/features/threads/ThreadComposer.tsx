@@ -8,6 +8,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-goal-editor";
 import { useAtomValue } from "@effect/atom-react";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
+import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { pastedTextDisposition, replaceTextSelection } from "@t3tools/client-runtime/text-paste";
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -60,6 +61,8 @@ import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import { threadEnvironment } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
 import {
   composerContextImportsAtom,
   countComposerDraftAttachmentsAfterSelection,
@@ -448,6 +451,38 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const sendLabel = sendPresentation.label;
   const currentModelSelection = props.selectedThread.modelSelection;
   const currentRuntimeMode = props.selectedThread.runtimeMode;
+  const stopSession = useAtomCommand(threadEnvironment.stopSession, "reload agent");
+  const threadRuntime = props.selectedThread.runtime;
+  // Stopping the provider keeps the conversation: the next message resumes it in a fresh process.
+  const reloadAgent = useMemo(() => {
+    if (threadRuntime === null) return undefined;
+    return {
+      disabled: props.connectionState !== "connected" || !threadRuntimeCanArchive(threadRuntime),
+      onPress: () =>
+        Alert.alert(
+          "Reload agent?",
+          "The next message will resume this thread in a fresh agent process.",
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: "Reload",
+              onPress: () => {
+                void stopSession({
+                  environmentId: props.environmentId,
+                  input: { threadId: props.selectedThread.id },
+                });
+              },
+            },
+          ],
+        ),
+    };
+  }, [
+    props.connectionState,
+    props.environmentId,
+    props.selectedThread.id,
+    stopSession,
+    threadRuntime,
+  ]);
   const modelUnavailable =
     props.connectionState === "connected" &&
     isModelSelectionUnavailable(props.serverConfig, currentModelSelection);
@@ -712,6 +747,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
       voiceNotifications: props.voiceNotifications,
       onUpdateVoiceNotifications: props.onUpdateVoiceNotifications,
+      reloadAgent,
     }),
     [
       currentModelSelection,
@@ -721,6 +757,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       props.onUpdateRuntimeMode,
       props.onUpdateVoiceNotifications,
       props.voiceNotifications,
+      reloadAgent,
       providerOptionDescriptors,
       settingsOwnerId,
       threadProviderGroups,

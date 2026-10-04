@@ -12,6 +12,7 @@ const baseState: ThreadActionMenuState = {
   canSnoozeNow: true,
   isRegeneratingTitle: false,
   isRunning: false,
+  hasReloadableSession: false,
   supports: {
     settlement: true,
     autoSettleOptOut: true,
@@ -165,5 +166,18 @@ describe("buildThreadActionMenuItems", () => {
       (item) => item.id === "archive",
     );
     expect(archiveItem?.disabled).toBe(true);
+  });
+
+  it("offers reload only for a thread with an idle provider runtime", () => {
+    const withSession = { ...baseState, hasReloadableSession: true };
+    expect(
+      buildThreadActionMenuItems(withSession).find((item) => item.id === "reload-agent"),
+    ).toMatchObject({ label: "Reload agent", disabled: false });
+    expect(
+      buildThreadActionMenuItems({ ...withSession, isRunning: true }).find(
+        (item) => item.id === "reload-agent",
+      )?.disabled,
+    ).toBe(true);
+    expect(ids(baseState)).not.toContain("reload-agent");
   });
 });

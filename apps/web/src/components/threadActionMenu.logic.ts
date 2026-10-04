@@ -23,6 +23,7 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "mark-unread"
+  | "reload-agent"
   | "copy"
   | "copy-path"
   | "copy-branch"
@@ -50,6 +51,8 @@ export interface ThreadActionMenuState {
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects a thread with an attached provider, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
+  /** The thread has a provider runtime that can be stopped and resumed by the next message. */
+  readonly hasReloadableSession: boolean;
   readonly supports: {
     readonly settlement: boolean;
     /** Server understands thread.auto-settle.set. */
@@ -160,6 +163,17 @@ export function buildThreadActionMenuItems(
                 checked: !state.autoSettleEnabled,
               },
             ],
+          },
+        ]
+      : []),
+    ...(state.hasReloadableSession
+      ? [
+          {
+            id: "reload-agent" as const,
+            label: "Reload agent",
+            icon: "refresh-cw",
+            disabled: state.isRunning,
+            separatorBefore: true,
           },
         ]
       : []),

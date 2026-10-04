@@ -2374,6 +2374,7 @@ export default function Sidebar() {
     archiveThread,
     deleteThread,
   } = useThreadActions();
+  const reloadAgent = useAtomCommand(threadEnvironment.stopSession, { reportFailure: false });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -4394,6 +4395,7 @@ export default function Sidebar() {
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
               isRunning: !threadRuntimeCanArchive(thread.runtime),
+              hasReloadableSession: thread.runtime !== null,
               supports: {
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -4510,6 +4512,31 @@ export default function Sidebar() {
           case "mark-unread":
             markThreadUnread(threadRef);
             return;
+          case "reload-agent": {
+            const result = await reloadAgent({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (result._tag === "Failure") {
+              if (!isAtomCommandInterrupted(result)) {
+                const error = squashAtomCommandFailure(result);
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title: "Failed to reload agent",
+                    description: error instanceof Error ? error.message : "An error occurred.",
+                  }),
+                );
+              }
+              return;
+            }
+            toastManager.add({
+              type: "success",
+              title: "Agent reloaded",
+              description: "The next message will resume in a fresh agent process.",
+            });
+            return;
+          }
           case "copy-path":
             if (!threadWorkspacePath) {
               toastManager.add(
@@ -4609,6 +4636,7 @@ export default function Sidebar() {
       markThreadUnread,
       openProjectSettings,
       projectScopeKey,
+      reloadAgent,
       projectByKey,
       serverConfigs,
       setProjectScopeKey,

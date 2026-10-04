@@ -253,6 +253,8 @@ type ThreadSettingsSessionProps = {
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
   readonly voiceNotifications?: boolean;
   readonly onUpdateVoiceNotifications?: (enabled: boolean) => void;
+  /** Present for an existing thread with a provider runtime; disabled while a turn runs. */
+  readonly reloadAgent?: { readonly disabled: boolean; readonly onPress: () => void };
 };
 
 export type ExistingThreadSettingsRouteSession = ThreadSettingsSessionProps & {
@@ -308,6 +310,7 @@ type ThreadSettingsSessionValue = {
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
   readonly voiceNotifications?: boolean;
   readonly onUpdateVoiceNotifications?: (enabled: boolean) => void;
+  readonly reloadAgent?: { readonly disabled: boolean; readonly onPress: () => void };
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
   readonly displayedModelSelection: ModelSelection | null;
   readonly reportedModelSelection: ModelSelection | null;
@@ -484,6 +487,7 @@ function ThreadSettingsSessionProvider(
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
       voiceNotifications: props.voiceNotifications,
       onUpdateVoiceNotifications: props.onUpdateVoiceNotifications,
+      reloadAgent: props.reloadAgent,
       displayedDescriptors,
       displayedModelSelection: pendingModel?.selection ?? props.selectedModel,
       reportedModelSelection: pendingModel ? null : (props.reportedModelSelection ?? null),
@@ -526,6 +530,7 @@ function ThreadSettingsSessionProvider(
       providerFilter,
       props.onUpdateRuntimeMode,
       props.onUpdateVoiceNotifications,
+      props.reloadAgent,
       props.voiceNotifications,
       props.providerGroups,
       runtimeModeChoices,
@@ -785,7 +790,9 @@ function ThreadSettingsOptionsItem(props: {
         })}
         <Animated.View layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}>
           <DisclosureRow
-            isLast={session.onUpdateVoiceNotifications === undefined}
+            isLast={
+              session.onUpdateVoiceNotifications === undefined && session.reloadAgent === undefined
+            }
             label="Runtime"
             value={
               session.runtimeModeChoices.find((choice) => choice.mode === session.runtimeMode)
@@ -797,11 +804,30 @@ function ThreadSettingsOptionsItem(props: {
         {session.onUpdateVoiceNotifications ? (
           <Animated.View layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}>
             <SwitchRow
-              isLast
+              isLast={session.reloadAgent === undefined}
               label="Voice notifications"
               value={session.voiceNotifications ?? true}
               onValueChange={session.onUpdateVoiceNotifications}
             />
+          </Animated.View>
+        ) : null}
+        {session.reloadAgent ? (
+          <Animated.View layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}>
+            <Pressable
+              accessibilityRole="button"
+              disabled={session.reloadAgent.disabled}
+              onPress={session.reloadAgent.onPress}
+              className="min-h-11 flex-row items-center gap-2 bg-grouped-card px-4 py-2 active:bg-subtle disabled:opacity-50 android:min-h-14"
+            >
+              <Text className="text-sm font-t3-medium text-foreground">Reload agent</Text>
+              <View className="flex-1" />
+              <SymbolView
+                name="arrow.clockwise"
+                size={15}
+                tintColorClassName="accent-icon-subtle"
+                type="monochrome"
+              />
+            </Pressable>
           </Animated.View>
         ) : null}
       </Animated.View>
