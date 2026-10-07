@@ -14,7 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as AgentMessaging from "./AgentMessagingService.ts";
@@ -159,11 +159,11 @@ const activeProjection = (thread: OrchestrationV2ThreadShell): OrchestrationV2Th
 
 const scope = (threadId: ThreadId, providerInstanceId: ProviderInstanceId): McpInvocationScope => ({
   environmentId: EnvironmentId.make("environment-agent-messaging"),
-  threadId,
-  providerSessionId: `session-${threadId}`,
-  providerInstanceId,
   capabilities: new Set(["orchestration"]),
   issuedAt: 1,
+  requestNamespace: `thread:${threadId}`,
+  thread: { threadId, providerSessionId: `session-${threadId}`, providerInstanceId },
+  client: undefined,
 });
 
 const makeThreadLayer = () =>

@@ -1,3 +1,4 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- stableId needs a synchronous SHA-256.
 import * as NodeCrypto from "node:crypto";
 import {
   type AgentInboxInput,
@@ -16,10 +17,10 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
-import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import { type McpInvocationScope, requireThreadScope } from "./McpInvocationContext.ts";
 
 const MAX_PENDING_MESSAGES = 100;
 const MAX_INBOX_MESSAGE_TEXT = 100_000;
@@ -138,15 +139,16 @@ const layerEffect = Effect.gen(function* () {
         "This MCP credential does not grant orchestration capabilities.",
       );
     }
+    const caller = (yield* requireThreadScope(scope, "Agent messaging")).thread;
     const senderRecords = yield* threads
-      .getThreadRecords(scope.threadId, ["runs"])
+      .getThreadRecords(caller.threadId, ["runs"])
       .pipe(
         Effect.mapError(() =>
           failure("orchestration_error", "Unable to resolve the sending agent."),
         ),
       );
     const activeRun = ThreadManagement.latestActiveRun(senderRecords);
-    if (activeRun === undefined || activeRun.providerInstanceId !== scope.providerInstanceId) {
+    if (activeRun === undefined || activeRun.providerInstanceId !== caller.providerInstanceId) {
       return yield* failure(
         "parent_not_active",
         "Agent messaging requires an active run owned by this MCP provider session.",
@@ -164,7 +166,7 @@ const layerEffect = Effect.gen(function* () {
         ),
       );
     const byThreadId = new Map(projectThreads.map((thread) => [thread.id, thread] as const));
-    const senderShell = byThreadId.get(scope.threadId);
+    const senderShell = byThreadId.get(caller.threadId);
     if (senderShell === undefined) {
       return yield* failure("thread_not_found", "The sending agent thread is not available.");
     }
@@ -242,7 +244,7 @@ const layerEffect = Effect.gen(function* () {
         },
       ];
     });
-    const sender = members.find((member) => member.threadId === scope.threadId);
+    const sender = members.find((member) => member.threadId === caller.threadId);
     if (sender === undefined) {
       return yield* failure("orchestration_error", "The sending agent has no delegation address.");
     }

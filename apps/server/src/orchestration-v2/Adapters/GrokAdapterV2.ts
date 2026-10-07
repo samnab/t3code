@@ -20,7 +20,7 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import * as ServerConfig from "../../config.ts";
@@ -59,7 +59,7 @@ import {
 } from "../../provider/ProviderInstanceEnvironment.ts";
 import { acpPermissionDisposition } from "../../provider/acp/AcpClientPolicy.ts";
 import * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
-import * as ProviderEventLoggers from "../../provider/Layers/ProviderEventLoggers.ts";
+import * as ProviderEventLoggers from "../../provider/ProviderEventLoggers.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import * as ProviderContinuationRequests from "../ProviderContinuationRequests.ts";
 import * as ProviderAdapter from "../ProviderAdapter.ts";

@@ -7,8 +7,8 @@ import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type * as Scope from "effect/Scope";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { HttpClient, HttpClientRequest } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 export const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 export const TAILSCALE_STATUS_TIMEOUT = Duration.millis(1_500);

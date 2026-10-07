@@ -5,13 +5,15 @@ import {
   AgentSendResult,
   OrchestratorMcpFailure,
 } from "@t3tools/contracts";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { Tool, Toolkit } from "effect/ai";
 
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as AgentMessagingService from "../../AgentMessagingService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
   AgentMessagingService.AgentMessagingService,
 ];
 

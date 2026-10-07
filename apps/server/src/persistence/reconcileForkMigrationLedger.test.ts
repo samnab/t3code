@@ -2,8 +2,8 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Migrator from "effect/unstable/sql/Migrator";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Migrator from "effect/sql/Migrator";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import { reconcileForkMigrationLedger } from "./reconcileForkMigrationLedger.ts";
@@ -218,16 +218,13 @@ describe("fork migration ledger reconciliation", () => {
   );
 
   it.effect(
-    "rewrites the exact fork ledger, prunes fork tables, and runs migrations 55 and 56",
+    "rewrites the exact fork ledger, prunes fork tables, and runs migrations from 55",
     () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         yield* seedForkDatabase;
 
-        assert.deepStrictEqual(yield* runMigrations(), [
-          [55, "OrchestrationV2"],
-          [56, "RemoveRedundantProjectionIndexes"],
-        ]);
+        assert.deepStrictEqual(yield* runMigrations(), migrationManifest.slice(54));
         const history = yield* readHistory;
         assert.deepStrictEqual(
           history.map(({ migration_id, name }) => [migration_id, name] as const),
@@ -322,7 +319,8 @@ describe("fork migration ledger reconciliation", () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
-      for (let migrationId = 57; migrationId <= 70; migrationId++) {
+      const firstFutureId = migrationManifest.length + 1;
+      for (let migrationId = firstFutureId; migrationId < firstFutureId + 14; migrationId++) {
         yield* sql`
           INSERT INTO effect_sql_migrations (migration_id, name)
           VALUES (${migrationId}, ${`FutureUpstreamMigration${migrationId}`})

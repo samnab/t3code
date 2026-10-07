@@ -52,7 +52,13 @@ it.layer(NodeServices.layer)("ClaudeDriver maintenance", (it) => {
           binaryPath: "claude",
           env,
         });
-        expect(before.update).toBeNull();
+        // Unproven installs fall back to the provider's own updater, but run through the shim.
+        const throughShim = {
+          executable: shimPath,
+          args: ["update"],
+          lockKey: "claudeAgent-native",
+        };
+        expect(before.update).toMatchObject(throughShim);
 
         const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
           makeClaudeDriverMaintenanceResolver(),
@@ -76,13 +82,13 @@ it.layer(NodeServices.layer)("ClaudeDriver maintenance", (it) => {
             },
           },
         );
-        expect(unknownWrapper.update).toBeNull();
+        expect(unknownWrapper.update).toMatchObject(throughShim);
 
         const explicitPath = yield* resolveProviderMaintenanceCapabilitiesEffect(
           makeClaudeDriverMaintenanceResolver(),
           { binaryPath: shimPath, env },
         );
-        expect(explicitPath.update).toBeNull();
+        expect(explicitPath.update).toMatchObject(throughShim);
       }).pipe(Effect.provideService(HostProcessPlatform, "darwin"), Effect.scoped),
   );
 });

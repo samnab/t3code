@@ -19,7 +19,7 @@ import * as Layer from "effect/Layer";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as CodexVoicePreferenceFiles from "./CodexVoicePreferenceFiles.ts";
 
 const codex = ProviderDriverKind.make("codex");
@@ -137,7 +137,7 @@ const withVoiceFiles = <A, E>(
   }).pipe(
     Effect.provide(
       Layer.mergeAll(
-        ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+        ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
         ServerConfig.layerTest(process.cwd(), { prefix: "t3code-voice-" }),
       ),
     ),

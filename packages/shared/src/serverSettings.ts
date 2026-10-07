@@ -281,6 +281,7 @@ export function applyServerSettingsPatch(
     usageLimitSources: usageLimitSourcesPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
     projectOptimizerOverrides: projectOptimizerOverridesPatch,
+    usageModelAliases: usageModelAliasesPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
     // Already translated into `projectSettingsOverrides` above; the legacy
@@ -367,6 +368,24 @@ export function applyServerSettingsPatch(
     ...(patch.providerModelPreferences !== undefined
       ? { providerModelPreferences: patch.providerModelPreferences }
       : {}),
+    ...(patch.worktreesDirectory !== undefined &&
+    patch.worktreesDirectory !== current.worktreesDirectory
+      ? {
+          previousWorktreesDirectories: [
+            ...current.previousWorktreesDirectories.filter(
+              (directory) => directory !== patch.worktreesDirectory,
+            ),
+            ...(current.worktreesDirectory !== "" &&
+            !current.previousWorktreesDirectories.includes(current.worktreesDirectory)
+              ? [current.worktreesDirectory]
+              : []),
+          ],
+        }
+      : {}),
+    // Host replacement: deepMerge would keep a cleared account pin.
+    ...(patch.github?.hosts !== undefined
+      ? { github: { ...next.github, hosts: patch.github.hosts } }
+      : {}),
     ...(projectSettingsOverridesPatch !== undefined
       ? {
           projectSettingsOverrides: Object.fromEntries(
@@ -423,6 +442,14 @@ export function applyServerSettingsPatch(
           usagePriceOverrides: mergeSettingsEntries(
             current.usagePriceOverrides,
             usagePriceOverridesPatch,
+          ),
+        }
+      : {}),
+    ...(usageModelAliasesPatch !== undefined
+      ? {
+          usageModelAliases: mergeSettingsEntries(
+            current.usageModelAliases,
+            usageModelAliasesPatch,
           ),
         }
       : {}),

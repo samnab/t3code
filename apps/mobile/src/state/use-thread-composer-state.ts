@@ -1,3 +1,5 @@
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { readEnvironmentScope } from "./session";
 import type { ComposerTextPaste } from "../native/T3ComposerEditor.types";
 import { useAtomValue } from "@effect/atom-react";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
@@ -98,8 +100,8 @@ import {
   type ActiveTurnComposerAction,
 } from "@t3tools/client-runtime/state/composer-dispatch";
 import { Cause } from "effect";
-import { Atom } from "effect/unstable/reactivity";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { prepareTurnAttachments } from "../lib/attachmentUpload";
 import { DEFAULT_FOLLOW_UP_BEHAVIOR } from "../lib/followUpBehavior";
 import { mobilePreferencesAtom } from "./preferences";
@@ -113,6 +115,7 @@ import {
   useQueuedRunEdit,
 } from "./queued-run-edit";
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
+import { clearThreadComposerError, setThreadComposerError } from "./thread-composer-error";
 import {
   useSelectedThreadProjection,
   useSelectedThreadVisibleTurnItems,
@@ -511,7 +514,8 @@ export function useThreadComposerState() {
       });
     }
     endQueuedRunEdit(selectedThreadKey, { deferAttachmentCleanup: keepable });
-    setPendingConnectionError(
+    setThreadComposerError(
+      selectedThreadKey,
       keepable
         ? "That message already started. Your edit is back in the composer."
         : "That message already started, so the edit was discarded.",
@@ -777,6 +781,12 @@ export function useThreadComposerState() {
 
   const onSendMessage = useCallback(
     async (followUpOverride?: ActiveTurnComposerAction) => {
+      if (
+        selectedThreadShell &&
+        selectedEnvironmentRuntime?.connectionState === "connected" &&
+        !readEnvironmentScope(selectedThreadShell.environmentId, AuthOrchestrationOperateScope)
+      )
+        return null;
       if (!selectedThreadShell) {
         return null;
       }
@@ -893,6 +903,8 @@ export function useThreadComposerState() {
           ? parseCodexFeedbackCommand(text)
           : null;
       if (feedbackCommand) {
+        if (!readEnvironmentScope(selectedThreadShell.environmentId, AuthOrchestrationOperateScope))
+          return null;
         if (thread.activeProviderThreadId === null) {
           Alert.alert("Start a Codex thread first", "Send a message before you submit feedback.");
           return null;
@@ -941,6 +953,8 @@ export function useThreadComposerState() {
 
       const metadata = makeQueuedMessageMetadata();
       const messageId = MessageId.make(metadata.messageId);
+      // A new send supersedes the reason the previous one bounced back.
+      clearThreadComposerError(threadKey);
       // Enqueue publishes the queued atom synchronously (the durable write
       // happens behind it), so clearing the draft here gives send feedback on
       // the tap frame instead of after file I/O. If the write fails the message
@@ -977,7 +991,8 @@ export function useThreadComposerState() {
             attachments: [],
           });
           appendComposerDraftAttachments(threadKey, attachments, { allowOverflow: true });
-          setPendingConnectionError(
+          setThreadComposerError(
+            threadKey,
             error instanceof Error ? error.message : "Failed to save the queued message.",
           );
         },

@@ -82,6 +82,7 @@ import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
 import { UsageShareBar } from "./UsageShareBar";
 import {
   costTypeSegments,
+  modelShare,
   sortModelsByTokens,
   speedCostSegments,
   tokenTypeSegments,
@@ -165,6 +166,10 @@ export function UsagePage() {
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
+
+  const canReadDiagnostics = selectedEnvironments.some(
+    (environment) => environment.canReadDiagnostics,
+  );
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -386,7 +391,7 @@ export function UsagePage() {
           onClick={refreshWindow}
           aria-label={showingLimits ? "Refresh limits" : "Refresh usage"}
           aria-busy={isRefreshing}
-          disabled={isRefreshing}
+          disabled={isRefreshing || (!showingLimits && !canReadDiagnostics)}
           size="icon-sm"
           variant="ghost"
         >
@@ -449,7 +454,7 @@ export function UsagePage() {
           onClick={refreshWindow}
           aria-label={showingLimits ? "Refresh limits" : "Refresh usage"}
           aria-busy={isRefreshing}
-          disabled={isRefreshing}
+          disabled={isRefreshing || (!showingLimits && !canReadDiagnostics)}
           size="icon-sm"
           variant="ghost"
         >
@@ -492,6 +497,15 @@ export function UsagePage() {
               />
             ) : isPending ? (
               <UsageSkeleton />
+            ) : !canReadDiagnostics ? (
+              <div className="space-y-2 py-12 text-center text-sm text-muted-foreground">
+                {selectedEnvironments.map((environment) => (
+                  <p key={environment.environmentId}>
+                    {selectedEnvironments.length > 1 ? `${environment.label}: ` : null}
+                    {environment.error}
+                  </p>
+                ))}
+              </div>
             ) : (
               <>
                 {sourceMessages.map((message) => (
@@ -718,6 +732,10 @@ export function UsagePage() {
                           breakdownModels.map((model, index) => {
                             const key = `${model.provider}:${model.model}`;
                             const value = metric === "tokens" ? model.totalTokens : model.costUsd;
+                            const share = modelShare(
+                              model,
+                              metric === "tokens" ? "tokens" : "cost",
+                            );
                             return (
                               <tr
                                 key={key}
@@ -758,7 +776,7 @@ export function UsagePage() {
                                   )}
                                 </td>
                                 <td className="hidden py-2.5 pl-6 sm:table-cell">
-                                  {isModelCostUnknown(model) ? "" : formatPercent(model.costShare)}
+                                  {share === null ? "" : formatPercent(share)}
                                 </td>
                                 <td className="py-2.5 pl-6">{formatTokens(model.totalTokens)}</td>
                               </tr>
@@ -1055,7 +1073,9 @@ function UsageCoverageNotice({
   return (
     <div className="flex flex-col gap-1 border-t border-border px-2 py-2 text-xs text-muted-foreground">
       {failed.map((environment) => (
-        <span key={environment.label}>{environment.label} could not report usage.</span>
+        <span key={environment.label}>
+          {environment.label}: {environment.error}
+        </span>
       ))}
       {incompatible.map(({ environment, mismatch }) => (
         <span key={environment.environmentId}>

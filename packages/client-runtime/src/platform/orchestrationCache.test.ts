@@ -154,7 +154,11 @@ describe("orchestration cache envelopes", () => {
       expect(DateTime.formatIso(thread.snapshot.projection.thread.updatedAt)).toBe(
         "2026-06-20T00:00:00.000Z",
       );
-      expect(thread.snapshot.projection).toEqual(v2Projection);
+      // Decoding fills the fork's thread-goal defaults.
+      expect(thread.snapshot.projection).toEqual({
+        ...v2Projection,
+        thread: { ...v2Projection.thread, goal: null, goalLoop: null, voiceNotifications: true },
+      });
       expect(thread.snapshot.snapshotSequence).toBe(4);
     }),
   );

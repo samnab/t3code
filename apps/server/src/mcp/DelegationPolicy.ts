@@ -12,7 +12,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
-import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 export class DelegationPolicyError extends Schema.TaggedError<DelegationPolicyError>()(

@@ -4,7 +4,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Ref from "effect/Ref";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import type { ProcessRunInput, ProcessRunOutput } from "../processRunner.ts";
 import { makeWith } from "./CbmIndexService.ts";
