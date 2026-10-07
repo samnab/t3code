@@ -26,10 +26,12 @@
  * T3-owned preamble delivered with the pinned guidance above; this is not
  * upstream text. The pinned Claude block's "Meta Commands" section advertises
  * `rtk init`, so this preface states the session-only contract the provider
- * actually runs under.
+ * actually runs under. It also narrows upstream's "prefix every command" rule:
+ * `rtk <unsupported>` logs a parse failure and runs unfiltered, which led
+ * agents to fall back to `rtk proxy` for everything.
  */
 export const RTK_SESSION_PREFACE =
-  "Note from T3 Code: RTK is already configured for this session, and this guidance applies to this session only. Do not run `rtk init`, install RTK hooks, or edit AGENTS.md, CLAUDE.md, or any other provider configuration file on account of this guidance.";
+  "Note from T3 Code: RTK is already configured for this session, and this guidance applies to this session only. Do not run `rtk init`, install RTK hooks, or edit AGENTS.md, CLAUDE.md, or any other provider configuration file on account of this guidance. Prefix only commands RTK supports: read files with `rtk read <file>`, never `rtk cat`, and run commands such as `python3`, `sed`, `node`, `date`, and `ssh` without the `rtk` prefix. Never reach for `rtk proxy` first; use it only to re-run one command whose filtered output was unusable.";
 
 export const RTK_CODEX_SESSION_INSTRUCTIONS = `# RTK
 
