@@ -2895,7 +2895,7 @@ export default function Sidebar() {
     const sortedActive = workingShelfEnabled
       ? sortInboxThreadsByReturn(active, inboxReturns.returnedAt)
       : sortThreadsForSidebar(active, sidebarThreadSortOrder);
-   return {
+    return {
       pinnedThreads:
         optimisticDrop?.section !== "pinned" || optimisticDrop.order === null
           ? sortedPinned

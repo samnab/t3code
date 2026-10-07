@@ -1282,7 +1282,6 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
-
   it.effect("resolves a driverKind target to a capable Antigravity instance", () =>
     Effect.gen(function* () {
       const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);

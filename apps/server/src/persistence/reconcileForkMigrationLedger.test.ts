@@ -217,49 +217,47 @@ describe("fork migration ledger reconciliation", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect(
-    "rewrites the exact fork ledger, prunes fork tables, and runs migrations from 55",
-    () =>
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* seedForkDatabase;
+  it.effect("rewrites the exact fork ledger, prunes fork tables, and runs migrations from 55", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seedForkDatabase;
 
-        assert.deepStrictEqual(yield* runMigrations(), migrationManifest.slice(54));
-        const history = yield* readHistory;
-        assert.deepStrictEqual(
-          history.map(({ migration_id, name }) => [migration_id, name] as const),
-          migrationManifest,
-        );
-        assert.deepStrictEqual(
-          yield* sql<{ readonly name: string }>`
+      assert.deepStrictEqual(yield* runMigrations(), migrationManifest.slice(54));
+      const history = yield* readHistory;
+      assert.deepStrictEqual(
+        history.map(({ migration_id, name }) => [migration_id, name] as const),
+        migrationManifest,
+      );
+      assert.deepStrictEqual(
+        yield* sql<{ readonly name: string }>`
           SELECT name FROM sqlite_master
           WHERE type = 'table' AND name IN ${sql.in(forkTableNames)}
         `,
-          [],
-        );
-        assert.deepStrictEqual(
-          yield* sql<{ readonly name: string }>`
+        [],
+      );
+      assert.deepStrictEqual(
+        yield* sql<{ readonly name: string }>`
           SELECT name FROM sqlite_master
           WHERE type = 'table' AND name = 'orchestration_v2_events'
         `,
-          [{ name: "orchestration_v2_events" }],
-        );
+        [{ name: "orchestration_v2_events" }],
+      );
 
-        const threadColumns = yield* sql<{
-          readonly name: string;
-        }>`PRAGMA table_info(projection_threads)`;
-        const messageColumns = yield* sql<{
-          readonly name: string;
-        }>`PRAGMA table_info(projection_thread_messages)`;
-        const projectColumns = yield* sql<{
-          readonly name: string;
-        }>`PRAGMA table_info(projection_projects)`;
-        assert.isTrue(threadColumns.some(({ name }) => name === "goal"));
-        assert.isTrue(threadColumns.some(({ name }) => name === "goal_loop_json"));
-        assert.isTrue(threadColumns.some(({ name }) => name === "voice_notifications"));
-        assert.isTrue(messageColumns.some(({ name }) => name === "origin"));
-        assert.isTrue(projectColumns.some(({ name }) => name === "schedules_json"));
-      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+      const threadColumns = yield* sql<{
+        readonly name: string;
+      }>`PRAGMA table_info(projection_threads)`;
+      const messageColumns = yield* sql<{
+        readonly name: string;
+      }>`PRAGMA table_info(projection_thread_messages)`;
+      const projectColumns = yield* sql<{
+        readonly name: string;
+      }>`PRAGMA table_info(projection_projects)`;
+      assert.isTrue(threadColumns.some(({ name }) => name === "goal"));
+      assert.isTrue(threadColumns.some(({ name }) => name === "goal_loop_json"));
+      assert.isTrue(threadColumns.some(({ name }) => name === "voice_notifications"));
+      assert.isTrue(messageColumns.some(({ name }) => name === "origin"));
+      assert.isTrue(projectColumns.some(({ name }) => name === "schedules_json"));
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
   it.effect("rejects a partial fork signature without changing the ledger", () =>

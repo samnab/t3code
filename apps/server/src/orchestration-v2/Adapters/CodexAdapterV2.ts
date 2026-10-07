@@ -1737,7 +1737,12 @@ export const CodexAdapterV2Driver: ProviderAdapterDriver<CodexSettings, CodexAda
 const layer: Layer.Layer<
   ProviderAdapterV2,
   never,
-  CodexAppServerClientFactory | Crypto.Crypto | FileSystem.FileSystem | IdAllocatorV2 | Path.Path | ServerConfig
+  | CodexAppServerClientFactory
+  | Crypto.Crypto
+  | FileSystem.FileSystem
+  | IdAllocatorV2
+  | Path.Path
+  | ServerConfig
 > = Layer.effect(
   ProviderAdapterV2,
   Effect.gen(function* () {

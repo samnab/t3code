@@ -61,7 +61,9 @@ beforeEach(() => {
   state.assetQuery.mockReset().mockReturnValue(state.assetAtom);
   state.mint
     .mockReset()
-    .mockResolvedValue(AsyncResult.success({ relativeUrl: "/api/assets/image.png", expiresAt: FAR_FUTURE }));
+    .mockResolvedValue(
+      AsyncResult.success({ relativeUrl: "/api/assets/image.png", expiresAt: FAR_FUTURE }),
+    );
 });
 
 it.each(["workspace-file", "media-file"] as const)(
