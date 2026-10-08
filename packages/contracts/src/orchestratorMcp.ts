@@ -311,8 +311,6 @@ export type OrchestratorMcpThreadListInput = typeof OrchestratorMcpThreadListInp
 
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   threadId: ThreadId,
-  /** Paste this whenever you mention the thread, so the user can click to open it. */
-  link: Schema.String,
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
@@ -360,8 +358,6 @@ export type OrchestratorMcpThreadReadInput = typeof OrchestratorMcpThreadReadInp
 
 export const OrchestratorMcpThreadDetail = Schema.Struct({
   threadId: ThreadId,
-  /** Paste this whenever you mention the thread, so the user can click to open it. */
-  link: Schema.String,
   projectId: ProjectId,
   title: Schema.String,
   createdBy: OrchestrationV2Actor,
