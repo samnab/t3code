@@ -2,16 +2,11 @@ import type {
   CbmProjectIndexStatus,
   OptimizerId,
   OptimizerStatus,
-  OptimizerStatusSnapshot,
-  ProjectId,
   ProjectOptimizerSettings,
-  ThreadId,
 } from "@t3tools/contracts";
-import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type * as Scope from "effect/Scope";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -19,41 +14,15 @@ import * as CbmIndexService from "./CbmIndexService.ts";
 import * as OptimizerProbeService from "./OptimizerProbeService.ts";
 import { isSupportedRtkVersion } from "./RtkRewrite.ts";
 
-export const CBM_MCP_SERVER_NAME = "codebase-memory";
-
-export interface SessionRtkAttachment {
-  readonly command: "rtk";
-}
-
-export interface SessionCbmAttachment {
-  readonly command: string;
-  readonly args: ReadonlyArray<string>;
-  readonly env: Readonly<Record<string, string>>;
-}
-
-export interface SessionHeadroomAttachment {
-  readonly environment: Readonly<Record<string, string>>;
-  /** Codex routes per thread: `openai_base_url` in the thread's config overrides. */
-  readonly codexBaseUrl?: string;
-}
-
-export interface SessionOptimizerAttachmentDescriptor {
-  readonly projectId: ProjectId;
-  readonly cwd: string;
-  readonly configured: ReadonlyArray<OptimizerId>;
-  readonly attached: ReadonlyArray<OptimizerId>;
-  readonly ready: ReadonlyArray<OptimizerId>;
-  readonly rtk?: SessionRtkAttachment;
-  readonly headroom?: SessionHeadroomAttachment;
-  readonly cbm?: SessionCbmAttachment;
-  readonly cbmIndexCompletion?: Effect.Effect<CbmProjectIndexStatus>;
-}
-
-export interface SessionOptimizerCapabilities {
-  readonly rtk: boolean;
-  readonly headroom: boolean;
-  readonly cbm: boolean;
-}
+import {
+  sessionOptimizerAttachmentEntries,
+  SessionOptimizerAttachments,
+  setSessionOptimizerAttachments,
+  clearSessionOptimizerAttachments,
+  isCurrentSessionOptimizerAttachments,
+  type SessionOptimizerCapabilities,
+  type SessionOptimizerAttachmentDescriptor,
+} from "@t3tools/provider-core/server/sessionOptimizerAttachments";
 
 export function configuredOptimizerIds(
   settings: ProjectOptimizerSettings,
@@ -92,80 +61,6 @@ export function resolveInstallableSessionOptimizers(input: {
       headroom.running === true,
     cbm: input.settings.cbm && input.capabilities.cbm && cbm?.installed === true,
   };
-}
-
-export class SessionOptimizerAttachments extends Context.Service<
-  SessionOptimizerAttachments,
-  {
-    readonly resolve: (input: {
-      readonly threadId: ThreadId;
-      readonly cwd: string | null;
-      readonly capabilities: SessionOptimizerCapabilities;
-      readonly resolveHeadroom?: (
-        proxyUrl: string,
-      ) => Effect.Effect<SessionHeadroomAttachment | undefined>;
-    }) => Effect.Effect<SessionOptimizerAttachmentDescriptor | undefined, never, Scope.Scope>;
-    readonly getStatus: (input: {
-      readonly refresh?: boolean;
-    }) => Effect.Effect<OptimizerStatusSnapshot>;
-  }
->()("t3/optimizer/SessionOptimizerAttachments") {}
-
-const attachmentsByThread = new Map<ThreadId, SessionOptimizerAttachmentDescriptor>();
-
-export function setSessionOptimizerAttachments(
-  threadId: ThreadId,
-  descriptor: SessionOptimizerAttachmentDescriptor,
-): void {
-  attachmentsByThread.set(threadId, descriptor);
-}
-
-export function readSessionOptimizerAttachments(
-  threadId: ThreadId,
-): SessionOptimizerAttachmentDescriptor | undefined {
-  return attachmentsByThread.get(threadId);
-}
-
-export function clearSessionOptimizerAttachments(threadId: ThreadId): void {
-  attachmentsByThread.delete(threadId);
-}
-
-export function clearAllSessionOptimizerAttachments(): void {
-  attachmentsByThread.clear();
-}
-
-export function isCurrentSessionOptimizerAttachments(
-  threadId: ThreadId,
-  descriptor: SessionOptimizerAttachmentDescriptor,
-): boolean {
-  return attachmentsByThread.get(threadId) === descriptor;
-}
-
-export function removeSessionOptimizerAttachment(threadId: ThreadId, optimizer: OptimizerId): void {
-  const current = attachmentsByThread.get(threadId);
-  if (current === undefined) return;
-  const attached = current.attached.filter((id) => id !== optimizer);
-  const ready = current.ready.filter((id) => id !== optimizer);
-  if (optimizer === "rtk") {
-    const { rtk: removed, ...remaining } = current;
-    void removed;
-    attachmentsByThread.set(threadId, { ...remaining, attached, ready });
-    return;
-  }
-  if (optimizer === "cbm") {
-    const { cbm: removed, cbmIndexCompletion: removedIndex, ...remaining } = current;
-    void removed;
-    void removedIndex;
-    attachmentsByThread.set(threadId, { ...remaining, attached, ready });
-    return;
-  }
-  if (optimizer === "headroom") {
-    const { headroom: removed, ...remaining } = current;
-    void removed;
-    attachmentsByThread.set(threadId, { ...remaining, attached, ready });
-    return;
-  }
-  attachmentsByThread.set(threadId, { ...current, attached, ready });
 }
 
 const make = Effect.gen(function* () {
@@ -258,7 +153,7 @@ const make = Effect.gen(function* () {
     optimizerProbe.getStatus(input).pipe(
       Effect.map((snapshot) => ({
         ...snapshot,
-        attachments: [...attachmentsByThread.entries()].map(([threadId, descriptor]) => {
+        attachments: sessionOptimizerAttachmentEntries().map(([threadId, descriptor]) => {
           const cbmReady = snapshot.cbmIndexes.some(
             (index) =>
               index.projectId === descriptor.projectId &&

@@ -38,10 +38,10 @@ import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
   type ServerProviderDraft,
-} from "./providerSnapshot.ts";
-import { expandHomePath } from "../pathExpansion.ts";
+} from "@t3tools/provider-core/server/snapshotProbe";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 import { resolveCodexHomeKey, withCodexStartupLock } from "./CodexStartupLock.ts";
-import { makeUnavailableUsageLimits } from "./providerUsageLimits.ts";
 import {
   codexRateLimitsFailureMessage,
   codexRateLimitsToLimits,
@@ -737,7 +737,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 // NOTE: the singleton `CodexProviderLive` Layer has been removed as part of
 // the per-instance-driver refactor. `CodexDriver.create()` builds a managed
 // snapshot per instance (each with its own `CodexSettings`) and hands the
-// resulting `ServerProviderShape` back as `ProviderInstance.snapshot`.
+// resulting `ManagedServerProvider` back as `ProviderInstance.snapshot`.
 //
 // The `makePendingCodexProvider` and `checkCodexProviderStatus` helpers are
 // re-exported for use by `CodexDriver`.

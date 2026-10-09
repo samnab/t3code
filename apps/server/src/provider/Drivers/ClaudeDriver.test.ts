@@ -11,7 +11,7 @@ import {
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
-} from "../providerMaintenance.ts";
+} from "@t3tools/provider-core/server/maintenanceResolver";
 import { makeClaudeMaintenanceResolver as makeClaudeDriverMaintenanceResolver } from "./ClaudeDriver.ts";
 
 const windowsHost = HostProcessPlatform.defaultValue() === "win32";

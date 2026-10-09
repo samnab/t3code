@@ -4,7 +4,7 @@ import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 
-import { expandHomePath } from "../pathExpansion.ts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 
 /**
  * The Codex home a spawned `codex app-server` will actually use, following the

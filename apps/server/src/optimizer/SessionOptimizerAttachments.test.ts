@@ -7,9 +7,10 @@ import {
   isCurrentSessionOptimizerAttachments,
   readSessionOptimizerAttachments,
   removeSessionOptimizerAttachment,
-  resolveInstallableSessionOptimizers,
   setSessionOptimizerAttachments,
-} from "./SessionOptimizerAttachments.ts";
+} from "@t3tools/provider-core/server/sessionOptimizerAttachments";
+
+import { resolveInstallableSessionOptimizers } from "./SessionOptimizerAttachments.ts";
 
 describe("SessionOptimizerAttachments", () => {
   it("selects only installed optimizers supported by the adapter", () => {

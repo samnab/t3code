@@ -16,8 +16,8 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import { expandHomePath } from "../pathExpansion.ts";
-import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
@@ -44,7 +44,7 @@ interface ProviderRoutingConfig {
 export interface HeadroomSessionRoutingInput {
   readonly provider: ProviderDriverKind;
   readonly providerInstanceId: ProviderInstanceId;
-  readonly settings: Pick<ServerSettings, "headroomProxyUrl" | "providerInstances" | "providers">;
+  readonly settings: Pick<ServerSettings, "headroomProxyUrl" | "providerInstances">;
   readonly cwd?: string;
   readonly environment?: NodeJS.ProcessEnv;
 }
@@ -146,10 +146,7 @@ function resolveProviderRoutingConfig(
   }
   if (String(input.providerInstanceId) !== input.provider) return undefined;
   return {
-    config:
-      input.provider === "claudeAgent"
-        ? input.settings.providers.claudeAgent
-        : input.settings.providers.codex,
+    config: {},
     environment: input.environment ?? process.env,
   };
 }

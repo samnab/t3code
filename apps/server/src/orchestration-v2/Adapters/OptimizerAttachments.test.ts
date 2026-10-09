@@ -5,9 +5,10 @@ import * as Effect from "effect/Effect";
 import * as HeadroomRouting from "../../optimizer/HeadroomRouting.ts";
 import {
   clearSessionOptimizerAttachments,
+  readSessionOptimizerAttachments,
   setSessionOptimizerAttachments,
-} from "../../optimizer/SessionOptimizerAttachments.ts";
-import { acpMcpContext } from "./AcpAdapterV2.ts";
+} from "@t3tools/provider-core/server/sessionOptimizerAttachments";
+import { acpMcpContext } from "@t3tools/provider-acp/server/adapter";
 import { claudeMcpQueryOverrides } from "./ClaudeAdapterV2.ts";
 import { buildCodexTurnStartParams, codexThreadRuntimeParams } from "./CodexAdapterV2.ts";
 
@@ -44,6 +45,7 @@ describe("optimizer attachment projections", () => {
       // have to ride in the per-thread config, not the process arguments.
       const threadConfig = codexThreadRuntimeParams({
         threadId,
+        mcpSession: undefined,
         runtimePolicy: {
           runtimeMode: "full-access",
           interactionMode: "default",
@@ -100,6 +102,7 @@ describe("optimizer attachment projections", () => {
       clearSessionOptimizerAttachments(threadId);
       const detachedConfig = codexThreadRuntimeParams({
         threadId,
+        mcpSession: undefined,
         runtimePolicy: {
           runtimeMode: "full-access",
           interactionMode: "default",
@@ -114,7 +117,11 @@ describe("optimizer attachment projections", () => {
   it("adds CBM to Claude and Antigravity MCP servers and Headroom to the ACP environment", () => {
     attachOptimizers();
     try {
-      const claude = claudeMcpQueryOverrides({ threadId, readOnlySandbox: false });
+      const claude = claudeMcpQueryOverrides({
+        threadId,
+        mcpSession: undefined,
+        readOnlySandbox: false,
+      });
       expect(claude.mcpServers?.["codebase-memory"]).toEqual({
         type: "stdio",
         command: "/tools/codebase-memory-mcp",
@@ -122,7 +129,11 @@ describe("optimizer attachment projections", () => {
         env: { CBM_ALLOWED_ROOT: "/workspace/repo" },
       });
 
-      const antigravity = acpMcpContext(threadId, { command: "t3", entrypoint: undefined });
+      const antigravity = acpMcpContext(
+        undefined,
+        { command: "t3", entrypoint: undefined },
+        readSessionOptimizerAttachments(threadId),
+      );
       expect(antigravity.servers).toContainEqual({
         name: "codebase-memory",
         command: "/tools/codebase-memory-mcp",
@@ -137,8 +148,16 @@ describe("optimizer attachment projections", () => {
       clearSessionOptimizerAttachments(threadId);
     }
 
-    expect(claudeMcpQueryOverrides({ threadId, readOnlySandbox: false })).toEqual({});
-    expect(acpMcpContext(threadId, { command: "t3", entrypoint: undefined })).toEqual({
+    expect(
+      claudeMcpQueryOverrides({ threadId, mcpSession: undefined, readOnlySandbox: false }),
+    ).toEqual({});
+    expect(
+      acpMcpContext(
+        undefined,
+        { command: "t3", entrypoint: undefined },
+        readSessionOptimizerAttachments(threadId),
+      ),
+    ).toEqual({
       servers: [],
       acpServers: [],
     });
