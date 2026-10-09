@@ -1128,6 +1128,10 @@ export function createServerEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       refreshIntervalMs: 30_000,
     }),
+    startHeadroom: createEnvironmentRpcCommand(runtime, {
+      label: "optimizer:headroom-start",
+      tag: WS_METHODS.optimizersStartHeadroom,
+    }),
     resourceTelemetry: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:resource-telemetry",
       tag: WS_METHODS.subscribeResourceTelemetry,

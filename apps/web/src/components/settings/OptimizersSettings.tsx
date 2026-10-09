@@ -7,6 +7,7 @@ import type {
   ProjectId,
 } from "@t3tools/contracts";
 import { DEFAULT_HEADROOM_PROXY_URL } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { CheckCircle2Icon, CircleAlertIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
@@ -56,20 +57,20 @@ const OPTIMIZER_META: Readonly<
 > = {
   rtk: {
     label: "RTK",
-    description: "Reduces shell output before it reaches an agent.",
+    description: "Runs as a CLI wrapper inside supported provider sessions.",
     mode: "CLI wrapper",
     supportedProviders:
       "Claude Code (hook and session instructions) and Codex (session instructions)",
   },
   headroom: {
     label: "Headroom",
-    description: "Routes supported new sessions through an existing local proxy.",
+    description: "Routes supported new sessions through the configured proxy. Start it here.",
     mode: "Session routing",
     supportedProviders: "First-party Claude Code and Codex sessions",
   },
   cbm: {
     label: "Codebase Memory",
-    description: "Adds project-scoped codebase search tools through MCP.",
+    description: "Runs as a stdio MCP server inside supported provider sessions.",
     mode: "stdio MCP",
     supportedProviders: "Claude Code, Codex, Grok, Cursor, Antigravity, and managed OpenCode",
   },
@@ -135,7 +136,19 @@ function ProviderCompatibilityRow({ id }: { readonly id: OptimizerId }) {
   );
 }
 
-function OptimizerStatusRows({ snapshot }: { readonly snapshot: OptimizerStatusSnapshot | null }) {
+function OptimizerStatusRows({
+  snapshot,
+  onStartHeadroom,
+  canStartHeadroom,
+  startingHeadroom,
+  headroomStartError,
+}: {
+  readonly snapshot: OptimizerStatusSnapshot | null;
+  readonly onStartHeadroom: () => void;
+  readonly canStartHeadroom: boolean;
+  readonly startingHeadroom: boolean;
+  readonly headroomStartError: string | null;
+}) {
   const statusById = useMemo(
     () => new Map(snapshot?.optimizers.map((status) => [status.id, status]) ?? []),
     [snapshot?.optimizers],
@@ -162,10 +175,27 @@ function OptimizerStatusRows({ snapshot }: { readonly snapshot: OptimizerStatusS
                 <Badge variant={statusTone(status)}>{statusLabel(status)}</Badge>
                 {status?.version ? <span>{`v${status.version}`}</span> : null}
                 {status?.detail ? <span>{status.detail}</span> : null}
+                {id === "headroom" && headroomStartError ? (
+                  <span className="text-destructive" role="alert">
+                    {headroomStartError}
+                  </span>
+                ) : null}
               </span>
             }
             control={
-              status?.installed ? null : (
+              status?.id === "headroom" && status.installed && status.running !== true ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={startingHeadroom || !canStartHeadroom}
+                  title={
+                    canStartHeadroom ? undefined : "Environment maintenance permission is required."
+                  }
+                  onClick={onStartHeadroom}
+                >
+                  {startingHeadroom ? "Starting…" : "Start"}
+                </Button>
+              ) : status?.installed ? null : (
                 <a
                   className="inline-flex items-center gap-1 font-medium text-primary text-xs hover:underline"
                   href={installLink.href}
@@ -402,7 +432,7 @@ function HeadroomProxySettingsRow({
   return (
     <SettingsRow
       title="Headroom proxy URL"
-      description="The HTTP loopback origin where this environment can reach an existing Headroom proxy. Use the base origin, such as http://127.0.0.1:8787; /v1 is not needed. Enabled projects route supported new sessions through it. T3 never starts, stops, or configures Headroom."
+      description="The HTTP loopback origin for this environment's Headroom proxy. Use the base origin, such as http://127.0.0.1:8787; /v1 is not needed. Start an installed proxy from Status. T3 does not install Headroom or change provider configuration."
       status={error ? <span className="text-destructive">{error}</span> : undefined}
       resetAction={
         proxyUrl !== DEFAULT_HEADROOM_PROXY_URL ? (
@@ -475,6 +505,15 @@ function OptimizerEnvironmentSettings({
         })
       : null,
   );
+  const canStartHeadroom = useAtomValue(
+    serverEnvironment.startHeadroom.permissionAtom(environmentId),
+  );
+  const startHeadroom = useAtomCommand(serverEnvironment.startHeadroom, {
+    label: "Headroom proxy start",
+    reportFailure: false,
+  });
+  const [startingHeadroom, setStartingHeadroom] = useState(false);
+  const [headroomStartError, setHeadroomStartError] = useState<string | null>(null);
   const environmentConnected = environment?.connection.phase === "connected";
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "optimizer setting",
@@ -486,6 +525,29 @@ function OptimizerEnvironmentSettings({
   const selectedProjectSettings =
     selectedProjectId === null ? undefined : settings.projectOptimizerOverrides[selectedProjectId];
   const cbmBinaryPath = settings.optimizerBinaryPaths.cbm;
+
+  const startHeadroomProxy = async () => {
+    if (!environmentConnected || !canStartHeadroom || startingHeadroom) return;
+    setStartingHeadroom(true);
+    setHeadroomStartError(null);
+    try {
+      const result = await startHeadroom({ environmentId, input: {} });
+      if (result._tag === "Success") {
+        statusQuery.refresh();
+      } else if (!isAtomCommandInterrupted(result)) {
+        const failure = squashAtomCommandFailure(result);
+        setHeadroomStartError(
+          failure instanceof Error ? failure.message : "Headroom could not be started.",
+        );
+      }
+    } catch (failure) {
+      setHeadroomStartError(
+        failure instanceof Error ? failure.message : "Headroom could not be started.",
+      );
+    } finally {
+      setStartingHeadroom(false);
+    }
+  };
 
   const saveProjectOptimizer = async (id: OptimizerId, enabled: boolean) => {
     if (selectedProjectId === null || savingProject || !environmentConnected) return;
@@ -573,7 +635,13 @@ function OptimizerEnvironmentSettings({
             description="The probe will finish shortly."
           />
         ) : (
-          <OptimizerStatusRows snapshot={statusQuery.data} />
+          <OptimizerStatusRows
+            snapshot={statusQuery.data}
+            onStartHeadroom={() => void startHeadroomProxy()}
+            canStartHeadroom={canStartHeadroom}
+            startingHeadroom={startingHeadroom}
+            headroomStartError={headroomStartError}
+          />
         )}
       </SettingsSection>
 
@@ -630,10 +698,10 @@ function OptimizerEnvironmentSettings({
                 title={OPTIMIZER_META[id].label}
                 description={
                   id === "headroom"
-                    ? "Routes supported new sessions through the existing healthy proxy; never starts or stops Headroom."
+                    ? "Routes supported new sessions through the configured Headroom proxy. T3 starts it from Status when requested."
                     : id === "cbm"
-                      ? "Adds CBM as a project-scoped MCP server for supported providers."
-                      : "Adds RTK's shell output filtering to the next provider session."
+                      ? "Starts CBM as a stdio MCP server inside each supported provider session."
+                      : "Starts RTK's CLI wrapper inside each supported provider session."
                 }
                 status={
                   selectedProjectSettings?.[id] === true ? "Enabled for the next session" : "Off"

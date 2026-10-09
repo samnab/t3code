@@ -1,6 +1,7 @@
 import type { ComponentProps } from "react";
 import { useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, View } from "react-native";
+import { ActivityIndicator, Alert, Pressable, View } from "react-native";
+import { useAtomValue } from "@effect/atom-react";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import {
@@ -23,6 +24,10 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 
 const OPTIMIZER_IDS = ["rtk", "headroom", "cbm"] as const;
 const OPTIMIZER_META: Readonly<
@@ -35,13 +40,21 @@ const OPTIMIZER_META: Readonly<
     }
   >
 > = {
-  rtk: { label: "RTK", subtitle: "Filters supported CLI output", icon: "terminal" },
+  rtk: {
+    label: "RTK",
+    subtitle: "Starts as a CLI wrapper inside supported sessions",
+    icon: "terminal",
+  },
   headroom: {
     label: "Headroom",
-    subtitle: "Routes supported new sessions through a local proxy",
+    subtitle: "Routes through the local proxy; start it from Host status",
     icon: "bolt.horizontal.circle",
   },
-  cbm: { label: "Codebase Memory", subtitle: "Adds project-scoped MCP tools", icon: "cube" },
+  cbm: {
+    label: "Codebase Memory",
+    subtitle: "Starts as stdio MCP inside supported sessions",
+    icon: "cube",
+  },
 };
 
 function SelectionRow(props: {
@@ -113,6 +126,34 @@ export function SettingsOptimizersRouteScreen() {
     label: "optimizer settings update",
     reportFailure: true,
   });
+  const canStartHeadroom = useAtomValue(
+    serverEnvironment.startHeadroom.permissionAtom(environmentId),
+  );
+  const startHeadroom = useAtomCommand(serverEnvironment.startHeadroom, {
+    label: "Headroom proxy start",
+    reportFailure: false,
+  });
+  const [startingHeadroom, setStartingHeadroom] = useState(false);
+
+  const startHeadroomProxy = async () => {
+    if (!environmentId || !connected || !canStartHeadroom || startingHeadroom) return;
+    setStartingHeadroom(true);
+    try {
+      const result = await startHeadroom({ environmentId, input: {} });
+      if (result._tag === "Success") {
+        status.refresh();
+      } else if (!isAtomCommandInterrupted(result)) {
+        Alert.alert("Could not start Headroom", String(squashAtomCommandFailure(result)));
+      }
+    } catch (failure) {
+      Alert.alert(
+        "Could not start Headroom",
+        failure instanceof Error ? failure.message : "Headroom could not be started.",
+      );
+    } finally {
+      setStartingHeadroom(false);
+    }
+  };
 
   const updateOptimizer = async (id: OptimizerId, enabled: boolean) => {
     if (!environmentId || !selectedProject || !connected || savingOptimizer !== null) return;
@@ -217,21 +258,53 @@ export function SettingsOptimizersRouteScreen() {
                   <Text className="text-sm text-danger-foreground">{status.error}</Text>
                 </View>
               ) : (
-                OPTIMIZER_IDS.map((id) => (
-                  <View key={id} className="border-t border-border-subtle p-4 first:border-t-0">
-                    <Text className="text-sm font-t3-medium text-foreground">
-                      {OPTIMIZER_META[id].label}
-                    </Text>
-                    <Text className="text-xs text-foreground-muted">
-                      {statusLabel(statusById.get(id))}
-                    </Text>
-                    {statusById.get(id)?.detail ? (
-                      <Text className="mt-1 text-xs text-foreground-muted" numberOfLines={3}>
-                        {statusById.get(id)?.detail}
-                      </Text>
-                    ) : null}
-                  </View>
-                ))
+                OPTIMIZER_IDS.map((id) => {
+                  const optimizer = statusById.get(id);
+                  const detail =
+                    optimizer?.detail ??
+                    (id === "rtk"
+                      ? "T3 starts the wrapper inside each supported provider session."
+                      : id === "cbm"
+                        ? "T3 starts CBM over stdio inside each supported provider session."
+                        : undefined);
+                  return (
+                    <View
+                      key={id}
+                      className="flex-row items-start gap-3 border-t border-border-subtle p-4 first:border-t-0"
+                    >
+                      <View className="min-w-0 flex-1">
+                        <Text className="text-sm font-t3-medium text-foreground">
+                          {OPTIMIZER_META[id].label}
+                        </Text>
+                        <Text className="text-xs text-foreground-muted">
+                          {statusLabel(optimizer)}
+                        </Text>
+                        {detail ? (
+                          <Text className="mt-1 text-xs text-foreground-muted" numberOfLines={3}>
+                            {detail}
+                          </Text>
+                        ) : null}
+                      </View>
+                      {id === "headroom" && optimizer?.installed && optimizer.running !== true ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            startingHeadroom ? "Starting Headroom" : "Start Headroom"
+                          }
+                          disabled={
+                            !connected || status.isPending || startingHeadroom || !canStartHeadroom
+                          }
+                          onPress={() => void startHeadroomProxy()}
+                          className="rounded-lg border border-border-subtle px-3 py-2 active:opacity-70 disabled:opacity-40"
+                        >
+                          <Text className="text-sm font-t3-medium text-foreground">
+                            {startingHeadroom ? "Starting…" : "Start"}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  );
+                })
               )}
               <Pressable
                 accessibilityRole="button"
@@ -341,7 +414,8 @@ export function SettingsOptimizersRouteScreen() {
                   onSubmitEditing={() => void saveProxy()}
                 />
                 <Text className="text-xs text-foreground-muted">
-                  T3 connects to this existing loopback proxy; it does not start or stop Headroom.
+                  This loopback URL belongs to the selected environment. Start an installed proxy
+                  from Host status; T3 does not install Headroom or change provider configuration.
                 </Text>
               </View>
             </SettingsSection>

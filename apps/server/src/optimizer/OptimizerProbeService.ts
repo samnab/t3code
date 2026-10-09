@@ -3,6 +3,7 @@ import {
   DEFAULT_HEADROOM_PROXY_URL,
   normalizeHeadroomProxyUrl,
   type CbmProjectIndexStatus,
+  OptimizerStartError,
   type OptimizerSavingsInterval,
   type OptimizerSavingsPoint,
   type OptimizerSavingsSummary,
@@ -16,13 +17,17 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -30,6 +35,8 @@ import { CbmIndexService } from "./CbmIndexService.ts";
 
 const PROBE_TIMEOUT = Duration.seconds(4);
 const REFRESH_COOLDOWN_MS = 5_000;
+const HEADROOM_READY_TIMEOUT_MS = 10_000;
+const HEADROOM_READY_POLL_MS = 100;
 
 const RtkGain = Schema.Struct({
   summary: Schema.Struct({
@@ -88,11 +95,22 @@ export interface OptimizerProbeDependencies {
   readonly fetchHeadroomHistory: (
     proxyUrl: string,
   ) => Effect.Effect<unknown, HeadroomStatsProbeError>;
+  readonly spawnHeadroomProxy: (input: {
+    readonly host: string;
+    readonly port: number;
+    readonly scope: Scope.Scope;
+  }) => Effect.Effect<OptimizerOwnedHeadroomProcess, OptimizerStartError>;
   readonly getCbmBinaryPath: Effect.Effect<string, ServerSettingsError>;
   readonly getHeadroomProxyUrl: Effect.Effect<string, ServerSettingsError>;
   readonly listCbmIndexes: Effect.Effect<ReadonlyArray<CbmProjectIndexStatus>>;
   readonly now: Effect.Effect<string>;
   readonly nowMs: Effect.Effect<number>;
+  readonly sleep: (milliseconds: number) => Effect.Effect<void>;
+}
+
+export interface OptimizerOwnedHeadroomProcess {
+  readonly isRunning: Effect.Effect<boolean, OptimizerStartError>;
+  readonly exitCode: Effect.Effect<number, OptimizerStartError>;
 }
 
 class HeadroomStatsProbeError extends Schema.TaggedError<HeadroomStatsProbeError>()(
@@ -106,7 +124,9 @@ export class OptimizerProbeService extends Context.Service<
     /** Omitted refresh serves the shared cache; refresh coalesces concurrent probes. */
     readonly getStatus: (input: {
       readonly refresh?: boolean | undefined;
+      readonly force?: boolean | undefined;
     }) => Effect.Effect<OptimizerStatusSnapshot>;
+    readonly startHeadroom: () => Effect.Effect<OptimizerStatusSnapshot, OptimizerStartError>;
   }
 >()("t3/optimizer/OptimizerProbeService") {}
 
@@ -196,6 +216,15 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
     refreshedAtMs: null,
   });
   const refreshLock = yield* Semaphore.make(1);
+  const startLock = yield* Semaphore.make(1);
+  const proxyScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
+    Scope.close(scope, Exit.void),
+  );
+  const ownedProcess = yield* Ref.make<{
+    readonly proxyUrl: string;
+    readonly scope: Scope.Closeable;
+    readonly process: OptimizerOwnedHeadroomProcess;
+  } | null>(null);
 
   const versionProbe = Effect.fn("OptimizerProbeService.versionProbe")(function* (
     command: string,
@@ -417,6 +446,7 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
             current.snapshot !== null &&
             sameCbmBinary &&
             sameHeadroomProxy &&
+            !input.force &&
             (!input.refresh || current.revision !== observedRevision || refreshIsCoolingDown)
           ) {
             return current.snapshot;
@@ -438,7 +468,129 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
       return { ...snapshot, cbmIndexes, attachments: [] } satisfies OptimizerStatusSnapshot;
     });
 
-  return OptimizerProbeService.of({ getStatus });
+  const waitForHeadroom = Effect.fn("OptimizerProbeService.waitForHeadroom")(function* (
+    proxyUrl: string,
+    process: OptimizerOwnedHeadroomProcess,
+  ) {
+    const startedAt = yield* dependencies.nowMs;
+    const deadline = startedAt + HEADROOM_READY_TIMEOUT_MS;
+    while (true) {
+      if (!(yield* process.isRunning)) {
+        const exitCode = yield* process.exitCode;
+        return yield* new OptimizerStartError({
+          message: `Headroom exited with code ${String(exitCode)} before its proxy became healthy. Check the server logs and configured port.`,
+        });
+      }
+
+      const healthAttempt = yield* dependencies.fetchHeadroomHealth(proxyUrl).pipe(
+        Effect.match({
+          onFailure: () => Option.none(),
+          onSuccess: decodeHeadroomHealth,
+        }),
+      );
+      if (Option.isSome(healthAttempt)) {
+        if (healthAttempt.value.status === "unhealthy") {
+          return yield* new OptimizerStartError({
+            message:
+              "Headroom started, but its health endpoint reports unhealthy. Check the server logs.",
+          });
+        }
+        return;
+      }
+
+      if ((yield* dependencies.nowMs) >= deadline) {
+        return yield* new OptimizerStartError({
+          message: `Headroom did not become healthy at ${proxyUrl} within 10 seconds. Check the server logs and ensure no other service is using this port.`,
+        });
+      }
+      yield* dependencies.sleep(HEADROOM_READY_POLL_MS);
+    }
+  });
+
+  const startHeadroom: OptimizerProbeService["Service"]["startHeadroom"] = () =>
+    startLock.withPermit(
+      Effect.gen(function* () {
+        const configuredProxyUrl = yield* dependencies.getHeadroomProxyUrl.pipe(
+          Effect.catchCause(() => Effect.succeed(DEFAULT_HEADROOM_PROXY_URL)),
+        );
+        const proxyUrl = normalizeHeadroomProxyUrl(configuredProxyUrl);
+        if (proxyUrl === null) {
+          return yield* new OptimizerStartError({
+            message: "The configured Headroom URL must be an HTTP loopback origin.",
+          });
+        }
+
+        const prior = yield* Ref.get(ownedProcess);
+        if (prior !== null) {
+          const isRunning = yield* prior.process.isRunning.pipe(Effect.orElseSucceed(() => false));
+          if (!isRunning || prior.proxyUrl !== proxyUrl) {
+            yield* Scope.close(prior.scope, Exit.void);
+            yield* Ref.set(ownedProcess, null);
+          }
+        }
+
+        const existing = yield* getStatus({ refresh: true, force: true });
+        const existingStatus = existing.optimizers.find((optimizer) => optimizer.id === "headroom");
+        if (existingStatus?.running === true) return existing;
+
+        const unhealthyOwnedProcess = yield* Ref.get(ownedProcess);
+        if (unhealthyOwnedProcess !== null) {
+          yield* Scope.close(unhealthyOwnedProcess.scope, Exit.void);
+          yield* Ref.set(ownedProcess, null);
+        }
+
+        const cli = yield* versionProbe("headroom");
+        if (!cli.installed) {
+          return yield* new OptimizerStartError({
+            message: cli.detail
+              ? `Headroom is not available. ${cli.detail} Install the Headroom CLI, then try again.`
+              : "Headroom is not installed. Install the Headroom CLI, then try again.",
+          });
+        }
+
+        const processScope = yield* Scope.make("sequential");
+        yield* Scope.addFinalizer(proxyScope, Scope.close(processScope, Exit.void));
+        const endpoint = new URL(proxyUrl);
+        const host = endpoint.hostname.startsWith("[")
+          ? endpoint.hostname.slice(1, -1)
+          : endpoint.hostname;
+        const port = Number(endpoint.port || "80");
+        const startup = Effect.gen(function* () {
+          const spawned = yield* dependencies
+            .spawnHeadroomProxy({
+              host,
+              port,
+              scope: processScope,
+            })
+            .pipe(
+              Effect.tap((process) =>
+                Ref.set(ownedProcess, { proxyUrl, scope: processScope, process }),
+              ),
+            );
+          yield* waitForHeadroom(proxyUrl, spawned);
+          const snapshot = yield* getStatus({ refresh: true, force: true });
+          const confirmed = snapshot.optimizers.find((optimizer) => optimizer.id === "headroom");
+          if (confirmed?.running !== true) {
+            return yield* new OptimizerStartError({
+              message:
+                "Headroom passed its startup check but did not remain healthy. Check the server logs.",
+            });
+          }
+          return snapshot;
+        });
+        return yield* startup.pipe(
+          Effect.onExit((exit) =>
+            Exit.isSuccess(exit)
+              ? Effect.void
+              : Scope.close(processScope, Exit.void).pipe(
+                  Effect.andThen(Ref.set(ownedProcess, null)),
+                ),
+          ),
+        );
+      }),
+    );
+
+  return OptimizerProbeService.of({ getStatus, startHeadroom });
 });
 
 export const make = Effect.gen(function* () {
@@ -447,6 +599,7 @@ export const make = Effect.gen(function* () {
   const cbmIndexes = yield* CbmIndexService;
   const httpClient = yield* HttpClient.HttpClient;
   const hostPlatform = yield* HostProcessPlatform;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
   return yield* makeWith({
     run: processRunner.run,
@@ -475,6 +628,42 @@ export const make = Effect.gen(function* () {
         Effect.timeout(Duration.seconds(2)),
         Effect.mapError(() => new HeadroomStatsProbeError()),
       ),
+    spawnHeadroomProxy: ({ host, port, scope }) =>
+      spawner
+        .spawn(
+          ChildProcess.make("headroom", ["proxy", "--host", host, "--port", String(port)], {
+            extendEnv: true,
+            detached: false,
+            stdin: "ignore",
+            stdout: "inherit",
+            stderr: "inherit",
+          }),
+        )
+        .pipe(
+          Scope.provide(scope),
+          Effect.map((handle) => ({
+            isRunning: handle.isRunning.pipe(
+              Effect.mapError(
+                () =>
+                  new OptimizerStartError({ message: "Could not inspect the Headroom process." }),
+              ),
+            ),
+            exitCode: handle.exitCode.pipe(
+              Effect.map((code) => Number(code)),
+              Effect.mapError(
+                () =>
+                  new OptimizerStartError({ message: "Could not inspect the Headroom process." }),
+              ),
+            ),
+          })),
+          Effect.mapError(
+            () =>
+              new OptimizerStartError({
+                message:
+                  "Could not start the Headroom CLI. Confirm it is installed and available on PATH.",
+              }),
+          ),
+        ),
     getCbmBinaryPath: settings.getSettings.pipe(
       Effect.map((current) => current.optimizerBinaryPaths.cbm),
     ),
@@ -484,6 +673,7 @@ export const make = Effect.gen(function* () {
     listCbmIndexes: cbmIndexes.listStatuses,
     now: DateTime.now.pipe(Effect.map(DateTime.formatIso)),
     nowMs: Clock.currentTimeMillis,
+    sleep: (milliseconds) => Effect.sleep(Duration.millis(milliseconds)),
   });
 });
 
@@ -527,6 +717,12 @@ export const layerTest = (snapshot?: OptimizerStatusSnapshot) =>
             cbmIndexes: [],
             attachments: [],
           },
+        ),
+      startHeadroom: () =>
+        Effect.fail(
+          new OptimizerStartError({
+            message: "Headroom startup is unavailable in this test layer.",
+          }),
         ),
     }),
   );

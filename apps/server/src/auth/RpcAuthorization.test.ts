@@ -67,6 +67,12 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
   });
 
+  it("requires environment maintenance permission to start Headroom", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.optimizersStartHeadroom)).toBe(
+      AuthEnvironmentMaintainScope,
+    );
+  });
+
   it("requires permission to operate on a thread before uploading feedback", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.providerUploadFeedback)).toBe(
       AuthOrchestrationOperateScope,

@@ -11,6 +11,11 @@ import {
 export const OptimizerId = Schema.Literals(["rtk", "headroom", "cbm"]);
 export type OptimizerId = typeof OptimizerId.Type;
 
+export class OptimizerStartError extends Schema.TaggedError<OptimizerStartError>()(
+  "OptimizerStartError",
+  { message: Schema.String },
+) {}
+
 export const OptimizerMode = Schema.Literals(["cli-wrapper", "detected-proxy", "stdio-mcp"]);
 export type OptimizerMode = typeof OptimizerMode.Type;
 

@@ -213,6 +213,7 @@ import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as DefectReporter from "./observability/DefectReporter.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as SessionOptimizerAttachments from "./optimizer/SessionOptimizerAttachments.ts";
+import * as OptimizerProbeService from "./optimizer/OptimizerProbeService.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { requiredScopeForDeviceList, rpcAuthorizationError } from "./auth/RpcAuthorization.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
@@ -1254,6 +1255,7 @@ const layerWsRpc = (
       const usage = yield* UsageService.UsageService;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const sessionOptimizers = yield* SessionOptimizerAttachments.SessionOptimizerAttachments;
+      const optimizerProbe = yield* OptimizerProbeService.OptimizerProbeService;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
@@ -2088,6 +2090,7 @@ const layerWsRpc = (
           ),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
         [WS_METHODS.optimizersGetStatus]: (input) => sessionOptimizers.getStatus(input),
+        [WS_METHODS.optimizersStartHeadroom]: () => optimizerProbe.startHeadroom(),
         [WS_METHODS.serverGetConfig]: (_input) => loadServerConfig({ usageLimitsCommand: false }),
         [WS_METHODS.serverSearchAcpRegistry]: (input) =>
           acpRegistryCatalog

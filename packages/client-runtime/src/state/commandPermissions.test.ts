@@ -7,6 +7,7 @@ import type { RpcSession } from "../rpc/session.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
+  AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
   ThreadId,
@@ -222,6 +223,27 @@ it.effect("honors exact empty permissions and preserves legacy parent grants", (
       registry.set(sessions(env), AsyncResult.success(legacy));
       expect(registry.get(git.permissionAtom(env))).toBe(true);
       yield* git.authorize(registry, env);
+    }),
+  ),
+);
+
+it.effect("guards Headroom startup with environment maintenance permission", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      const startHeadroom = createCommandPermissions(runtime, WS_METHODS.optimizersStartHeadroom);
+      registry.set(sessions(env), AsyncResult.success({ ...grant(true), permissions: [] }));
+      expect(registry.get(startHeadroom.permissionAtom(env))).toBe(false);
+      registry.set(
+        sessions(env),
+        AsyncResult.success({
+          ...grant(true),
+          scopes: [AuthEnvironmentMaintainScope],
+          permissions: [AuthEnvironmentMaintainScope],
+        }),
+      );
+      expect(registry.get(startHeadroom.permissionAtom(env))).toBe(true);
+      yield* startHeadroom.authorize(registry, env);
     }),
   ),
 );

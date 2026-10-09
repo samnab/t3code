@@ -318,7 +318,7 @@ import {
   ProviderConsumeResetCreditResult,
 } from "./providerUsageLimits.ts";
 import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
-import { OptimizerStatusSnapshot } from "./optimizer.ts";
+import { OptimizerStartError, OptimizerStatusSnapshot } from "./optimizer.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
   ScheduledTaskDeleteInput,
@@ -411,6 +411,7 @@ export const WS_METHODS = {
 
   // Optimizer methods
   optimizersGetStatus: "optimizers.getStatus",
+  optimizersStartHeadroom: "optimizers.startHeadroom",
 
   // VCS methods
   vcsPull: "vcs.pull",
@@ -744,6 +745,12 @@ const WsOptimizersGetStatusRpc = Rpc.make(WS_METHODS.optimizersGetStatus, {
   payload: Schema.Struct({ refresh: Schema.optionalKey(Schema.Boolean) }),
   success: OptimizerStatusSnapshot,
   error: EnvironmentAuthorizationError,
+});
+
+const WsOptimizersStartHeadroomRpc = Rpc.make(WS_METHODS.optimizersStartHeadroom, {
+  payload: Schema.Struct({}),
+  success: OptimizerStatusSnapshot,
+  error: Schema.Union([OptimizerStartError, EnvironmentAuthorizationError]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1853,6 +1860,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
   WsOptimizersGetStatusRpc,
+  WsOptimizersStartHeadroomRpc,
   WsServerUpdateSettingsRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerSearchAcpRegistryRpc,
