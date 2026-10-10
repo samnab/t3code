@@ -1,4 +1,4 @@
-import * as NodeOS from "node:os";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import {
   ClaudeSettings,
@@ -131,14 +131,14 @@ export function inspectCodexHeadroomRouting(contents: string): CodexHeadroomRout
   return { modelProvider, openAiBaseUrl, headroomBaseUrl };
 }
 
-function resolveProviderRoutingConfig(
+const resolveProviderRoutingConfig = Effect.fn(function* (
   input: HeadroomSessionRoutingInput & { readonly provider: HeadroomRoutableProvider },
-): ProviderRoutingConfig | undefined {
+): Effect.fn.Return<ProviderRoutingConfig | undefined> {
   const explicit = input.settings.providerInstances[input.providerInstanceId];
   if (explicit !== undefined) {
     return {
       config: explicit.config ?? {},
-      environment: mergeProviderInstanceEnvironment(
+      environment: yield* mergeProviderInstanceEnvironment(
         explicit.environment,
         input.environment ?? process.env,
       ),
@@ -149,7 +149,7 @@ function resolveProviderRoutingConfig(
     config: {},
     environment: input.environment ?? process.env,
   };
-}
+});
 
 function environmentHomePath(
   path: Path.Path,
@@ -253,9 +253,9 @@ export const resolveProviderHeadroomSessionRouting = Effect.fn(
     const configuredHome = config.value.homePath.trim();
     const configDir =
       configuredHome.length > 0
-        ? path.resolve(expandHomePath(configuredHome))
+        ? path.resolve(expandHomePath(configuredHome, yield* HostProcess.HomeDirectory))
         : (environmentHomePath(path, input.environment.CLAUDE_CONFIG_DIR, input.cwd) ??
-          path.join(NodeOS.homedir(), ".claude"));
+          path.join(yield* HostProcess.HomeDirectory, ".claude"));
     const contents = yield* readOptional(fileSystem, path.join(configDir, "settings.json"));
     const settingsRoute = Option.flatMap(contents, decodeClaudeRoutingSettings);
     const explicitBaseUrl =
@@ -325,7 +325,7 @@ export const resolveHeadroomSessionRouting = Effect.fn("HeadroomRouting.resolveS
   input: HeadroomSessionRoutingInput,
 ): Effect.fn.Return<HeadroomSessionRouting | undefined, never, FileSystem.FileSystem | Path.Path> {
   if (!isHeadroomRoutableProvider(input.provider)) return undefined;
-  const resolved = resolveProviderRoutingConfig({ ...input, provider: input.provider });
+  const resolved = yield* resolveProviderRoutingConfig({ ...input, provider: input.provider });
   if (resolved === undefined) return undefined;
   return yield* resolveProviderHeadroomSessionRouting({
     provider: input.provider,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import type { ProjectId } from "./baseSchemas.ts";
+import type { CommandId, ProjectId } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -10,6 +10,7 @@ import {
   CodexSettings,
   DEFAULT_SERVER_SETTINGS,
   LegacyClientSettings,
+  requiredScopesForProjectMutation,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -166,6 +167,7 @@ describe("storage cleanup settings", () => {
       worktreeOnMerge: false,
       worktreeOnDelete: false,
       worktreeUnchanged: false,
+      worktreeKeepWhen: "uncommitted-changes",
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
     });
@@ -192,6 +194,29 @@ describe("storage cleanup settings", () => {
           project: { worktreeCleanup: { mode: "custom", rules: { worktreeAfterDays: 8 } } },
         },
       }),
+    ).toThrow();
+  });
+
+  it("decodes older custom rules with the default local-file policy", () => {
+    const settings = decodeServerSettings({
+      worktreeCleanup: {
+        mode: "custom",
+        rules: {
+          worktreeAfterDays: 8,
+          worktreeOnMerge: false,
+          worktreeOnDelete: false,
+          worktreeUnchanged: false,
+        },
+      },
+    });
+    expect(settings.worktreeCleanup).toMatchObject({
+      rules: { worktreeKeepWhen: "uncommitted-changes" },
+    });
+    expect(
+      decodeServerSettingsPatch({ storageCleanup: { worktreeKeepWhen: "tracked-changes" } }),
+    ).toEqual({ storageCleanup: { worktreeKeepWhen: "tracked-changes" } });
+    expect(() =>
+      decodeServerSettingsPatch({ storageCleanup: { worktreeKeepWhen: "unknown" } }),
     ).toThrow();
   });
 
@@ -1204,5 +1229,23 @@ describe("ServerSettings.removeAgentCreditsOnMerge", () => {
         projectSettingsOverrides: { project: { removeAgentCreditsOnMerge: true } },
       }).projectSettingsOverrides["project" as ProjectId]?.removeAgentCreditsOnMerge,
     ).toBe(true);
+  });
+});
+
+describe("requiredScopesForProjectMutation", () => {
+  it("adds the settings scope only when a mutation carries scripts", () => {
+    const projectId = "project-1" as ProjectId;
+    const commandId = "command-1" as CommandId;
+    expect(
+      requiredScopesForProjectMutation({ type: "project.update", commandId, projectId }),
+    ).toEqual(["orchestration:operate"]);
+    expect(
+      requiredScopesForProjectMutation({
+        type: "project.update",
+        commandId,
+        projectId,
+        scripts: [],
+      }),
+    ).toEqual(["orchestration:operate", "settings:write"]);
   });
 });

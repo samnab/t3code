@@ -11,7 +11,7 @@ import {
   type OptimizerStatusSnapshot,
   type ServerSettingsError,
 } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -598,14 +598,14 @@ export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const cbmIndexes = yield* CbmIndexService;
   const httpClient = yield* HttpClient.HttpClient;
-  const hostPlatform = yield* HostProcessPlatform;
+  const hostPlatform = yield* HostProcess.Platform;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
   return yield* makeWith({
     run: processRunner.run,
     isMissingResult: (result) =>
       ProcessRunner.isWindowsCommandNotFound(Number(result.code), result.stderr).pipe(
-        Effect.provideService(HostProcessPlatform, hostPlatform),
+        Effect.provideService(HostProcess.Platform, hostPlatform),
       ),
     fetchHeadroomStats: (proxyUrl) =>
       httpClient.get(`${proxyUrl}/stats`).pipe(

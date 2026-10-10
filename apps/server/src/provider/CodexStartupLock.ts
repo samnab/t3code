@@ -16,7 +16,9 @@ export const resolveCodexHomeKey = (input: {
   readonly environment?: NodeJS.ProcessEnv | undefined;
 }): string => {
   const configured = input.homePath?.trim() || input.environment?.CODEX_HOME?.trim();
-  return configured ? expandHomePath(configured) : NodePath.join(NodeOS.homedir(), ".codex");
+  return configured
+    ? expandHomePath(configured, NodeOS.homedir())
+    : NodePath.join(NodeOS.homedir(), ".codex");
 };
 
 const CODEX_STATE_RUNTIME_FAILURE = "failed to initialize sqlite state runtime";

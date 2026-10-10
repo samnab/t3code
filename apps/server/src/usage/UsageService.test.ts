@@ -8,7 +8,7 @@ import * as NodeSqlite from "node:sqlite";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { mergeUsage } from "@t3tools/shared/usageMerge";
 import {
   EnvironmentId,
@@ -132,9 +132,11 @@ const layerService = (input: {
     Layer.provideMerge(ProviderHostLive.layer),
     Layer.provideMerge(Layer.mock(BackgroundPolicy.BackgroundPolicy)({})),
     Layer.provideMerge(Layer.mock(ServerSecretStore.ServerSecretStore)({})),
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: input.prefix })),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), NodePath.join(input.home, input.prefix)),
+    ),
     Layer.provideMerge(NodeServices.layer),
-    Layer.provideMerge(Layer.succeed(HostProcessPlatform, input.platform ?? "linux")),
+    Layer.provideMerge(Layer.succeed(HostProcess.Platform, input.platform ?? "linux")),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
       Layer.succeed(
@@ -150,7 +152,7 @@ const layerService = (input: {
       ),
     ),
     Layer.provideMerge(
-      Layer.succeed(HostProcessEnvironment, {
+      Layer.succeed(HostProcess.Environment, {
         HOME: input.home,
         GROK_HOME: NodePath.join(input.home, "grok"),
         OPENCODE_DATA_DIR: NodePath.join(input.home, "opencode"),
@@ -996,6 +998,34 @@ describe("UsageService", () => {
       }).pipe(Effect.scoped),
   );
 
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32" || process.getuid?.() === 0)(
+    "reports unreadable transcripts as partial and recovers once they can be read",
+    () =>
+      Effect.gen(function* () {
+        const { transcript, settings, home } = yield* setup;
+        const unreadable = NodePath.join(NodePath.dirname(transcript), "other.jsonl");
+        yield* Effect.promise(async () => {
+          await NodeFSP.writeFile(transcript, claudeLine(1, 5));
+          await NodeFSP.writeFile(unreadable, claudeLine(2, 7));
+          await NodeFSP.chmod(unreadable, 0);
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          const partial = yield* service.readSummary(WINDOW);
+          assert.strictEqual(totalOutputTokens(partial), 5);
+          assert.strictEqual(partial.sources[0]?.status, "partial");
+
+          yield* Effect.promise(() => NodeFSP.chmod(unreadable, 0o600));
+          const healthy = yield* service.readSummary(WINDOW);
+          assert.strictEqual(totalOutputTokens(healthy), 12);
+          assert.strictEqual(healthy.sources[0]?.status, "ok");
+          assert.isNull(healthy.sources[0]?.message);
+        }).pipe(
+          Effect.provide(layerService({ prefix: "usage-service-unreadable", home, settings })),
+        );
+      }).pipe(Effect.scoped),
+  );
+
   it.live("reprices unchanged transcripts when custom prices are added, edited, or removed", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;
@@ -1352,7 +1382,7 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.live.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     "keeps a newer cached read when a slower scan of another window finishes later",
     () =>
       Effect.gen(function* () {
@@ -1383,7 +1413,7 @@ describe("UsageService", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.live.skipIf(HostProcessPlatform.defaultValue() === "win32")(
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     "keeps the later read when a scan that read earlier finishes first",
     () =>
       Effect.gen(function* () {

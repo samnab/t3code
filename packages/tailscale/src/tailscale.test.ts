@@ -8,7 +8,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import {
   buildTailscaleHttpsBaseUrl,
@@ -104,7 +104,7 @@ function neverFinishingMockHandle() {
 function layerSpawner(spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) {
   return Layer.merge(
     Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
-    Layer.succeed(HostProcessPlatform, "linux"),
+    Layer.succeed(HostProcess.Platform, "linux"),
   );
 }
 
@@ -219,7 +219,7 @@ describe("tailscale", () => {
     return Effect.gen(function* () {
       const status = yield* readTailscaleStatus.pipe(
         Effect.provide(layer),
-        Effect.provideService(HostProcessPlatform, "darwin"),
+        Effect.provideService(HostProcess.Platform, "darwin"),
       );
       assert.deepEqual(status, {
         magicDnsName: "desktop.tail.ts.net",
@@ -256,7 +256,7 @@ describe("tailscale", () => {
     return Effect.gen(function* () {
       const status = yield* readTailscaleStatus.pipe(
         Effect.provide(layer),
-        Effect.provideService(HostProcessPlatform, "darwin"),
+        Effect.provideService(HostProcess.Platform, "darwin"),
       );
       assert.equal(status.magicDnsName, "desktop.tail.ts.net");
       assert.deepEqual(commands, [

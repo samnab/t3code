@@ -1,4 +1,4 @@
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -512,6 +512,47 @@ describe("GitHubSourceControlProvider writes", () => {
       });
       assert.deepStrictEqual(requests, ["GET user", "POST orgs/acme/repos"]);
     }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("looks up a bare repository name under the signed-in account on that host", () => {
+    const requests: Array<string> = [];
+    return Effect.gen(function* () {
+      const gh = yield* makeProvider({
+        rest: (input) =>
+          Effect.sync(() => {
+            requests.push(`${input.host} ${input.method ?? "GET"} ${input.path}`);
+            return input.path === "user"
+              ? restResponse({ login: "me" })
+              : restResponse({
+                  full_name: "me/notes",
+                  html_url: `https://${input.host}/me/notes`,
+                  ssh_url: `git@${input.host}:me/notes.git`,
+                });
+          }),
+      });
+
+      const urls = yield* gh.getRepositoryCloneUrls({
+        cwd: "/repo",
+        context: githubContext("code.example.test"),
+        repository: " notes.git ",
+      });
+
+      assert.deepStrictEqual(urls, {
+        nameWithOwner: "me/notes",
+        url: "https://code.example.test/me/notes",
+        sshUrl: "git@code.example.test:me/notes.git",
+      });
+      assert.deepStrictEqual(requests, [
+        "code.example.test GET user",
+        "code.example.test GET repos/me/notes",
+      ]);
+      // Malformed names are still refused before any request.
+      for (const repository of ["me/", "/notes", "a/b/c/d", "", "two words"]) {
+        const error = yield* Effect.flip(gh.getRepositoryCloneUrls({ cwd: "/repo", repository }));
+        assert.include(error.message, "Repositories are named owner/name.");
+      }
+      assert.strictEqual(requests.length, 2);
+    });
   });
 });
 
@@ -1075,7 +1116,7 @@ it.live.each([
       remoteName: "enterprise",
       remoteBranch: "feature",
     });
-  }).pipe(Effect.provide(layer), Effect.provideService(HostProcessEnvironment, {}), Effect.scoped);
+  }).pipe(Effect.provide(layer), Effect.provideService(HostProcess.Environment, {}), Effect.scoped);
 });
 
 it.effect.each([
@@ -1162,7 +1203,7 @@ it.effect.each([
       ]);
     }).pipe(
       Effect.provide(layer),
-      Effect.provideService(HostProcessEnvironment, { GH_REPO: envRepository }),
+      Effect.provideService(HostProcess.Environment, { GH_REPO: envRepository }),
       Effect.scoped,
     );
   },
