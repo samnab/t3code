@@ -4,6 +4,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
+  RuntimeTaskId,
   EventId,
   MessageId,
   type ModelSelection,
@@ -21,6 +23,10 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as AgentMessaging from "../mcp/AgentMessagingService.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -908,6 +914,72 @@ const seedRestartCancelledChild = (input: {
 it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
   "subagent follow-ups",
   (it) => {
+    it.effect("agent-message notices do not create another delegated task", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const now = yield* DateTime.now;
+        const parentThreadId = ThreadId.make("thread:agent-message-parent");
+        const projectId = ProjectId.make("project:agent-message-notice");
+        const parentRunId = RunId.make("run:agent-message-parent");
+        const rootNodeId = NodeId.make("node:agent-message-parent");
+        yield* seedParentWithTerminalTask({
+          threadId: parentThreadId,
+          projectId,
+          runId: parentRunId,
+          rootNodeId,
+          taskId: NodeId.make("node:agent-message-seed"),
+          deliveryState: "acknowledged",
+          now,
+        });
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId,
+          projectId,
+          parentRunId,
+          rootNodeId,
+          name: "agent-message-child",
+          completionWake: "always",
+          continuationPending: false,
+          runStatus: "completed",
+          now,
+        });
+        yield* orchestrator.recoverDelegatedTasks;
+        const before = yield* orchestrator.getThreadProjection(parentThreadId);
+        const original = before.subagents.find((task) => task.id === child.taskId)!;
+        assert.isNotNull(original.result);
+        const layerMessaging = AgentMessaging.layer.pipe(
+          Layer.provide(ThreadManagement.layer),
+          Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator)),
+          Layer.provide(NodeSqliteClient.layer({ filename: ":memory:" })),
+        );
+        yield* Effect.gen(function* () {
+          const messaging = yield* AgentMessaging.AgentMessagingService;
+          yield* messaging.send(
+            {
+              environmentId: EnvironmentId.make("environment:agent-message-notice"),
+              capabilities: new Set(["orchestration"]),
+              issuedAt: 1,
+              requestNamespace: "agent-message-notice",
+              thread: {
+                threadId: parentThreadId,
+                providerSessionId: "session:agent-message-notice",
+                providerInstanceId: modelSelection.instanceId,
+              },
+              client: undefined,
+            },
+            {
+              messageId: "agent-message-notice",
+              targetAgentId: RuntimeTaskId.make(child.taskId),
+              message: "The checkpoint is ready to inspect.",
+            },
+          );
+        }).pipe(Effect.provide(layerMessaging));
+        const after = yield* orchestrator.getThreadProjection(parentThreadId);
+        assert.deepEqual(after.subagents, before.subagents);
+        const childAfter = yield* orchestrator.getThreadProjection(child.childThreadId);
+        assert.isUndefined(childAfter.runs.at(-1)?.delegatedTaskId);
+      }),
+    );
+
     const outcomes = [
       "completed",
       "failed",

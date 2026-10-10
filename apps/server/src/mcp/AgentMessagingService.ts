@@ -209,13 +209,20 @@ const layerEffect = Effect.gen(function* () {
         ),
       { concurrency: "unbounded" },
     );
+    // A child keeps its original delegation address when follow-up work adds tasks.
     const taskByChildThread = new Map(
       parentTasks
         .flat()
-        .filter(
-          (task): task is OrchestrationV2Subagent & { readonly childThreadId: ThreadId } =>
-            task.origin === "app_owned" && task.childThreadId !== null,
-        )
+        .filter((task): task is OrchestrationV2Subagent & { readonly childThreadId: ThreadId } => {
+          const child =
+            task.childThreadId === null ? undefined : byThreadId.get(task.childThreadId);
+          return (
+            task.origin === "app_owned" &&
+            task.childThreadId !== null &&
+            child?.forkedFrom?.type === "node" &&
+            child.forkedFrom.nodeId === task.id
+          );
+        })
         .map((task) => [task.childThreadId, task] as const),
     );
     const members = familyShells.flatMap((thread): ReadonlyArray<AgentPeer> => {
@@ -350,7 +357,8 @@ const layerEffect = Effect.gen(function* () {
           attachments: [],
           mode: "auto",
           createdBy: "agent",
-          creationSource: "mcp",
+          // The inbox owns this delivery; it is not another delegated work request.
+          creationSource: "server",
         })
         .pipe(
           Effect.mapError(() =>

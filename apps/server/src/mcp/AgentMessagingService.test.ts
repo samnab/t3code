@@ -13,6 +13,7 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -56,6 +57,14 @@ const shell = (input: {
           ? outsiderRootThreadId
           : rootThreadId,
     },
+    forkedFrom:
+      input.id === senderThreadId
+        ? { type: "node", nodeId: senderTaskId }
+        : input.id === recipientThreadId
+          ? { type: "node", nodeId: recipientTaskId }
+          : input.id === outsiderThreadId
+            ? { type: "node", nodeId: outsiderTaskId }
+            : null,
     status: "running",
     activityRunStatus: "running",
   }) as unknown as OrchestrationV2ThreadShell;
@@ -166,10 +175,11 @@ const scope = (threadId: ThreadId, providerInstanceId: ProviderInstanceId): McpI
   client: undefined,
 });
 
-const makeThreadLayer = () =>
+const makeThreadLayer = (readRootTasks = () => rootTasks) =>
   Layer.mock(ThreadManagement.ThreadManagementService)({
     getThreadRecords: (threadId) => {
-      if (threadId === rootThreadId) return Effect.succeed(activeProjection(shells[0]!));
+      if (threadId === rootThreadId)
+        return Effect.succeed({ ...activeProjection(shells[0]!), subagents: readRootTasks() });
       if (threadId === outsiderRootThreadId) {
         return Effect.succeed({
           ...activeProjection(shells[3]!),
@@ -203,6 +213,67 @@ const makeThreadLayer = () =>
 const serviceLayer = () => AgentMessaging.layer.pipe(Layer.provide(makeThreadLayer()));
 
 describe("AgentMessagingService", () => {
+  it.effect.each(["creation", "reverse"] as const)(
+    "keeps a child's inbox and address across follow-up tasks in %s order",
+    (order) =>
+      Effect.gen(function* () {
+        const original = {
+          ...rootTasks[1]!,
+          status: "completed" as const,
+          result: "Original result",
+          startedAt: DateTime.makeUnsafe("2026-10-10T12:00:00Z"),
+        };
+        const followup = {
+          ...original,
+          id: NodeId.make("agent-recipient-followup"),
+          status: "running" as const,
+          result: null,
+          startedAt: DateTime.makeUnsafe("2026-10-10T12:01:00Z"),
+        };
+        let currentTasks = [rootTasks[0]!, original];
+        const layer = AgentMessaging.layer.pipe(Layer.provide(makeThreadLayer(() => currentTasks)));
+        yield* Effect.gen(function* () {
+          const messaging = yield* AgentMessaging.AgentMessagingService;
+          yield* messaging.send(scope(rootThreadId, codex), {
+            messageId: "before-followup",
+            targetAgentId: recipientAgentId,
+            message: "Please inspect the importer.",
+          });
+          currentTasks =
+            order === "creation"
+              ? [rootTasks[0]!, original, followup]
+              : [followup, original, rootTasks[0]!];
+          const inbox = yield* messaging.inbox(scope(recipientThreadId, claude), {});
+          assert.equal(inbox.agentId, recipientAgentId);
+          assert.deepEqual(
+            inbox.messages.map((message) => message.messageId),
+            ["before-followup"],
+          );
+          const acknowledged = yield* messaging.inbox(scope(recipientThreadId, claude), {
+            acknowledgeMessageIds: ["before-followup"],
+          });
+          assert.deepEqual(acknowledged.acknowledgedMessageIds, ["before-followup"]);
+          assert.deepEqual(acknowledged.messages, []);
+          const parentInbox = yield* messaging.inbox(scope(rootThreadId, codex), {});
+          assert.isTrue(parentInbox.peers.some((peer) => peer.agentId === recipientAgentId));
+          assert.isFalse(
+            parentInbox.peers.some((peer) => peer.agentId === RuntimeTaskId.make(followup.id)),
+          );
+          const sent = yield* messaging.send(scope(rootThreadId, codex), {
+            messageId: "after-followup",
+            targetAgentId: recipientAgentId,
+            message: "Please inspect the checkpoint too.",
+          });
+          assert.equal(sent.targetAgentId, recipientAgentId);
+          const nextInbox = yield* messaging.inbox(scope(recipientThreadId, claude), {});
+          assert.deepEqual(
+            nextInbox.messages.map((message) => message.messageId),
+            ["after-followup"],
+          );
+        }).pipe(Effect.provide(layer));
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
   it.effect("persists send-to-inbox delivery across service restarts and acknowledges it", () =>
     Effect.gen(function* () {
       const sent = yield* Effect.gen(function* () {
