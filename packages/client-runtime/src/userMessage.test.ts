@@ -1,4 +1,4 @@
-import { ScheduledTaskId } from "@t3tools/contracts";
+import { ScheduledTaskId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { resolveUserMessagePresentation } from "./userMessage.ts";
@@ -70,6 +70,18 @@ describe("resolveUserMessagePresentation", () => {
         resolveUserMessagePresentation({ role: "user", createdBy: "agent", creationSource, text }),
       ).toMatchObject({ attribution: "agent" });
     }
+  });
+
+  it("attributes server notices carrying a sender thread to the sending agent", () => {
+    expect(
+      resolveUserMessagePresentation({
+        role: "user",
+        createdBy: "agent",
+        creationSource: "server",
+        senderThreadId: ThreadId.make("thread-1"),
+        text: "Note: follow-up from the agent's own thread.",
+      }),
+    ).toMatchObject({ attribution: "agent" });
   });
 
   it("recovers the triggering automation from older scheduler message ids", () => {

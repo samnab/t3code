@@ -2,6 +2,7 @@ import {
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
   ScheduledTaskId,
+  type ThreadId,
 } from "@t3tools/contracts";
 
 const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
@@ -18,6 +19,8 @@ export function resolveUserMessagePresentation(message: {
   readonly createdBy?: OrchestrationV2Actor;
   readonly creationSource?: OrchestrationV2CreationSource;
   readonly scheduledTaskId?: ScheduledTaskId;
+  /** Set on server-created notices that belong to another agent's thread. */
+  readonly senderThreadId?: ThreadId;
 }): {
   readonly text: string;
   /** Who sent a user-role message the user did not type. */
@@ -51,7 +54,7 @@ export function resolveUserMessagePresentation(message: {
     attribution:
       message.createdBy !== "agent"
         ? null
-        : message.creationSource === "server"
+        : message.creationSource === "server" && message.senderThreadId === undefined
           ? "t3code"
           : "agent",
     scheduledTaskId: undefined,
