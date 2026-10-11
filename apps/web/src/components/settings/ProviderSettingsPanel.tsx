@@ -22,7 +22,6 @@ import {
   type ProjectId,
   type ProviderInstanceConfig,
   type ProviderInstanceId,
-  type ProviderOptionSelections,
   resolveEnvironmentMachineKind,
   resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
@@ -894,42 +893,6 @@ export function EnvironmentProviderSettings({
     }
   };
 
-  const updateProviderModelPreferences = (
-    instanceId: ProviderInstanceId,
-    next: {
-      readonly hiddenModels: ReadonlyArray<string>;
-      readonly modelOrder: ReadonlyArray<string>;
-      readonly defaultModel?: string | null;
-      readonly defaultOptions?: ProviderOptionSelections;
-    },
-  ) => {
-    const hiddenModels = [...new Set(next.hiddenModels.filter((slug) => slug.trim().length > 0))];
-    const modelOrder = [...new Set(next.modelOrder.filter((slug) => slug.trim().length > 0))];
-    const defaultModel = next.defaultModel ?? null;
-    const defaultOptions = next.defaultOptions ?? [];
-    const rest = Object.fromEntries(
-      Object.entries(settings.providerModelPreferences ?? {}).filter(([key]) => key !== instanceId),
-    );
-    // Server-side so agents on this environment cannot pick hidden models.
-    updateSettings({
-      providerModelPreferences:
-        hiddenModels.length === 0 &&
-        modelOrder.length === 0 &&
-        defaultModel === null &&
-        defaultOptions.length === 0
-          ? rest
-          : {
-              ...rest,
-              [instanceId]: {
-                hiddenModels,
-                modelOrder,
-                defaultModel,
-                defaultOptions,
-              },
-            },
-    });
-  };
-
   const resetDefaultInstance = async (driverKind: ProviderDriverKind) => {
     const result = await persistProviderInstance({
       operation: "remove",
@@ -1146,16 +1109,16 @@ export function EnvironmentProviderSettings({
         }}
         defaultModel={modelPreferences.defaultModel}
         defaultOptions={modelPreferences.defaultOptions}
-        onDefaultModelChange={(defaultModel) =>
-          updateProviderModelPreferences(row.instanceId, {
-            ...modelPreferences,
-            defaultModel,
-            defaultOptions: [],
-          })
-        }
-        onDefaultOptionsChange={(defaultOptions) =>
-          updateProviderModelPreferences(row.instanceId, { ...modelPreferences, defaultOptions })
-        }
+        onDefaultModelChange={(defaultModel) => {
+          void updateModelPreferences({
+            setProviderModelDefault: { provider: row.instanceId, defaultModel, defaultOptions: [] },
+          });
+        }}
+        onDefaultOptionsChange={(defaultOptions) => {
+          void updateModelPreferences({
+            setProviderModelDefault: { provider: row.instanceId, defaultOptions },
+          });
+        }}
         onInstallRecommended={
           !readOnly &&
           liveProvider?.compatibilityAdvisory?.message &&

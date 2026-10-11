@@ -391,6 +391,7 @@ export function applyServerSettingsPatch(
     setModelFavorites,
     setModelsHidden,
     setProviderModelOrder,
+    setProviderModelDefault,
     providerModelPreferences,
     automaticGitFetchInterval,
     providerHealthRefreshInterval,
@@ -493,6 +494,14 @@ export function applyServerSettingsPatch(
       },
     };
   }
+  if (setProviderModelDefault) {
+    const { provider, ...defaults } = setProviderModelDefault;
+    const preferences = nextModelPreferences?.[provider] ?? { hiddenModels: [], modelOrder: [] };
+    nextModelPreferences = {
+      ...nextModelPreferences,
+      [provider]: { ...preferences, ...defaults },
+    };
+  }
   const next = deepMerge(current, patchForMerge);
   const nextWithReplacementsBase = {
     ...next,
@@ -534,9 +543,6 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
-      : {}),
-    ...(patch.providerModelPreferences !== undefined
-      ? { providerModelPreferences: patch.providerModelPreferences }
       : {}),
     ...(patch.worktreesDirectory !== undefined &&
     patch.worktreesDirectory !== current.worktreesDirectory

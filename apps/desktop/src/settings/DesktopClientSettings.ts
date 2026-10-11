@@ -21,9 +21,8 @@ const ClientSettingsJson = fromLenientJson(LegacyClientSettings);
 const decodeClientSettingsDocument = Schema.decodeEffect(
   fromLenientJson(Schema.Record(Schema.String, Schema.Unknown)),
 );
-// Reads and writes use the legacy view: the retired device-local
-// providerModelPreferences stays in the file until the one-time migration to
-// server settings succeeds, and the renderer stops sending it afterwards.
+// Saved model preferences seed connected environments once; authoritative
+// server preferences then win over this device-local migration source.
 const decodeClientSettingsValue = Schema.decodeUnknownEffect(LegacyClientSettings);
 const decodeClientSettingsJson = Effect.fnUntraced(function* (raw: string) {
   const document = yield* decodeClientSettingsDocument(raw);

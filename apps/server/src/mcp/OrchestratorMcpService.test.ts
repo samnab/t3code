@@ -1521,14 +1521,18 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
-  it.effect(
-    "retrying an accepted driver-only delegation replays even after the project disables every candidate",
-    () =>
+  it.effect.each(["project-disabled", "model-hidden"] as const)(
+    "retrying a recorded delegation replays after its model is %s",
+    (changedPreference) =>
       Effect.gen(function* () {
         const altInstanceId = ProviderInstanceId.make("codex-alt");
         const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
-        const accepted = yield* Ref.make(false);
-        const everyCandidateDisabled = yield* Ref.make(false);
+        const acceptedCommandIds = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
+        const preferenceChanged = yield* Ref.make(false);
+        const target =
+          changedPreference === "model-hidden"
+            ? { providerInstanceId: codexInstanceId, model: "gpt-5.4" }
+            : { driverKind: ProviderDriverKind.make("codex") };
         const task = {
           id: taskId,
           threadId: parentThreadId,
@@ -1554,36 +1558,37 @@ describe("OrchestratorMcpService provider resolution", () => {
           unusedDelegationPolicyLayer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadRecords: (threadId) =>
-              Ref.get(accepted).pipe(
-                Effect.map((isAccepted) =>
+              Ref.get(acceptedCommandIds).pipe(
+                Effect.map((ids) =>
                   threadId === parentThreadId
-                    ? parentProjection(isAccepted ? [task] : [])
+                    ? parentProjection(ids.size > 0 ? [task] : [])
                     : childProjection,
                 ),
               ),
-            // A command id already accepted once, even if the project later
-            // disables every candidate: its retry must replay, not re-resolve.
-            hasReceipt: () => Ref.get(accepted),
-            // Effective settings once the project turns every instance off,
-            // ignoring the already-accepted command's replay exemption.
+            // Receipts belong to one command id; fresh requests remain guarded.
+            hasReceipt: (commandId) =>
+              Ref.get(acceptedCommandIds).pipe(Effect.map((ids) => ids.has(commandId))),
+
             isProviderInstanceEnabledForProject: () =>
-              Ref.get(everyCandidateDisabled).pipe(Effect.map((disabled) => !disabled)),
-            assertProviderInstanceEnabled: ({ projectId, instanceId }) =>
-              Effect.all([Ref.get(accepted), Ref.get(everyCandidateDisabled)]).pipe(
-                Effect.flatMap(([isAccepted, disabled]) =>
-                  isAccepted || !disabled
+              Ref.get(preferenceChanged).pipe(
+                Effect.map((changed) => changedPreference !== "project-disabled" || !changed),
+              ),
+            assertProviderInstanceEnabled: ({ commandId, projectId, instanceId }) =>
+              Effect.all([Ref.get(acceptedCommandIds), Ref.get(preferenceChanged)]).pipe(
+                Effect.flatMap(([ids, changed]) =>
+                  ids.has(commandId) || changedPreference !== "project-disabled" || !changed
                     ? Effect.void
-                    : Effect.fail(
-                        new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
-                          projectId,
-                          instanceId,
-                        }),
-                      ),
+                    : new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
+                        projectId,
+                        instanceId,
+                      }),
                 ),
               ),
             dispatch: (command) =>
               Ref.update(dispatched, (commands) => [...commands, command]).pipe(
-                Effect.andThen(Ref.set(accepted, true)),
+                Effect.andThen(
+                  Ref.update(acceptedCommandIds, (ids) => new Set([...ids, command.commandId])),
+                ),
                 Effect.as({
                   sequence: 1,
                   storedEvents: [
@@ -1612,31 +1617,54 @@ describe("OrchestratorMcpService provider resolution", () => {
           Layer.mock(ProjectService.ProjectService)({}),
           Layer.mock(SecretRequests.SecretRequests)({}),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-          ServerSettings.layerTest(),
+          Layer.mock(ServerSettings.ServerSettingsService)({
+            getSettings: Ref.get(preferenceChanged).pipe(
+              Effect.map((changed) => ({
+                ...DEFAULT_SERVER_SETTINGS,
+                providerModelPreferences: {
+                  [codexInstanceId]: {
+                    hiddenModels:
+                      changed && changedPreference === "model-hidden" ? ["gpt-5.4"] : [],
+                    modelOrder: [],
+                  },
+                },
+              })),
+            ),
+          }),
         );
 
         yield* Effect.gen(function* () {
           const service = yield* OrchestratorMcpService.OrchestratorMcpService;
           const first = yield* service.delegateTask(scope, {
             task: "Summarize the diff.",
-            target: { driverKind: ProviderDriverKind.make("codex") },
+            target,
             mode: "async",
-            clientRequestId: "delegate-driver-retry-after-disable-1",
+            clientRequestId: "delegate-retry-after-preference-change-1",
           });
           assert.equal(first.status, "running");
 
-          // The project turns off every instance of this driver only after
-          // the delegation above was already accepted.
-          yield* Ref.set(everyCandidateDisabled, true);
+          // The user changes settings only after the command has a receipt.
+          yield* Ref.set(preferenceChanged, true);
 
           const retry = yield* service.delegateTask(scope, {
             task: "Summarize the diff.",
-            target: { driverKind: ProviderDriverKind.make("codex") },
+            target,
             mode: "async",
-            clientRequestId: "delegate-driver-retry-after-disable-1",
+            clientRequestId: "delegate-retry-after-preference-change-1",
           });
           assert.equal(retry.status, "running");
 
+          if (changedPreference === "model-hidden") {
+            const fresh = yield* service
+              .delegateTask(scope, {
+                task: "Summarize the diff.",
+                target,
+                mode: "async",
+                clientRequestId: "delegate-new-after-hide",
+              })
+              .pipe(Effect.flip);
+            assert.equal(fresh.code, "model_unavailable");
+          }
           const commands = yield* Ref.get(dispatched);
           assert.equal(commands.length, 2);
           const retryCommand = commands[1] as {

@@ -1565,6 +1565,13 @@ export const ServerSettingsPatch = Schema.Struct({
   setProviderModelOrder: Schema.optionalKey(
     Schema.Struct({ provider: ProviderInstanceId, modelOrder: Schema.Array(TrimmedString) }),
   ),
+  setProviderModelDefault: Schema.optionalKey(
+    Schema.Struct({
+      provider: ProviderInstanceId,
+      defaultModel: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+      defaultOptions: Schema.optionalKey(ProviderOptionSelections),
+    }),
+  ),
   favorites: Schema.optionalKey(ModelFavorites),
   providerModelPreferences: Schema.optionalKey(ProviderModelPreferences),
   // Applied under the settings service's write lock, only while still unset.

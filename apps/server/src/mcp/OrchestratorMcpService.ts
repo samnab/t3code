@@ -1176,16 +1176,8 @@ const make = Effect.gen(function* () {
     readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
-    /**
-     * Skips the per-candidate project-enablement check in driver-only
-     * resolution. Set only when the command that will dispatch this target
-     * already has a receipt: that dispatch can only replay the recorded
-     * result, never start anything new, so filtering candidates by the
-     * project's current settings would just refuse a retry that does no new
-     * work. Never set this for a resolution whose dispatch uses a different
-     * command id than the one checked for a receipt.
-     */
-    readonly skipProjectEnablementFilter?: boolean;
+    /** Skip project/model preference checks only when this dispatch's command id has a receipt. */
+    readonly isReplayOfRecordedCommand?: boolean;
   }): Effect.Effect<ResolvedTarget, OrchestratorMcpFailure> =>
     Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings.pipe(
@@ -1227,7 +1219,7 @@ const make = Effect.gen(function* () {
         ];
         for (const candidate of orderedCandidates) {
           const enabledForProject =
-            input.skipProjectEnablementFilter === true ||
+            input.isReplayOfRecordedCommand === true ||
             (yield* threadManagement.isProviderInstanceEnabledForProject({
               projectId: input.parent.thread.projectId,
               instanceId: candidate.instanceId,
@@ -1310,7 +1302,7 @@ const make = Effect.gen(function* () {
           `Model ${requestedModel} is not advertised by provider ${instanceId}.`,
         );
       }
-      if (requestedModel !== undefined) {
+      if (requestedModel !== undefined && input.isReplayOfRecordedCommand !== true) {
         const hiddenReason = hiddenModelMessage({
           settings,
           providers: input.providers,
@@ -2037,7 +2029,7 @@ const make = Effect.gen(function* () {
                     : { options: tierSelection.options }),
                 },
           providers,
-          skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
+          isReplayOfRecordedCommand: isRetryOfAcceptedDelegation,
         });
         const runtimeMode = yield* resolveRuntimeMode(
           parent.thread.runtimeMode,

@@ -1,12 +1,17 @@
+import * as Schema from "effect/Schema";
 import type { ReactElement } from "react";
 import {
   DEFAULT_UNIFIED_SETTINGS,
+  DEFAULT_SERVER_SETTINGS,
+  type ServerSettings,
+  ServerSettingsPatch,
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
   type UnifiedSettings,
 } from "@t3tools/contracts";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { visitElements } from "../../test/reactElementTree";
@@ -145,6 +150,9 @@ vi.mock("../../state/entities", () => ({
 
 import { EnvironmentProviderSettings } from "./ProviderSettingsPanel";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
+
+const decodeServerSettingsPatch = Schema.decodeSync(ServerSettingsPatch);
+const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 
 const environmentId = EnvironmentId.make("remote-device");
 const codexId = ProviderInstanceId.make("codex");
@@ -371,6 +379,40 @@ describe("EnvironmentProviderSettings routing", () => {
     (editor.props[action] as (models: string[]) => void)(["chosen"]);
     expect(settingsState.updateSettings).toHaveBeenCalledExactlyOnceWith(expected);
     expect(settingsState.updateClientSettings).not.toHaveBeenCalled();
+  });
+
+  it("default edits preserve other clients' visibility and ordering from a stale panel", () => {
+    atoms.providers = [provider()];
+    const panel = renderPanel();
+    const editor = visitElements(
+      panel,
+      (element) => element.props.instanceId === codexId && element.props.mode === "editor",
+    );
+    if (!editor) throw new Error("Provider editor was not rendered");
+    let current: ServerSettings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      providerModelPreferences: {
+        [codexId]: { hiddenModels: ["hidden-by-phone"], modelOrder: ["phone-order"] },
+        [customId]: { hiddenModels: ["other-hidden"], modelOrder: ["other-order"] },
+      },
+    });
+    const otherPreferences = current.providerModelPreferences?.[customId];
+    settingsState.updateSettings.mockImplementation((patch: ServerSettingsPatch) => {
+      current = applyServerSettingsPatch(
+        current,
+        decodeServerSettingsPatch(encodeServerSettingsPatch(patch)),
+      );
+    });
+    (editor.props.onDefaultModelChange as (model: string) => void)("chosen-default");
+    (
+      editor.props.onDefaultOptionsChange as (options: Array<{ id: string; value: string }>) => void
+    )([{ id: "reasoningEffort", value: "high" }]);
+    expect(current.providerModelPreferences?.[codexId]).toEqual({
+      hiddenModels: ["hidden-by-phone"],
+      modelOrder: ["phone-order"],
+      defaultModel: "chosen-default",
+      defaultOptions: [{ id: "reasoningEffort", value: "high" }],
+    });
+    expect(current.providerModelPreferences?.[customId]).toEqual(otherPreferences);
   });
 
   it("does not substitute another account when the requested instance was removed", () => {
