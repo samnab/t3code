@@ -163,7 +163,11 @@ export function DelegationSettingsPanel() {
     (provider) => provider.supportsTextGeneration !== false,
   );
   const instanceEntries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(deriveProviderInstanceEntries(textGenerationProviders), settings),
+    applyProviderInstanceSettings(
+      deriveProviderInstanceEntries(textGenerationProviders),
+      settings,
+      null,
+    ),
   );
   // The picker keeps its own highlighted row across tiers; it starts on the
   // environment's default selection and follows the last candidate added.
@@ -221,6 +225,7 @@ export function DelegationSettingsPanel() {
             title={tier.label}
             headerAction={
               <ProviderModelPicker
+                environmentId={environment?.environmentId ?? null}
                 activeInstanceId={activeSelection.instanceId}
                 model={activeSelection.model}
                 lockedProvider={null}

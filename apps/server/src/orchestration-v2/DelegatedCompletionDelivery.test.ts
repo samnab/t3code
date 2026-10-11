@@ -26,6 +26,7 @@ import * as Stream from "effect/Stream";
 
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as AgentMessaging from "../mcp/AgentMessagingService.ts";
+import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
@@ -947,7 +948,12 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
         const original = before.subagents.find((task) => task.id === child.taskId)!;
         assert.isNotNull(original.result);
         const layerMessaging = AgentMessaging.layer.pipe(
-          Layer.provide(ThreadManagement.layer),
+          Layer.provide(
+            ThreadManagement.layer.pipe(
+              Layer.provide(CommandReceiptStore.layer),
+              Layer.provide(ServerSettings.layerTest()),
+            ),
+          ),
           Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator)),
           Layer.provide(NodeSqliteClient.layer({ filename: ":memory:" })),
         );

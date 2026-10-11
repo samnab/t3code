@@ -11,9 +11,8 @@ import * as DesktopIpc from "../DesktopIpc.ts";
 export const getClientSettings = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.GET_CLIENT_SETTINGS_CHANNEL,
   payload: Schema.Void,
-  // LegacyClientSettings keeps the retired device-local
-  // providerModelPreferences until the one-time migration to server settings
-  // succeeds; the renderer omits it on writes afterwards.
+  // Saved model preferences seed connected environments once; authoritative
+  // server preferences then win over this device-local migration source.
   result: Schema.NullOr(LegacyClientSettings),
   handler: Effect.fn("desktop.ipc.clientSettings.get")(function* () {
     const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;

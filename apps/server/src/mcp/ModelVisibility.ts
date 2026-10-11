@@ -15,7 +15,7 @@ export function hiddenModelSlugs(
   settings: Pick<ServerSettings, "providerModelPreferences">,
   instanceId: ProviderInstanceId,
 ): ReadonlySet<string> {
-  return new Set(settings.providerModelPreferences[instanceId]?.hiddenModels ?? []);
+  return new Set(settings.providerModelPreferences?.[instanceId]?.hiddenModels ?? []);
 }
 
 /** Models of one provider an agent may see or pick. */

@@ -159,6 +159,7 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
               ? Effect.succeed(projection)
               : Effect.die(`unexpected thread ${input.threadId}`),
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
@@ -226,6 +227,7 @@ it("readThread prefers waiting activity status over a newer cancelled queued run
               ? Effect.succeed(projection)
               : Effect.die(`unexpected thread ${input.threadId}`),
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
@@ -341,6 +343,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
             return Effect.die(`unexpected thread ${threadId}`);
           },
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
@@ -466,6 +469,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
               delivery: "started",
             } as unknown as ThreadManagementService.ThreadManagementSendResult),
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),

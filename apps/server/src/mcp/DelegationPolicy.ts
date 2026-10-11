@@ -3,6 +3,8 @@ import {
   DelegationTierId,
   isProviderAvailable,
   type ModelSelection,
+  type ProjectId,
+  resolveProjectProviderInstanceEnabled,
   type ServerSettingsError,
   type ServerProvider,
 } from "@t3tools/contracts";
@@ -42,6 +44,7 @@ export class DelegationCandidateHeadroom extends Context.Service<
 export interface DelegationPolicyShape {
   readonly resolve: (
     tier: string,
+    options?: { readonly projectId: ProjectId; readonly skipProjectEnablementFilter?: boolean },
   ) => Effect.Effect<ModelSelection, DelegationPolicyError | ServerSettingsError>;
 }
 
@@ -76,19 +79,34 @@ export const layer = Layer.effect(
     const headroom = yield* DelegationCandidateHeadroom;
 
     return DelegationPolicy.of({
-      resolve: Effect.fn("DelegationPolicy.resolve")(function* (tier) {
+      resolve: Effect.fn("DelegationPolicy.resolve")(function* (tier, options) {
         if (!Schema.is(DelegationTierId)(tier)) {
           return yield* new DelegationPolicyError({
             code: "unknown_tier",
             message: `Unknown delegation tier "${tier}".`,
           });
         }
-        const configured = (yield* settings.getSettings).delegationTiers[tier];
+        const currentSettings = yield* settings.getSettings;
+        const configured = currentSettings.delegationTiers[tier];
         const providerSnapshots = yield* providers.getProviders;
         const orchestrationCapable = new Set(yield* adapters.list());
         const reasons: string[] = [];
 
         for (const candidate of configured) {
+          if (
+            options !== undefined &&
+            options.skipProjectEnablementFilter !== true &&
+            !resolveProjectProviderInstanceEnabled(
+              currentSettings,
+              options.projectId,
+              candidate.providerInstanceId,
+            )
+          ) {
+            reasons.push(
+              `${candidate.providerInstanceId}/${candidate.model}: disabled for this project`,
+            );
+            continue;
+          }
           const provider = providerSnapshots.find(
             (entry) => entry.instanceId === candidate.providerInstanceId,
           );

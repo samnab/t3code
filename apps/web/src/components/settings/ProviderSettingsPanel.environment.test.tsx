@@ -108,6 +108,8 @@ vi.mock("../../hooks/useSettings", () => ({
     settingsState.updateEnvironmentIds.push(environmentId);
     return settingsState.updateSettings;
   },
+  useUpdateEnvironmentModelPreferences: () => settingsState.updateSettings,
+  useToggleEnvironmentModelFavorite: () => () => undefined,
   usePersistEnvironmentProviderInstanceMutation: (environmentId: EnvironmentId) => {
     settingsState.mutationEnvironmentIds.push(environmentId);
     return settingsState.mutateProviderInstance;
@@ -138,6 +140,7 @@ vi.mock("../../state/session", () => ({
 
 vi.mock("../../state/entities", () => ({
   useProjects: () => [],
+  useServerConfigs: () => new Map(),
 }));
 
 import { EnvironmentProviderSettings } from "./ProviderSettingsPanel";
@@ -343,46 +346,20 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(editor?.props.instanceId).toBe(customId);
   });
 
-  it("saves favorite models on this device without changing the selected server", () => {
-    atoms.providers = [provider()];
-    const panel = renderPanel();
-    const editor = visitElements(
-      panel,
-      (element) => element.props.instanceId === codexId && element.props.mode === "editor",
-    );
-    expect(editor).not.toBeNull();
-    if (!editor) throw new Error("Provider editor was not rendered");
-    (editor.props.onFavoriteModelsChange as (models: string[]) => void)(["chosen"]);
-    expect(settingsState.updateClientSettings).toHaveBeenCalledExactlyOnceWith({
-      favorites: [{ provider: codexId, model: "chosen" }],
-    });
-    expect(settingsState.updateSettings).not.toHaveBeenCalled();
-  });
-
-  const fullPreferenceEntry = (entry: { hiddenModels: string[]; modelOrder: string[] }) => ({
-    ...entry,
-    defaultModel: null,
-    defaultOptions: [],
-  });
-
   it.each([
     [
+      "onFavoriteModelsChange",
+      { setModelFavorites: [{ provider: codexId, model: "chosen", favorite: true }] },
+    ],
+    [
       "onHiddenModelsChange",
-      {
-        providerModelPreferences: {
-          [codexId]: fullPreferenceEntry({ hiddenModels: ["chosen"], modelOrder: [] }),
-        },
-      },
+      { setModelsHidden: [{ provider: codexId, model: "chosen", hidden: true }] },
     ],
     [
       "onModelOrderChange",
-      {
-        providerModelPreferences: {
-          [codexId]: fullPreferenceEntry({ hiddenModels: [], modelOrder: ["chosen"] }),
-        },
-      },
+      { setProviderModelOrder: { provider: codexId, modelOrder: ["chosen"] } },
     ],
-  ])("saves %s on the selected environment so agents respect it", (action, expected) => {
+  ])("saves %s on the selected environment for every connected client", (action, expected) => {
     atoms.providers = [provider()];
     const panel = renderPanel();
     const editor = visitElements(

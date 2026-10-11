@@ -1,5 +1,11 @@
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import {
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+  type ServerSettings as ServerSettingsValue,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -33,11 +39,13 @@ const provider = (input: {
 const makeLayer = (input: {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly adapterIds: ReadonlyArray<ProviderInstanceId>;
+  readonly projectSettingsOverrides?: ServerSettingsValue["projectSettingsOverrides"];
 }) =>
   DelegationPolicy.layer.pipe(
     Layer.provide(DelegationPolicy.DelegationCandidateHeadroom.allowAll),
     Layer.provide(
       ServerSettings.layerTest({
+        projectSettingsOverrides: input.projectSettingsOverrides ?? {},
         delegationTiers: {
           small: [
             { providerInstanceId: codex, model: "gpt-5.4" },
@@ -113,6 +121,40 @@ describe("DelegationPolicy", () => {
             }),
           ],
           adapterIds: [codex, claude],
+        }),
+      ),
+    ),
+  );
+
+  it.effect("falls back when the project's first tier candidate is disabled", () =>
+    Effect.gen(function* () {
+      const policy = yield* DelegationPolicy.DelegationPolicy;
+      const projectId = ProjectId.make("project-tier");
+      assert.deepEqual(yield* policy.resolve("small", { projectId }), {
+        instanceId: claude,
+        model: "claude-sonnet-4-6",
+      });
+      // An accepted command retries its recorded selection even after settings change.
+      assert.deepEqual(
+        yield* policy.resolve("small", { projectId, skipProjectEnablementFilter: true }),
+        {
+          instanceId: codex,
+          model: "gpt-5.4",
+        },
+      );
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          providers: [
+            provider({ instanceId: codex, driver: "codex", model: "gpt-5.4" }),
+            provider({ instanceId: claude, driver: "claudeAgent", model: "claude-sonnet-4-6" }),
+          ],
+          adapterIds: [codex, claude],
+          projectSettingsOverrides: {
+            [ProjectId.make("project-tier")]: {
+              providerInstances: { [codex]: { enabled: false } },
+            },
+          },
         }),
       ),
     ),

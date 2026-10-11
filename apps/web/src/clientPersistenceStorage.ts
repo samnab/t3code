@@ -11,10 +11,8 @@ function hasWindow(): boolean {
   return typeof window !== "undefined";
 }
 
-// Reads through LegacyClientSettings so the retired device-local
-// providerModelPreferences survives decoding for the one-time migration to
-// server settings. Writes keep it while pending; the caller omits it once
-// migrated.
+// Saved model preferences remain available to seed connected environments;
+// authoritative server preferences take precedence after migration.
 export function readBrowserClientSettings(): LegacyClientSettingsType | null {
   if (!hasWindow()) {
     return null;
