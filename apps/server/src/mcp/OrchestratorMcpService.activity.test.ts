@@ -23,6 +23,8 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as DelegationPolicy from "./DelegationPolicy.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -35,6 +37,10 @@ const unusedDelegationPolicyLayer = Layer.mock(DelegationPolicy.DelegationPolicy
 const unusedServerSettingsLayer = Layer.mock(ServerSettings.ServerSettingsService)({
   getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
 });
+const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+);
 
 const environmentId = EnvironmentId.make("environment-mcp-orchestrator-detail");
 const projectId = ProjectId.make("project-mcp-orchestrator-detail");
@@ -137,7 +143,7 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
     updatedAt: now,
   } as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = OrchestratorMcpService.layer.pipe(
+  const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         unusedDelegationPolicyLayer,
@@ -205,7 +211,7 @@ it("readThread prefers waiting activity status over a newer cancelled queued run
     updatedAt: now,
   } as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = OrchestratorMcpService.layer.pipe(
+  const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         unusedDelegationPolicyLayer,
@@ -330,7 +336,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
     updatedAt: now,
   } as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = OrchestratorMcpService.layer.pipe(
+  const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         unusedDelegationPolicyLayer,
@@ -431,7 +437,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       updatedAt: now,
     }) as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = OrchestratorMcpService.layer.pipe(
+  const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         unusedDelegationPolicyLayer,

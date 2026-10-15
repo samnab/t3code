@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   type AssetUrlState,
   assetUrlStateFromResult,
+  blockedAssetUrlState,
   EMPTY_ASSET_URL_ATOM,
   resolveAssetUrl,
 } from "@t3tools/client-runtime/state/assets";
@@ -33,12 +34,7 @@ export function useAssetUrlState(
 ): AssetUrlState {
   const resourceKey = JSON.stringify(resource);
   const stableResource = useMemo(() => resource, [resourceKey]);
-  const fileAccess = useFilesystemReadAccess(environmentId);
-  const canReadResource =
-    fileAccess.canReadFiles ||
-    (stableResource?._tag !== "workspace-file" &&
-      stableResource?._tag !== "media-file" &&
-      stableResource?._tag !== "draft-workspace-file");
+  const blocked = blockedAssetUrlState(stableResource, useFilesystemReadAccess(environmentId));
   const preparedConnection = usePreparedConnection(environmentId);
   const refresh = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
@@ -46,17 +42,17 @@ export function useAssetUrlState(
     refresh: true,
   });
   const result = useAtomValue(
-    !canReadResource || environmentId === null || stableResource === null
+    blocked !== null || environmentId === null || stableResource === null
       ? EMPTY_ASSET_URL_ATOM
       : assetEnvironment.createUrl({ environmentId, input: { resource: stableResource } }),
   );
   const resultIsCurrent = result._tag === "Success" && isAssetUrlCurrent(result.value);
   useEffect(() => {
-    if (environmentId === null || stableResource === null) return;
+    if (blocked !== null || environmentId === null || stableResource === null) return;
     if (result._tag !== "Success" || resultIsCurrent) return;
     void refresh({ environmentId, input: { resource: stableResource } });
-  }, [environmentId, refresh, stableResource, result, resultIsCurrent]);
-  if (!canReadResource) return { _tag: fileAccess.isPending ? "Loading" : "Failure" };
+  }, [blocked, environmentId, refresh, stableResource, result, resultIsCurrent]);
+  if (blocked !== null) return blocked;
   if (result._tag === "Success" && !resultIsCurrent) return { _tag: "Loading" };
   return assetUrlStateFromResult(
     result,
