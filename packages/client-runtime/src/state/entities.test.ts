@@ -241,7 +241,6 @@ describe("V2 client presentation", () => {
       pendingBackgroundTasks: [{ taskId: "bg-1", description: "Watch build", kind: "monitor" }],
     });
 
-    // Sidebar and mobile list read runtime "idle" as Waiting before failure.
     expect(shell.runtime).toMatchObject({ status: "failed", lastError: "Provider turn failed" });
     expect(shell.pendingBackgroundTasks).toHaveLength(1);
   });
@@ -258,13 +257,11 @@ describe("V2 client presentation", () => {
       providerInstanceHistory: [codex, claude, cursor, grok],
     });
 
-    // Three slots: the two most recent earlier owners, then the current one.
     expect(resolveThreadProviderStack(shell)).toEqual([claude, cursor, grok]);
     expect(
       resolveThreadProviderStack({ ...shell, providerInstanceHistory: [codex, grok] }),
     ).toEqual([codex, grok]);
     expect(resolveThreadProviderStack({ ...shell, providerInstanceHistory: [] })).toEqual([grok]);
-    // Servers that predate the field decode to an empty history.
     expect(
       presentThreadShell(environmentId, { ...v2ThreadShell, providerInstanceHistory: undefined })
         .providerInstanceHistory,
@@ -361,8 +358,6 @@ describe("V2 client presentation", () => {
       ...v2ThreadShell,
       latestRunId: runId,
       activeRunId: runId,
-      // Stale: server already projected a post-settlement roster, but shell
-      // status still says running (packaged orchestrator-v2 bug).
       status: "running",
       pendingBackgroundTasks: [{ taskId: "bg-1", description: "Watch build", kind: "monitor" }],
     });
@@ -383,7 +378,6 @@ describe("V2 client presentation", () => {
       ...v2ThreadShell,
       latestRunId: runId,
       activeRunId: runId,
-      // Stale: checkpoint-oriented waiting masks post-settlement background work.
       status: "waiting",
       pendingBackgroundTasks: [{ taskId: "bg-2", description: "Watch build", kind: "monitor" }],
     });
