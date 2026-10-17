@@ -786,13 +786,6 @@ export function useThreadComposerState() {
       if (!selectedThreadShell) {
         return null;
       }
-      // The server has not created this thread yet. Queuing a follow-up against
-      // its id would strand the message: if the creation is rejected the thread
-      // never appears and the drain drops the orphan. The composer disables its
-      if (selectedThreadCreation !== null) {
-        return null;
-      }
-
       // Editing a queued message repurposes the composer: the send button saves
       // the edit in place instead of enqueuing a new message.
       const editKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);

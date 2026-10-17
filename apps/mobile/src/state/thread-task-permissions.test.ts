@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 const state = vi.hoisted(() => ({
   grantedEnvironments: new Set<string>(),
   connectionState: "connected",
+  creationPending: false,
   draft: { text: "Keep my draft", attachments: [] as DraftComposerImageAttachment[] },
   pendingRequests: { approvals: [], userInputs: [] } as PendingThreadRequests,
   enqueue: vi.fn(async () => undefined),
@@ -37,6 +38,7 @@ vi.mock("react", () => ({
   useCallback: <A>(callback: A) => callback,
   useEffect: () => {},
   useRef: <A>(current: A) => ({ current }),
+  useReducer: <S>(_reducer: unknown, initial: S) => [initial, vi.fn()],
   useMemo: <A>(factory: () => A) => factory(),
   useState: <A>(initial: A | (() => A)) => [
     typeof initial === "function" ? (initial as () => A)() : initial,
@@ -67,7 +69,20 @@ vi.mock("./session", () => ({
 vi.mock("./use-thread-selection", () => ({
   useThreadSelection: () => ({
     selectedThread: state.thread,
-    selectedThreadCreation: null,
+    selectedThreadCreation: state.creationPending
+      ? {
+          message: {
+            environmentId: "secondary",
+            threadId: "thread",
+            commandId: "creation-command",
+            messageId: "creation-message",
+            text: "Create the thread",
+            attachments: [],
+            createdAt: "2026-09-05T00:00:00.000Z",
+          },
+          outcome: null,
+        }
+      : null,
     selectedEnvironmentRuntime: {
       connectionState: state.connectionState,
       serverConfig: {
@@ -145,12 +160,14 @@ vi.mock("../lib/copyTextWithHaptic", () => ({ copyTextWithHaptic: vi.fn() }));
 vi.mock("../lib/modelOptions", () => ({ isModelSelectionUnavailable: () => false }));
 vi.mock("./use-remote-environment-registry", () => ({ setPendingConnectionError: vi.fn() }));
 
+import { Alert } from "react-native";
 import { useThreadComposerState } from "./use-thread-composer-state";
 import { useSelectedThreadRequests } from "./use-selected-thread-requests";
 
 beforeEach(() => {
   state.grantedEnvironments = new Set(["primary"]);
   state.connectionState = "connected";
+  state.creationPending = false;
   state.draft = { text: "Keep my draft", attachments: [] };
   state.pendingRequests = {
     approvals: [
@@ -170,6 +187,22 @@ beforeEach(() => {
 });
 
 describe("mobile task permissions", () => {
+  it("explains why /goal cannot submit while thread creation is pending", async () => {
+    state.grantedEnvironments.add("secondary");
+    state.creationPending = true;
+    state.draft.text = "/goal ship it";
+
+    expect(await useThreadComposerState().onSendMessage()).toBeNull();
+
+    expect(Alert.alert).toHaveBeenCalledWith(
+      "Could not update the thread goal",
+      "Wait for the thread to finish starting, then try again.",
+    );
+    expect(state.draft.text).toBe("/goal ship it");
+    expect(state.clearDraft).not.toHaveBeenCalled();
+    expect(state.enqueue).not.toHaveBeenCalled();
+  });
+
   it("keeps a connected read-only task's draft instead of queueing it with another environment's grant", async () => {
     const composer = useThreadComposerState();
     expect(await composer.onSendMessage()).toBeNull();
