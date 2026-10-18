@@ -1939,6 +1939,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
+    onResponse: (method: string) => Effect.Effect<void> = () => Effect.void,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1973,6 +1974,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
+                          Effect.tap(() => onResponse(method)),
                         ),
                     }) satisfies CodexClient.CodexAppServerClient["Service"],
                 ),
@@ -2269,246 +2271,108 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     },
   ];
 
-  it.effect.each([
-    "stop",
-    "failed-stop",
-    "deadline",
-    "session-close",
-    "offer-cleared",
-    "goal-active",
-  ] as const)("releases an unadopted realtime turn on %s and declines its approval", (exit) =>
-    Effect.gen(function* () {
-      const nativeThreadId = `voice-release-${exit}`;
-      const nativeTurnId = "held-turn";
-      const stopsVoice = exit === "stop" || exit === "failed-stop" || exit === "goal-active";
-      const stopEntries: Array<CodexReplay.CodexAppServerReplayEntry> = !stopsVoice
-        ? []
-        : [
-            {
-              type: "expect_outbound",
-              frame: {
-                id: 4,
-                method: "thread/realtime/stop",
-                params: { threadId: nativeThreadId },
-              },
-            },
-            {
-              type: "emit_inbound",
-              frame:
-                exit === "failed-stop"
-                  ? { id: 4, error: { code: -32603, message: "stop failed" } }
-                  : { id: 4, result: {} },
-            },
-          ];
-      const sessionScope = yield* Scope.make();
-      yield* Effect.addFinalizer(() => Scope.close(sessionScope, Exit.void));
-      const harness = yield* makeCodexReplayHarness(
-        makeCodexReplayTranscript({
-          scenario: `voice-release-${exit}`,
-          entries: [
-            ...heldVoiceEntries(nativeThreadId, nativeTurnId, false, exit === "goal-active"),
-            ...stopEntries,
-            {
-              type: "expect_outbound",
-              frame: { id: "held-approval", result: { decision: "decline" } },
-            },
-            {
-              type: "expect_outbound",
-              frame: {
-                id: stopsVoice ? 5 : 4,
-                method: "turn/interrupt",
-                params: { threadId: nativeThreadId, turnId: nativeTurnId },
-              },
-            },
-            { type: "emit_inbound", frame: { id: stopsVoice ? 5 : 4, result: {} } },
-          ],
-        }),
-      ).pipe(Scope.provide(sessionScope));
-      yield* harness.runtime.startRealtimeVoice!({
-        providerThread: harness.providerThread,
-        sdp: "offer",
-      });
-      const offer = harness.continuationRequests[0]!;
-      if (exit === "deadline") yield* TestClock.adjust("30 seconds");
-      else if (exit === "session-close") yield* Scope.close(sessionScope, Exit.void);
-      else if (exit === "offer-cleared") yield* offer.clearIfCurrent!();
-      else {
-        const stopped = yield* harness.runtime.stopRealtimeVoice!({
-          providerThread: harness.providerThread,
-        }).pipe(Effect.exit);
-        assert.equal(stopped._tag, exit === "failed-stop" ? "Failure" : "Success");
-      }
-      const turnInput = makeCodexTestTurnInput({
-        threadId: harness.threadId,
-        providerThread: harness.providerThread,
-        now: yield* DateTime.now,
-        attemptId: RunAttemptId.make("released"),
-        text: offer.detail!,
-      });
-      const adopted = yield* harness.runtime
-        .startTurn({
-          ...turnInput,
-          message: {
-            ...turnInput.message,
-            messageId: offer.messageId!,
-            creationSource: "provider",
-          },
-        })
-        .pipe(Effect.exit);
-      assert.equal(adopted._tag, "Failure");
-      if (offer.dispatchIfCurrent !== undefined) {
-        assert.isTrue(
-          Option.isNone(yield* offer.dispatchIfCurrent(Effect.die("stale offer dispatched"))),
-        );
-      }
-      const replay = yield* Ref.get(harness.replayDriver.state);
-      assert.isNull(replay.failure);
-      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-      ),
-    ),
-  );
-
-  it.effect.each(["voice", "steered-user"] as const)(
-    "replays a held realtime turn for %s",
-    (owner) =>
+  it.effect.each(["closed", "error"] as const)(
+    "releases an unoffered turn on realtime %s without blocking a restarted session",
+    (event) =>
       Effect.gen(function* () {
-        const approvalDeclined = yield* Deferred.make<void>();
-        const runtimeReady =
-          yield* Deferred.make<ProviderAdapter.ProviderAdapterV2SessionRuntime>();
-        const nativeThreadId = `voice-completed-${owner}`;
-        const nativeTurnId = "held-completed";
-        const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "User race" });
+        const nativeThreadId = `voice-release-${event}`;
+        const nativeTurnId = "unoffered-turn";
+        const closeAllowed = yield* Deferred.make<void>();
+        const interruptRequested = yield* Deferred.make<void>();
+        const interruptReplied = yield* Deferred.make<void>();
+        const startFrame = (id: number) => ({
+          id,
+          method: "thread/realtime/start",
+          params: {
+            threadId: nativeThreadId,
+            outputModality: "audio",
+            version: "v3",
+            transport: { type: "webrtc", sdp: "offer" },
+          },
+        });
         const harness = yield* makeCodexReplayHarness(
           makeCodexReplayTranscript({
-            scenario: `voice-completed-${owner}`,
+            scenario: `voice-release-${event}`,
             entries: [
-              ...heldVoiceEntries(nativeThreadId, nativeTurnId, owner === "voice"),
-              ...(owner === "voice"
-                ? []
-                : [
-                    withReplayRequestId(preamble[5]!, 4),
-                    {
-                      type: "emit_inbound" as const,
-                      frame: {
-                        id: 4,
-                        result: {
-                          turn: {
-                            ...makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
-                            startedAt: null,
-                          },
-                        },
-                      },
-                    },
-                  ]),
-              {
-                type: "expect_outbound",
-                frame: { id: "held-approval", result: { decision: "decline" } },
-              },
-              ...(owner === "voice"
-                ? []
-                : [
-                    {
-                      type: "emit_inbound" as const,
-                      frame: {
-                        method: "turn/completed",
-                        params: {
-                          threadId: nativeThreadId,
-                          turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
-                        },
-                      },
-                    },
-                  ]),
+              ...heldVoiceEntries(nativeThreadId, nativeTurnId, false).filter(
+                (entry) =>
+                  entry.type !== "emit_inbound" ||
+                  !Predicate.hasProperty(entry.frame, "method") ||
+                  (entry.frame.method !== "item/started" &&
+                    entry.frame.method !== "item/commandExecution/requestApproval"),
+              ),
               {
                 type: "emit_inbound",
-                label: "approval-declined",
+                label: "close",
                 frame: {
-                  method: "thread/realtime/sdp",
-                  params: { threadId: nativeThreadId, sdp: "answer" },
+                  method: `thread/realtime/${event}`,
+                  params: {
+                    threadId: nativeThreadId,
+                    ...(event === "closed" ? { reason: "disconnected" } : { message: "lost" }),
+                  },
                 },
               },
               {
                 type: "expect_outbound",
                 frame: {
-                  id: owner === "voice" ? 4 : 5,
+                  id: 4,
+                  method: "turn/interrupt",
+                  params: { threadId: nativeThreadId, turnId: nativeTurnId },
+                },
+              },
+              { type: "emit_inbound", label: "interrupt-response", frame: { id: 4, result: {} } },
+              { type: "expect_outbound", frame: startFrame(5) },
+              { type: "emit_inbound", frame: { id: 5, result: {} } },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "thread/realtime/sdp",
+                  params: { threadId: nativeThreadId, sdp: "restarted answer" },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 6,
                   method: "thread/realtime/stop",
                   params: { threadId: nativeThreadId },
                 },
               },
-              { type: "emit_inbound", frame: { id: owner === "voice" ? 4 : 5, result: {} } },
+              { type: "emit_inbound", frame: { id: 6, result: {} } },
             ],
           }),
-          (event) =>
-            event.type === "runtime_request.updated"
-              ? Deferred.await(runtimeReady).pipe(
-                  Effect.flatMap((runtime) =>
-                    runtime.respondToRuntimeRequest({
-                      requestId: event.runtimeRequest.id,
-                      decision: "decline",
-                    }),
-                  ),
-                  Effect.orDie,
-                )
-              : Effect.void,
+          undefined,
           undefined,
           undefined,
           (entry) =>
-            entry.label === "approval-declined"
-              ? Deferred.succeed(approvalDeclined, undefined).pipe(Effect.asVoid)
+            entry.label === "close"
+              ? Deferred.await(closeAllowed)
+              : entry.label === "interrupt-response"
+                ? Deferred.succeed(interruptRequested, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+          (method) =>
+            method === "turn/interrupt"
+              ? Deferred.succeed(interruptReplied, undefined).pipe(Effect.asVoid)
               : Effect.void,
         );
-        yield* Deferred.succeed(runtimeReady, harness.runtime);
         yield* harness.runtime.startRealtimeVoice!({
           providerThread: harness.providerThread,
           sdp: "offer",
         });
-        const offer = harness.continuationRequests[0]!;
-        assert.equal(offer.detail, "Inspect <project> & &lt;tests&gt;");
-        const turnInput = makeCodexTestTurnInput({
-          threadId: harness.threadId,
+        yield* Deferred.succeed(closeAllowed, undefined);
+        yield* Deferred.await(interruptRequested);
+        const restarted = yield* harness.runtime.startRealtimeVoice!({
           providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make(owner),
-          text: owner === "voice" ? offer.detail! : "User race",
-        });
-        yield* harness.runtime.startTurn(
-          owner === "voice"
-            ? {
-                ...turnInput,
-                message: {
-                  ...turnInput.message,
-                  messageId: offer.messageId!,
-                  creationSource: "provider",
-                },
-              }
-            : turnInput,
-        );
-        yield* harness.firstTerminal;
-        yield* Deferred.await(approvalDeclined);
+          sdp: "offer",
+        }).pipe(Effect.exit, Effect.forkChild({ startImmediately: true }));
+        // The reader must consume the interrupt reply and the new SDP before
+        // the old request's five-second deadline.
+        yield* TestClock.adjust("5 seconds");
+        assert.isTrue(yield* Deferred.isDone(interruptReplied));
+        const result = yield* Fiber.join(restarted);
+        assert.equal(result._tag, "Success");
+        if (Exit.isSuccess(result)) assert.deepEqual(result.value, { sdp: "restarted answer" });
         yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
-        assert.equal(harness.terminalEvents().length, 1);
-        assert.equal(harness.terminalEvents()[0]?.status, "completed");
-        if (owner === "steered-user") {
-          const items = harness.events.flatMap((event) =>
-            event.type === "turn_item.updated" ? [event.turnItem] : [],
-          );
-          assert.isAbove(
-            items.find((item) => item.type === "approval_request")!.ordinal,
-            items.find((item) => item.type === "assistant_message")!.ordinal,
-          );
-        }
-        assert.equal(
-          harness.events.filter(
-            (event) => event.type === "message.updated" && event.message.role === "user",
-          ).length,
-          owner === "voice" ? 0 : 1,
-        );
-        if (offer.dispatchIfCurrent !== undefined)
-          assert.isTrue(
-            Option.isNone(yield* offer.dispatchIfCurrent(Effect.die("consumed offer dispatched"))),
-          );
         const replay = yield* Ref.get(harness.replayDriver.state);
         assert.isNull(replay.failure);
         assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
@@ -2519,9 +2383,390 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
-  it.effect(
-    "adopts a realtime handoff as a run with streamed items, approvals and a checkpoint",
-    () =>
+  it.effect.each(["before-turn", "after-turn"] as const)(
+    "pauses an unowned goal announced %s while voice is active",
+    (timing) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "voice-unowned-goal";
+        const nativeTurnId = "goal-turn";
+        const interrupted = yield* Deferred.make<void>();
+        const entries = heldVoiceEntries(nativeThreadId, nativeTurnId, false, true).filter(
+          (entry) =>
+            entry.type !== "emit_inbound" ||
+            !Predicate.hasProperty(entry.frame, "method") ||
+            typeof entry.frame.method !== "string" ||
+            !entry.frame.method.startsWith("item/"),
+        );
+        if (timing === "after-turn") {
+          const goalIndex = entries.findIndex(
+            (entry) =>
+              entry.type === "emit_inbound" &&
+              Predicate.hasProperty(entry.frame, "method") &&
+              entry.frame.method === "thread/goal/updated",
+          );
+          const [goalUpdate] = entries.splice(goalIndex, 1);
+          entries.splice(entries.length - 1, 0, goalUpdate!);
+        }
+        const stopEntries: Array<CodexReplay.CodexAppServerReplayEntry> = [
+          {
+            type: "expect_outbound",
+            frame: {
+              id: timing === "after-turn" ? 4 : 6,
+              method: "thread/realtime/stop",
+              params: { threadId: nativeThreadId },
+            },
+          },
+          { type: "emit_inbound", frame: { id: timing === "after-turn" ? 4 : 6, result: {} } },
+        ];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "voice-unowned-goal",
+            entries: [
+              ...entries,
+              ...(timing === "after-turn" ? stopEntries : []),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: timing === "after-turn" ? 5 : 4,
+                  method: "thread/goal/set",
+                  params: { threadId: nativeThreadId, status: "paused" },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: { id: timing === "after-turn" ? 5 : 4, result: { goal: null } },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: timing === "after-turn" ? 6 : 5,
+                  method: "turn/interrupt",
+                  params: { threadId: nativeThreadId, turnId: nativeTurnId },
+                },
+              },
+              { type: "emit_inbound", frame: { id: timing === "after-turn" ? 6 : 5, result: {} } },
+              {
+                type: "emit_inbound",
+                label: "interrupted",
+                frame: {
+                  method: "thread/realtime/sdp",
+                  params: { threadId: nativeThreadId, sdp: "answer" },
+                },
+              },
+              ...(timing === "before-turn" ? stopEntries : []),
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          (entry) =>
+            entry.label === "interrupted"
+              ? Deferred.succeed(interrupted, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        );
+        yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        });
+        if (timing === "after-turn") {
+          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+          yield* TestClock.adjust("5 seconds");
+          assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+        }
+        yield* Deferred.await(interrupted);
+        assert.isEmpty(harness.continuationRequests);
+        if (timing === "before-turn")
+          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const replay = yield* Ref.get(harness.replayDriver.state);
+        assert.isNull(replay.failure);
+        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each(["deadline", "session-close", "offer-cleared"] as const)(
+    "releases an unadopted realtime turn on %s and declines its approval",
+    (exit) =>
+      Effect.gen(function* () {
+        const nativeThreadId = `voice-release-${exit}`;
+        const nativeTurnId = "held-turn";
+        const interrupted = yield* Deferred.make<void>();
+        const sessionScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(sessionScope, Exit.void));
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: `voice-release-${exit}`,
+            entries: [
+              ...heldVoiceEntries(nativeThreadId, nativeTurnId, false),
+              {
+                type: "expect_outbound",
+                frame: { id: "held-approval", result: { decision: "decline" } },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "turn/interrupt",
+                  params: { threadId: nativeThreadId, turnId: nativeTurnId },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: {} } },
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (method) =>
+            method === "turn/interrupt"
+              ? Deferred.succeed(interrupted, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        ).pipe(Scope.provide(sessionScope));
+        yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        });
+        const offer = harness.continuationRequests[0]!;
+        if (exit === "deadline") yield* TestClock.adjust("30 seconds");
+        else if (exit === "session-close") yield* Scope.close(sessionScope, Exit.void);
+        else if (exit === "offer-cleared") yield* offer.clearIfCurrent!();
+        const turnInput = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("released"),
+          text: offer.detail!,
+        });
+        const adopted = yield* harness.runtime
+          .startTurn({
+            ...turnInput,
+            message: {
+              ...turnInput.message,
+              messageId: offer.messageId!,
+              creationSource: "provider",
+            },
+          })
+          .pipe(Effect.exit);
+        assert.equal(adopted._tag, "Failure");
+        if (offer.dispatchIfCurrent !== undefined) {
+          assert.isTrue(
+            Option.isNone(yield* offer.dispatchIfCurrent(Effect.die("stale offer dispatched"))),
+          );
+        }
+        yield* Deferred.await(interrupted);
+        const replay = yield* Ref.get(harness.replayDriver.state);
+        assert.isNull(replay.failure);
+        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each([
+    "voice",
+    "steered-user",
+    "voice-after-stop",
+    "voice-after-failed-stop",
+    "voice-during-stop",
+  ] as const)("replays a held realtime turn for %s", (owner) =>
+    Effect.gen(function* () {
+      const voice = owner !== "steered-user";
+      const stopBeforeAdoption =
+        owner === "voice-after-stop" ||
+        owner === "voice-after-failed-stop" ||
+        owner === "voice-during-stop";
+      const stopEntries: Array<CodexReplay.CodexAppServerReplayEntry> = [
+        {
+          type: "expect_outbound",
+          frame: {
+            id: voice ? 4 : 5,
+            method: "thread/realtime/stop",
+            params: { threadId: `voice-completed-${owner}` },
+          },
+        },
+        {
+          type: "emit_inbound",
+          frame:
+            owner === "voice-after-failed-stop"
+              ? { id: 4, error: { code: -32603, message: "stop failed" } }
+              : { id: voice ? 4 : 5, result: {} },
+        },
+      ];
+      const approvalDeclined = yield* Deferred.make<void>();
+      const runtimeReady = yield* Deferred.make<ProviderAdapter.ProviderAdapterV2SessionRuntime>();
+      const nativeThreadId = `voice-completed-${owner}`;
+      const nativeTurnId = "held-completed";
+      const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "User race" });
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: `voice-completed-${owner}`,
+          entries: [
+            ...heldVoiceEntries(nativeThreadId, nativeTurnId, voice),
+            ...(voice
+              ? []
+              : [
+                  withReplayRequestId(preamble[5]!, 4),
+                  {
+                    type: "emit_inbound" as const,
+                    frame: {
+                      id: 4,
+                      result: {
+                        turn: {
+                          ...makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+                          startedAt: null,
+                        },
+                      },
+                    },
+                  },
+                ]),
+            ...(stopBeforeAdoption ? stopEntries : []),
+            {
+              type: "expect_outbound",
+              frame: { id: "held-approval", result: { decision: "decline" } },
+            },
+            ...(voice
+              ? []
+              : [
+                  {
+                    type: "emit_inbound" as const,
+                    frame: {
+                      method: "turn/completed",
+                      params: {
+                        threadId: nativeThreadId,
+                        turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                      },
+                    },
+                  },
+                ]),
+            {
+              type: "emit_inbound",
+              label: "approval-declined",
+              frame: {
+                method: "thread/realtime/sdp",
+                params: { threadId: nativeThreadId, sdp: "answer" },
+              },
+            },
+            ...(stopBeforeAdoption ? [] : stopEntries),
+          ],
+        }),
+        (event) =>
+          event.type === "runtime_request.updated"
+            ? Deferred.await(runtimeReady).pipe(
+                Effect.flatMap((runtime) =>
+                  runtime.respondToRuntimeRequest({
+                    requestId: event.runtimeRequest.id,
+                    decision: "decline",
+                  }),
+                ),
+                Effect.orDie,
+              )
+            : Effect.void,
+        undefined,
+        undefined,
+        (entry) =>
+          entry.label === "approval-declined"
+            ? Deferred.succeed(approvalDeclined, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* Deferred.succeed(runtimeReady, harness.runtime);
+      yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      });
+      const offer = harness.continuationRequests[0]!;
+      assert.equal(offer.detail, "Inspect <project> & &lt;tests&gt;");
+      const turnInput = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make(owner),
+        text: voice ? offer.detail! : "User race",
+      });
+      if (stopBeforeAdoption && owner !== "voice-during-stop") {
+        const stopped = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.exit);
+        assert.equal(stopped._tag, owner === "voice-after-failed-stop" ? "Failure" : "Success");
+      }
+      const startTurn = harness.runtime.startTurn(
+        voice
+          ? {
+              ...turnInput,
+              message: {
+                ...turnInput.message,
+                messageId: offer.messageId!,
+                creationSource: "provider",
+              },
+            }
+          : turnInput,
+      );
+      if (owner === "voice-during-stop") {
+        const dispatchAllowed = yield* Deferred.make<void>();
+        const dispatch = yield* offer.dispatchIfCurrent!(Deferred.await(dispatchAllowed)).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        const adoption = yield* startTurn.pipe(Effect.forkChild({ startImmediately: true }));
+        yield* offer.clearIfCurrent!();
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        yield* Deferred.succeed(dispatchAllowed, undefined);
+        yield* Fiber.join(dispatch);
+        yield* Fiber.join(adoption);
+      } else yield* startTurn;
+      yield* harness.firstTerminal;
+      yield* Deferred.await(approvalDeclined);
+      if (!stopBeforeAdoption)
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+      assert.equal(harness.terminalEvents().length, 1);
+      assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      if (owner === "steered-user") {
+        const items = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" ? [event.turnItem] : [],
+        );
+        assert.isAbove(
+          items.find((item) => item.type === "approval_request")!.ordinal,
+          items.find((item) => item.type === "assistant_message")!.ordinal,
+        );
+      }
+      if (owner === "steered-user") {
+        const spoken = harness.events.find(
+          (event) => event.type === "message.updated" && event.message.role === "user",
+        );
+        assert.equal(
+          spoken?.type === "message.updated" ? spoken.message.id : undefined,
+          offer.messageId,
+        );
+      }
+      assert.equal(
+        harness.events.filter(
+          (event) => event.type === "message.updated" && event.message.role === "user",
+        ).length,
+        voice ? 0 : 1,
+      );
+      if (offer.dispatchIfCurrent !== undefined)
+        assert.isTrue(
+          Option.isNone(yield* offer.dispatchIfCurrent(Effect.die("consumed offer dispatched"))),
+        );
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(
+        replay.cursor,
+        harness.replayDriver.transcript.entries.length - (stopBeforeAdoption ? 1 : 0),
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect.each(["voice", "typed-race"] as const)(
+    "adopts a realtime handoff for %s with streamed items, approvals and a checkpoint",
+    (owner) =>
       Effect.scoped(
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
@@ -2673,6 +2918,27 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   },
                 },
               },
+              ...(owner === "voice"
+                ? []
+                : [
+                    withReplayRequestId(
+                      codexReplayPreamble({
+                        nativeThreadId,
+                        nativeTurnId,
+                        prompt: "Typed request",
+                      })[5]!,
+                      5,
+                    ),
+                    {
+                      type: "emit_inbound" as const,
+                      frame: {
+                        id: 5,
+                        result: {
+                          turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+                        },
+                      },
+                    },
+                  ]),
               {
                 type: "expect_outbound",
                 frame: { id: "voice-approval", result: { decision: "accept" } },
@@ -2707,12 +2973,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               {
                 type: "expect_outbound",
                 frame: {
-                  id: 5,
+                  id: owner === "voice" ? 5 : 6,
                   method: "thread/realtime/stop",
                   params: { threadId: nativeThreadId },
                 },
               },
-              { type: "emit_inbound", frame: { id: 5, result: {} } },
+              { type: "emit_inbound", frame: { id: owner === "voice" ? 5 : 6, result: {} } },
             ],
           });
           const localTranscript = yield* decodeReplayTranscriptJson(
@@ -2767,6 +3033,19 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             const session = yield* sessions
               .get(before.providerSessions[0]!.id)
               .pipe(Effect.flatMap(Effect.fromOption));
+            if (owner === "typed-race") {
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make("typed-race"),
+                threadId,
+                messageId: MessageId.make("message:typed-race"),
+                text: "Typed request",
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+                dispatchMode: { type: "start_immediately" },
+              });
+            }
             const created = yield* orchestrator.streamDomainEvents.pipe(
               Stream.filter((event) => event.type === "run.created"),
               Stream.runHead,
@@ -2787,11 +3066,11 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             yield* worker.drain();
             yield* Fiber.join(approval);
             const active = yield* orchestrator.getThreadProjection(threadId);
-            const run = active.runs.at(-1)!;
+            const run = active.runs.find((candidate) => candidate.status === "running")!;
             const request = active.runtimeRequests.find((request) => request.status === "pending")!;
             assert.equal(
               active.messages.find((message) => message.id === run.userMessageId)?.text,
-              text,
+              owner === "voice" ? text : "Typed request",
             );
             assert.equal(
               active.messages.find((message) => message.id === run.userMessageId)?.createdBy,
@@ -2819,7 +3098,19 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             yield* Fiber.join(waiting);
             yield* worker.drain();
             const completed = yield* orchestrator.getThreadProjection(threadId);
-            assert.equal(completed.runs.at(-1)?.status, "completed");
+            assert.equal(
+              completed.runs.find((candidate) => candidate.id === run.id)?.status,
+              "completed",
+            );
+            if (owner === "typed-race") {
+              assert.equal(completed.runs.at(-1)?.status, "cancelled");
+              assert.equal(completed.messages.filter((message) => message.text === text).length, 1);
+              assert.equal(
+                completed.messages.find((message) => message.text === text)?.runId,
+                run.id,
+              );
+              assert.isFalse(completed.runs.some((candidate) => candidate.status === "failed"));
+            }
             assert.isTrue(
               completed.turnItems.some(
                 (item) =>
