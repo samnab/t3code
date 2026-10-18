@@ -73,6 +73,7 @@ describe("orchestrator MCP contracts", () => {
       latestTerminalStatus: "completed",
       latestTerminalSummary: "Workspace inspected.",
       latestTerminalResultContextTransferId: "context-transfer-result-1",
+      hasPendingQuestion: false,
       waitTimedOut: false,
     });
 
@@ -113,7 +114,6 @@ describe("orchestrator MCP contracts", () => {
         target: {
           providerInstanceId: "codex",
           model: "gpt-5.6-luna",
-          // Must fail loudly instead of being dropped like legacy persistence.
           options: { reasoning: 3 },
         },
       }),

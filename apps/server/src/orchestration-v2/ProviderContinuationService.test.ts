@@ -217,7 +217,6 @@ describe("ProviderContinuationService", () => {
           readonly creationSource: string;
           readonly notification: OrchestrationV2Notification;
         };
-        // ClaudeAdapterV2 keys on this to attach buffered CLI output.
         assert.equal(command.creationSource, "provider");
         assert.deepEqual(command.notification, {
           source: { kind: "background_task" },
@@ -241,7 +240,6 @@ describe("ProviderContinuationService", () => {
         const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
         yield* requests.offer({ ...request(), messageId });
         const command = (yield* Queue.take(dispatched)) as { readonly messageId: MessageId };
-        // The adapter matches the continuation run's message to the wake it holds.
         assert.equal(command.messageId, messageId);
       }).pipe(
         Effect.provide(
@@ -634,8 +632,6 @@ describe("ProviderContinuationService", () => {
           assert.equal(yield* Ref.get(attempts), 1);
           assert.isTrue(yield* Ref.get(cleared));
 
-          // The refused delivery is acknowledged administratively, task by
-          // task, so the cohort's delivery is consumed instead of left open.
           const acknowledgements = (yield* Queue.takeAll(acknowledged)) as ReadonlyArray<{
             type: string;
             taskId: string;
@@ -650,8 +646,6 @@ describe("ProviderContinuationService", () => {
             assert.isNull(command.observedByRunId);
           }
 
-          // A refusal is terminal: no backoff timer is pending behind it,
-          // so no further dispatch attempt can ever land.
           yield* TestClock.adjust("1 hour");
           yield* Effect.yieldNow;
           assert.equal(yield* Ref.get(attempts), 1);

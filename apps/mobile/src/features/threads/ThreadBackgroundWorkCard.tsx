@@ -1,7 +1,7 @@
 import type { ThreadBackgroundTask } from "@t3tools/client-runtime/state/thread-background-work";
 import { Pressable, View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 
 function taskLabel(item: ThreadBackgroundTask): string {
   return item.task.description?.trim() || item.task.kind.replaceAll("_", " ");

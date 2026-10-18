@@ -20,39 +20,21 @@ export interface ProviderContinuationRequest {
   /** A spoken user request whose native turn is already running in the provider. */
   readonly origin?: "voice";
   readonly notification?: OrchestrationV2Notification;
-  /**
-   * Durable ownership for an app-owned delegated-task completion delivery.
-   * The continuation worker re-reads the cohort before dispatching so a later
-   * task can join a queued wake and a stopped or acknowledged cohort is dropped.
-   */
   readonly delegatedCompletion?: {
     readonly parentRunId: RunId;
     readonly generation: number;
     readonly messageId: MessageId;
   };
   /**
-   * How the continuation turn gets its content.
-   *
-   * `adapter_buffered` (default) is the provider-native wake: the adapter has
-   * already buffered the CLI's wake output, and the dispatched message only
-   * triggers ingestion. `ClaudeAdapterV2` deliberately discards the message
-   * text on that path.
-   *
-   * `message_text` is for app-owned work with no buffered provider output, such
-   * as a delegated child finishing. The text is the entire wake, so it must
-   * reach the provider as a real prompt.
+   * `adapter_buffered` (default) is the provider-native wake: the adapter has already buffered the
+   * CLI's wake output, and the dispatched message only triggers ingestion. `message_text` is for
+   * app-owned work with no buffered provider output, such as a delegated child finishing.
    */
   readonly delivery?: "adapter_buffered" | "message_text";
-  /**
-   * The message the continuation run starts from, when the adapter picks it:
-   * its turn input carries this id, so the adapter can tell which of its held
-   * wakes a run was dispatched for. Otherwise the service allocates one.
-   */
   readonly messageId?: MessageId;
   readonly dispatchIfCurrent?: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<Option.Option<A>, E, R>;
-  /** Clears a pending offer that the continuation worker intentionally drops. */
   readonly clearIfCurrent?: () => Effect.Effect<void>;
 }
 

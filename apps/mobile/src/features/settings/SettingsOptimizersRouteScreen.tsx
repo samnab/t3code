@@ -12,10 +12,10 @@ import {
   type OptimizerStatus,
 } from "@t3tools/contracts";
 
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
-import { ControlPillMenu } from "../../components/ControlPill";
-import { ScreenScrollView } from "../../components/ScreenScrollView";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
+import { Menu } from "../../components/ui/Menu";
+import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
 import { useEnvironments } from "../../state/environments";
 import { useEnvironmentServerConfig, useProjects } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
@@ -60,11 +60,11 @@ const OPTIMIZER_META: Readonly<
 function SelectionRow(props: {
   readonly label: string;
   readonly value: string;
-  readonly actions: ComponentProps<typeof ControlPillMenu>["actions"];
+  readonly actions: ComponentProps<typeof Menu>["actions"];
   readonly onSelect: (id: string) => void;
 }) {
   return (
-    <ControlPillMenu
+    <Menu
       accessibilityLabel={props.label}
       actions={props.actions}
       onPressAction={({ nativeEvent }) => props.onSelect(nativeEvent.event)}
@@ -79,7 +79,7 @@ function SelectionRow(props: {
         </View>
         <SymbolView name="chevron.right" size={13} tintColorClassName="accent-chevron" />
       </Pressable>
-    </ControlPillMenu>
+    </Menu>
   );
 }
 
