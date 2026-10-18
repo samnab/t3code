@@ -38,16 +38,19 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Predicate from "effect/Predicate";
 import * as FileSystem from "effect/FileSystem";
 import { MCP_APP_OUTPUT_KEY, readMcpAppReference } from "@t3tools/shared/mcpApp";
 import { resolveAttachmentPathById } from "../../attachmentStore.ts";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
@@ -1935,12 +1938,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const serverConfig = yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie);
-      const replayDriver = yield* CodexReplay.makeReplayDriver(transcript);
+      const replayDriver = yield* CodexReplay.makeReplayDriver(
+        transcript,
+        beforeEmitInbound === undefined ? {} : { beforeEmitInbound },
+      );
       const continuationRequests: Array<ProviderContinuationRequests.ProviderContinuationRequest> =
         [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
@@ -2114,6 +2121,402 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
+  );
+
+  const heldVoiceEntries = (
+    nativeThreadId: string,
+    nativeTurnId: string,
+    completed: boolean,
+    goalActive = false,
+  ): Array<CodexReplay.CodexAppServerReplayEntry> => [
+    ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "unused" }).slice(0, 5),
+    {
+      type: "expect_outbound",
+      frame: {
+        id: 3,
+        method: "thread/realtime/start",
+        params: {
+          threadId: nativeThreadId,
+          outputModality: "audio",
+          version: "v3",
+          transport: { type: "webrtc", sdp: "offer" },
+        },
+      },
+    },
+    { type: "emit_inbound", frame: { id: 3, result: {} } },
+    ...(goalActive
+      ? [
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "thread/goal/updated",
+              params: {
+                threadId: nativeThreadId,
+                turnId: nativeTurnId,
+                goal: {
+                  threadId: nativeThreadId,
+                  objective: "Inspect the project",
+                  status: "active",
+                  tokenBudget: null,
+                  tokensUsed: 0,
+                  timeUsedSeconds: 0,
+                  createdAt: 1782622440,
+                  updatedAt: 1782622440,
+                },
+              },
+            },
+          },
+        ]
+      : []),
+    {
+      type: "emit_inbound",
+      frame: {
+        method: "turn/started",
+        params: {
+          threadId: nativeThreadId,
+          turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+        },
+      },
+    },
+    {
+      type: "emit_inbound",
+      frame: {
+        method: "item/started",
+        params: {
+          threadId: nativeThreadId,
+          turnId: nativeTurnId,
+          item: {
+            type: "userMessage",
+            id: "spoken-input",
+            content: [
+              {
+                type: "text",
+                text: "<realtime_delegation><input>Inspect &lt;project&gt; &amp; &amp;lt;tests&amp;gt;</input></realtime_delegation>",
+                text_elements: [],
+              },
+            ],
+          },
+        },
+      },
+    },
+    {
+      type: "emit_inbound",
+      frame: {
+        method: "item/completed",
+        params: {
+          threadId: nativeThreadId,
+          turnId: nativeTurnId,
+          item: {
+            type: "agentMessage",
+            id: "held-agent",
+            text: "Inspecting now",
+            phase: "commentary",
+            memoryCitation: null,
+          },
+        },
+      },
+    },
+    {
+      type: "emit_inbound",
+      frame: {
+        id: "held-approval",
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: nativeThreadId,
+          turnId: nativeTurnId,
+          itemId: "held-command",
+          command: "pwd",
+          cwd: "/workspace",
+          commandActions: [],
+        },
+      },
+    },
+    ...(completed
+      ? [
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+              },
+            },
+          },
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "item/started",
+              params: {
+                threadId: nativeThreadId,
+                turnId: nativeTurnId,
+                item: {
+                  type: "agentMessage",
+                  id: "late-item",
+                  text: "",
+                  phase: "commentary",
+                  memoryCitation: null,
+                },
+              },
+            },
+          },
+        ]
+      : []),
+    // Serial notification delivery makes this a barrier after the buffered completion.
+    {
+      type: "emit_inbound",
+      frame: { method: "thread/realtime/sdp", params: { threadId: nativeThreadId, sdp: "answer" } },
+    },
+  ];
+
+  it.effect.each([
+    "stop",
+    "failed-stop",
+    "deadline",
+    "session-close",
+    "offer-cleared",
+    "goal-active",
+  ] as const)("releases an unadopted realtime turn on %s and declines its approval", (exit) =>
+    Effect.gen(function* () {
+      const nativeThreadId = `voice-release-${exit}`;
+      const nativeTurnId = "held-turn";
+      const stopsVoice = exit === "stop" || exit === "failed-stop" || exit === "goal-active";
+      const stopEntries: Array<CodexReplay.CodexAppServerReplayEntry> = !stopsVoice
+        ? []
+        : [
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/realtime/stop",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame:
+                exit === "failed-stop"
+                  ? { id: 4, error: { code: -32603, message: "stop failed" } }
+                  : { id: 4, result: {} },
+            },
+          ];
+      const sessionScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(sessionScope, Exit.void));
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: `voice-release-${exit}`,
+          entries: [
+            ...heldVoiceEntries(nativeThreadId, nativeTurnId, false, exit === "goal-active"),
+            ...stopEntries,
+            {
+              type: "expect_outbound",
+              frame: { id: "held-approval", result: { decision: "decline" } },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: stopsVoice ? 5 : 4,
+                method: "turn/interrupt",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: stopsVoice ? 5 : 4, result: {} } },
+          ],
+        }),
+      ).pipe(Scope.provide(sessionScope));
+      yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      });
+      const offer = harness.continuationRequests[0]!;
+      if (exit === "deadline") yield* TestClock.adjust("30 seconds");
+      else if (exit === "session-close") yield* Scope.close(sessionScope, Exit.void);
+      else if (exit === "offer-cleared") yield* offer.clearIfCurrent!();
+      else {
+        const stopped = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.exit);
+        assert.equal(stopped._tag, exit === "failed-stop" ? "Failure" : "Success");
+      }
+      const turnInput = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("released"),
+        text: offer.detail!,
+      });
+      const adopted = yield* harness.runtime
+        .startTurn({
+          ...turnInput,
+          message: {
+            ...turnInput.message,
+            messageId: offer.messageId!,
+            creationSource: "provider",
+          },
+        })
+        .pipe(Effect.exit);
+      assert.equal(adopted._tag, "Failure");
+      if (offer.dispatchIfCurrent !== undefined) {
+        assert.isTrue(
+          Option.isNone(yield* offer.dispatchIfCurrent(Effect.die("stale offer dispatched"))),
+        );
+      }
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect.each(["voice", "steered-user"] as const)(
+    "replays a held realtime turn for %s",
+    (owner) =>
+      Effect.gen(function* () {
+        const approvalDeclined = yield* Deferred.make<void>();
+        const runtimeReady =
+          yield* Deferred.make<ProviderAdapter.ProviderAdapterV2SessionRuntime>();
+        const nativeThreadId = `voice-completed-${owner}`;
+        const nativeTurnId = "held-completed";
+        const preamble = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "User race" });
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: `voice-completed-${owner}`,
+            entries: [
+              ...heldVoiceEntries(nativeThreadId, nativeTurnId, owner === "voice"),
+              ...(owner === "voice"
+                ? []
+                : [
+                    withReplayRequestId(preamble[5]!, 4),
+                    {
+                      type: "emit_inbound" as const,
+                      frame: {
+                        id: 4,
+                        result: {
+                          turn: {
+                            ...makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+                            startedAt: null,
+                          },
+                        },
+                      },
+                    },
+                  ]),
+              {
+                type: "expect_outbound",
+                frame: { id: "held-approval", result: { decision: "decline" } },
+              },
+              ...(owner === "voice"
+                ? []
+                : [
+                    {
+                      type: "emit_inbound" as const,
+                      frame: {
+                        method: "turn/completed",
+                        params: {
+                          threadId: nativeThreadId,
+                          turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                        },
+                      },
+                    },
+                  ]),
+              {
+                type: "emit_inbound",
+                label: "approval-declined",
+                frame: {
+                  method: "thread/realtime/sdp",
+                  params: { threadId: nativeThreadId, sdp: "answer" },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: owner === "voice" ? 4 : 5,
+                  method: "thread/realtime/stop",
+                  params: { threadId: nativeThreadId },
+                },
+              },
+              { type: "emit_inbound", frame: { id: owner === "voice" ? 4 : 5, result: {} } },
+            ],
+          }),
+          (event) =>
+            event.type === "runtime_request.updated"
+              ? Deferred.await(runtimeReady).pipe(
+                  Effect.flatMap((runtime) =>
+                    runtime.respondToRuntimeRequest({
+                      requestId: event.runtimeRequest.id,
+                      decision: "decline",
+                    }),
+                  ),
+                  Effect.orDie,
+                )
+              : Effect.void,
+          undefined,
+          undefined,
+          (entry) =>
+            entry.label === "approval-declined"
+              ? Deferred.succeed(approvalDeclined, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        );
+        yield* Deferred.succeed(runtimeReady, harness.runtime);
+        yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        });
+        const offer = harness.continuationRequests[0]!;
+        assert.equal(offer.detail, "Inspect <project> & &lt;tests&gt;");
+        const turnInput = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make(owner),
+          text: owner === "voice" ? offer.detail! : "User race",
+        });
+        yield* harness.runtime.startTurn(
+          owner === "voice"
+            ? {
+                ...turnInput,
+                message: {
+                  ...turnInput.message,
+                  messageId: offer.messageId!,
+                  creationSource: "provider",
+                },
+              }
+            : turnInput,
+        );
+        yield* harness.firstTerminal;
+        yield* Deferred.await(approvalDeclined);
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        assert.equal(harness.terminalEvents().length, 1);
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        if (owner === "steered-user") {
+          const items = harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" ? [event.turnItem] : [],
+          );
+          assert.isAbove(
+            items.find((item) => item.type === "approval_request")!.ordinal,
+            items.find((item) => item.type === "assistant_message")!.ordinal,
+          );
+        }
+        assert.equal(
+          harness.events.filter(
+            (event) => event.type === "message.updated" && event.message.role === "user",
+          ).length,
+          owner === "voice" ? 0 : 1,
+        );
+        if (offer.dispatchIfCurrent !== undefined)
+          assert.isTrue(
+            Option.isNone(yield* offer.dispatchIfCurrent(Effect.die("consumed offer dispatched"))),
+          );
+        const replay = yield* Ref.get(harness.replayDriver.state);
+        assert.isNull(replay.failure);
+        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
   );
 
   it.effect(

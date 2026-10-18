@@ -55,7 +55,8 @@ function delegatedCompletionRetryKey(
  * message.dispatch per request so the wake turn buffered by the adapter is
  * ingested as a normal run. Delegated completions are durable mailbox offers:
  * the orchestrator selects native steering or queued delivery under its thread
- * lock. Adapter-buffered continuations still queue behind active work.
+ * lock. Spoken requests start immediately when the thread is idle; other
+ * adapter-buffered continuations queue behind active work.
  */
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -225,7 +226,9 @@ export const layer = Layer.effectDiscard(
                 },
               }),
           attachments: [],
-          dispatchMode: { type: "queue_after_active" },
+          dispatchMode: {
+            type: request.origin === "voice" ? "start_immediately" : "queue_after_active",
+          },
           createdBy: request.origin === "voice" ? "user" : "agent",
           // "provider" marks an adapter-buffered wake, which ClaudeAdapterV2
           // detects to attach the buffered CLI output and drop this text. A
@@ -311,6 +314,8 @@ export const layer = Layer.effectDiscard(
                   ),
                   Effect.forkScoped,
                 );
+              } else if (request.clearIfCurrent !== undefined) {
+                yield* request.clearIfCurrent();
               }
             }),
           ),

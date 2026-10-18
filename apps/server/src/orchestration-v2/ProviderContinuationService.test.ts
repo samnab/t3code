@@ -108,6 +108,56 @@ function layerTest(input: {
 }
 
 describe("ProviderContinuationService", () => {
+  it.effect("starts a spoken request immediately as a user message", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({ ...request(), origin: "voice", detail: "Inspect tests" });
+        const command = yield* Queue.take(dispatched);
+        assert.deepInclude(command, {
+          createdBy: "user",
+          creationSource: "provider",
+          dispatchMode: { type: "start_immediately" },
+          text: "Inspect tests",
+        });
+        assert.notProperty(command, "notification");
+      }).pipe(
+        Effect.provide(
+          layerTest({ dispatched, getThreadRecords: () => Effect.succeed(projection) }),
+        ),
+        Effect.scoped,
+      );
+    }),
+  );
+
+  it.effect("clears an adapter offer after a dispatch failure", () =>
+    Effect.gen(function* () {
+      const cleared = yield* Deferred.make<void>();
+      const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
+        getThreadRecords: () => Effect.succeed(projection),
+        dispatch: () => Effect.die("dispatch failed"),
+      });
+      const layerWorker = ProviderContinuationService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(IdAllocator.layer, ProviderContinuationRequests.layer, layerThreads),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          ...request(),
+          origin: "voice",
+          clearIfCurrent: () => Deferred.succeed(cleared, undefined).pipe(Effect.asVoid),
+        });
+        yield* Deferred.await(cleared);
+      }).pipe(
+        Effect.provide(Layer.merge(ProviderContinuationRequests.layer, layerWorker)),
+        Effect.scoped,
+      );
+    }),
+  );
+
   it.effect("recovers an unaccepted persisted steer using the same delivery identity", () =>
     Effect.gen(function* () {
       const dispatched = yield* Queue.unbounded<unknown>();
