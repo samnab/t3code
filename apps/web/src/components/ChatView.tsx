@@ -452,6 +452,7 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import { RealtimeVoiceControl } from "./chat/RealtimeVoiceControl";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
 import { isTimelineScrollTarget } from "./chat/timelineScrollTarget";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
@@ -12169,6 +12170,17 @@ export default function ChatView(props: ChatViewProps) {
                               runtimeMode={runtimeMode}
                               interactionMode={interactionMode}
                               voiceNotifications={voiceNotifications}
+                              renderRealtimeVoiceControl={
+                                isServerThread && selectedProvider === "codex"
+                                  ? (size) => (
+                                      <RealtimeVoiceControl
+                                        environmentId={activeThread.environmentId}
+                                        threadId={activeThread.id}
+                                        size={size}
+                                      />
+                                    )
+                                  : null
+                              }
                               lockedProvider={modelPickerLockedProvider}
                               providerStatuses={providerStatuses as ServerProvider[]}
                               providerCatalogKnown={serverConfig !== null}
