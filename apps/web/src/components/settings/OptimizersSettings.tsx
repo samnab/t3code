@@ -9,7 +9,7 @@ import type {
 import { DEFAULT_HEADROOM_PROXY_URL } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { CheckCircle2Icon, CircleAlertIcon, ExternalLinkIcon, RefreshCwIcon } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useState } from "react";
 
 import {
   isAtomCommandInterrupted,
@@ -149,10 +149,7 @@ function OptimizerStatusRows({
   readonly startingHeadroom: boolean;
   readonly headroomStartError: string | null;
 }) {
-  const statusById = useMemo(
-    () => new Map(snapshot?.optimizers.map((status) => [status.id, status]) ?? []),
-    [snapshot?.optimizers],
-  );
+  const statusById = new Map(snapshot?.optimizers.map((status) => [status.id, status]) ?? []);
 
   return (
     <>
@@ -383,51 +380,41 @@ function HeadroomProxySettingsRow({
     reportFailure: false,
   });
 
-  const save = useCallback(
-    async (value: string) => {
-      if (saving || !environmentConnected) return;
-      const next = value.trim();
-      if (next === proxyUrl) {
-        setDraft(null);
-        setError(null);
-        return;
-      }
-
-      setSaving(true);
+  const save = async (value: string) => {
+    if (saving || !environmentConnected) return;
+    const next = value.trim();
+    if (next === proxyUrl) {
+      setDraft(null);
       setError(null);
-      try {
-        const result = await updateSettings({
-          environmentId,
-          input: { patch: { headroomProxyUrl: next } },
-        });
-        if (result._tag === "Success") {
-          setDraft(null);
-          onSaved();
-        } else if (!isAtomCommandInterrupted(result)) {
-          const failure = squashAtomCommandFailure(result);
-          setError(
-            failure instanceof Error ? failure.message : "Headroom proxy URL could not be saved.",
-          );
-        }
-      } catch (failure) {
-        setError(
-          failure instanceof Error ? failure.message : "Headroom proxy URL could not be saved.",
-        );
-      } finally {
-        setSaving(false);
-      }
-    },
-    [environmentConnected, environmentId, onSaved, proxyUrl, saving, updateSettings],
-  );
+      return;
+    }
 
-  const commit = useCallback(() => {
+    setSaving(true);
+    setError(null);
+    // Atom commands settle to a result rather than rejecting.
+    const result = await updateSettings({
+      environmentId,
+      input: { patch: { headroomProxyUrl: next } },
+    }).finally(() => setSaving(false));
+    if (result._tag === "Success") {
+      setDraft(null);
+      onSaved();
+    } else if (!isAtomCommandInterrupted(result)) {
+      const failure = squashAtomCommandFailure(result);
+      setError(
+        failure instanceof Error ? failure.message : "Headroom proxy URL could not be saved.",
+      );
+    }
+  };
+
+  const commit = () => {
     if (draft !== null) void save(draft);
-  }, [draft, save]);
+  };
 
-  const reset = useCallback(() => {
+  const reset = () => {
     setDraft(DEFAULT_HEADROOM_PROXY_URL);
     void save(DEFAULT_HEADROOM_PROXY_URL);
-  }, [save]);
+  };
 
   return (
     <SettingsRow
@@ -484,10 +471,7 @@ function OptimizerEnvironmentSettings({
   );
   const settings = useEnvironmentSettings(environmentId);
   const projects = useProjects();
-  const environmentProjects = useMemo(
-    () => projects.filter((project) => project.environmentId === environmentId),
-    [environmentId, projects],
-  );
+  const environmentProjects = projects.filter((project) => project.environmentId === environmentId);
   const [projectSelection, setProjectSelection] = useState<ProjectId | null>(
     environmentProjects[0]?.id ?? null,
   );
@@ -530,58 +514,45 @@ function OptimizerEnvironmentSettings({
     if (!environmentConnected || !canStartHeadroom || startingHeadroom) return;
     setStartingHeadroom(true);
     setHeadroomStartError(null);
-    try {
-      const result = await startHeadroom({ environmentId, input: {} });
-      if (result._tag === "Success") {
-        statusQuery.refresh();
-      } else if (!isAtomCommandInterrupted(result)) {
-        const failure = squashAtomCommandFailure(result);
-        setHeadroomStartError(
-          failure instanceof Error ? failure.message : "Headroom could not be started.",
-        );
-      }
-    } catch (failure) {
+    const result = await startHeadroom({ environmentId, input: {} }).finally(() =>
+      setStartingHeadroom(false),
+    );
+    if (result._tag === "Success") {
+      statusQuery.refresh();
+    } else if (!isAtomCommandInterrupted(result)) {
+      const failure = squashAtomCommandFailure(result);
       setHeadroomStartError(
         failure instanceof Error ? failure.message : "Headroom could not be started.",
       );
-    } finally {
-      setStartingHeadroom(false);
     }
   };
 
   const saveProjectOptimizer = async (id: OptimizerId, enabled: boolean) => {
     if (selectedProjectId === null || savingProject || !environmentConnected) return;
     setSavingProject(true);
-    try {
-      await updateSettings({
-        environmentId,
-        input: {
-          patch: {
-            projectOptimizerOverrides: {
-              [selectedProjectId]: { [id]: enabled },
-            },
+    await updateSettings({
+      environmentId,
+      input: {
+        patch: {
+          projectOptimizerOverrides: {
+            [selectedProjectId]: { [id]: enabled },
           },
         },
-      });
-    } finally {
-      setSavingProject(false);
-    }
+      },
+    }).finally(() => setSavingProject(false));
   };
 
-  const saveBinaryPath = useCallback(
-    (next: string) => {
-      if (savingBinary || next === cbmBinaryPath || !environmentConnected) return;
-      setBinaryDraft(null);
-      setSavingBinary(true);
-      void updateSettings({
-        environmentId,
-        input: { patch: { optimizerBinaryPaths: { cbm: next } } },
-      }).finally(() => setSavingBinary(false));
-    },
-    [cbmBinaryPath, environmentConnected, environmentId, savingBinary, updateSettings],
-  );
+  const saveBinaryPath = (next: string) => {
+    if (savingBinary || next === cbmBinaryPath || !environmentConnected) return;
+    setBinaryDraft(null);
+    setSavingBinary(true);
+    void updateSettings({
+      environmentId,
+      input: { patch: { optimizerBinaryPaths: { cbm: next } } },
+    }).finally(() => setSavingBinary(false));
+  };
 
-  const commitBinaryPath = useCallback(() => {
+  const commitBinaryPath = () => {
     if (binaryDraft === null) return;
     const next = binaryDraft.trim();
     if (next === cbmBinaryPath) {
@@ -589,11 +560,11 @@ function OptimizerEnvironmentSettings({
       return;
     }
     saveBinaryPath(next);
-  }, [binaryDraft, cbmBinaryPath, saveBinaryPath]);
+  };
 
-  const resetBinaryPath = useCallback(() => {
+  const resetBinaryPath = () => {
     saveBinaryPath("");
-  }, [saveBinaryPath]);
+  };
 
   return (
     <>

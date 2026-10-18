@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
 import { ProviderRealtimeVoiceError, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
 import { AudioLinesIcon, MicIcon } from "lucide-react";
+import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { toastManager } from "../ui/toast";
@@ -63,6 +64,19 @@ function waitForIceGathering(peerConnection: RTCPeerConnection): Promise<void> {
   });
 }
 
+// The throwing helpers live outside the component: the React Compiler cannot
+// lower a throw inside try/catch.
+function requireLocalSdp(peerConnection: RTCPeerConnection): string {
+  const localSdp = peerConnection.localDescription?.sdp;
+  if (localSdp === undefined) throw new Error("No local SDP description was generated.");
+  return localSdp;
+}
+
+function requireSuccess<A, E>(result: AtomCommandResult<A, E>): A {
+  if (AsyncResult.isFailure(result)) throw Cause.squash(result.cause);
+  return result.value;
+}
+
 const isProviderRealtimeVoiceError = Schema.is(ProviderRealtimeVoiceError);
 
 function describeRealtimeVoiceFailure(error: unknown): string {
@@ -87,13 +101,13 @@ export function RealtimeVoiceControl(props: {
     reportFailure: false,
   });
 
-  const endSession = useCallback(() => {
+  const endSession = () => {
     const session = sessionRef.current;
     if (session === null) return;
     sessionRef.current = null;
     stopRealtimeVoiceSession(session);
     setStatus("idle");
-  }, []);
+  };
 
   // Leaving the view, switching threads, or a dead connection all end the
   // call. The stop command tells the provider session so its side tears down
@@ -109,7 +123,7 @@ export function RealtimeVoiceControl(props: {
     };
   }, [environmentId, threadId, stopVoice]);
 
-  const start = useCallback(async () => {
+  const start = async () => {
     if (sessionRef.current !== null) return;
     setStatus("connecting");
     const peerConnection = new RTCPeerConnection();
@@ -147,18 +161,14 @@ export function RealtimeVoiceControl(props: {
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
       await waitForIceGathering(peerConnection);
-      const localSdp = peerConnection.localDescription?.sdp;
-      if (localSdp === undefined) {
-        throw new Error("No local SDP description was generated.");
-      }
       const result = await startVoice({
         environmentId,
-        input: { threadId, sdp: localSdp },
+        input: { threadId, sdp: requireLocalSdp(peerConnection) },
       });
-      if (AsyncResult.isFailure(result)) {
-        throw Cause.squash(result.cause);
-      }
-      await peerConnection.setRemoteDescription({ type: "answer", sdp: result.value.sdp });
+      await peerConnection.setRemoteDescription({
+        type: "answer",
+        sdp: requireSuccess(result).sdp,
+      });
       setStatus("live");
     } catch (error) {
       // A mid-flow failure must not leave the mic open or the stored session
@@ -174,9 +184,9 @@ export function RealtimeVoiceControl(props: {
         }),
       );
     }
-  }, [endSession, environmentId, startVoice, threadId]);
+  };
 
-  const stop = useCallback(async () => {
+  const stop = async () => {
     if (sessionRef.current === null) return;
     endSession();
     const result = await stopVoice({ environmentId, input: { threadId } });
@@ -189,7 +199,7 @@ export function RealtimeVoiceControl(props: {
         }),
       );
     }
-  }, [endSession, environmentId, stopVoice, threadId]);
+  };
 
   const tooltip = status === "live" ? "Voice mode — click to end" : "Talk with Codex by voice";
   return (

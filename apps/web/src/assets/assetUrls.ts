@@ -9,7 +9,7 @@ import {
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { AssetCreateUrlResult, AssetResource, EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
-import { useCallback, useEffect, useMemo } from "react";
+import { useEffect } from "react";
 
 import { assetEnvironment } from "~/state/assets";
 import { useFilesystemReadAccess } from "~/state/filesystem";
@@ -32,9 +32,7 @@ export function useAssetUrlState(
   environmentId: EnvironmentId | null,
   resource: AssetResource | null,
 ): AssetUrlState {
-  const resourceKey = JSON.stringify(resource);
-  const stableResource = useMemo(() => resource, [resourceKey]);
-  const blocked = blockedAssetUrlState(stableResource, useFilesystemReadAccess(environmentId));
+  const blocked = blockedAssetUrlState(resource, useFilesystemReadAccess(environmentId));
   const preparedConnection = usePreparedConnection(environmentId);
   const refresh = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
@@ -42,16 +40,17 @@ export function useAssetUrlState(
     refresh: true,
   });
   const result = useAtomValue(
-    blocked !== null || environmentId === null || stableResource === null
+    blocked !== null || environmentId === null || resource === null
       ? EMPTY_ASSET_URL_ATOM
-      : assetEnvironment.createUrl({ environmentId, input: { resource: stableResource } }),
+      : assetEnvironment.createUrl({ environmentId, input: { resource } }),
   );
   const resultIsCurrent = result._tag === "Success" && isAssetUrlCurrent(result.value);
   useEffect(() => {
-    if (blocked !== null || environmentId === null || stableResource === null) return;
-    if (result._tag !== "Success" || resultIsCurrent) return;
-    void refresh({ environmentId, input: { resource: stableResource } });
-  }, [blocked, environmentId, refresh, stableResource, result, resultIsCurrent]);
+    if (blocked !== null || environmentId === null || resource === null) return;
+    // A refresh in flight keeps the stale success until it lands.
+    if (result._tag !== "Success" || result.waiting || resultIsCurrent) return;
+    void refresh({ environmentId, input: { resource } });
+  }, [blocked, environmentId, refresh, resource, result, resultIsCurrent]);
   if (blocked !== null) return blocked;
   if (result._tag === "Success" && !resultIsCurrent) return { _tag: "Loading" };
   return assetUrlStateFromResult(
@@ -70,12 +69,12 @@ export function useAssetUrlRefresh(
     reportFailure: false,
     refresh: true,
   });
-  return useCallback(async () => {
+  return async () => {
     if (environmentId === null || resource === null || httpBaseUrl === null) return null;
     const result = await refresh({ environmentId, input: { resource } });
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
     return resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
-  }, [environmentId, resource, refresh, httpBaseUrl]);
+  };
 }
 
 export function useAssetUrls(
@@ -89,18 +88,9 @@ export function useAssetUrls(
     refresh: true,
   });
   const { canReadFiles } = useFilesystemReadAccess(environmentId);
-  const allowedResources = useMemo(
-    () =>
-      canReadFiles
-        ? resources
-        : resources.filter(
-            (resource) =>
-              resource._tag !== "workspace-file" &&
-              resource._tag !== "media-file" &&
-              resource._tag !== "draft-workspace-file",
-          ),
-    [canReadFiles, resources],
-  );
+  const allowedResources = canReadFiles
+    ? resources
+    : resources.filter((resource) => !isFileResource(resource));
   const results = useAtomValue(
     assetEnvironment.createUrls({
       environmentId,
@@ -110,28 +100,36 @@ export function useAssetUrls(
   useEffect(() => {
     const expiredResources = allowedResources.filter((_, index) => {
       const result = results[index];
-      return result?._tag === "Success" && !isAssetUrlCurrent(result.value);
+      return result?._tag === "Success" && !result.waiting && !isAssetUrlCurrent(result.value);
     });
     if (expiredResources.length === 0) return;
     void Promise.all(
       expiredResources.map((resource) => refresh({ environmentId, input: { resource } })),
     );
   }, [allowedResources, environmentId, refresh, results]);
-  return useMemo(() => {
-    if (preparedConnection._tag === "None") return resources.map(() => null);
-    let resultIndex = 0;
-    return resources.map((resource) => {
-      if (
-        !canReadFiles &&
-        (resource._tag === "workspace-file" ||
-          resource._tag === "media-file" ||
-          resource._tag === "draft-workspace-file")
-      )
-        return null;
-      const result = results[resultIndex++];
-      return result && AsyncResult.isSuccess(result) && isAssetUrlCurrent(result.value)
+  if (preparedConnection._tag === "None") return resources.map(() => null);
+  const urls: Array<string | null> = [];
+  let resultIndex = 0;
+  for (const resource of resources) {
+    if (!canReadFiles && isFileResource(resource)) {
+      urls.push(null);
+      continue;
+    }
+    const result = results[resultIndex];
+    resultIndex += 1;
+    urls.push(
+      result && AsyncResult.isSuccess(result) && isAssetUrlCurrent(result.value)
         ? resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl)
-        : null;
-    });
-  }, [canReadFiles, preparedConnection, resources, results]);
+        : null,
+    );
+  }
+  return urls;
+}
+
+function isFileResource(resource: AssetResource): boolean {
+  return (
+    resource._tag === "workspace-file" ||
+    resource._tag === "media-file" ||
+    resource._tag === "draft-workspace-file"
+  );
 }
