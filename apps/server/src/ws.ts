@@ -75,6 +75,7 @@ import {
   ProjectWriteFileError,
   ProjectMutationError,
   ProviderUploadFeedbackError,
+  ProviderRealtimeVoiceError,
   ProviderSetupError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
@@ -258,6 +259,7 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
+const isProviderRealtimeVoiceError = Schema.is(ProviderRealtimeVoiceError);
 
 const resolveDiscoveryForConfig = <A, E, R>(
   discovery: Effect.Effect<A, E, R>,
@@ -1839,6 +1841,32 @@ const layerWsRpc = (
         return result;
       });
 
+      // Resolves the provider thread and running session a thread-scoped
+      // provider operation (feedback upload, realtime voice) targets, failing
+      // with the user-facing reason when either is missing.
+      const resolveActiveProviderSession = Effect.fn("ws.providers.resolveActiveSession")(
+        function* (threadId: ThreadId) {
+          const projection = yield* threadManagement.getThreadRecords(threadId, [
+            "providerThreads",
+          ]);
+          const providerThread =
+            projection.providerThreads.find(
+              (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+            ) ?? projection.providerThreads.at(-1);
+          const providerSessionId = providerThread?.providerSessionId ?? null;
+          if (providerThread === undefined || providerSessionId === null) {
+            return yield* Effect.fail("No provider session has run in this thread yet.");
+          }
+          const runtime = Option.getOrNull(yield* providerSessionsV2.get(providerSessionId));
+          if (runtime === null) {
+            return yield* Effect.fail(
+              "The provider session is no longer running. Send a message first.",
+            );
+          }
+          return { providerThread, runtime };
+        },
+      );
+
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.stopBackgroundTask]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
@@ -2292,31 +2320,17 @@ const layerWsRpc = (
         [WS_METHODS.mcpAppsReadResource]: (input) => mcpAppRequests.readResource(input),
         [WS_METHODS.providerUploadFeedback]: (input) =>
           Effect.gen(function* () {
-            const projection = yield* threadManagement.getThreadRecords(input.threadId, [
-              "providerThreads",
-            ]);
-            const providerThread =
-              projection.providerThreads.find(
-                (candidate) => candidate.id === projection.thread.activeProviderThreadId,
-              ) ?? projection.providerThreads.at(-1);
-            const providerSessionId = providerThread?.providerSessionId ?? null;
-            if (providerThread === undefined || providerSessionId === null) {
-              return yield* Effect.fail(
-                new ProviderUploadFeedbackError({
-                  threadId: input.threadId,
-                  cause: "No provider session has run in this thread yet.",
-                }),
-              );
-            }
-            const runtime = Option.getOrNull(yield* providerSessionsV2.get(providerSessionId));
-            if (runtime === null) {
-              return yield* Effect.fail(
-                new ProviderUploadFeedbackError({
-                  threadId: input.threadId,
-                  cause: "The provider session is no longer running. Send a message first.",
-                }),
-              );
-            }
+            const { providerThread, runtime } = yield* resolveActiveProviderSession(
+              input.threadId,
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderUploadFeedbackError({
+                    threadId: input.threadId,
+                    cause,
+                  }),
+              ),
+            );
             if (runtime.uploadFeedback === undefined) {
               return yield* Effect.fail(
                 new ProviderUploadFeedbackError({
@@ -2334,6 +2348,73 @@ const layerWsRpc = (
               isProviderUploadFeedbackError(cause)
                 ? cause
                 : new ProviderUploadFeedbackError({
+                    threadId: input.threadId,
+                    cause,
+                  }),
+            ),
+          ),
+        [WS_METHODS.providerRealtimeVoiceStart]: (input) =>
+          Effect.gen(function* () {
+            const { providerThread, runtime } = yield* resolveActiveProviderSession(
+              input.threadId,
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderRealtimeVoiceError({
+                    threadId: input.threadId,
+                    cause,
+                  }),
+              ),
+            );
+            if (runtime.startRealtimeVoice === undefined) {
+              return yield* Effect.fail(
+                new ProviderRealtimeVoiceError({
+                  threadId: input.threadId,
+                  cause: `Provider '${runtime.driver}' does not support realtime voice.`,
+                }),
+              );
+            }
+            return yield* runtime.startRealtimeVoice({
+              providerThread,
+              sdp: input.sdp,
+            });
+          }).pipe(
+            Effect.mapError((cause) =>
+              isProviderRealtimeVoiceError(cause)
+                ? cause
+                : new ProviderRealtimeVoiceError({
+                    threadId: input.threadId,
+                    cause,
+                  }),
+            ),
+          ),
+        [WS_METHODS.providerRealtimeVoiceStop]: (input) =>
+          Effect.gen(function* () {
+            const { providerThread, runtime } = yield* resolveActiveProviderSession(
+              input.threadId,
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderRealtimeVoiceError({
+                    threadId: input.threadId,
+                    cause,
+                  }),
+              ),
+            );
+            if (runtime.stopRealtimeVoice === undefined) {
+              return yield* Effect.fail(
+                new ProviderRealtimeVoiceError({
+                  threadId: input.threadId,
+                  cause: `Provider '${runtime.driver}' does not support realtime voice.`,
+                }),
+              );
+            }
+            return yield* runtime.stopRealtimeVoice({ providerThread });
+          }).pipe(
+            Effect.mapError((cause) =>
+              isProviderRealtimeVoiceError(cause)
+                ? cause
+                : new ProviderRealtimeVoiceError({
                     threadId: input.threadId,
                     cause,
                   }),

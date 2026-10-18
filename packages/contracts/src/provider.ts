@@ -142,6 +142,36 @@ export class ProviderUploadFeedbackError extends Schema.TaggedError<ProviderUplo
   }
 }
 
+export const ProviderRealtimeVoiceStartInput = Schema.Struct({
+  threadId: ThreadId,
+  /** The browser's WebRTC SDP offer for the realtime session. */
+  sdp: TrimmedNonEmptyString,
+});
+export type ProviderRealtimeVoiceStartInput = typeof ProviderRealtimeVoiceStartInput.Type;
+
+export const ProviderRealtimeVoiceStartResult = Schema.Struct({
+  /** The provider's SDP answer to set as the remote description. */
+  sdp: Schema.String,
+});
+export type ProviderRealtimeVoiceStartResult = typeof ProviderRealtimeVoiceStartResult.Type;
+
+export const ProviderRealtimeVoiceStopInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ProviderRealtimeVoiceStopInput = typeof ProviderRealtimeVoiceStopInput.Type;
+
+export class ProviderRealtimeVoiceError extends Schema.TaggedError<ProviderRealtimeVoiceError>()(
+  "ProviderRealtimeVoiceError",
+  {
+    threadId: ThreadId,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Realtime voice failed for thread ${this.threadId}.`;
+  }
+}
+
 const ProviderEventKind = Schema.Literals(["session", "notification", "request", "error"]);
 
 export const ProviderEvent = Schema.Struct({

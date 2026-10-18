@@ -159,6 +159,10 @@ import {
   ProviderUploadFeedbackError,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
+  ProviderRealtimeVoiceError,
+  ProviderRealtimeVoiceStartInput,
+  ProviderRealtimeVoiceStartResult,
+  ProviderRealtimeVoiceStopInput,
 } from "./provider.ts";
 import { ProviderInstanceId, ProviderInstanceMutation } from "./providerInstance.ts";
 import { PullRequestReviewGuideResult } from "./pullRequestReviewGuide.ts";
@@ -407,6 +411,8 @@ export const WS_METHODS = {
 
   // Provider methods
   providerUploadFeedback: "provider.uploadFeedback",
+  providerRealtimeVoiceStart: "provider.realtimeVoiceStart",
+  providerRealtimeVoiceStop: "provider.realtimeVoiceStop",
   providerAuthStart: "provider.auth.start",
   providerConsumeResetCredit: "provider.consumeResetCredit",
   providerAuthComplete: "provider.auth.complete",
@@ -1364,6 +1370,18 @@ const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFeedback, 
   error: Schema.Union([ProviderUploadFeedbackError, EnvironmentAuthorizationError]),
 });
 
+const WsProviderRealtimeVoiceStartRpc = Rpc.make(WS_METHODS.providerRealtimeVoiceStart, {
+  payload: ProviderRealtimeVoiceStartInput,
+  success: ProviderRealtimeVoiceStartResult,
+  error: Schema.Union([ProviderRealtimeVoiceError, EnvironmentAuthorizationError]),
+});
+
+const WsProviderRealtimeVoiceStopRpc = Rpc.make(WS_METHODS.providerRealtimeVoiceStop, {
+  payload: ProviderRealtimeVoiceStopInput,
+  success: Schema.Void,
+  error: Schema.Union([ProviderRealtimeVoiceError, EnvironmentAuthorizationError]),
+});
+
 const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusSubscriptionInput,
   success: VcsStatusStreamEvent,
@@ -2036,6 +2054,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsMcpAppsReadResourceRpc,
   WsMcpAppsUpdateModelContextRpc,
   WsProviderUploadFeedbackRpc,
+  WsProviderRealtimeVoiceStartRpc,
+  WsProviderRealtimeVoiceStopRpc,
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
   WsWorktreeSetupCancelRpc,
