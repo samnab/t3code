@@ -1304,7 +1304,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // Every terminal run checks the queue. Only a deliverable queued run
       // needs the transcript for provider handoff and legacy import context.
       if (!(yield* projectionStore.canStartQueuedRun(threadId))) return;
-      const projection = yield* readCommandProjection(threadId);
+      let projection = yield* readCommandProjection(threadId);
       if (
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
@@ -1325,6 +1325,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           )[0]?.lastError ?? null;
       if (usageLimitBlockedRun(projection.runs, projection.turnItems, sessionError) !== null) {
         return;
+      }
+      // A typed turn/start can adopt native voice work whose offer was already
+      // queued. Replay moves that same message to the owning run; its queued
+      // placeholder must then leave the queue without starting the work again.
+      const consumedVoiceRuns = projection.runs.filter(
+        (run) =>
+          run.status === "queued" &&
+          projection.messages.some(
+            (message) =>
+              message.id === run.userMessageId &&
+              message.createdBy === "user" &&
+              message.creationSource === "provider" &&
+              message.runId !== null &&
+              message.runId !== run.id,
+          ),
+      );
+      if (consumedVoiceRuns.length > 0) {
+        const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
+        const now = yield* DateTime.now;
+        for (const run of consumedVoiceRuns) {
+          yield* emitQueuedRunCancellation({
+            command: {
+              type: "queued-run.cancel",
+              commandId: CommandId.make(`command:system:consumed-voice:${run.id}`),
+              threadId,
+              runId: run.id,
+            },
+            events,
+            projection,
+            run,
+            now,
+          });
+        }
+        yield* eventSink.write({ events: yield* Ref.get(events) });
+        projection = yield* readCommandProjection(threadId);
       }
       const queuedRun = nextQueuedRun(projection);
       if (queuedRun === undefined) {
