@@ -17,6 +17,8 @@ export interface ProviderContinuationRequest {
   readonly providerThreadId: ProviderThreadId;
   readonly driver: ProviderDriverKind;
   readonly detail: string | null;
+  /** A spoken user request whose native turn is already running in the provider. */
+  readonly origin?: "voice";
   readonly notification?: OrchestrationV2Notification;
   /**
    * Durable ownership for an app-owned delegated-task completion delivery.
@@ -55,8 +57,8 @@ export interface ProviderContinuationRequest {
 }
 
 /**
- * Adapters offer a continuation request when provider-native work completes
- * outside an active turn (for example a Claude background task wake turn) so
+ * Adapters offer a continuation request when provider-native work arrives
+ * outside an active turn (for example a background wake or realtime handoff) so
  * the orchestrator can start a run that ingests it. The default reference
  * drops requests, keeping adapter construction dependency-free in tests; the
  * live layer must be shared with the ProviderContinuationService worker that

@@ -86,6 +86,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -424,6 +425,14 @@ function codexUserMessageText(
     .join("\n")
     .trim();
 }
+
+const decodeCodexRealtimeUserItem = Schema.decodeUnknownOption(
+  Schema.Struct({
+    type: Schema.Literal("userMessage"),
+    id: Schema.String,
+    content: Schema.Array(CodexSchema.V2ItemStartedNotification__UserInput),
+  }),
+);
 
 function mapCodexTurnStatus(
   status: CodexSchema.V2TurnCompletedNotification__TurnStatus,
@@ -1188,6 +1197,7 @@ function codexErrorInfoCode(value: unknown): string | null {
 }
 
 interface ActiveCodexTurnContext {
+  realtimeInputItemId?: string;
   latestProviderFailure?: {
     readonly nativeMessage: string;
     readonly failure: OrchestrationV2ProviderFailure;
@@ -1817,9 +1827,8 @@ export interface CodexAdapterV2Options {
   readonly serverConfig: ServerConfig["Service"];
   readonly sessionOptimizers?: SessionOptimizerAttachments.SessionOptimizerAttachments["Service"];
   /**
-   * Sink for post-settle background command completions so the orchestrator
-   * can start a continuation run. Optional: adapters that omit it keep
-   * projection-only handling for late item completions.
+   * Offers background completions and native realtime handoffs for ingestion
+   * as normal runs. Optional for adapter tests without orchestration.
    */
   readonly continuationRequests?: {
     readonly offer: (
@@ -1904,7 +1913,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // and two app-servers doing that at once make one of them exit 1. The
         // gate covers the spawn and the handshake that proves this child is up,
         // so the provider probes sharing the home start before or after it.
-        const client = yield* withCodexStartupLock(
+        const connectedClient = yield* withCodexStartupLock(
           resolveCodexHomeKey({
             homePath: resolvedSettings.homePath,
             environment: baseEnvironment,
@@ -1939,6 +1948,57 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
         );
+        const realtimeThreads = new Set<string>();
+        const realtimeAnswers = new Map<
+          string,
+          Deferred.Deferred<string, CodexErrors.CodexAppServerError>
+        >();
+        const realtimeTurns = new Map<
+          string,
+          {
+            readonly nativeThreadId: string;
+            readonly startedAt: DateTime.Utc;
+            readonly messageId: ProviderAdapter.ProviderAdapterV2TurnMessage["messageId"];
+            readonly ready: Deferred.Deferred<boolean>;
+            readonly notifications: Array<Effect.Effect<void, CodexErrors.CodexAppServerError>>;
+            userItemId?: string;
+            offered: boolean;
+            adopting: boolean;
+          }
+        >();
+        // Notification delivery is serial. Hold effects rather than blocking the
+        // reader, so the user input and SDP can arrive before adoption finishes.
+        const client: CodexClient.CodexAppServerClient["Service"] = {
+          ...connectedClient,
+          handleServerNotification: (method, handler) =>
+            connectedClient.handleServerNotification(method, (payload) =>
+              Effect.gen(function* () {
+                const nativeTurnId =
+                  Predicate.hasProperty(payload, "turnId") && typeof payload.turnId === "string"
+                    ? payload.turnId
+                    : Predicate.hasProperty(payload, "turn") &&
+                        Predicate.hasProperty(payload.turn, "id") &&
+                        typeof payload.turn.id === "string"
+                      ? payload.turn.id
+                      : undefined;
+                const held =
+                  nativeTurnId === undefined ? undefined : realtimeTurns.get(nativeTurnId);
+                if (nativeTurnId === undefined || held === undefined || method === "turn/started")
+                  return yield* handler(payload);
+                held.notifications.push(handler(payload));
+                if (Predicate.hasProperty(payload, "item")) {
+                  const item = decodeCodexRealtimeUserItem(payload.item);
+                  if (Option.isSome(item)) {
+                    held.userItemId ??= item.value.id;
+                    yield* offerRealtimeTurn(
+                      nativeTurnId,
+                      codexUserMessageText(item.value.content),
+                    );
+                  }
+                }
+              }),
+            ),
+        };
         const resolvedOptimizerThreads = yield* Ref.make(new Set<string>());
         /**
          * Attach the thread's project optimizers before Codex builds its
@@ -2146,6 +2206,69 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           yield* emitGoalUpdate(nativeThreadId);
         });
 
+        const voiceRequestText = (text: string) => {
+          // Codex XML-escapes input and optionally includes a transcript delta.
+          // Only unwrap its complete known shape; preserve unfamiliar content.
+          const match =
+            /^\s*<realtime_delegation>\s*(?:<source>transcript_tail_flush<\/source>\s*)?<input>([^<>]*)<\/input>\s*(?:<transcript_delta>[^<>]*<\/transcript_delta>\s*)?<\/realtime_delegation>\s*$/.exec(
+              text,
+            );
+          return (
+            match?.[1]
+              ?.replaceAll("&lt;", "<")
+              .replaceAll("&gt;", ">")
+              .replaceAll("&amp;", "&")
+              .trim() || text
+          );
+        };
+        const offerRealtimeTurn = Effect.fnUntraced(function* (nativeTurnId: string, text: string) {
+          const held = realtimeTurns.get(nativeTurnId);
+          if (held === undefined || held.offered || continuationRequests === undefined) return;
+          const providerThread = rootProviderThreads.get(held.nativeThreadId);
+          if (providerThread?.appThreadId == null) return;
+          held.offered = true;
+          yield* continuationRequests.offer({
+            threadId: providerThread.appThreadId,
+            providerThreadId: providerThread.id,
+            driver: CODEX_PROVIDER,
+            messageId: held.messageId,
+            origin: "voice",
+            detail: voiceRequestText(text),
+            dispatchIfCurrent: (effect) =>
+              Effect.suspend(() =>
+                realtimeTurns.get(nativeTurnId) === held && !held.adopting
+                  ? effect.pipe(Effect.asSome)
+                  : Effect.succeedNone,
+              ),
+            clearIfCurrent: () => releaseRealtimeTurn(nativeTurnId),
+          });
+        });
+
+        /** Drops an unowned native turn so approvals and Codex cannot stay blocked. */
+        const releaseRealtimeTurn = Effect.fnUntraced(function* (nativeTurnId: string) {
+          const held = realtimeTurns.get(nativeTurnId);
+          if (held === undefined) return;
+          realtimeTurns.delete(nativeTurnId);
+          held.notifications.length = 0;
+          yield* Deferred.succeed(held.ready, false);
+          yield* client
+            .request("turn/interrupt", {
+              threadId: held.nativeThreadId,
+              turnId: nativeTurnId,
+            })
+            .pipe(
+              Effect.timeout("5 seconds"),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Failed to interrupt an unadopted Codex realtime turn.", {
+                  cause,
+                }),
+              ),
+            );
+        });
+        yield* Effect.addFinalizer(() =>
+          Effect.forEach(Array.from(realtimeTurns.keys()), releaseRealtimeTurn, { discard: true }),
+        );
+
         // Call only for new model-output activity. A local item/completed can
         // arrive while the upstream response stream is still retrying.
         const completeProviderRetry = Effect.fn("CodexAdapterV2.completeProviderRetry")(function* (
@@ -2269,12 +2392,73 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         ): Effect.Effect<ActiveCodexTurnContext | undefined> =>
           Effect.gen(function* () {
             const context = (yield* Ref.get(activeTurns)).get(nativeTurnId);
+            const held = realtimeTurns.get(nativeTurnId);
+            if (context === undefined && held !== undefined) {
+              // A completion replayed earlier may have removed this context.
+              // Later replayed notifications must not wait on their own replay.
+              if (held.adopting) return undefined;
+              if (!(yield* Deferred.await(held.ready))) return undefined;
+              return (yield* Ref.get(activeTurns)).get(nativeTurnId);
+            }
             if (context !== undefined || attemptsRemaining <= 0) {
               return context;
             }
             yield* Effect.yieldNow;
             return yield* awaitActiveTurn(nativeTurnId, attemptsRemaining - 1);
           });
+
+        // Requests wait until replay finishes, preserving item ordinals. Replay
+        // itself uses awaitActiveTurn after registering the context.
+        const awaitRequestTurn = Effect.fnUntraced(function* (nativeTurnId: string) {
+          const held = realtimeTurns.get(nativeTurnId);
+          if (held !== undefined && !(yield* Deferred.await(held.ready))) return undefined;
+          return yield* awaitActiveTurn(nativeTurnId);
+        });
+
+        /** Binds a run to native work and drains its buffered notifications in order. */
+        const adoptRealtimeTurn = Effect.fnUntraced(function* (
+          turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+          nativeTurnId: string,
+        ) {
+          const held = realtimeTurns.get(nativeTurnId);
+          if (held === undefined || held.adopting)
+            return yield* toProtocolError(
+              "Codex realtime turn is no longer available for adoption.",
+            );
+          held.adopting = true;
+          yield* Effect.gen(function* () {
+            if (held.nativeThreadId !== (yield* getNativeThreadId(turnInput.providerThread)))
+              return yield* toProtocolError(
+                "Codex realtime turn belongs to a different native thread.",
+              );
+            const context = yield* registerRootTurn({
+              turnInput,
+              nativeTurnId,
+              startedAt: held.startedAt,
+            });
+            if (turnInput.message.messageId === held.messageId && held.userItemId !== undefined)
+              context.realtimeInputItemId = held.userItemId;
+            for (let index = 0; index < held.notifications.length; index++) {
+              const notification = held.notifications[index];
+              if (notification !== undefined)
+                yield* notification.pipe(
+                  Effect.catchCauseIf(
+                    (cause) => !Cause.hasInterruptsOnly(cause),
+                    () => Effect.void,
+                  ),
+                );
+            }
+          }).pipe(
+            Effect.onError(() => releaseRealtimeTurn(nativeTurnId)),
+            Effect.ensuring(
+              Effect.gen(function* () {
+                realtimeTurns.delete(nativeTurnId);
+                held.notifications.length = 0;
+                yield* Deferred.succeed(held.ready, true);
+              }),
+            ),
+          );
+        });
 
         /**
          * Like awaitActiveTurn, but item lifecycle events for a turn that
@@ -3688,6 +3872,73 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             return true;
           });
 
+        const emitVoiceUserMessage = (
+          context: ActiveCodexTurnContext,
+          item: Extract<CodexSchema.V2ItemStartedNotification__ThreadItem, { type: "userMessage" }>,
+        ) =>
+          Effect.gen(function* () {
+            const rawText = codexUserMessageText(item.content);
+            if (
+              context.subagent !== null ||
+              !rawText.trimStart().startsWith("<realtime_delegation>")
+            )
+              return false;
+            if (context.realtimeInputItemId === item.id || context.itemPositions.has(item.id))
+              return true;
+            const { ordinal, startedAt } = yield* resolveItemPosition(context, item.id);
+            const messageId = idAllocator.derive.messageFromProviderItem({
+              driver: CODEX_PROVIDER,
+              nativeItemId: item.id,
+            });
+            const text = voiceRequestText(rawText);
+            yield* emitProviderEvent({
+              type: "message.updated",
+              driver: CODEX_PROVIDER,
+              message: {
+                id: messageId,
+                threadId: context.projectionThreadId,
+                runId: context.projectionRunId,
+                nodeId: context.rootNodeId,
+                role: "user",
+                createdBy: "user",
+                creationSource: "provider",
+                text,
+                attachments: [],
+                streaming: false,
+                createdAt: startedAt,
+                updatedAt: startedAt,
+              },
+            });
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CODEX_PROVIDER,
+              turnItem: {
+                id: idAllocator.derive.userTurnItem({ messageId }),
+                threadId: context.projectionThreadId,
+                runId: context.projectionRunId,
+                nodeId: context.rootNodeId,
+                providerThreadId: context.providerThread.id,
+                providerTurnId: context.providerTurnId,
+                nativeItemRef: codexNativeItemRef(item.id),
+                parentItemId: null,
+                ordinal,
+                status: "completed",
+                title: null,
+                startedAt,
+                completedAt: startedAt,
+                updatedAt: startedAt,
+                type: "user_message",
+                createdBy: "user",
+                creationSource: "provider",
+                inputIntent: "steer",
+                messageId,
+                text,
+                attachments: [],
+              },
+            });
+            return true;
+          });
+
         const buildCommandExecutionArtifacts = (
           context: ActiveCodexTurnContext,
           item: Extract<
@@ -4625,6 +4876,36 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           updateSubagentSelection(payload.threadId, payload.toModel),
         );
 
+        yield* client.handleServerNotification("thread/realtime/sdp", (payload) =>
+          Effect.gen(function* () {
+            const answer = realtimeAnswers.get(payload.threadId);
+            if (answer !== undefined) yield* Deferred.succeed(answer, payload.sdp);
+          }),
+        );
+        const closeRealtime = (threadId: string, message: string) =>
+          Effect.gen(function* () {
+            realtimeThreads.delete(threadId);
+            yield* Effect.forEach(
+              Array.from(realtimeTurns.entries()).filter(
+                ([, held]) => held.nativeThreadId === threadId,
+              ),
+              ([nativeTurnId]) => releaseRealtimeTurn(nativeTurnId),
+              { discard: true },
+            );
+            const answer = realtimeAnswers.get(threadId);
+            if (answer !== undefined)
+              yield* Deferred.fail(
+                answer,
+                CodexErrors.CodexAppServerRequestError.invalidParams(message),
+              );
+          });
+        yield* client.handleServerNotification("thread/realtime/error", (payload) =>
+          closeRealtime(payload.threadId, payload.message),
+        );
+        yield* client.handleServerNotification("thread/realtime/closed", (payload) =>
+          closeRealtime(payload.threadId, "Codex realtime session closed before SDP was received."),
+        );
+
         yield* client.handleServerNotification("turn/started", (payload) =>
           Effect.gen(function* () {
             const context = (yield* Ref.get(activeTurns)).get(payload.turn.id);
@@ -4646,6 +4927,42 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 updated.delete(payload.threadId);
                 return updated;
               });
+              return;
+            }
+            const realtimeProviderThread = rootProviderThreads.get(payload.threadId);
+            if (
+              realtimeThreads.has(payload.threadId) &&
+              realtimeProviderThread?.appThreadId != null &&
+              !goalHolds.has(payload.threadId) &&
+              continuationRequests !== undefined
+            ) {
+              if (realtimeTurns.has(payload.turn.id)) return;
+              const userItem = payload.turn.items.find((item) => item.type === "userMessage");
+              realtimeTurns.set(payload.turn.id, {
+                nativeThreadId: payload.threadId,
+                startedAt: codexTimestamp(payload.turn.startedAt),
+                messageId: yield* idAllocator.allocate.message({
+                  threadId: realtimeProviderThread.appThreadId,
+                  ordinal: 1,
+                }),
+                ready: yield* Deferred.make<boolean>(),
+                notifications: [],
+                offered: false,
+                adopting: false,
+                ...(userItem === undefined ? {} : { userItemId: userItem.id }),
+              });
+              const held = realtimeTurns.get(payload.turn.id)!;
+              // Covers dropped dispatches, cancelled queues and provider switches
+              // without coupling the adapter to every orchestration exit.
+              yield* Deferred.await(held.ready).pipe(
+                Effect.timeout("30 seconds"),
+                Effect.catch(() =>
+                  held.adopting ? Effect.void : releaseRealtimeTurn(payload.turn.id),
+                ),
+                Effect.forkIn(scope),
+              );
+              if (userItem !== undefined)
+                yield* offerRealtimeTurn(payload.turn.id, codexUserMessageText(userItem.content));
               return;
             }
             // Codex continues an active goal on its own. The next turn joins the
@@ -4868,6 +5185,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }
 
             if (payload.item.type === "userMessage") {
+              if (yield* emitVoiceUserMessage(context, payload.item)) return;
               yield* emitSubagentUserMessage(
                 context,
                 payload.item,
@@ -5016,6 +5334,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }
 
             if (payload.item.type === "userMessage") {
+              if (yield* emitVoiceUserMessage(context, payload.item)) return;
               if (yield* emitSubagentUserMessage(context, payload.item)) {
                 return;
               }
@@ -5272,12 +5591,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload) =>
           Effect.gen(function* () {
-            const context = yield* awaitActiveTurn(payload.turnId);
+            const context = yield* awaitRequestTurn(payload.turnId);
             if (context === undefined) {
-              return yield* toProtocolError(
-                `No active Codex turn context for approval turn ${payload.turnId}.`,
-                payload,
-              );
+              return {
+                decision: "decline",
+              } satisfies CodexSchema.CommandExecutionRequestApprovalResponse;
             }
 
             const nativeRequestId = payload.approvalId ?? payload.itemId;
@@ -5335,12 +5653,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         yield* client.handleServerRequest("item/fileChange/requestApproval", (payload) =>
           Effect.gen(function* () {
-            const context = yield* awaitActiveTurn(payload.turnId);
+            const context = yield* awaitRequestTurn(payload.turnId);
             if (context === undefined) {
-              return yield* toProtocolError(
-                `No active Codex turn context for file change approval turn ${payload.turnId}.`,
-                payload,
-              );
+              return {
+                decision: "decline",
+              } satisfies CodexSchema.FileChangeRequestApprovalResponse;
             }
 
             const artifacts = yield* buildApprovalRequestArtifacts({
@@ -5395,12 +5712,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
           Effect.gen(function* () {
-            const context = yield* awaitActiveTurn(payload.turnId);
+            const context = yield* awaitRequestTurn(payload.turnId);
             if (context === undefined) {
-              return yield* toProtocolError(
-                `No active Codex turn context for permissions approval turn ${payload.turnId}.`,
-                payload,
-              );
+              return permissionsResponseFromDecision({
+                decision: "decline",
+                permissions: payload.permissions,
+              });
             }
 
             const requestKind = providerRequestKindFromPermissions(payload.permissions);
@@ -5471,7 +5788,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const context =
               payload.turnId === undefined || payload.turnId === null
                 ? undefined
-                : yield* awaitActiveTurn(payload.turnId);
+                : yield* awaitRequestTurn(payload.turnId);
             if (context === undefined) {
               yield* Effect.logWarning(
                 "Declined an MCP elicitation without an active Codex turn context.",
@@ -5660,12 +5977,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
           Effect.gen(function* () {
-            const context = yield* awaitActiveTurn(payload.turnId);
+            const context = yield* awaitRequestTurn(payload.turnId);
             if (context === undefined) {
-              return yield* toProtocolError(
-                `No active Codex turn context for user input request turn ${payload.turnId}.`,
-                payload,
-              );
+              return { answers: {} } satisfies CodexSchema.ToolRequestUserInputResponse;
             }
 
             const artifacts = yield* buildUserInputRequestArtifacts({
@@ -6435,6 +6749,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               return next;
             });
             const started = yield* client.request("turn/start", turnStartParams);
+            // StartOrSteer returns the existing turn id when voice won the race.
+            if (realtimeTurns.has(started.turn.id)) {
+              yield* adoptRealtimeTurn(turnInput, started.turn.id);
+              return;
+            }
             yield* registerRootTurn({
               turnInput,
               nativeTurnId: started.turn.id,
@@ -6902,6 +7221,34 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
           startTurn: (turnInput) => {
+            // A user message with provider provenance is an adopted spoken
+            // request. Its identity selects native work; never resend its prompt.
+            if (
+              turnInput.message.createdBy === "user" &&
+              turnInput.message.creationSource === "provider"
+            ) {
+              return Effect.gen(function* () {
+                const heldEntry = Array.from(realtimeTurns.entries()).find(
+                  ([, held]) => held.messageId === turnInput.message.messageId,
+                );
+                if (heldEntry === undefined)
+                  return yield* toProtocolError(
+                    "Codex realtime turn is no longer available for adoption.",
+                  );
+                yield* adoptRealtimeTurn(turnInput, heldEntry[0]);
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterTurnStartError({
+                      driver: CODEX_PROVIDER,
+                      threadId: turnInput.threadId,
+                      providerThreadId: turnInput.providerThread.id,
+                      runId: turnInput.runId,
+                      cause,
+                    }),
+                ),
+              );
+            }
             const goalCommand =
               turnInput.message.attachments.length === 0 &&
               turnInput.restartContinuationOfRunId === undefined
@@ -7416,6 +7763,81 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                       requestId: requestInput.requestId,
                       cause,
                     }),
+              ),
+            ),
+          startRealtimeVoice: (voiceInput) =>
+            Effect.gen(function* () {
+              const threadId = yield* getNativeThreadId(voiceInput.providerThread);
+              if (realtimeThreads.has(threadId))
+                return yield* toProtocolError(
+                  "Codex realtime voice is already active on this thread.",
+                );
+              const answer = yield* Deferred.make<string, CodexErrors.CodexAppServerError>();
+              realtimeAnswers.set(threadId, answer);
+              realtimeThreads.add(threadId);
+              yield* rememberRootProviderThread(voiceInput.providerThread);
+              return yield* ensureInitialized.pipe(
+                Effect.andThen(
+                  client.raw.request("thread/realtime/start", {
+                    threadId,
+                    outputModality: "audio",
+                    version: "v3",
+                    transport: { type: "webrtc", sdp: voiceInput.sdp },
+                  }),
+                ),
+                Effect.andThen(Deferred.await(answer)),
+                Effect.timeout("20 seconds"),
+                Effect.map((sdp) => ({ sdp })),
+                Effect.onError(() =>
+                  Effect.gen(function* () {
+                    if (!realtimeThreads.delete(threadId)) return;
+                    // A timed-out or cancelled WebRTC negotiation may already
+                    // have started Codex's session. Stop it before allowing retry.
+                    yield* client.raw.request("thread/realtime/stop", { threadId }).pipe(
+                      Effect.timeout("5 seconds"),
+                      Effect.catch((cause) =>
+                        Effect.logWarning(
+                          "Failed to stop Codex realtime voice after startup failure.",
+                          { cause },
+                        ),
+                      ),
+                      Effect.ensuring(
+                        closeRealtime(threadId, "Codex realtime voice startup failed."),
+                      ),
+                    );
+                  }),
+                ),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    realtimeAnswers.delete(threadId);
+                  }),
+                ),
+              );
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CODEX_PROVIDER,
+                    detail: "Failed to start Codex realtime voice.",
+                    cause,
+                  }),
+              ),
+            ),
+          stopRealtimeVoice: (voiceInput) =>
+            Effect.gen(function* () {
+              const threadId = yield* getNativeThreadId(voiceInput.providerThread);
+              yield* ensureInitialized.pipe(
+                Effect.andThen(client.raw.request("thread/realtime/stop", { threadId })),
+                Effect.ensuring(closeRealtime(threadId, "Codex realtime voice was stopped.")),
+              );
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CODEX_PROVIDER,
+                    detail: "Failed to stop Codex realtime voice.",
+                    cause,
+                  }),
               ),
             ),
           uploadFeedback: (feedbackInput) =>

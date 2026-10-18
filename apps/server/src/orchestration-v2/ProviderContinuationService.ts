@@ -55,7 +55,8 @@ function delegatedCompletionRetryKey(
  * message.dispatch per request so the wake turn buffered by the adapter is
  * ingested as a normal run. Delegated completions are durable mailbox offers:
  * the orchestrator selects native steering or queued delivery under its thread
- * lock. Adapter-buffered continuations still queue behind active work.
+ * lock. Spoken requests start immediately when the thread is idle; other
+ * adapter-buffered continuations queue behind active work.
  */
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -215,14 +216,20 @@ export const layer = Layer.effectDiscard(
           threadId: request.threadId,
           messageId,
           text: request.detail ?? CONTINUATION_MESSAGE_TEXT,
-          notification: request.notification ?? {
-            source: { kind: "background_task" },
-            outcome: "updated",
-            summary: "Background activity updated",
-          },
+          ...(request.origin === "voice"
+            ? {}
+            : {
+                notification: request.notification ?? {
+                  source: { kind: "background_task" },
+                  outcome: "updated",
+                  summary: "Background activity updated",
+                },
+              }),
           attachments: [],
-          dispatchMode: { type: "queue_after_active" },
-          createdBy: "agent",
+          dispatchMode: {
+            type: request.origin === "voice" ? "start_immediately" : "queue_after_active",
+          },
+          createdBy: request.origin === "voice" ? "user" : "agent",
           // "provider" marks an adapter-buffered wake, which ClaudeAdapterV2
           // detects to attach the buffered CLI output and drop this text. A
           // message_text wake has no buffered output, so it must not carry that
@@ -307,6 +314,8 @@ export const layer = Layer.effectDiscard(
                   ),
                   Effect.forkScoped,
                 );
+              } else if (request.clearIfCurrent !== undefined) {
+                yield* request.clearIfCurrent();
               }
             }),
           ),
