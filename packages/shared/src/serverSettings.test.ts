@@ -1045,6 +1045,34 @@ describe("synchronized model preferences", () => {
     ).toEqual({ hiddenModels: ["luna", "sol"], modelOrder: [] });
   });
 
+  it("default model edits keep other clients' visibility, order and providers", () => {
+    const otherProvider = ProviderInstanceId.make("claude_work");
+    const initial = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      providerModelPreferences: {
+        ...legacy.providerModelPreferences,
+        [otherProvider]: { hiddenModels: ["opus"], modelOrder: ["sonnet"] },
+      },
+    });
+    const withModel = applyServerSettingsPatch(initial, {
+      setProviderModelDefault: { provider, defaultModel: "sol", defaultOptions: [] },
+    });
+    const withOptions = applyServerSettingsPatch(withModel, {
+      setProviderModelDefault: {
+        provider,
+        defaultOptions: [{ id: "reasoningEffort", value: "high" }],
+      },
+    });
+    expect(withOptions.providerModelPreferences?.[provider]).toEqual({
+      hiddenModels: ["astra"],
+      modelOrder: ["sol"],
+      defaultModel: "sol",
+      defaultOptions: [{ id: "reasoningEffort", value: "high" }],
+    });
+    expect(withOptions.providerModelPreferences?.[otherProvider]).toEqual(
+      initial.providerModelPreferences?.[otherProvider],
+    );
+  });
+
   it("migrates saved lists independently without claiming empty legacy lists", () => {
     expect(modelPreferencesMigrationPatch(DEFAULT_SERVER_SETTINGS, {})).toBeNull();
     const patch = modelPreferencesMigrationPatch(DEFAULT_SERVER_SETTINGS, legacy)!;
