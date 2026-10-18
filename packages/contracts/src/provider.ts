@@ -144,8 +144,8 @@ export class ProviderUploadFeedbackError extends Schema.TaggedError<ProviderUplo
 
 export const ProviderRealtimeVoiceStartInput = Schema.Struct({
   threadId: ThreadId,
-  /** The browser's WebRTC SDP offer for the realtime session. */
-  sdp: TrimmedNonEmptyString,
+  /** The browser's WebRTC SDP offer, verbatim: SDP needs its trailing CRLF, so never trim it. */
+  sdp: Schema.String.check(Schema.isMinLength(1)),
 });
 export type ProviderRealtimeVoiceStartInput = typeof ProviderRealtimeVoiceStartInput.Type;
 
