@@ -662,6 +662,20 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly reason?: string;
   }) => Effect.Effect<{ readonly feedbackId: string }, ProviderAdapterV2Error>;
   /**
+   * Realtime voice on a thread, for drivers whose provider hosts a voice model
+   * (Codex). The client sends its WebRTC SDP offer and gets the provider's
+   * answer; audio then flows between client and provider directly. Work the
+   * voice hands off runs as ordinary turns on the thread. Absent means the
+   * driver has no voice mode.
+   */
+  readonly startRealtimeVoice?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly sdp: string;
+  }) => Effect.Effect<{ readonly sdp: string }, ProviderAdapterV2Error>;
+  readonly stopRealtimeVoice?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /**
    * MCP Apps host operations through the provider's own MCP client, for
    * drivers whose protocol exposes them (Codex). Absent means apps from this
    * provider are not interactive and their tool calls stay plain tool rows.
