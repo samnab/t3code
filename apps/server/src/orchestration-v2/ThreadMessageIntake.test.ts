@@ -7,6 +7,7 @@ import {
   ChatAttachmentId,
   CommandId,
   EventId,
+  MessageId,
   RuntimeRequestId,
   ThreadId,
   TurnItemId,

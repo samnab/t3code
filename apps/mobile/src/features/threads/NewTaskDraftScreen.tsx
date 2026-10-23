@@ -1265,6 +1265,20 @@ export function NewTaskDraftScreen(props: {
         onChangeUserInputCustomAnswer={() => {}}
         onSubmitUserInput={async () => {}}
         onDismissUserInput={async () => {}}
+        goal={null}
+        goalLoop={null}
+        goalEditorState={null}
+        onOpenGoalEditor={() => {}}
+        onGoalDraftChange={() => {}}
+        onCloseGoalEditor={() => {}}
+        onSaveGoal={() => {}}
+        onClearGoal={() => {}}
+        onGoalLoopAction={() => {}}
+        voiceNotifications={flow.voiceNotifications}
+        onUpdateVoiceNotifications={flow.setVoiceNotifications}
+        backgroundWork={[]}
+        onStopBackgroundTask={() => {}}
+        outputThroughputByProviderTurnId={{}}
       />
     </>
   );

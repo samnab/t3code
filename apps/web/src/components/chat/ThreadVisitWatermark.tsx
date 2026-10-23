@@ -1,5 +1,5 @@
 import { type ScopedThreadRef } from "@t3tools/contracts";
-import { resolveThreadLastVisitedAt } from "../Sidebar.logic";
+import { resolveSeenCompletionAt, resolveThreadLastVisitedAt } from "../Sidebar.logic";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useEffect, useRef } from "react";
 import { useUiStateStore } from "../../uiStateStore";
@@ -26,8 +26,15 @@ export function ThreadVisitWatermark(props: { readonly threadRef: ScopedThreadRe
   const lastDispatchedVisitRef = useRef<string | null>(null);
   const lastVisitDispatchAtRef = useRef(0);
 
+  // A completion stays unseen while its background work is still running.
+  const completionSeenPending =
+    serverThread !== null &&
+    Boolean(serverThread.latestRun?.completedAt) &&
+    resolveSeenCompletionAt(serverThread) === null;
+
   useEffect(() => {
     if (!serverThread?.id) return;
+    if (completionSeenPending) return;
     const threadUpdatedAt = Date.parse(serverThread.updatedAt);
     if (Number.isNaN(threadUpdatedAt)) return;
     const effectiveLastVisitedAt = resolveThreadLastVisitedAt(
@@ -73,6 +80,7 @@ export function ThreadVisitWatermark(props: { readonly threadRef: ScopedThreadRe
     );
   }, [
     activeThreadLocalLastVisitedAt,
+    completionSeenPending,
     markThreadVisited,
     threadKey,
     serverThread?.environmentId,

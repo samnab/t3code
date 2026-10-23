@@ -52,13 +52,12 @@ describe("optimizer attachment projections", () => {
           cwd: "/workspace/repo",
         },
       }).config;
-      expect(threadConfig["mcp_servers"]).toEqual({
-        "codebase-memory": {
-          command: "/tools/codebase-memory-mcp",
-          args: ["serve"],
-          env: { CBM_ALLOWED_ROOT: "/workspace/repo" },
-        },
+      expect(threadConfig["mcp_servers.codebase-memory"]).toEqual({
+        command: "/tools/codebase-memory-mcp",
+        args: ["serve"],
+        env: { CBM_ALLOWED_ROOT: "/workspace/repo" },
       });
+      expect(threadConfig["mcp_servers.t3-code"]).toBeUndefined();
       expect(threadConfig["openai_base_url"]).toEqual("http://127.0.0.1:6767/v1");
 
       const turn = yield* buildCodexTurnStartParams({

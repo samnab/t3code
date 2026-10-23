@@ -14,6 +14,7 @@ import {
   snapshotComposerSend,
   withMessageContext,
   makeThreadErrorSetter,
+  resolveDraftThreadCreationSettings,
 } from "../ChatView.logic";
 import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import {
@@ -25,7 +26,12 @@ import {
   type ThreadId,
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadGoal,
 } from "@t3tools/contracts";
+import {
+  resolveComposerThreadGoalCommand,
+  runThreadGoalMutation,
+} from "@t3tools/client-runtime/state/thread-goal-editor";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
@@ -233,6 +239,7 @@ interface ComposerSendInput {
   readonly acknowledgeActiveThreadWoke: () => void;
   readonly handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
   readonly handleNewThreadInActiveProject: () => void;
+  readonly openGoalEditor: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
     threadId: ThreadId;
     createdAt: string;
@@ -318,6 +325,7 @@ export function useComposerSend(input: ComposerSendInput) {
     acknowledgeActiveThreadWoke,
     handleInteractionModeChange,
     handleNewThreadInActiveProject,
+    openGoalEditor,
     persistThreadSettingsForNextTurn,
   } = input;
   const handleNewThread = useNewThreadHandler();
@@ -328,6 +336,12 @@ export function useComposerSend(input: ComposerSendInput) {
     reportFailure: false,
   });
   const uploadThreadFeedback = useOrchestrationCommand(threadEnvironment.uploadFeedback, {
+    reportFailure: false,
+  });
+  const setThreadGoal = useOrchestrationCommand(threadEnvironment.setGoal, {
+    reportFailure: false,
+  });
+  const clearThreadGoal = useOrchestrationCommand(threadEnvironment.clearGoal, {
     reportFailure: false,
   });
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
@@ -816,6 +830,72 @@ export function useComposerSend(input: ComposerSendInput) {
     const outgoingMessageContext = buildOutgoingMessageContext(
       composerAttachmentsSnapshot.map((attachment) => attachment.id),
     );
+    const goalServerConfig = readEnvironmentPresentation(environmentId)?.serverConfig ?? null;
+    const goalCommand = resolveComposerThreadGoalCommand({
+      text: messageTextForSend,
+      isServerThread,
+      attachmentCount: composerAttachmentsSnapshot.length,
+      ...(outgoingMessageContext === undefined ? {} : { context: outgoingMessageContext }),
+      capabilityKnown: goalServerConfig !== null,
+      supportsThreadGoals: goalServerConfig !== null,
+    });
+    if (goalCommand !== null) {
+      if (goalCommand.blockReason !== null) {
+        const descriptions = {
+          "draft-thread": "Create the thread first, or use the goal editor in the top bar.",
+          attachments: "Remove attachments before using /goal.",
+          context: "Remove attached context before using /goal.",
+          unavailable: "Thread goal support is still loading.",
+          unsupported: "This server does not support thread goals.",
+        } as const;
+        setThreadError(activeThread.id, descriptions[goalCommand.blockReason]);
+        return;
+      }
+      const clearGoalCommandFromComposer = () => {
+        setComposerDraftPrompt(composerDraftTarget, "");
+        promptRef.current = "";
+        composerRef.current?.resetCursorState();
+      };
+      if (goalCommand.command.action === "show") {
+        openGoalEditor();
+        clearGoalCommandFromComposer();
+        return;
+      }
+      const goalUpdate =
+        goalCommand.command.action === "set" ? ThreadGoal.make(goalCommand.command.goal) : null;
+      const goalThreadId = activeThread.id;
+      const mutation = await runThreadGoalMutation(
+        scopeThreadRef(environmentId, goalThreadId),
+        () =>
+          goalUpdate === null
+            ? clearThreadGoal({ environmentId, input: { threadId: goalThreadId } })
+            : setThreadGoal({
+                environmentId,
+                input: { threadId: goalThreadId, goal: goalUpdate },
+              }),
+      );
+      if (mutation.status === "busy") {
+        setThreadError(goalThreadId, "A goal update is already in progress.");
+        return;
+      }
+      if (mutation.value._tag === "Failure") {
+        if (!isAtomCommandInterrupted(mutation.value)) {
+          const error = squashAtomCommandFailure(mutation.value);
+          setThreadError(
+            goalThreadId,
+            error instanceof Error ? error.message : "Failed to update the thread goal.",
+          );
+        }
+        return;
+      }
+      clearGoalCommandFromComposer();
+      return;
+    }
+    const stagedDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    const draftCreationSettings = resolveDraftThreadCreationSettings({
+      goal: stagedDraft?.goal ?? null,
+      voiceNotifications: stagedDraft?.voiceNotifications ?? null,
+    });
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
@@ -1224,6 +1304,7 @@ export function useComposerSend(input: ComposerSendInput) {
                       modelSelection: threadCreateModelSelection,
                       runtimeMode,
                       interactionMode: sendInteractionMode,
+                      ...draftCreationSettings,
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,

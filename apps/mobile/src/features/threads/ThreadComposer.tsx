@@ -578,7 +578,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   })();
   const goalDisplay = resolveThreadGoalDisplay({
     goal: props.goal,
-    controlsVisible: props.connectionState === "connected",
+    controlsVisible: props.connectionState === "connected" && !props.isDraft,
     supportsThreadGoals: true,
   });
   const goalLoopAction = mobileGoalLoopAction(props.goalLoop);

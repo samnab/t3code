@@ -48,6 +48,7 @@ import {
   type StopThreadSessionInput,
   type StopThreadBackgroundTaskInput,
   type SetThreadGoalInput,
+  type ThreadCommandInput,
   type ControlThreadGoalLoopInput,
   type SetThreadVoiceNotificationsInput,
   type UnarchiveThreadInput,

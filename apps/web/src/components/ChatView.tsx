@@ -3156,6 +3156,7 @@ export default function ChatView(props: ChatViewProps) {
     acknowledgeActiveThreadWoke,
     handleInteractionModeChange,
     handleNewThreadInActiveProject,
+    openGoalEditor,
     persistThreadSettingsForNextTurn,
   });
   const onImplementPlanInNewThreadStable = useStableCallback(onImplementPlanInNewThread);

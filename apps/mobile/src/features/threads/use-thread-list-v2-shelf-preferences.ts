@@ -64,9 +64,7 @@ export function useThreadSortOrder() {
     (AsyncResult.isSuccess(preferencesResult)
       ? preferencesResult.value.threadSortOrder
       : undefined) ?? DEFAULT_SIDEBAR_THREAD_SORT_ORDER;
-  const setThreadSortOrder = useCallback(
-    (value: SidebarThreadSortOrder) => savePreferences({ threadSortOrder: value }),
-    [savePreferences],
-  );
+  const setThreadSortOrder = (value: SidebarThreadSortOrder) =>
+    savePreferences({ threadSortOrder: value });
   return { threadSortOrder, setThreadSortOrder } as const;
 }

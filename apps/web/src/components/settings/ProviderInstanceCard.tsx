@@ -1360,8 +1360,6 @@ export function ProviderInstanceCard({
                         instanceId={instanceId}
                         models={defaultModelEntry.models}
                         model={resolvedDefaultModel}
-                        prompt=""
-                        onPromptChange={() => {}}
                         modelOptions={defaultOptions}
                         allowPromptInjectedEffort={false}
                         planModeEnabled={false}

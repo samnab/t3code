@@ -1683,7 +1683,7 @@ export function presentThreadShellFromProjection(
             .map((thread) => thread.providerInstanceId),
         ),
       ],
-      goal:
+      providerGoal:
         projection.providerThreads.find(
           (thread) => thread.id === projection.thread.activeProviderThreadId,
         )?.goal ?? null,

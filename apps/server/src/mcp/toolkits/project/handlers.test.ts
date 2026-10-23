@@ -16,7 +16,6 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
-import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
@@ -30,10 +29,6 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
-
-const unusedServerSettingsLayer = Layer.mock(ServerSettings.ServerSettingsService)({
-  getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-});
 
 const unusedProviderRegistryLayer = Layer.mock(ProviderRegistry.ProviderRegistry)({
   getProviders: Effect.succeed([]),
@@ -112,7 +107,6 @@ const clientLaunchHarness = (input: {
         ),
     }),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
-    unusedServerSettingsLayer,
     unusedProviderRegistryLayer,
     NodeServices.layer,
   ).pipe(

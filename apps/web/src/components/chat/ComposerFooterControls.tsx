@@ -5,11 +5,11 @@ import type {
   RuntimeMode,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
-import { BotIcon, PencilRulerIcon } from "lucide-react";
+import { BellIcon, BellOffIcon, BotIcon, PencilRulerIcon } from "lucide-react";
 import { type ComponentProps, memo } from "react";
 
 import type { ContextWindowSnapshot } from "../../lib/contextWindow";
-import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
+import { Select, SelectItem, SelectPopup } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   ComposerControl,
@@ -35,10 +35,12 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   runtimeModeOptions: ReadonlyArray<RuntimeModeOption>;
+  voiceNotifications: boolean;
   size?: "sm" | "xs";
   hidden?: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onVoiceNotificationsChange: (enabled: boolean) => void;
 }) {
   const size = props.size ?? "sm";
   const composerFloatingLayerProps = useComposerMenuProps();
@@ -111,7 +113,6 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
             }
           >
             <ComposerControlIcon icon={RuntimeModeIcon} size={size} />
-            <SelectValue data-composer-control-label>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
             {props.runtimeModeOptions.map((option) => {
@@ -139,7 +140,33 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
             })}
           </SelectPopup>
         </Select>
-        <TooltipPopup side="top">{runtimeModeOption.description}</TooltipPopup>
+        <TooltipPopup side="top">
+          {runtimeModeOption.label}: {runtimeModeOption.description}
+        </TooltipPopup>
+      </Tooltip>
+
+      <ComposerControlSeparator size={size} />
+      <Tooltip>
+        <Select
+          value={props.voiceNotifications ? "on" : "off"}
+          onValueChange={(value) => props.onVoiceNotificationsChange(value === "on")}
+        >
+          <TooltipTrigger
+            render={<ComposerSelectControl size={size} aria-label="Voice notifications" />}
+          >
+            <ComposerControlIcon
+              icon={props.voiceNotifications ? BellIcon : BellOffIcon}
+              size={size}
+            />
+          </TooltipTrigger>
+          <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
+            <SelectItem value="on">Voice notifications on</SelectItem>
+            <SelectItem value="off">Voice notifications off</SelectItem>
+          </SelectPopup>
+        </Select>
+        <TooltipPopup side="top">
+          Voice notifications {props.voiceNotifications ? "on" : "off"}
+        </TooltipPopup>
       </Tooltip>
 
       {interactionModeToggle}

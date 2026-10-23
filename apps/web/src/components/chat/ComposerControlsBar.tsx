@@ -3,8 +3,13 @@ import type { PromptUltrathink } from "./TraitsPicker";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { type AppModelOption } from "../../modelSelection";
 import { CircleAlertIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
-import { ComposerControl, ComposerControlSeparator } from "./ComposerControl";
+import {
+  ComposerControl,
+  ComposerControlSeparator,
+  type ComposerControlSize,
+} from "./ComposerControl";
 import {
   ComposerFooterModeControls,
   ComposerModelPicker,
@@ -78,6 +83,9 @@ export function ComposerControlsBar(props: {
   onModelPickerOpenChange: (open: boolean) => void;
   modelPickerIconClassName: string | undefined;
   getModelDisabledReason: ChatComposerProps["getModelDisabledReason"];
+  voiceNotifications: boolean;
+  onVoiceNotificationsChange: (enabled: boolean) => void;
+  renderRealtimeVoiceControl?: ((size: ComposerControlSize) => ReactNode) | null | undefined;
 }) {
   const {
     environmentId,
@@ -127,6 +135,9 @@ export function ComposerControlsBar(props: {
     onModelPickerOpenChange,
     modelPickerIconClassName,
     getModelDisabledReason,
+    voiceNotifications,
+    onVoiceNotificationsChange,
+    renderRealtimeVoiceControl,
   } = props;
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
     provider: selectedProvider,
@@ -175,6 +186,19 @@ export function ComposerControlsBar(props: {
           },
         ]
       : []),
+    ...(renderRealtimeVoiceControl
+      ? [
+          {
+            id: "voice",
+            content: (
+              <>
+                <ComposerControlSeparator size={composerControlsCollapsed ? "xs" : "sm"} />
+                {renderRealtimeVoiceControl(composerControlsCollapsed ? "xs" : "sm")}
+              </>
+            ),
+          },
+        ]
+      : []),
     {
       id: "mode",
       content: (
@@ -183,10 +207,12 @@ export function ComposerControlsBar(props: {
           interactionMode={interactionMode}
           runtimeMode={compatibleRuntimeMode}
           runtimeModeOptions={compatibleRuntimeModeOptions}
+          voiceNotifications={voiceNotifications}
           size={composerControlsCollapsed ? "xs" : "sm"}
           hidden={composerControlsHidden || restingHiddenBlockCount > 0}
           onToggleInteractionMode={toggleInteractionMode}
           onRuntimeModeChange={handleRuntimeModeChange}
+          onVoiceNotificationsChange={onVoiceNotificationsChange}
         />
       ),
     },
@@ -313,6 +339,7 @@ export function ComposerControlsBar(props: {
           <CompactComposerControlsMenu
             interactionMode={interactionMode}
             runtimeMode={compatibleRuntimeMode}
+            voiceNotifications={voiceNotifications}
             runtimeModeOptions={compatibleRuntimeModeOptions}
             size={composerControlsCollapsed ? "xs" : "sm"}
             hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
@@ -322,6 +349,7 @@ export function ComposerControlsBar(props: {
             }
             onToggleInteractionMode={toggleInteractionMode}
             onRuntimeModeChange={handleRuntimeModeChange}
+            onVoiceNotificationsChange={onVoiceNotificationsChange}
           />
         </div>
       </>

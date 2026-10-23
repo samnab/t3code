@@ -159,7 +159,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
-  const interruptThreadTurn = useOrchestrationCommand(threadEnvironment.interruptTurn, {
+  const stopBackgroundTask = useOrchestrationCommand(threadEnvironment.stopBackgroundTask, {
     reportFailure: false,
   });
 
@@ -387,16 +387,20 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   // has background work.
   const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
-  const isStoppingBackgroundWork =
-    stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
-  const handleStopBackgroundWork = async () => {
+  const stoppingBackgroundWorkPrefix = `${environmentId}:${activeThreadId}:`;
+  const stoppingBackgroundTaskId = stoppingBackgroundWorkKey?.startsWith(
+    stoppingBackgroundWorkPrefix,
+  )
+    ? stoppingBackgroundWorkKey.slice(stoppingBackgroundWorkPrefix.length)
+    : null;
+  const handleStopBackgroundWork = async (taskId: string) => {
     if (!activeThread || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
       return;
-    const requestKey = `${environmentId}:${activeThread.id}`;
+    const requestKey = `${environmentId}:${activeThread.id}:${taskId}`;
     setStoppingBackgroundWorkKey(requestKey);
-    const result = await interruptThreadTurn({
+    const result = await stopBackgroundTask({
       environmentId,
-      input: { threadId: activeThread.id },
+      input: { threadId: activeThread.id, taskId },
     });
     // Acceptance does not confirm termination. Allow retry while the provider
     // finishes stopping the tasks or reports a failure.
@@ -511,12 +515,13 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     sendInFlightRef.current = false;
   };
   const sendStandaloneCommandStable = useStableCallback(sendStandaloneCommand);
-  const activeGoal = activeThreadShell?.goal ?? null;
+  // The provider's native /goal; the fork's own thread `goal` is a separate string.
+  const activeProviderGoal = activeThreadShell?.providerGoal ?? null;
   const goalBanner =
-    activeThread && activeGoal !== null
+    activeThread && activeProviderGoal !== null
       ? goalBannerItem({
           threadId: activeThread.id,
-          goal: activeGoal,
+          goal: activeProviderGoal,
           isWorking,
           onSendCommand: sendStandaloneCommandStable,
         })
@@ -526,8 +531,8 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     ? backgroundWorkBannerItem({
         threadId: activeThread.id,
         tasks: activeBackgroundTasks,
-        stopDisabled: !canOperateThread || isStoppingBackgroundWork,
-        stopping: isStoppingBackgroundWork,
+        stopDisabled: !canOperateThread,
+        stoppingTaskId: stoppingBackgroundTaskId,
         onStop: handleStopBackgroundWorkStable,
         onOpenThread: onOpenRelatedThreadStable,
       })

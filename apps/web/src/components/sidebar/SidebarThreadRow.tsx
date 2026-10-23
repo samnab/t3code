@@ -1,3 +1,4 @@
+import { readThreadGoalState } from "@t3tools/client-runtime/state/thread-goal-editor";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
@@ -44,6 +45,7 @@ import {
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
+  UsersIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -583,6 +585,46 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     variantAction,
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
+  const threadGoalState = readThreadGoalState({
+    ...(thread.goal === undefined ? {} : { goal: thread.goal }),
+    ...(thread.goalLoop === undefined ? {} : { goalLoop: thread.goalLoop }),
+  });
+  const backgroundTaskCount = thread.pendingBackgroundTasks.length;
+  const goalBadge = threadGoalState.goal ? (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-sm bg-accent px-1.5 py-0.5 text-2xs text-sidebar-muted-foreground" />
+        }
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "size-1.5 rounded-full",
+            threadGoalState.goalLoop?.state === "running" ? "bg-success" : "bg-muted-foreground",
+          )}
+        />
+        Goal
+      </TooltipTrigger>
+      <TooltipPopup side="top">{threadGoalState.goal}</TooltipPopup>
+    </Tooltip>
+  ) : null;
+  const backgroundTaskBadge =
+    backgroundTaskCount > 0 ? (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span className="inline-flex shrink-0 items-center gap-1 text-sidebar-muted-foreground" />
+          }
+        >
+          <UsersIcon aria-hidden className="size-3" />
+          {backgroundTaskCount}
+        </TooltipTrigger>
+        <TooltipPopup side="top">
+          {backgroundTaskCount} background {backgroundTaskCount === 1 ? "task" : "tasks"}
+        </TooltipPopup>
+      </Tooltip>
+    ) : null;
   const threadKey = scopedThreadKey(threadRef);
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   useEffect(() => {
@@ -651,7 +693,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const topStatus =
     status === "working"
       ? {
-          label: thread.goal?.status === "active" ? "Goal" : "Working",
+          // A native /goal keeps the agent going across turns until it is met.
+          label: thread.providerGoal?.status === "active" ? "Goal" : "Working",
           icon: "working" as const,
           className: "text-info",
         }
@@ -1115,6 +1158,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             {draftIndicator}
             {title}
             {pinIndicator}
+            {goalBadge}
+            {backgroundTaskBadge}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
@@ -1458,6 +1503,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 <span className="flex-1" />
               )}
               {terminalStatusIcon}
+              {goalBadge}
+              {backgroundTaskBadge}
               {prBadge}
               {diff ? (
                 <span className="shrink-0 font-mono">

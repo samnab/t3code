@@ -20,6 +20,7 @@ import {
   getProviderSkillsForSlashMenu,
   getProviderSlashCommandsForSlashMenu,
 } from "@t3tools/client-runtime/providerSkills";
+import { dedupeProviderSlashCommands } from "@t3tools/client-runtime/provider-slash-commands";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useThreadShells } from "~/state/entities";
 import {
@@ -206,9 +207,9 @@ export function useComposerMenuItems({
         selectedProviderSkills,
         showSkillsInSlashMenu,
       );
-      const providerSlashCommandItems = getProviderSlashCommandsForSlashMenu(
-        selectedProviderSlashCommands,
-        slashMenuSkills,
+      const providerSlashCommandItems = dedupeProviderSlashCommands(
+        getProviderSlashCommandsForSlashMenu(selectedProviderSlashCommands, slashMenuSkills),
+        builtInSlashCommandItems.map((item) => item.command),
       ).map((command) => ({
         id: `provider-slash-command:${selectedProvider}:${command.name}`,
         type: "provider-slash-command" as const,

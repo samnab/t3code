@@ -83,6 +83,8 @@ describe("buildThreadActionMenuItems", () => {
         (item) => item.id === "reload-agent",
       )?.disabled,
     ).toBe(true);
-    expect(ids(baseState)).not.toContain("reload-agent");
+    expect(buildThreadActionMenuItems(baseState).map((item) => item.id)).not.toContain(
+      "reload-agent",
+    );
   });
 });

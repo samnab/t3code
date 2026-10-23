@@ -30,6 +30,7 @@ import {
   boundAttachmentIds,
   type ComposerSendSnapshot,
   type makeThreadErrorSetter,
+  resolveDraftThreadCreationSettings,
   withMessageContext,
 } from "../ChatView.logic";
 import {
@@ -115,6 +116,11 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     readonly isCurrentSend: () => boolean;
   }) => {
     const { attachments: attachmentsSnapshot, messageText } = sendSnapshot;
+    const stagedDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    const draftCreationSettings = resolveDraftThreadCreationSettings({
+      goal: stagedDraft?.goal ?? null,
+      voiceNotifications: stagedDraft?.voiceNotifications ?? null,
+    });
     const failedSelections: ModelSelection[] = [];
     let clearedDraft = false;
     let releasedComposer = false;
@@ -187,6 +193,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                       modelSelection: target.selection,
                       runtimeMode,
                       interactionMode: target.interactionMode,
+                      ...draftCreationSettings,
                       branch,
                       worktreePath: null,
                       createdAt: createdAt,

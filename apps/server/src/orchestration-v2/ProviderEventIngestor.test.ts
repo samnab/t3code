@@ -2020,6 +2020,9 @@ layer("ProviderEventIngestorV2", (it) => {
           providerInstanceId,
           modelSelection: { instanceId: providerInstanceId, model: "claude-sonnet-4-6" },
           activeProviderThreadId: null,
+          goal: null,
+          goalLoop: null,
+          voiceNotifications: true,
           createdBy: "agent",
           creationSource: "provider",
           lineage: {

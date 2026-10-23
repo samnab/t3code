@@ -20,6 +20,7 @@ import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
+import type { TurnOutputThroughput } from "@t3tools/client-runtime/state/tokenThroughput";
 import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./timelineRowContext";
 import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts";
 
@@ -154,6 +155,11 @@ function AssistantMessageMeta({
   alwaysVisible?: boolean;
 }) {
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  const showThroughput =
+    ctx.turnOutputThroughput !== null &&
+    message.runId === activity.latestRunId &&
+    !message.streaming;
 
   return (
     <div
@@ -188,7 +194,32 @@ function AssistantMessageMeta({
           </TooltipPopup>
         </Tooltip>
       )}
+      {showThroughput && ctx.turnOutputThroughput ? (
+        <TurnOutputRate throughput={ctx.turnOutputThroughput} />
+      ) : null}
     </div>
+  );
+}
+
+function TurnOutputRate({ throughput }: { readonly throughput: TurnOutputThroughput }) {
+  const label = `${throughput.tokensPerSecond.toLocaleString(undefined, {
+    maximumFractionDigits: 1,
+  })} tok/s`;
+  const description = "Average output tokens per second over the whole turn.";
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            className="text-muted-foreground tabular-nums"
+            aria-label={`${description} ${label}`}
+          />
+        }
+      >
+        {label}
+      </TooltipTrigger>
+      <TooltipPopup>{description}</TooltipPopup>
+    </Tooltip>
   );
 }
 

@@ -10,6 +10,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import type { WorkflowOpening } from "@t3tools/client-runtime/state/subagentRuntime";
+import type { TurnOutputThroughput } from "@t3tools/client-runtime/state/tokenThroughput";
 import { createContext, type MouseEvent } from "react";
 import { type LegendListRef } from "@legendapp/list/react";
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
@@ -64,6 +65,7 @@ export interface TimelineRowSharedState {
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
   workGroupViewState: WorkGroupViewState;
+  turnOutputThroughput: TurnOutputThroughput | null;
 }
 
 export interface TimelineRowActivityState {
