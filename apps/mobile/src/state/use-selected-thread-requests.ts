@@ -5,7 +5,11 @@ import {
   questionAttachmentDraftPrefix,
   questionAttachmentPreparationAtom,
 } from "./question-attachments";
-import { composerDraftsAtom, clearComposerDraft } from "./use-composer-drafts";
+import {
+  clearComposerDraft,
+  composerDraftsAtom,
+  questionAttachmentDraftsAtom,
+} from "./use-composer-drafts";
 import {
   composerAttachmentUploadsAtom,
   composerAttachmentUploadBlockReason,
@@ -119,7 +123,13 @@ export function useSelectedThreadRequests() {
     }
   }, [activePendingUserInput, selectedThreadShell]);
   const questionServerConfigs = useServerConfigs();
-  const attachmentDrafts = useAtomValue(composerDraftsAtom);
+  const attachmentDrafts = useAtomValue(
+    questionAttachmentDraftsAtom(
+      selectedThreadShell
+        ? questionAttachmentDraftPrefix(selectedThreadShell.environmentId, selectedThreadShell.id)
+        : "",
+    ),
+  );
   const preparationCounts = useAtomValue(questionAttachmentPreparationAtom);
   const uploadStates = useAtomValue(composerAttachmentUploadsAtom);
   useEffect(() => {
@@ -226,7 +236,7 @@ export function useSelectedThreadRequests() {
   );
 
   const onRespondToApproval = useCallback(
-    async (requestId: RuntimeRequestId, decision: ProviderApprovalDecision) => {
+    async (requestId: RuntimeRequestId, decision: ProviderApprovalDecision, feedback?: string) => {
       if (
         !selectedThreadShell ||
         !readEnvironmentScope(selectedThreadShell.environmentId, AuthOrchestrationOperateScope)
@@ -247,6 +257,7 @@ export function useSelectedThreadRequests() {
           threadId: selectedThreadShell.id,
           requestId,
           decision,
+          ...(feedback === undefined ? {} : { feedback }),
         },
       });
       setRespondingApprovalId((current) => (current === requestId ? null : current));
@@ -361,6 +372,7 @@ export function useSelectedThreadRequests() {
 
   return {
     activePendingApproval,
+    activePendingApprovals,
     activePendingUserInput,
     activePendingUserInputDrafts,
     activePendingUserInputAnswers,

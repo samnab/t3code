@@ -2,6 +2,7 @@ import {
   type KeybindingCommand,
   type KeybindingShortcut,
   type KeybindingWhenNode,
+  type ResolvedKeybindingRule,
   MODEL_PICKER_JUMP_KEYBINDING_COMMANDS,
   type ResolvedKeybindingsConfig,
   THREAD_JUMP_KEYBINDING_COMMANDS,
@@ -104,6 +105,25 @@ export function shortcutConflictKey(
   ].join("|");
 }
 
+function shortcutForContext(binding: ResolvedKeybindingRule, context: ShortcutMatchContext) {
+  const shortcut = binding.shortcut;
+  // Existing installs persist Mod+Enter. Resolve its alternate chord against
+  // the send preference without rewriting saved or remapped shortcuts.
+  if (
+    context.composerRequiresModifier &&
+    binding.command === "composer.sendAlternate" &&
+    shortcut.key === "enter" &&
+    shortcut.modKey &&
+    !shortcut.metaKey &&
+    !shortcut.ctrlKey &&
+    !shortcut.altKey &&
+    !shortcut.shiftKey
+  ) {
+    return { ...shortcut, shiftKey: true };
+  }
+  return shortcut;
+}
+
 export function effectiveShortcutsForCommand(
   keybindings: ResolvedKeybindingsConfig,
   command: KeybindingCommand,
@@ -119,14 +139,15 @@ export function effectiveShortcutsForCommand(
     if (!binding) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
 
-    const conflictKey = shortcutConflictKey(binding.shortcut, platform);
+    const shortcut = shortcutForContext(binding, context);
+    const conflictKey = shortcutConflictKey(shortcut, platform);
     if (claimedShortcuts.has(conflictKey)) {
       continue;
     }
 
     claimedShortcuts.add(conflictKey);
     if (binding.command === command) {
-      effective.push(binding.shortcut);
+      effective.push(shortcut);
     }
   }
 
@@ -162,7 +183,7 @@ export function resolveShortcutCommand(
     const binding = keybindings[index];
     if (!binding) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
-    if (!matchesKeybindingShortcut(event, binding.shortcut, platform)) continue;
+    if (!matchesKeybindingShortcut(event, shortcutForContext(binding, context), platform)) continue;
     return binding.command;
   }
   return null;
@@ -350,15 +371,21 @@ export function isOpenFavoriteEditorShortcut(
 }
 
 /**
- * Whether the keypress is the rich-text bold chord (Mod+B without extra
- * modifiers). Tiptap binds the same chord, so app shortcuts captured ahead
- * of the editor must yield when the rich-text composer is focused.
+ * Whether the keypress should bold text in the rich-text composer: Mod+B
+ * without extra modifiers, with text selected. Tiptap binds the same chord, so
+ * app shortcuts captured ahead of the editor yield only in that case. With no
+ * selection the chord stays with the app (the sidebar toggle by default).
  */
-export function isRichTextBoldShortcut(event: ShortcutEventLike): boolean {
+export function isRichTextBoldShortcut(
+  event: ShortcutEventLike,
+  selection: Pick<Selection, "isCollapsed"> | null,
+): boolean {
   if (event.type !== undefined && event.type !== "keydown") {
     return false;
   }
   return (
+    selection !== null &&
+    !selection.isCollapsed &&
     resolveEventKeys(event).has("b") &&
     (event.metaKey || event.ctrlKey) &&
     !event.altKey &&

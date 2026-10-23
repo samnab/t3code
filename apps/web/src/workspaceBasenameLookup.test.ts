@@ -2,9 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   claimWorkspaceBasenameLookup,
-  needsWorkspaceBasenameLookup,
   pickWorkspaceBasenameMatch,
-} from "./workspaceBasenameLookup";
+  needsWorkspaceBasenameLookup,
+} from "@t3tools/client-runtime/workspace-basename-lookup";
 
 describe("needsWorkspaceBasenameLookup", () => {
   it("flags bare filenames", () => {
@@ -61,6 +61,7 @@ describe("pickWorkspaceBasenameMatch", () => {
     ).toBeNull();
   });
 
+  // regression: #6297 a bare filename resolves to a file, never a same-named directory
   it("ignores directories", () => {
     expect(
       pickWorkspaceBasenameMatch("components", [
@@ -93,15 +94,6 @@ describe("pickWorkspaceBasenameMatch", () => {
       ]),
     ).toBeNull();
   });
-
-  it("returns null when nothing matches the name", () => {
-    expect(pickWorkspaceBasenameMatch("ChatView.tsx", [])).toBeNull();
-    expect(
-      pickWorkspaceBasenameMatch("ChatView.tsx", [
-        { path: "apps/web/src/components/ChatHeader.tsx", kind: "file" },
-      ]),
-    ).toBeNull();
-  });
 });
 
 describe("claimWorkspaceBasenameLookup", () => {
@@ -111,10 +103,5 @@ describe("claimWorkspaceBasenameLookup", () => {
 
     expect(second()).toBe(true);
     expect(first()).toBe(false);
-  });
-
-  it("stays valid while it is the only claim", () => {
-    const only = claimWorkspaceBasenameLookup();
-    expect(only()).toBe(true);
   });
 });

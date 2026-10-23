@@ -14,6 +14,9 @@ const SPLIT_SIDEBAR_DEFAULT_MAX_WIDTH = 380;
 
 export const AUXILIARY_PANE_MIN_CONTENT_WIDTH = 960;
 export const CHAT_CONTENT_MAX_WIDTH = 960;
+// Android reading width for the thread feed, composer, and full-width thread list.
+// Phones are narrower; foldables in portrait and the keyboard-open split view are not.
+export const ANDROID_READING_MAX_WIDTH = 640;
 // min-h-8 uses the 14px rem configured in metro.config.js.
 export const THREAD_WORK_ROW_MIN_HEIGHT = 28;
 
@@ -55,6 +58,8 @@ export interface Layout {
 
 export interface WorkspacePaneLayout {
   readonly primarySidebarVisible: boolean;
+  /** Whether the sidebar shows once a collapsed split expands; independent of the current width. */
+  readonly primarySidebarWhenExpanded: boolean;
   readonly primarySidebarSuppressedByAuxiliary: boolean;
   readonly contentPaneWidth: number;
   readonly supportsAuxiliaryPane: boolean;
@@ -212,6 +217,7 @@ export function deriveWorkspacePaneLayout(input: {
 
     return {
       primarySidebarVisible,
+      primarySidebarWhenExpanded: input.primarySidebarPreferredVisible,
       primarySidebarSuppressedByAuxiliary,
       contentPaneWidth: Math.max(0, viewportWidth - primarySidebarWidth),
       supportsAuxiliaryPane: fileInspector.supported,
@@ -232,6 +238,7 @@ export function deriveWorkspacePaneLayout(input: {
 
   return {
     primarySidebarVisible: preferredPrimarySidebarVisible,
+    primarySidebarWhenExpanded: input.primarySidebarPreferredVisible,
     primarySidebarSuppressedByAuxiliary: false,
     contentPaneWidth,
     supportsAuxiliaryPane,

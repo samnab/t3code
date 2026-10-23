@@ -14,6 +14,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as SqlClient from "effect/sql/SqlClient";
 import {
   ProjectionStoreReadError,
@@ -263,8 +264,10 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
           });
     });
   });
+  // Each scan visits every message, so a cache smaller than the thread is cycled through and
+  // never hits. Real threads reach a few thousand messages of a few hundred characters.
   const textCache = yield* Cache.make({
-    capacity: 512,
+    capacity: 8192,
     timeToLive: "1 minute",
     lookup: (key: TextKey) => Effect.sync(() => parseText(key)),
   });
@@ -296,6 +299,9 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
         WHERE json_extract(t.payload_json, '$.forkedFrom.type') = 'run'
       )
       SELECT COALESCE(MAX(sequence), 0) AS sequence FROM orchestration_events
+      -- The planner otherwise walks every V2 event backwards from the newest,
+      -- which takes seconds for a thread that has been idle a long time.
+      INDEXED BY idx_orch_events_stream_sequence
       WHERE application_event_version = 2 AND aggregate_kind = 'thread'
         AND stream_id IN (SELECT thread_id FROM source_threads)
     `;
@@ -340,7 +346,7 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
       }
       return { payloads, cwd, sequence, cacheKey, sourceThreadIds };
     },
-    sql.withTransaction,
+    (effect) => sql.withTransaction(effect).pipe(NodeSqliteClient.readOnly),
     (effect, input) =>
       effect.pipe(
         Effect.mapError((cause) =>

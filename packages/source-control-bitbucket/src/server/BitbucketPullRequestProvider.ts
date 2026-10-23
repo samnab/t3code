@@ -61,6 +61,9 @@ export function bitbucketProviderFailure(
   if (error._tag === "BitbucketResponseError" && error.status === 401) {
     return { reason: "unauthenticated" };
   }
+  if (error._tag === "SourceControlRateLimitPausedError") {
+    return { reason: "rate-limited", retryAt: error.retryAt };
+  }
   if (
     (error._tag === "BitbucketResponseError" || error._tag === "BitbucketResponseBodyReadError") &&
     error.status === 429
@@ -198,8 +201,8 @@ export const make = Effect.gen(function* () {
             deletions: diffStat.deletions,
             changedFiles: diffStat.changedFiles,
             body: pullRequest.body,
-            mergedAt: null,
-            closedAt: null,
+            mergedAt: pullRequest.state === "merged" ? pullRequest.closedAt : null,
+            closedAt: pullRequest.state === "closed" ? pullRequest.closedAt : null,
             reviewers: pullRequest.reviewers,
             checks,
             // Bitbucket publishes no per-repository list of allowed strategies, so the ones it
