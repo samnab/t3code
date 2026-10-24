@@ -1,5 +1,7 @@
+import { useAtomValue } from "@effect/atom-react";
 import { AudioLinesIcon, MicOffIcon } from "lucide-react";
-import { realtimeVoiceShortcutLabel } from "../../keybindings";
+import { shortcutLabelForCommand } from "../../keybindings";
+import { primaryServerKeybindingsAtom } from "../../state/server";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
 import { useRealtimeVoice } from "./RealtimeVoiceProvider";
@@ -14,7 +16,12 @@ const STATUS = {
 
 export function GlobalRealtimeVoiceControl() {
   const { snapshot, pause, resume, end, returnToOwner } = useRealtimeVoice();
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   if (snapshot.mode === "off") return null;
+  const shortcut = (command: "voice.togglePause" | "voice.micOff") => {
+    const label = shortcutLabelForCommand(keybindings, command, { context: { voiceActive: true } });
+    return label === null ? null : <Kbd>{label}</Kbd>;
+  };
   const owner = snapshot.owner;
   const live = snapshot.mode === "transmitting" || snapshot.mode === "connecting";
   return (
@@ -56,17 +63,17 @@ export function GlobalRealtimeVoiceControl() {
             onClick={resume}
           >
             Resume
-            <Kbd>{realtimeVoiceShortcutLabel("togglePause")}</Kbd>
+            {shortcut("voice.togglePause")}
           </Button>
         ) : (
           <Button size="sm" variant="outline" disabled={!live} onClick={pause}>
             Pause
-            <Kbd>{realtimeVoiceShortcutLabel("togglePause")}</Kbd>
+            {shortcut("voice.togglePause")}
           </Button>
         )}
         <Button size="sm" variant="destructive-outline" onClick={end}>
           {snapshot.mode === "connecting" ? "Cancel" : "Mic off"}
-          <Kbd>{realtimeVoiceShortcutLabel("micOff")}</Kbd>
+          {shortcut("voice.micOff")}
         </Button>
       </div>
     </div>

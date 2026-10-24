@@ -6,6 +6,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { useAtomValue } from "@effect/atom-react";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
 import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
@@ -21,7 +22,8 @@ import {
   type VoiceOwner,
   type VoiceSnapshot,
 } from "@t3tools/client-runtime/realtime-voice";
-import { realtimeVoiceShortcutAction } from "../../keybindings";
+import { resolveShortcutCommand } from "../../keybindings";
+import { primaryServerKeybindingsAtom } from "../../state/server";
 import {
   readVoiceOwner,
   validateVoiceOwner,
@@ -151,19 +153,8 @@ export function RealtimeVoiceProvider({
     const stopDesktopPause = window.desktopBridge?.onVoicePrivacyPause?.(() =>
       controller.pause("Paused because this computer locked or went to sleep."),
     );
-    const shortcut = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || controller.getSnapshot().mode === "off") return;
-      const action = realtimeVoiceShortcutAction(event);
-      if (action === null) return;
-      event.preventDefault();
-      if (event.repeat) return;
-      if (action === "micOff") controller.end();
-      else if (controller.getSnapshot().mode === "paused") resumeVoice(controller);
-      else controller.pause();
-    };
     window.addEventListener("pagehide", end);
     window.addEventListener("offline", offline);
-    window.addEventListener("keydown", shortcut);
     document.addEventListener("freeze", end);
     document.addEventListener("visibilitychange", hidden);
     return () => {
@@ -171,11 +162,28 @@ export function RealtimeVoiceProvider({
       stopDesktopPause?.();
       window.removeEventListener("pagehide", end);
       window.removeEventListener("offline", offline);
-      window.removeEventListener("keydown", shortcut);
       document.removeEventListener("freeze", end);
       document.removeEventListener("visibilitychange", hidden);
     };
   }, [controller]);
+  // Separate from the lifecycle effect, whose cleanup ends voice, so remapping never ends a call.
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || controller.getSnapshot().mode === "off") return;
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: { voiceActive: true },
+      });
+      if (command !== "voice.togglePause" && command !== "voice.micOff") return;
+      event.preventDefault();
+      if (event.repeat) return;
+      if (command === "voice.micOff") controller.end();
+      else if (controller.getSnapshot().mode === "paused") resumeVoice(controller);
+      else controller.pause();
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, [controller, keybindings]);
   const invoke = (environmentId: EnvironmentId, threadId: ThreadId, moving: boolean) => {
     try {
       const owner = readVoiceOwner(environmentId, threadId);

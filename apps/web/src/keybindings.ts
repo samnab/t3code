@@ -393,40 +393,6 @@ export function isRichTextBoldShortcut(
   );
 }
 
-const VOICE_PAUSE_SHORTCUT: KeybindingShortcut = {
-  key: "m",
-  modKey: true,
-  altKey: true,
-  shiftKey: false,
-  metaKey: false,
-  ctrlKey: false,
-};
-const VOICE_MIC_OFF_SHORTCUT: KeybindingShortcut = { ...VOICE_PAUSE_SHORTCUT, shiftKey: true };
-
-/**
- * Fixed voice privacy chords, handled by the app voice owner: Mod+Alt+M pauses or resumes,
- * Mod+Alt+Shift+M turns the microphone off. They are not remappable keybinding commands yet.
- */
-export function realtimeVoiceShortcutAction(
-  event: ShortcutEventLike,
-  platform = navigator.platform,
-): "togglePause" | "micOff" | null {
-  if (event.type !== undefined && event.type !== "keydown") return null;
-  if (matchesKeybindingShortcut(event, VOICE_MIC_OFF_SHORTCUT, platform)) return "micOff";
-  if (matchesKeybindingShortcut(event, VOICE_PAUSE_SHORTCUT, platform)) return "togglePause";
-  return null;
-}
-
-export function realtimeVoiceShortcutLabel(
-  action: "togglePause" | "micOff",
-  platform = navigator.platform,
-): string {
-  return formatShortcutLabel(
-    action === "micOff" ? VOICE_MIC_OFF_SHORTCUT : VOICE_PAUSE_SHORTCUT,
-    platform,
-  );
-}
-
 export function isTerminalClearShortcut(
   event: ShortcutEventLike,
   platform = navigator.platform,
