@@ -718,6 +718,64 @@ const threadWorktreePathsIncludeArchivedOnRequest = Effect.gen(function* () {
   ]);
 });
 
+const voiceHistoryResumeRemovedWithThread = Effect.gen(function* () {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const now = yield* DateTime.now;
+  const resume = { cursor: "page", firstIdentity: "first", firstPosition: 3, anchorOrdinal: 7 };
+  const keyFor = (threadId: ThreadId) => ({
+    threadId,
+    providerInstanceId,
+    nativeThreadId: "native-thread",
+  });
+  for (const id of ["thread:voice-kept", "thread:voice-deleted"]) {
+    const threadId = ThreadId.make(id);
+    yield* store.apply({
+      id: EventId.make(`event:${id}:created`),
+      type: "thread.created",
+      threadId,
+      occurredAt: now,
+      payload: {
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        id: threadId,
+        projectId: ProjectId.make("project:voice-resume"),
+        title: id,
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      },
+    });
+    yield* store.setRealtimeVoiceHistoryResume(keyFor(threadId), resume);
+  }
+  const deleted = yield* store.getThread(ThreadId.make("thread:voice-deleted"));
+  yield* store.apply({
+    id: EventId.make("event:thread:voice-deleted:deleted"),
+    type: "thread.deleted",
+    threadId: deleted!.id,
+    occurredAt: now,
+    payload: { ...deleted!, deletedAt: now },
+  });
+
+  assert.isNull(yield* store.getRealtimeVoiceHistoryResume(keyFor(deleted!.id)));
+  assert.deepEqual(
+    yield* store.getRealtimeVoiceHistoryResume(keyFor(ThreadId.make("thread:voice-kept"))),
+    resume,
+  );
+});
+
 const commandReadsSkipSettledLeafNodes = Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;
@@ -1168,6 +1226,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
   it.effect(
     "worktree path lookup defaults to active threads and can include archived threads",
     () => threadWorktreePathsIncludeArchivedOnRequest,
+  );
+  it.effect(
+    "thread deletion removes that thread's voice history resume point",
+    () => voiceHistoryResumeRemovedWithThread,
   );
 
   it.effect(

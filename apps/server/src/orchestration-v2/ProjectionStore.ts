@@ -1984,19 +1984,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   ProjectionStoreV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    // A read position, not domain state: losing a row only costs one full history read.
-    yield* sql`
-      CREATE TABLE IF NOT EXISTS orchestration_v2_realtime_voice_history_resume (
-        thread_id TEXT NOT NULL,
-        provider_instance_id TEXT NOT NULL,
-        native_thread_id TEXT NOT NULL,
-        cursor TEXT,
-        first_identity TEXT,
-        first_position INTEGER,
-        anchor_ordinal INTEGER,
-        PRIMARY KEY (thread_id, provider_instance_id, native_thread_id)
-      )
-    `.pipe(Effect.orDie);
 
     // For run upserts: a snapshot without `path` keeps the value another event recorded there.
     const keepRecordedRunField = (payload: Statement.Fragment, path: string) => sql`
@@ -2097,6 +2084,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 deleted_at = excluded.deleted_at,
                 payload_json = excluded.payload_json
             `;
+              // A voice history read position (migration 070) has no use once the thread is gone.
+              if (event.type === "thread.deleted")
+                yield* sql`
+                DELETE FROM orchestration_v2_realtime_voice_history_resume
+                WHERE thread_id = ${event.threadId}
+              `;
               break;
             }
             case "thread.goal-loop-updated":
