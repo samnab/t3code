@@ -85,3 +85,21 @@ it.effect("appends live voice after existing coding items instead of the runless
     );
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("keeps a stitched voice ordinal and leaves room after live voice receipts", () =>
+  Effect.gen(function* () {
+    const positions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+    const threadId = ThreadId.make("thread:voice-positions");
+    const live = yield* positions.allocate({
+      threadId,
+      turnItemId: TurnItemId.make("item:live-voice"),
+      runId: null,
+      appendAfterLatest: true,
+      appendStep: 64,
+    });
+    assert.equal(live, 64);
+    const stitched = { threadId, turnItemId: TurnItemId.make("item:recovered"), runId: null };
+    assert.equal(yield* positions.allocate({ ...stitched, fixedOrdinal: 32 }), 32);
+    assert.equal(yield* positions.allocate({ ...stitched, fixedOrdinal: 50 }), 32);
+  }).pipe(Effect.provide(layerTest)),
+);

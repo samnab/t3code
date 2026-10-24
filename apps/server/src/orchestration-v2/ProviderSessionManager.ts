@@ -53,6 +53,7 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as RealtimeVoiceHistoryReconciler from "./RealtimeVoiceHistoryReconciler.ts";
 
 const isValidVoiceHistoryItem = Schema.is(OrchestrationV2TurnItem);
 
@@ -391,6 +392,8 @@ export const layerWithOptions = (
           }),
       );
       const sessions = yield* Ref.make(new Map<string, LiveSessionEntry>());
+      // Key -> whether another reconciliation was requested while this one ran.
+      const voiceReconciliations = yield* Ref.make(new Map<string, boolean>());
       // One retry per released entry, so a later release with the same id
       // cannot drop cleanup for threads only the earlier session served.
       const releaseRecordRetries = yield* FiberSet.make();
@@ -1805,7 +1808,21 @@ export const layerWithOptions = (
                 isProviderThreadLoaded({ providerSessionId, threadId, providerThreadKey }),
               ),
               Effect.flatMap((loaded) =>
-                loaded ? Effect.succeed(input.providerThread) : runtime.resumeThread(input),
+                loaded
+                  ? Effect.succeed(input.providerThread)
+                  : runtime.resumeThread(input).pipe(
+                      // Loading is where speech committed while T3 was away becomes visible.
+                      Effect.tap((providerThread) =>
+                        Ref.get(sessions).pipe(
+                          Effect.flatMap((current) => {
+                            const entry = current.get(sessionKey(providerSessionId));
+                            return entry?.runtime === runtime
+                              ? scheduleVoiceReconciliation(entry, providerThread)
+                              : Effect.void;
+                          }),
+                        ),
+                      ),
+                    ),
               ),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
@@ -2037,7 +2054,7 @@ export const layerWithOptions = (
         function* (
           entry: LiveSessionEntry,
           threadId: ThreadId,
-          reason: "invalid_record" | "persistence",
+          reason: "invalid_record" | "persistence" | "reconciliation",
         ) {
           yield* Effect.logWarning("orchestration-v2.driver-session.voice-history-incomplete", {
             providerSessionId: entry.runtime.providerSessionId,
@@ -2056,9 +2073,10 @@ export const layerWithOptions = (
             thread.providerInstanceId !== entry.runtime.instanceId
           )
             return;
+          const unrecovered = reason === "reconciliation";
           const id = idAllocator.derive.turnItemFromProviderItem({
             driver: entry.runtime.driver,
-            nativeItemId: `${entry.runtime.providerSessionId}:${threadId}:voice-history-incomplete`,
+            nativeItemId: `${entry.runtime.providerSessionId}:${threadId}:${unrecovered ? "voice-history-unrecovered" : "voice-history-incomplete"}`,
           });
           if ((yield* projectionStore.getTurnItem({ threadId, itemId: id })) !== null) return;
           const now = yield* DateTime.now;
@@ -2088,8 +2106,9 @@ export const layerWithOptions = (
                   failure: {
                     class: "provider_error",
                     code: "voice_history_incomplete",
-                    message:
-                      "Voice history capture is incomplete. A provider record could not be saved.",
+                    message: unrecovered
+                      ? "Voice history could not be recovered from the provider. Some speech may be missing."
+                      : "Voice history capture is incomplete. A provider record could not be saved.",
                     retryable: false,
                   },
                 },
@@ -2109,6 +2128,143 @@ export const layerWithOptions = (
             ),
           ),
       );
+
+      /**
+       * Persists one canonical voice record; callers hold the session's request permit. Returns the
+       * provider thread it belongs to, or null when the binding does not vouch for it. A binding
+       * that is no longer active still vouches for late records of its own native thread.
+       */
+      const persistVoiceItem = Effect.fn("ProviderSessionManager.persistVoiceItem")(function* (
+        entry: LiveSessionEntry,
+        item: Extract<OrchestrationV2TurnItem, { readonly type: "realtime_voice" }>,
+      ) {
+        const declined = Effect.logDebug("orchestration-v2.driver-session.voice-binding-declined", {
+          providerSessionId: entry.runtime.providerSessionId,
+        }).pipe(Effect.as(null));
+        const current = (yield* Ref.get(sessions)).get(sessionKey(entry.runtime.providerSessionId));
+        if (
+          current?.runtime !== entry.runtime ||
+          item.providerInstanceId !== entry.runtime.instanceId ||
+          item.providerThreadId === null
+        )
+          return yield* declined;
+        const thread = yield* projectionStore.getThread(item.threadId);
+        if (thread === null || thread.deletedAt !== null) return yield* declined;
+        const { providerThreads } = yield* projectionStore.getThreadRecords(item.threadId, [
+          "providerThreads",
+        ]);
+        const providerThread = providerThreads.find(
+          (candidate) => candidate.id === item.providerThreadId,
+        );
+        if (
+          providerThread?.appThreadId !== item.threadId ||
+          providerThread.providerInstanceId !== item.providerInstanceId ||
+          providerThread.nativeThreadRef?.nativeId !== item.nativeThreadId
+        )
+          return yield* declined;
+        if (
+          !isValidVoiceHistoryItem(item) ||
+          item.runId !== null ||
+          item.nodeId !== null ||
+          item.providerTurnId !== null
+        ) {
+          yield* markVoiceHistoryIncomplete(entry, item.threadId, "invalid_record");
+          return null;
+        }
+        yield* providerEventIngestor.ingestNormalized({
+          providerSessionId: entry.runtime.providerSessionId,
+          providerInstanceId: entry.runtime.instanceId,
+          threadId: item.threadId,
+          event: { type: "turn_item.updated", driver: entry.runtime.driver, turnItem: item },
+        });
+        return providerThread;
+      });
+
+      /**
+       * Recovers committed voice the projection is missing from the provider's own history. Runs
+       * forked in the session scope: the history read replies through the provider's serial
+       * reader, which this session's event pump must keep draining. Recovered records are
+       * descriptive and pass the same binding checks as live ones; nothing here starts work.
+       */
+      const scheduleVoiceReconciliation = Effect.fn(
+        "ProviderSessionManager.scheduleVoiceReconciliation",
+      )(function* (entry: LiveSessionEntry, providerThread: OrchestrationV2ProviderThread) {
+        const readRealtimeHistoryPage = entry.runtime.readRealtimeHistoryPage;
+        const threadId = providerThread.appThreadId;
+        if (readRealtimeHistoryPage === undefined || threadId === null) return;
+        const key = `${entry.runtime.providerSessionId}\u0000${providerThread.id}`;
+        const claimed = yield* Ref.modify(voiceReconciliations, (running) =>
+          running.has(key)
+            ? ([false, new Map(running).set(key, true)] as const)
+            : ([true, new Map(running).set(key, false)] as const),
+        );
+        if (!claimed) return;
+        const reconcileOnce = RealtimeVoiceHistoryReconciler.reconcileRealtimeVoiceHistory({
+          providerThread,
+          readRealtimeHistoryPage,
+        }).pipe(
+          Effect.provideService(ProjectionStore.ProjectionStoreV2, projectionStore),
+          Effect.provideService(IdAllocator.IdAllocatorV2, idAllocator),
+          Effect.flatMap((items) =>
+            Effect.forEach(
+              items,
+              (item) => persistVoiceItem(entry, item).pipe(entry.requestEventPermit.withPermits(1)),
+              { discard: true },
+            ),
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.interrupt
+              : markVoiceHistoryIncomplete(entry, threadId, "reconciliation").pipe(
+                  entry.requestEventPermit.withPermits(1),
+                ),
+          ),
+        );
+        const drain: Effect.Effect<void> = reconcileOnce.pipe(
+          Effect.andThen(
+            Ref.modify(voiceReconciliations, (running) => {
+              if (running.get(key) === true) return [true, new Map(running).set(key, false)];
+              const next = new Map(running);
+              next.delete(key);
+              return [false, next];
+            }),
+          ),
+          Effect.flatMap((again) => (again ? Effect.suspend(() => drain) : Effect.void)),
+        );
+        yield* drain.pipe(
+          Effect.onInterrupt(() =>
+            Ref.update(voiceReconciliations, (running) => {
+              const next = new Map(running);
+              next.delete(key);
+              return next;
+            }),
+          ),
+          Effect.forkIn(entry.scope),
+        );
+      });
+
+      const scheduleVoiceReconciliationForItem = (
+        entry: LiveSessionEntry,
+        item: Extract<OrchestrationV2TurnItem, { readonly type: "realtime_voice" }>,
+      ) =>
+        projectionStore.getThreadRecords(item.threadId, ["providerThreads"]).pipe(
+          Effect.map(({ providerThreads }) =>
+            providerThreads.find(
+              (candidate) =>
+                candidate.id === item.providerThreadId &&
+                candidate.appThreadId === item.threadId &&
+                candidate.nativeThreadRef?.nativeId === item.nativeThreadId,
+            ),
+          ),
+          Effect.flatMap((providerThread) =>
+            providerThread === undefined
+              ? Effect.void
+              : scheduleVoiceReconciliation(entry, providerThread),
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.void,
+          ),
+        );
 
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
@@ -2180,68 +2336,19 @@ export const layerWithOptions = (
                     event.turnItem.type === "realtime_voice"
                   ) {
                     const item = event.turnItem;
-                    yield* Effect.gen(function* () {
-                      const current = (yield* Ref.get(sessions)).get(
-                        sessionKey(entry.runtime.providerSessionId),
-                      );
-                      if (
-                        current?.runtime !== entry.runtime ||
-                        !current.attachedThreadIds.has(item.threadId) ||
-                        item.providerInstanceId !== entry.runtime.instanceId ||
-                        item.providerThreadId === null
-                      )
-                        return yield* Effect.logDebug(
-                          "orchestration-v2.driver-session.voice-binding-declined",
-                          { providerSessionId: entry.runtime.providerSessionId },
-                        );
-                      const thread = yield* projectionStore.getThread(item.threadId);
-                      if (
-                        thread?.activeProviderThreadId !== item.providerThreadId ||
-                        thread.providerInstanceId !== item.providerInstanceId ||
-                        thread.deletedAt !== null
-                      )
-                        return yield* Effect.logDebug(
-                          "orchestration-v2.driver-session.voice-binding-declined",
-                          { providerSessionId: entry.runtime.providerSessionId },
-                        );
-                      const { providerThreads } = yield* projectionStore.getThreadRecords(
-                        item.threadId,
-                        ["providerThreads"],
-                      );
-                      const providerThread = providerThreads.find(
-                        (candidate) => candidate.id === item.providerThreadId,
-                      );
-                      if (
-                        providerThread?.appThreadId !== item.threadId ||
-                        providerThread.providerSessionId !== entry.runtime.providerSessionId ||
-                        providerThread.nativeThreadRef?.nativeId !== item.nativeThreadId
-                      )
-                        return yield* Effect.logDebug(
-                          "orchestration-v2.driver-session.voice-binding-declined",
-                          { providerSessionId: entry.runtime.providerSessionId },
-                        );
-                      if (
-                        !isValidVoiceHistoryItem(item) ||
-                        item.runId !== null ||
-                        item.nodeId !== null ||
-                        item.providerTurnId !== null
-                      )
-                        return yield* markVoiceHistoryIncomplete(
-                          entry,
-                          item.threadId,
-                          "invalid_record",
-                        );
-                      yield* providerEventIngestor.ingestNormalized({
-                        providerSessionId: entry.runtime.providerSessionId,
-                        providerInstanceId: entry.runtime.instanceId,
-                        threadId: item.threadId,
-                        event,
-                      });
-                    }).pipe(
+                    yield* persistVoiceItem(entry, item).pipe(
+                      Effect.flatMap((providerThread) =>
+                        // A closed realtime session is the point its provider history is complete.
+                        providerThread !== null && item.content.type === "realtimeSessionClosed"
+                          ? scheduleVoiceReconciliation(entry, providerThread)
+                          : Effect.void,
+                      ),
                       Effect.catchCause((cause) =>
                         Cause.hasInterruptsOnly(cause)
                           ? Effect.interrupt
-                          : markVoiceHistoryIncomplete(entry, item.threadId, "persistence"),
+                          : markVoiceHistoryIncomplete(entry, item.threadId, "persistence").pipe(
+                              Effect.andThen(scheduleVoiceReconciliationForItem(entry, item)),
+                            ),
                       ),
                       entry.requestEventPermit.withPermits(1),
                     );

@@ -356,16 +356,27 @@ const layerBase: Layer.Layer<
             if (event.payload.type === "realtime_voice") {
               if (seenVoiceItems.has(event.payload.id)) return [];
               seenVoiceItems.add(event.payload.id);
-              const existing = yield* sql<{ readonly thread_id: string }>`
-                SELECT thread_id FROM orchestration_v2_projection_turn_items
+              const existing = yield* sql<{
+                readonly thread_id: string;
+                readonly capture_state: string | null;
+              }>`
+                SELECT thread_id, json_extract(payload_json, '$.captureState') AS capture_state
+                FROM orchestration_v2_projection_turn_items
                 WHERE turn_item_id = ${event.payload.id} LIMIT 1
               `;
               if (existing[0] !== undefined) {
-                if (existing[0].thread_id !== event.threadId)
+                if (existing[0].thread_id !== event.threadId) {
                   yield* Effect.logWarning("orchestration-v2.voice-item.owner-mismatch", {
                     threadId: event.threadId,
                   });
-                return [];
+                  return [];
+                }
+                // Only a provider commit may replace a stored tail; nothing replaces a commit.
+                if (
+                  existing[0].capture_state === "canonical_completed" ||
+                  event.payload.captureState !== "canonical_completed"
+                )
+                  return [];
               }
             }
             const payload = yield* turnItemPositions.normalize(

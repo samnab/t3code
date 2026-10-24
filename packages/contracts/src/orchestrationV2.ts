@@ -1426,6 +1426,21 @@ const RealtimeVoiceContent = Schema.Union([
   }),
 ]);
 
+// Only canonical_completed text was committed by the provider. Tails keep the streamed text seen
+// before the realtime session ended; it may differ from what was heard (stock Codex keeps streamed text).
+const RealtimeVoiceCaptureState = Schema.Literals([
+  "canonical_completed",
+  "incomplete",
+  "interrupted",
+]);
+// live_only came from live notifications; provider_history was recovered from a provider history read.
+const RealtimeVoiceHistoryCoverage = Schema.Literals(["live_only", "provider_history"]);
+// unreconciled sits at its receipt position; provider_anchored was placed after the coding turn that
+// preceded it in provider history.
+const RealtimeVoiceSourceOrder = Schema.Literals(["unreconciled", "provider_anchored"]);
+// Provider history has no transcript timestamps, so recovered items carry the recovery time.
+const RealtimeVoiceTimestampProvenance = Schema.Literals(["observed", "recovered"]);
+
 export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -1435,10 +1450,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
     realtimeSessionId: TrimmedNonEmptyString,
     nativeRealtimeItemId: TrimmedNonEmptyString,
     content: RealtimeVoiceContent,
-    captureState: Schema.Literal("canonical_completed"),
-    historyCoverage: Schema.Literal("live_only"),
-    sourceOrder: Schema.Literal("unreconciled"),
-    timestampProvenance: Schema.Literal("observed"),
+    captureState: RealtimeVoiceCaptureState,
+    historyCoverage: RealtimeVoiceHistoryCoverage,
+    sourceOrder: RealtimeVoiceSourceOrder,
+    timestampProvenance: RealtimeVoiceTimestampProvenance,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2254,10 +2269,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     realtimeSessionId: TrimmedNonEmptyString,
     nativeRealtimeItemId: TrimmedNonEmptyString,
     content: RealtimeVoiceContent,
-    captureState: Schema.Literal("canonical_completed"),
-    historyCoverage: Schema.Literal("live_only"),
-    sourceOrder: Schema.Literal("unreconciled"),
-    timestampProvenance: Schema.Literal("observed"),
+    captureState: RealtimeVoiceCaptureState,
+    historyCoverage: RealtimeVoiceHistoryCoverage,
+    sourceOrder: RealtimeVoiceSourceOrder,
+    timestampProvenance: RealtimeVoiceTimestampProvenance,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

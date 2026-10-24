@@ -5,6 +5,8 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { REALTIME_VOICE_ORDINAL_STEP } from "./realtimeVoiceStitch.ts";
+
 export class TurnItemPositionStoreError extends Schema.TaggedError<TurnItemPositionStoreError>()(
   "TurnItemPositionStoreError",
   {
@@ -23,6 +25,10 @@ export interface TurnItemPositionStoreV2Shape {
     readonly runId: RunId | null;
     readonly runOrdinal?: number;
     readonly appendAfterLatest?: boolean;
+    /** Gap left after the latest ordinal when appending. */
+    readonly appendStep?: number;
+    /** Exact ordinal already chosen by a stitch; ties sort by item id. */
+    readonly fixedOrdinal?: number;
   }) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
     item: OrchestrationV2TurnItem,
@@ -49,6 +55,8 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           runId,
           runOrdinal: suppliedRunOrdinal,
           appendAfterLatest,
+          appendStep = 1,
+          fixedOrdinal,
         }) {
           const existing = yield* sql<{ readonly ordinal: number }>`
           SELECT ordinal
@@ -57,6 +65,13 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           LIMIT 1
         `;
           if (existing[0] !== undefined) return existing[0].ordinal;
+          if (fixedOrdinal !== undefined) {
+            yield* sql`
+            INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
+            VALUES (${threadId}, ${turnItemId}, ${fixedOrdinal})
+            ON CONFLICT(thread_id, turn_item_id) DO NOTHING
+          `;
+          }
 
           const runRows =
             runId === null
@@ -79,7 +94,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           SELECT
             ${threadId},
             ${turnItemId},
-            COALESCE(MAX(ordinal), ${lowerBound}) + 1
+            COALESCE(MAX(ordinal), ${lowerBound}) + ${appendStep}
           FROM orchestration_v2_turn_item_positions
           WHERE thread_id = ${threadId}
             AND ordinal >= ${lowerBound}
@@ -120,10 +135,14 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           turnItemId: item.id,
           runId: item.runId,
           // Voice and capture warnings have no run bucket; keep them at the receipt position.
-          ...(item.type === "realtime_voice" ||
-          (item.type === "error" && item.failure.code === "voice_history_incomplete")
-            ? { appendAfterLatest: true }
-            : {}),
+          // Live voice leaves room so recovered speech can be stitched between receipts.
+          ...(item.type === "realtime_voice"
+            ? item.sourceOrder === "provider_anchored"
+              ? { fixedOrdinal: item.ordinal }
+              : { appendAfterLatest: true, appendStep: REALTIME_VOICE_ORDINAL_STEP }
+            : item.type === "error" && item.failure.code === "voice_history_incomplete"
+              ? { appendAfterLatest: true }
+              : {}),
           ...(runOrdinal === undefined ? {} : { runOrdinal }),
         }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal }))),
     });
