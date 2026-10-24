@@ -1295,6 +1295,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         },
       });
       const answer = (id: number) => [
+        {
+          type: "emit_inbound" as const,
+          frame: {
+            method: "thread/realtime/started",
+            params: { threadId: nativeThreadId, version: "v3", realtimeSessionId: "" },
+          },
+        },
         { type: "emit_inbound" as const, frame: { id, result: {} } },
         {
           type: "emit_inbound" as const,
@@ -1348,6 +1355,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       if (first.voiceSessionToken === undefined)
         return yield* Effect.die("Modern voice must return an ownership token.");
       assert.equal(first.operationId, "owner-a");
+      assert.isUndefined(first.nativeRealtimeSessionId);
       assert.equal(first.providerSessionId, harness.runtime.providerSessionId);
       assert.equal(first.providerThreadId, harness.providerThread.id);
       assert.isTrue(yield* harness.runtime.hasActiveRealtimeVoice!());

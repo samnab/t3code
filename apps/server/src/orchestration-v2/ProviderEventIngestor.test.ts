@@ -2299,6 +2299,18 @@ it.effect(
         }),
         1,
       );
+      const anotherThread = yield* threadCreatedEvent(now);
+      yield* eventSink.write({ events: [anotherThread] });
+      const moved = yield* ingestor.ingestNormalized({
+        ...input,
+        threadId: anotherThread.threadId,
+        event: { ...event, turnItem: { ...item, threadId: anotherThread.threadId } },
+      });
+      assert.lengthOf(moved, 0);
+      assert.isNotNull(yield* projections.getTurnItem({ threadId, itemId: item.id }));
+      assert.isNull(
+        yield* projections.getTurnItem({ threadId: anotherThread.threadId, itemId: item.id }),
+      );
       const identity: ProviderEventRouteIdentity = {
         threadId: ThreadId.make("root"),
         runId: RunId.make("run:root"),

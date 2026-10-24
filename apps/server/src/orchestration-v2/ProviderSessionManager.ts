@@ -5,6 +5,7 @@ import {
   isOrchestrationV2WorkActive,
   ModelSelection,
   OrchestrationV2DomainEvent,
+  OrchestrationV2TurnItem,
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
@@ -52,6 +53,8 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+
+const isValidVoiceHistoryItem = Schema.is(OrchestrationV2TurnItem);
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
@@ -2028,6 +2031,85 @@ export const layerWithOptions = (
           ),
         );
 
+      const markVoiceHistoryIncomplete = Effect.fn(
+        "ProviderSessionManager.markVoiceHistoryIncomplete",
+      )(
+        function* (
+          entry: LiveSessionEntry,
+          threadId: ThreadId,
+          reason: "invalid_record" | "persistence",
+        ) {
+          yield* Effect.logWarning("orchestration-v2.driver-session.voice-history-incomplete", {
+            providerSessionId: entry.runtime.providerSessionId,
+            threadId,
+            reason,
+          });
+          const current = (yield* Ref.get(sessions)).get(
+            sessionKey(entry.runtime.providerSessionId),
+          );
+          if (current?.runtime !== entry.runtime || !current.attachedThreadIds.has(threadId))
+            return;
+          const thread = yield* projectionStore.getThread(threadId);
+          if (
+            thread === null ||
+            thread.deletedAt !== null ||
+            thread.providerInstanceId !== entry.runtime.instanceId
+          )
+            return;
+          const id = idAllocator.derive.turnItemFromProviderItem({
+            driver: entry.runtime.driver,
+            nativeItemId: `${entry.runtime.providerSessionId}:${threadId}:voice-history-incomplete`,
+          });
+          if ((yield* projectionStore.getTurnItem({ threadId, itemId: id })) !== null) return;
+          const now = yield* DateTime.now;
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* idAllocator.allocate.event({ threadId }),
+                threadId,
+                type: "turn-item.updated",
+                occurredAt: now,
+                payload: {
+                  id,
+                  threadId,
+                  runId: null,
+                  nodeId: null,
+                  providerThreadId: thread.activeProviderThreadId,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 0,
+                  status: "failed",
+                  title: "Voice history incomplete",
+                  startedAt: null,
+                  completedAt: now,
+                  updatedAt: now,
+                  type: "error",
+                  failure: {
+                    class: "provider_error",
+                    code: "voice_history_incomplete",
+                    message:
+                      "Voice history capture is incomplete. A provider record could not be saved.",
+                    retryable: false,
+                  },
+                },
+              },
+            ],
+          });
+        },
+        (effect, entry, threadId) =>
+          effect.pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.interrupt
+                : Effect.logWarning(
+                    "orchestration-v2.driver-session.voice-history-marker-unavailable",
+                    { providerSessionId: entry.runtime.providerSessionId, threadId },
+                  ),
+            ),
+          ),
+      );
+
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
         return entry.runtime.events.pipe(
@@ -2108,14 +2190,20 @@ export const layerWithOptions = (
                         item.providerInstanceId !== entry.runtime.instanceId ||
                         item.providerThreadId === null
                       )
-                        return;
+                        return yield* Effect.logDebug(
+                          "orchestration-v2.driver-session.voice-binding-declined",
+                          { providerSessionId: entry.runtime.providerSessionId },
+                        );
                       const thread = yield* projectionStore.getThread(item.threadId);
                       if (
                         thread?.activeProviderThreadId !== item.providerThreadId ||
                         thread.providerInstanceId !== item.providerInstanceId ||
                         thread.deletedAt !== null
                       )
-                        return;
+                        return yield* Effect.logDebug(
+                          "orchestration-v2.driver-session.voice-binding-declined",
+                          { providerSessionId: entry.runtime.providerSessionId },
+                        );
                       const { providerThreads } = yield* projectionStore.getThreadRecords(
                         item.threadId,
                         ["providerThreads"],
@@ -2128,7 +2216,21 @@ export const layerWithOptions = (
                         providerThread.providerSessionId !== entry.runtime.providerSessionId ||
                         providerThread.nativeThreadRef?.nativeId !== item.nativeThreadId
                       )
-                        return;
+                        return yield* Effect.logDebug(
+                          "orchestration-v2.driver-session.voice-binding-declined",
+                          { providerSessionId: entry.runtime.providerSessionId },
+                        );
+                      if (
+                        !isValidVoiceHistoryItem(item) ||
+                        item.runId !== null ||
+                        item.nodeId !== null ||
+                        item.providerTurnId !== null
+                      )
+                        return yield* markVoiceHistoryIncomplete(
+                          entry,
+                          item.threadId,
+                          "invalid_record",
+                        );
                       yield* providerEventIngestor.ingestNormalized({
                         providerSessionId: entry.runtime.providerSessionId,
                         providerInstanceId: entry.runtime.instanceId,
@@ -2137,13 +2239,10 @@ export const layerWithOptions = (
                       });
                     }).pipe(
                       entry.requestEventPermit.withPermits(1),
-                      Effect.mapError(
-                        (cause) =>
-                          new ProviderAdapter.ProviderAdapterEventStreamError({
-                            driver: entry.runtime.driver,
-                            providerSessionId: entry.runtime.providerSessionId,
-                            cause,
-                          }),
+                      Effect.catchCause((cause) =>
+                        Cause.hasInterruptsOnly(cause)
+                          ? Effect.interrupt
+                          : markVoiceHistoryIncomplete(entry, item.threadId, "persistence"),
                       ),
                     );
                     return;

@@ -465,6 +465,7 @@ function layerTest(input: {
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
+  readonly failVoiceWrites?: boolean;
   readonly failEventStream?: boolean;
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
   readonly mcpConfigs?: Ref.Ref<
@@ -494,8 +495,25 @@ function layerTest(input: {
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
-  const layerConfiguredEventSink =
-    input.flakyReleaseWrites !== undefined
+  const layerVoiceFailingSink = Layer.effect(
+    EventSink.EventSinkV2,
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      return EventSink.EventSinkV2.of({
+        ...sink,
+        write: (input) =>
+          input.events.some(
+            (event) =>
+              event.type === "turn-item.updated" && event.payload.type === "realtime_voice",
+          )
+            ? Effect.fail(new EventSink.EventSinkWriteError({ eventCount: input.events.length }))
+            : sink.write(input),
+      });
+    }),
+  ).pipe(Layer.provide(layerTestEventSink));
+  const layerConfiguredEventSink = input.failVoiceWrites
+    ? layerVoiceFailingSink
+    : input.flakyReleaseWrites !== undefined
       ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
       : input.pauseAttachWrite !== undefined
         ? layerPausingAttachEventSink(input.pauseAttachWrite)
@@ -3647,4 +3665,121 @@ it.effect("ProviderSessionManagerV2 preserves quiet voice beyond the background 
       ),
     );
   }),
+);
+
+it.effect.each(["malformed", "unpersistable"] as const)(
+  "ProviderSessionManagerV2 isolates %s voice records from coding event subscribers",
+  (failure) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("voice-owner");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              type: "provider-thread.updated",
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const item = {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "old-session",
+            nativeItemId: "speech",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "old-session",
+          nativeRealtimeItemId: "speech",
+          content: { type: "transcriptSegment", role: "assistant", text: "durable speech" },
+          captureState: "canonical_completed",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        } satisfies OrchestrationV2TurnItem;
+        const runtime = Option.getOrThrow(yield* manager.get(providerSessionId));
+        const subscription = yield* runtime.subscribeEvents!;
+        const coding = yield* subscription.events.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const afterSequence = yield* sink.latestSequence({ threadId });
+        const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(events);
+        yield* Queue.offerAll(events!, [
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: {
+              ...item,
+              nativeRealtimeItemId: failure === "malformed" ? "" : item.nativeRealtimeItemId,
+            },
+          },
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...item, type: "command_execution", input: "echo coding continues" },
+          },
+        ]);
+        assert.lengthOf(Array.from(yield* Fiber.join(coding)), 1);
+        assert.isTrue(yield* manager.isLive(providerSessionId));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        const marker = yield* sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" &&
+              stored.event.payload.type === "error" &&
+              stored.event.payload.failure.code === "voice_history_incomplete",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        assert.lengthOf(Array.from(marker), 1);
+        assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 1000, failVoiceWrites: failure === "unpersistable" }),
+        ),
+      );
+    }),
 );

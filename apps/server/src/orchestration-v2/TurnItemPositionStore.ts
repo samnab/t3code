@@ -119,8 +119,11 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           threadId: item.threadId,
           turnItemId: item.id,
           runId: item.runId,
-          // Live voice has no run bucket. Native ordering is reconciled separately.
-          ...(item.type === "realtime_voice" ? { appendAfterLatest: true } : {}),
+          // Voice and capture warnings have no run bucket; keep them at the receipt position.
+          ...(item.type === "realtime_voice" ||
+          (item.type === "error" && item.failure.code === "voice_history_incomplete")
+            ? { appendAfterLatest: true }
+            : {}),
           ...(runOrdinal === undefined ? {} : { runOrdinal }),
         }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal }))),
     });

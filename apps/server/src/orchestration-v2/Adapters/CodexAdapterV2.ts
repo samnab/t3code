@@ -30,6 +30,7 @@ import {
 } from "../../provider/codexUsageLimits.ts";
 import {
   CodexSettings,
+  TrimmedNonEmptyString,
   defaultInstanceIdForDriver,
   isOrchestrationV2WorkActive,
   OrchestrationV2ProviderGoal,
@@ -164,6 +165,8 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const CODEX_PROVIDER = ProviderDriverKind.make("codex");
+const isNativeRealtimeSessionId = Schema.is(TrimmedNonEmptyString);
+
 export const CODEX_DRIVER_KIND = CODEX_PROVIDER;
 export const CODEX_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CODEX_DRIVER_KIND);
 
@@ -5027,7 +5030,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         yield* client.handleServerNotification("thread/realtime/item/completed", (payload) =>
           Effect.gen(function* () {
             const providerThread = rootProviderThreads.get(payload.threadId);
-            if (providerThread?.appThreadId == null) return;
+            if (providerThread?.appThreadId == null) {
+              yield* Effect.logDebug("Codex canonical voice item has no bound app thread.");
+              return;
+            }
             const now = yield* DateTime.now;
             yield* emitProviderEvent({
               type: "turn_item.updated",
@@ -5124,7 +5130,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         yield* client.handleServerNotification("thread/realtime/started", (payload) =>
           Effect.sync(() => {
             const session = realtimeThreads.get(payload.threadId);
-            if (session !== undefined && payload.realtimeSessionId != null)
+            if (session !== undefined && isNativeRealtimeSessionId(payload.realtimeSessionId))
               session.nativeSessionId = payload.realtimeSessionId;
           }),
         );

@@ -356,15 +356,17 @@ const layerBase: Layer.Layer<
             if (event.payload.type === "realtime_voice") {
               if (seenVoiceItems.has(event.payload.id)) return [];
               seenVoiceItems.add(event.payload.id);
-              const existing = yield* projectionStore.getTurnItem({
-                threadId: event.threadId,
-                itemId: event.payload.id,
-              });
-              if (
-                existing?.type === "realtime_voice" &&
-                existing.captureState === "canonical_completed"
-              )
+              const existing = yield* sql<{ readonly thread_id: string }>`
+                SELECT thread_id FROM orchestration_v2_projection_turn_items
+                WHERE turn_item_id = ${event.payload.id} LIMIT 1
+              `;
+              if (existing[0] !== undefined) {
+                if (existing[0].thread_id !== event.threadId)
+                  yield* Effect.logWarning("orchestration-v2.voice-item.owner-mismatch", {
+                    threadId: event.threadId,
+                  });
                 return [];
+              }
             }
             const payload = yield* turnItemPositions.normalize(
               event.payload,
