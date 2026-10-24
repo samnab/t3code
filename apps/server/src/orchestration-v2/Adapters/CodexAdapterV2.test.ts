@@ -2154,6 +2154,95 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
+  it.effect.each([false, true] as const)(
+    "keeps uncommitted streamed tails as honest capture states (session error %s)",
+    (failed) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "voice-tail-thread";
+        const emit = (method: string, params: Record<string, unknown>) => ({
+          type: "emit_inbound" as const,
+          frame: { method, params: { threadId: nativeThreadId, ...params } },
+        });
+        const segment = (id: string, role: "user" | "assistant", text: string) => ({
+          item: { id, realtimeSessionId: "session", type: "transcriptSegment", role, text },
+        });
+        const transcript = makeCodexReplayTranscript({
+          scenario: "voice-tail",
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "thread/realtime/start",
+                params: {
+                  threadId: nativeThreadId,
+                  outputModality: "audio",
+                  version: "v3",
+                  transport: { type: "webrtc", sdp: "offer" },
+                },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 3, result: {} } },
+            emit("thread/realtime/item/started", segment("spoken", "user", "hel")),
+            emit("thread/realtime/item/transcript/delta", { itemId: "spoken", delta: "lo" }),
+            emit("thread/realtime/item/transcript/delta", { itemId: "unknown", delta: "stray" }),
+            emit("thread/realtime/item/started", segment("silent", "user", "")),
+            emit("thread/realtime/item/started", segment("reply", "assistant", "")),
+            emit("thread/realtime/item/transcript/delta", { itemId: "reply", delta: "streamed" }),
+            emit("thread/realtime/item/completed", segment("reply", "assistant", "committed")),
+            emit("thread/realtime/sdp", { sdp: "answer" }),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/realtime/stop",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+            ...(failed ? [emit("thread/realtime/error", { message: "transport lost" })] : []),
+            emit("thread/realtime/closed", { reason: "stopped" }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        });
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const voiceItems = () =>
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "realtime_voice"
+              ? [event.turnItem]
+              : [],
+          );
+        yield* harness.until(() => voiceItems().length === 2);
+        const [reply, spoken] = voiceItems();
+        assert.equal(reply?.captureState, "canonical_completed");
+        assert.equal(
+          reply?.content.type === "transcriptSegment" ? reply.content.text : null,
+          "committed",
+        );
+        assert.equal(spoken?.nativeRealtimeItemId, "spoken");
+        assert.equal(spoken?.captureState, failed ? "interrupted" : "incomplete");
+        assert.equal(spoken?.status, "interrupted");
+        assert.equal(
+          spoken?.content.type === "transcriptSegment" ? spoken.content.text : null,
+          "hello",
+        );
+        assert.lengthOf(harness.continuationRequests, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
   it.effect.each(["", "reused-native-session"] as const)(
     "rejects legacy and stale owner stops with native session identity %s",
     (nativeSessionId) =>

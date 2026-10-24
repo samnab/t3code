@@ -162,6 +162,53 @@ describe("historical voice timeline", () => {
       closed.item.id,
     ]);
   });
+
+  it("links a spoken request to the coding message it became and shows uncommitted tails", () => {
+    const spoken = voiceProjectedItem(
+      "voice-request",
+      { type: "transcriptSegment", role: "user", text: "Please work" },
+      1,
+    );
+    const promoted = voiceProjectedItem(
+      "voice-promotion",
+      {
+        type: "bemItemPromoted",
+        item_id: "coding-item",
+        turn_id: "coding-turn",
+        presentation: { type: "wholeItem" },
+      },
+      2,
+    );
+    const coding = makeStreamingTimelineFixture().visibleTurnItems[0]!;
+    const promotedCoding: OrchestrationV2ProjectedTurnItem = {
+      ...coding,
+      item: {
+        ...coding.item,
+        nativeItemRef: {
+          driver: ProviderDriverKind.make("codex"),
+          nativeId: "coding-item",
+          strength: "strong",
+        },
+      },
+    };
+    const tailSource = voiceProjectedItem(
+      "voice-tail",
+      { type: "transcriptSegment", role: "assistant", text: "Partial" },
+      4,
+    );
+    const tailItem = tailSource.item;
+    if (tailItem.type !== "realtime_voice") throw new Error("Expected a voice item");
+    const tail: OrchestrationV2ProjectedTurnItem = {
+      ...tailSource,
+      item: { ...tailItem, status: "interrupted", captureState: "interrupted" },
+    };
+    const result = rows([spoken, promoted, promotedCoding, tail]);
+    const codingRow = result.find((row) => row.kind === "message");
+    expect(codingRow).toBeDefined();
+    expect(result[0]).toMatchObject({ kind: "event", voicePromotedToRowId: codingRow!.id });
+    expect(result.at(-1)).toMatchObject({ kind: "event", id: tail.item.id });
+    expect(result.filter((row) => "voicePromotedToRowId" in row)).toHaveLength(1);
+  });
 });
 
 describe("computeMessageDurationStart", () => {

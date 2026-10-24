@@ -3842,6 +3842,132 @@ it.effect(
     }),
 );
 
+it.effect(
+  "ProviderSessionManagerV2 upgrades a stored voice tail in place when history has its commit",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+        new Map<string | null, HistoryPage>([
+          [null, { entries: [historySpeech(1, "tail")], nextCursor: null }],
+        ]),
+      );
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("voice-tail-upgrade");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              type: "provider-thread.updated",
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const tail = {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "session",
+            nativeItemId: "tail",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "interrupted",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "session",
+          nativeRealtimeItemId: "tail",
+          content: { type: "transcriptSegment", role: "user", text: "ta" },
+          captureState: "interrupted",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        } satisfies OrchestrationV2TurnItem;
+        const writes = (count: number) =>
+          Effect.gen(function* () {
+            const afterSequence = yield* sink.latestSequence({ threadId });
+            return yield* sink.stream({ threadId, afterSequence }).pipe(
+              Stream.filter((stored) => stored.event.type === "turn-item.updated"),
+              Stream.take(count),
+              Stream.runCollect,
+              Effect.forkScoped,
+            );
+          });
+        const live = yield* writes(1);
+        const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        yield* Queue.offer(events!, {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: tail,
+        });
+        yield* Fiber.join(live);
+        const stored = yield* projections.getTurnItem({ threadId, itemId: tail.id });
+
+        const upgraded = yield* writes(1);
+        yield* runtime.resumeThread({ threadId, providerThread });
+        yield* Fiber.join(upgraded);
+        const committed = yield* projections.getTurnItem({ threadId, itemId: tail.id });
+        assert.equal(
+          committed?.type === "realtime_voice" ? committed.captureState : null,
+          "canonical_completed",
+        );
+        assert.equal(
+          committed?.type === "realtime_voice" && committed.content.type === "transcriptSegment"
+            ? committed.content.text
+            : null,
+          "tail",
+        );
+        assert.equal(committed?.ordinal, stored?.ordinal);
+        assert.equal(
+          committed?.type === "realtime_voice" ? committed.timestampProvenance : null,
+          "observed",
+        );
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            readRealtimeHistoryPage: makeHistoryReader(pages),
+          }),
+        ),
+      );
+    }),
+);
+
 it.effect("ProviderSessionManagerV2 rejects unsafe native history positions visibly", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);

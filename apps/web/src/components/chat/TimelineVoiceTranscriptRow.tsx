@@ -1,7 +1,9 @@
+import { describeRealtimeVoiceCapture } from "@t3tools/shared/orchestrationV2Timeline";
 import { use } from "react";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { TimelineRowCtx, type TimelineRow } from "./timelineRowContext";
+import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 /** Render provider speech as selectable history without message or executable markdown actions. */
@@ -15,14 +17,14 @@ export function VoiceTranscriptTimelineRow({
   if (item.type !== "realtime_voice") return null;
   const content = item.content;
   if (content.type === "bemItemPromoted") return null;
+  const capture = describeRealtimeVoiceCapture(item);
   const observed = (
     <Tooltip>
       <TooltipTrigger render={<span className="text-xs tabular-nums text-muted-foreground" />}>
-        Observed {formatDayAwareTimestamp(row.createdAt, ctx.timestampFormat)}
+        {capture.timeLabel} {formatDayAwareTimestamp(row.createdAt, ctx.timestampFormat)}
       </TooltipTrigger>
       <TooltipPopup>
-        {formatChatTimestampTooltip(row.createdAt, ctx.timestampFormat)}. Provider-completed
-        history; earlier speech may be missing and source order has not been reconciled.
+        {formatChatTimestampTooltip(row.createdAt, ctx.timestampFormat)}. {capture.detail}
       </TooltipPopup>
     </Tooltip>
   );
@@ -43,6 +45,7 @@ export function VoiceTranscriptTimelineRow({
       </div>
     );
   }
+  const promotedTo = row.voicePromotedToRowId;
   return (
     <div
       className="min-w-0 space-y-1.5 px-1 py-0.5"
@@ -63,8 +66,24 @@ export function VoiceTranscriptTimelineRow({
       </p>
       <div className="flex flex-wrap items-center gap-2">
         <MessageCopyButton text={content.text} label="Copy voice transcript" variant="ghost" />
-        <span className="text-xs text-muted-foreground">Provider completed</span>
+        <span className="text-xs text-muted-foreground" data-voice-capture-status="true">
+          {capture.status}
+        </span>
         {observed}
+        {promotedTo === undefined ? null : (
+          <Button
+            variant="link"
+            size="xs"
+            data-voice-promoted-to={promotedTo}
+            onClick={() =>
+              document
+                .querySelector(`[data-timeline-row-id="${CSS.escape(promotedTo)}"]`)
+                ?.scrollIntoView({ block: "center" })
+            }
+          >
+            Sent as coding request
+          </Button>
+        )}
       </div>
     </div>
   );

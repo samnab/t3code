@@ -1,3 +1,4 @@
+import { describeRealtimeVoiceCapture } from "@t3tools/shared/orchestrationV2Timeline";
 import { View, type ColorValue } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
 import type { ThreadFeedEntry } from "../../lib/threadActivity";
@@ -35,6 +36,7 @@ export function ThreadVoiceTranscriptRow({
     );
   }
   const author = content.role === "user" ? "You" : "Codex";
+  const capture = describeRealtimeVoiceCapture(item);
   return (
     <View className="mb-5 gap-1.5 px-1">
       <Text className="font-t3-medium text-xs text-foreground-secondary">
@@ -51,8 +53,9 @@ export function ThreadVoiceTranscriptRow({
           buttonSize={28}
           iconSize={13}
         />
-        <Text className="text-xs text-foreground-secondary">
-          Provider completed · Observed {timestampLabel}
+        <Text className="text-xs text-foreground-secondary" accessibilityHint={capture.detail}>
+          {capture.status} · {capture.timeLabel} {timestampLabel}
+          {entry.promotedToCodingRequest ? " · Sent as coding request" : ""}
         </Text>
       </View>
     </View>

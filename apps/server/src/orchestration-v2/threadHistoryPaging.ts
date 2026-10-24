@@ -22,7 +22,12 @@ export const OLDER_THREAD_USER_TURN_LIMIT = 20;
 export function isConversationHistoryItem(
   item: Parameters<typeof isOrchestrationV2MessageHistoryItem>[0],
 ): boolean {
-  if (item.type === "realtime_voice") return isOrchestrationV2MessageHistoryItem(item);
+  // Uncommitted tails stay visible in the conversation, never in message or context history.
+  if (item.type === "realtime_voice")
+    return (
+      isOrchestrationV2MessageHistoryItem(item) ||
+      (item.status === "interrupted" && item.content?.type === "transcriptSegment")
+    );
   return !["command_execution", "reasoning", "file_change", "dynamic_tool"].includes(item.type);
 }
 export const THREAD_HISTORY_MAX_RAW_TURNS = 150;

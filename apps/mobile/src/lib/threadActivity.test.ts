@@ -244,6 +244,49 @@ describe("historical voice feed", () => {
     });
     expect(feed[2]).toMatchObject({ projectedItem: closed });
   });
+
+  it("marks a spoken request promoted into a coding message and shows uncommitted tails", () => {
+    const spoken = projected(
+      voiceItem("voice-request", { type: "transcriptSegment", role: "user", text: "Please work" }),
+      0,
+    );
+    const promoted = projected(
+      voiceItem("voice-promotion", {
+        type: "bemItemPromoted",
+        item_id: "coding-item",
+        turn_id: "coding-turn",
+        presentation: { type: "wholeItem" },
+      }),
+      1,
+    );
+    const coding = projected(
+      {
+        ...userMessage(),
+        nativeItemRef: {
+          driver: ProviderDriverKind.make("codex"),
+          nativeId: "coding-item",
+          strength: "strong",
+        },
+      },
+      2,
+    );
+    const tail = projected(
+      {
+        ...voiceItem("voice-tail", { type: "transcriptSegment", role: "assistant", text: "Part" }),
+        status: "interrupted",
+        captureState: "interrupted",
+      },
+      3,
+    );
+    const feed = buildThreadFeed([spoken, promoted, coding, tail]);
+    expect(feed.map((entry) => entry.type)).toEqual([
+      "realtime-voice",
+      "message",
+      "realtime-voice",
+    ]);
+    expect(feed[0]).toMatchObject({ promotedToCodingRequest: true });
+    expect(feed[2]).toMatchObject({ projectedItem: tail, promotedToCodingRequest: false });
+  });
 });
 
 describe("buildThreadFeed", () => {

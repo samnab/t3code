@@ -5088,53 +5088,127 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           updateSubagentSelection(payload.threadId, payload.toModel),
         );
 
+        const emitRealtimeVoiceItem = Effect.fn("CodexAdapterV2.emitRealtimeVoiceItem")(function* (
+          nativeThreadId: string,
+          item: Extract<
+            ProviderAdapter.ProviderAdapterV2RealtimeHistoryEntry,
+            { readonly type: "realtime" }
+          >["item"],
+          captureState: Extract<
+            OrchestrationV2TurnItem,
+            { readonly type: "realtime_voice" }
+          >["captureState"],
+        ) {
+          const providerThread = rootProviderThreads.get(nativeThreadId);
+          if (providerThread?.appThreadId == null) {
+            yield* Effect.logDebug("Codex canonical voice item has no bound app thread.");
+            return;
+          }
+          const now = yield* DateTime.now;
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver: CODEX_PROVIDER,
+            turnItem: {
+              id: idAllocator.derive.realtimeVoiceTurnItem({
+                providerInstanceId: adapterOptions.instanceId,
+                nativeThreadId,
+                realtimeSessionId: item.realtimeSessionId,
+                nativeItemId: item.id,
+              }),
+              threadId: providerThread.appThreadId,
+              runId: null,
+              nodeId: null,
+              providerThreadId: providerThread.id,
+              providerTurnId: null,
+              nativeItemRef: {
+                driver: CODEX_PROVIDER,
+                nativeId: item.id,
+                strength: "strong",
+              },
+              parentItemId: null,
+              ordinal: 0,
+              status: captureState === "canonical_completed" ? "completed" : "interrupted",
+              title: null,
+              startedAt: null,
+              completedAt: now,
+              updatedAt: now,
+              type: "realtime_voice",
+              providerInstanceId: adapterOptions.instanceId,
+              nativeThreadId,
+              realtimeSessionId: item.realtimeSessionId,
+              nativeRealtimeItemId: item.id,
+              content: item,
+              captureState,
+              historyCoverage: "live_only",
+              sourceOrder: "unreconciled",
+              timestampProvenance: "observed",
+            },
+          });
+        });
+        // Started transcript segments the provider has not committed, by native thread and item.
+        // Text is only what streamed; it is never upgraded to heard words.
+        const realtimeTails = new Map<
+          string,
+          Map<
+            string,
+            {
+              readonly realtimeSessionId: string;
+              readonly role: "user" | "assistant";
+              text: string;
+            }
+          >
+        >();
+        const realtimeFailedThreads = new Set<string>();
+        const flushRealtimeTails = Effect.fn("CodexAdapterV2.flushRealtimeTails")(function* (
+          nativeThreadId: string,
+        ) {
+          const tails = realtimeTails.get(nativeThreadId);
+          const captureState = realtimeFailedThreads.has(nativeThreadId)
+            ? "interrupted"
+            : "incomplete";
+          realtimeTails.delete(nativeThreadId);
+          realtimeFailedThreads.delete(nativeThreadId);
+          if (tails === undefined) return;
+          for (const [id, tail] of tails) {
+            // An empty tail carries no transcript; the session divider already shows the end.
+            if (tail.text.trim().length === 0) continue;
+            yield* emitRealtimeVoiceItem(
+              nativeThreadId,
+              {
+                id,
+                realtimeSessionId: tail.realtimeSessionId,
+                type: "transcriptSegment",
+                role: tail.role,
+                text: tail.text,
+              },
+              captureState,
+            );
+          }
+        });
+        yield* client.handleServerNotification("thread/realtime/item/started", (payload) =>
+          Effect.sync(() => {
+            const item = payload.item;
+            if (item.type !== "transcriptSegment") return;
+            const tails = realtimeTails.get(payload.threadId) ?? new Map();
+            tails.set(item.id, {
+              realtimeSessionId: item.realtimeSessionId,
+              role: item.role,
+              text: item.text,
+            });
+            realtimeTails.set(payload.threadId, tails);
+          }),
+        );
+        // Deltas name no session; map them only through an item this connection saw start.
+        yield* client.handleServerNotification("thread/realtime/item/transcript/delta", (payload) =>
+          Effect.sync(() => {
+            const tail = realtimeTails.get(payload.threadId)?.get(payload.itemId);
+            if (tail !== undefined) tail.text += payload.delta;
+          }),
+        );
         yield* client.handleServerNotification("thread/realtime/item/completed", (payload) =>
           Effect.gen(function* () {
-            const providerThread = rootProviderThreads.get(payload.threadId);
-            if (providerThread?.appThreadId == null) {
-              yield* Effect.logDebug("Codex canonical voice item has no bound app thread.");
-              return;
-            }
-            const now = yield* DateTime.now;
-            yield* emitProviderEvent({
-              type: "turn_item.updated",
-              driver: CODEX_PROVIDER,
-              turnItem: {
-                id: idAllocator.derive.realtimeVoiceTurnItem({
-                  providerInstanceId: adapterOptions.instanceId,
-                  nativeThreadId: payload.threadId,
-                  realtimeSessionId: payload.item.realtimeSessionId,
-                  nativeItemId: payload.item.id,
-                }),
-                threadId: providerThread.appThreadId,
-                runId: null,
-                nodeId: null,
-                providerThreadId: providerThread.id,
-                providerTurnId: null,
-                nativeItemRef: {
-                  driver: CODEX_PROVIDER,
-                  nativeId: payload.item.id,
-                  strength: "strong",
-                },
-                parentItemId: null,
-                ordinal: 0,
-                status: "completed",
-                title: null,
-                startedAt: null,
-                completedAt: now,
-                updatedAt: now,
-                type: "realtime_voice",
-                providerInstanceId: adapterOptions.instanceId,
-                nativeThreadId: payload.threadId,
-                realtimeSessionId: payload.item.realtimeSessionId,
-                nativeRealtimeItemId: payload.item.id,
-                content: payload.item,
-                captureState: "canonical_completed",
-                historyCoverage: "live_only",
-                sourceOrder: "unreconciled",
-                timestampProvenance: "observed",
-              },
-            });
+            realtimeTails.get(payload.threadId)?.delete(payload.item.id);
+            yield* emitRealtimeVoiceItem(payload.threadId, payload.item, "canonical_completed");
           }),
         );
 
@@ -5200,6 +5274,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         );
         yield* client.handleServerNotification("thread/realtime/error", (payload) =>
           Effect.gen(function* () {
+            realtimeFailedThreads.add(payload.threadId);
             const session = realtimeThreads.get(payload.threadId);
             if (session === undefined) return;
             yield* Deferred.fail(
@@ -5218,7 +5293,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }),
         );
         yield* client.handleServerNotification("thread/realtime/closed", (payload) =>
-          closeRealtime(payload.threadId, "Codex realtime session closed before SDP was received."),
+          closeRealtime(
+            payload.threadId,
+            "Codex realtime session closed before SDP was received.",
+          ).pipe(Effect.andThen(flushRealtimeTails(payload.threadId))),
         );
 
         yield* client.handleServerNotification("turn/started", (payload) =>
@@ -5503,6 +5581,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // their command items, while the shared provider session stays alive.
         yield* client.handleServerNotification("thread/closed", (payload) =>
           Effect.gen(function* () {
+            // The native thread is gone, so any streaming segment was cut off by it.
+            realtimeFailedThreads.add(payload.threadId);
+            yield* flushRealtimeTails(payload.threadId);
             forgetHistoryBinding(payload.threadId);
             const completedAt = yield* DateTime.now;
             for (const context of (yield* Ref.get(settledTurns)).values()) {

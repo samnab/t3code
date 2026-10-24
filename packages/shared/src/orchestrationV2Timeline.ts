@@ -33,6 +33,42 @@ export function isOrchestrationV2MessageHistoryItem(
   );
 }
 
+type RealtimeVoiceProvenance = Pick<
+  Extract<OrchestrationV2TurnItem, { readonly type: "realtime_voice" }>,
+  "captureState" | "historyCoverage" | "sourceOrder" | "timestampProvenance"
+>;
+
+/**
+ * Capture labels shared by web and mobile voice rows. Text is always the provider's streamed
+ * transcript, so no state claims corrected or heard words.
+ */
+export function describeRealtimeVoiceCapture(item: RealtimeVoiceProvenance): {
+  readonly status: string;
+  readonly timeLabel: "Observed" | "Recovered";
+  readonly detail: string;
+} {
+  const capture =
+    item.captureState === "canonical_completed"
+      ? "The provider committed this streamed transcript. It may differ from what was heard."
+      : `The voice session ${item.captureState === "interrupted" ? "failed" : "ended"} before the provider committed this segment. Text is what streamed before it stopped.`;
+  const source =
+    item.historyCoverage === "provider_history" ? " Recovered from provider history." : "";
+  const order =
+    item.sourceOrder === "provider_anchored"
+      ? " Placed after the coding turn that preceded it in provider history."
+      : " Shown where T3 received it; order against coding turns is not reconciled.";
+  return {
+    status:
+      item.captureState === "canonical_completed"
+        ? "Provider completed"
+        : item.captureState === "interrupted"
+          ? "Interrupted · partial"
+          : "Incomplete · partial",
+    timeLabel: item.timestampProvenance === "recovered" ? "Recovered" : "Observed",
+    detail: `${capture}${source}${order}`,
+  };
+}
+
 export function isOrchestrationV2SupersededInterrupt(input: {
   readonly item: TimelineTurnItem;
   readonly attempts: ReadonlyArray<TimelineRunAttempt>;

@@ -175,7 +175,10 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
     const now = yield* DateTime.now;
     return missing.map((entry): RealtimeVoiceItem => {
       const { id: nativeItemId, realtimeSessionId, ...content } = entry.item;
-      const ordinal = placements.get(realtimeVoiceKey(realtimeSessionId, nativeItemId)) ?? null;
+      const key = realtimeVoiceKey(realtimeSessionId, nativeItemId);
+      // A stored tail upgraded by its commit keeps the slot and time it was observed at.
+      const tail = existing.get(key);
+      const ordinal = tail?.ordinal ?? placements.get(key) ?? null;
       return {
         id: idAllocator.derive.realtimeVoiceTurnItem({
           providerInstanceId: providerThread.providerInstanceId,
@@ -208,8 +211,8 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
         content,
         captureState: "canonical_completed",
         historyCoverage: "provider_history",
-        sourceOrder: ordinal === null ? "unreconciled" : "provider_anchored",
-        timestampProvenance: "recovered",
+        sourceOrder: tail?.sourceOrder ?? (ordinal === null ? "unreconciled" : "provider_anchored"),
+        timestampProvenance: tail?.timestampProvenance ?? "recovered",
       };
     });
   },

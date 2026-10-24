@@ -617,6 +617,8 @@ type MessagesTimelineRowContent =
       projectedItem: OrchestrationV2ProjectedTurnItem;
       subagents?: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
       resourceSummary?: boolean;
+      /** Row of the coding instruction this spoken request was promoted into. */
+      voicePromotedToRowId?: string;
     }
   | {
       kind: "proposed-plan";
@@ -1371,6 +1373,45 @@ function settleSupersededReasoning(entries: ReadonlyArray<TimelineEntry>) {
   });
 }
 
+function timelineVoiceProjectedItem(entry: TimelineEntry) {
+  const projectedItem =
+    entry.kind === "work"
+      ? entry.entry.projectedItem
+      : entry.kind === "event"
+        ? entry.projectedItem
+        : undefined;
+  return projectedItem?.item.type === "realtime_voice" ? projectedItem : undefined;
+}
+
+/**
+ * A promotion record names the native coding item a spoken request became. Links the latest
+ * spoken user segment of that realtime session before the record to the coding message row.
+ */
+function voicePromotionTargets(entries: ReadonlyArray<TimelineEntry>): ReadonlyMap<string, string> {
+  const codingRowByNativeItem = new Map<string, string>();
+  for (const entry of entries) {
+    const nativeId =
+      entry.kind === "message" && entry.projectedItem?.item.type === "user_message"
+        ? entry.projectedItem.item.nativeItemRef?.nativeId
+        : null;
+    if (nativeId != null) codingRowByNativeItem.set(nativeId, entry.id);
+  }
+  const targets = new Map<string, string>();
+  const latestRequest = new Map<string, string>();
+  for (const entry of entries) {
+    const item = timelineVoiceProjectedItem(entry)?.item;
+    if (item?.type !== "realtime_voice") continue;
+    const session = `${item.nativeThreadId}\u0000${item.realtimeSessionId}`;
+    if (item.content.type === "transcriptSegment" && item.content.role === "user")
+      latestRequest.set(session, entry.id);
+    if (item.content.type !== "bemItemPromoted") continue;
+    const request = latestRequest.get(session);
+    const target = codingRowByNativeItem.get(item.content.item_id);
+    if (request !== undefined && target !== undefined) targets.set(request, target);
+  }
+  return targets;
+}
+
 function timelineRowEntries(entries: ReadonlyArray<TimelineEntry>) {
   const historicalVoiceEntries = entries.flatMap((entry): TimelineEntry[] => {
     const projectedItem =
@@ -1381,8 +1422,9 @@ function timelineRowEntries(entries: ReadonlyArray<TimelineEntry>) {
           : undefined;
     if (projectedItem === undefined || projectedItem.item.type !== "realtime_voice") return [entry];
     const item = projectedItem.item;
+    // Uncommitted tails are interrupted items; they render with their capture state.
     if (
-      item.status !== "completed" ||
+      (item.status !== "completed" && item.status !== "interrupted") ||
       item.content.type === "bemItemPromoted" ||
       (item.content.type === "transcriptSegment" && item.content.text.trim().length === 0)
     )
@@ -1442,6 +1484,7 @@ export function deriveMessagesTimelineRows(input: {
   worktreeSetup?: WorktreeSetupSnapshot | null;
 }): MessagesTimelineRow[] {
   const timelineEntries = timelineRowEntries(input.timelineEntries);
+  const voicePromotions = voicePromotionTargets(input.timelineEntries);
   const turnDiffSummaryByAssistantMessageId = new Map<MessageId, TurnDiffSummary>();
   for (const summary of input.turnDiffSummaries) {
     if (summary.assistantMessageId) {
@@ -1893,11 +1936,13 @@ export function deriveMessagesTimelineRows(input: {
         };
         continue;
       }
+      const voicePromotedToRowId = voicePromotions.get(timelineEntry.id);
       nextRows.push({
         kind: "event",
         id: timelineEntry.id,
         createdAt: timelineEntry.createdAt,
         projectedItem: timelineEntry.projectedItem,
+        ...(voicePromotedToRowId === undefined ? {} : { voicePromotedToRowId }),
       });
       continue;
     }

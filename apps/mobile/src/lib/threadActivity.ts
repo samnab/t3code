@@ -168,6 +168,8 @@ type RawThreadFeedEntry =
       readonly runId: null;
       readonly messageId: null;
       readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+      /** This spoken request was promoted into a coding message in this feed. */
+      readonly promotedToCodingRequest: boolean;
     }
   | {
       readonly type: "message";
@@ -1954,6 +1956,7 @@ interface ThreadFeedBuild {
   readonly checkpointSummaries: ReadonlyArray<ThreadCheckpointSummary> | undefined;
   readonly foldedAnswerMessageIds: ReadonlySet<string>;
   readonly delegatedChildrenByRun: ReadonlyMap<RunId, ReadonlySet<string>>;
+  readonly promotedVoiceRequests: ReadonlySet<string>;
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
   /** Grouping is empty before `row`: the rows before it produced `feed.slice(0, feedLength)`. */
   readonly restarts: ReadonlyArray<{ readonly row: number; readonly feedLength: number }>;
@@ -2025,6 +2028,33 @@ function firstChangedIndex<T>(previous: ReadonlyArray<T>, next: ReadonlyArray<T>
   return index;
 }
 
+/**
+ * A promotion record names the native coding item a spoken request became. Marks the latest
+ * spoken user segment of that realtime session before the record when the coding item is here.
+ */
+function promotedVoiceRequestKeys(
+  rows: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
+): ReadonlySet<string> {
+  const codingNativeItems = new Set<string>();
+  for (const { item } of rows) {
+    if (item.type === "user_message" && item.nativeItemRef?.nativeId != null)
+      codingNativeItems.add(item.nativeItemRef.nativeId);
+  }
+  const promoted = new Set<string>();
+  const latestRequest = new Map<string, string>();
+  for (const row of rows) {
+    const item = row.item;
+    if (item.type !== "realtime_voice") continue;
+    const session = `${item.nativeThreadId}\u0000${item.realtimeSessionId}`;
+    if (item.content.type === "transcriptSegment" && item.content.role === "user")
+      latestRequest.set(session, `${row.sourceThreadId}:${row.sourceItemId}`);
+    if (item.content.type !== "bemItemPromoted") continue;
+    const request = latestRequest.get(session);
+    if (request !== undefined && codingNativeItems.has(item.content.item_id)) promoted.add(request);
+  }
+  return promoted;
+}
+
 export function buildThreadFeed(
   visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
   options?: {
@@ -2060,6 +2090,7 @@ export function buildThreadFeed(
   // is reused only while these match the build that produced it.
   const foldedAnswerMessageIds = new Set<string>();
   const delegatedChildrenByRun = new Map<RunId, Set<string>>();
+  const promotedVoiceRequests = promotedVoiceRequestKeys(visibleTurnItems);
   for (const { item } of visibleTurnItems) {
     if (item.type === "user_input_request" && item.questionAnswer) {
       foldedAnswerMessageIds.add(`async-answer:${item.questionAnswer.requestId}`);
@@ -2080,6 +2111,7 @@ export function buildThreadFeed(
     previous.nodes === options?.nodes &&
     checkpointSummariesEqual(previous.checkpointSummaries, options?.checkpointSummaries) &&
     setsEqual(previous.foldedAnswerMessageIds, foldedAnswerMessageIds) &&
+    setsEqual(previous.promotedVoiceRequests, promotedVoiceRequests) &&
     setMapsEqual(previous.delegatedChildrenByRun, delegatedChildrenByRun)
   ) {
     const firstChanged = firstChangedIndex(previous.rows, visibleTurnItems);
@@ -2104,15 +2136,20 @@ export function buildThreadFeed(
       continue;
     }
     if (item.type === "realtime_voice") {
+      // Uncommitted tails are interrupted items; they render with their capture state.
       if (
-        item.status !== "completed" ||
+        (item.status !== "completed" && item.status !== "interrupted") ||
         item.content.type === "bemItemPromoted" ||
         (item.content.type === "transcriptSegment" && item.content.text.trim().length === 0)
       )
         continue;
       const cachedVoice = projectedEntriesCache.get(row)?.entry;
+      const promotedToCodingRequest = promotedVoiceRequests.has(
+        `${row.sourceThreadId}:${row.sourceItemId}`,
+      );
       const entry: RawThreadFeedEntry =
-        cachedVoice?.type === "realtime-voice"
+        cachedVoice?.type === "realtime-voice" &&
+        cachedVoice.promotedToCodingRequest === promotedToCodingRequest
           ? cachedVoice
           : {
               type: "realtime-voice",
@@ -2121,6 +2158,7 @@ export function buildThreadFeed(
               runId: null,
               messageId: null,
               projectedItem: row,
+              promotedToCodingRequest,
             };
       projectedEntriesCache.set(row, { attemptId: null, entry });
       entries.push(entry);
@@ -2291,6 +2329,7 @@ export function buildThreadFeed(
             checkpointSummaries: options?.checkpointSummaries,
             foldedAnswerMessageIds,
             delegatedChildrenByRun,
+            promotedVoiceRequests,
             feed,
             restarts,
           };
