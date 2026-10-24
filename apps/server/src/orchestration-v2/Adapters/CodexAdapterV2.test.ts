@@ -1115,7 +1115,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       type: "emit_inbound",
       frame: {
         method: "thread/realtime/started",
-        params: { threadId, realtimeSessionId: threadId },
+        params: { threadId, realtimeSessionId: threadId, version: "v3" },
       },
     },
     {
@@ -1662,31 +1662,46 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           attemptId: RunAttemptId.make("speech-first"),
           text: "Request",
         });
-        yield* harness.runtime.startRealtimeVoice!({
+        const firstSession = yield* harness.runtime.startRealtimeVoice!({
           providerThread: harness.providerThread,
           sdp: "offer",
+          operationId: "speech-first-owner",
         });
+        assert.equal(firstSession.nativeRealtimeSessionId, threadId);
+        const firstToken = firstSession.voiceSessionToken;
+        if (typeof firstToken !== "string") return yield* Effect.die("Missing first owner token");
         yield* harness.runtime.startTurn(input);
         yield* Deferred.await(appendEntered);
         const stopping = yield* harness.runtime.stopRealtimeVoice!({
           providerThread: harness.providerThread,
+          operationId: "speech-first-owner",
+          voiceSessionToken: firstToken,
         }).pipe(Effect.forkChild({ startImmediately: true }));
         const replacing = yield* harness.runtime.startRealtimeVoice!({
           providerThread: harness.providerThread,
           sdp: "offer",
+          operationId: "speech-second-owner",
         }).pipe(Effect.forkChild({ startImmediately: true }));
         assert.equal(requests.filter((method) => method === "thread/realtime/stop").length, 0);
         assert.equal(requests.filter((method) => method === "thread/realtime/start").length, 1);
         yield* Deferred.succeed(appendReleased, undefined);
         yield* Fiber.join(stopping);
-        yield* Fiber.join(replacing);
+        const secondSession = yield* Fiber.join(replacing);
+        assert.equal(secondSession.nativeRealtimeSessionId, firstSession.nativeRealtimeSessionId);
+        const secondToken = secondSession.voiceSessionToken;
+        if (typeof secondToken !== "string") return yield* Effect.die("Missing second owner token");
+        assert.notEqual(secondToken, firstToken);
         yield* harness.runtime.startTurn({
           ...input,
           attemptId: RunAttemptId.make("speech-second"),
           message: { ...input.message, messageId: MessageId.make("speech-second-message") },
         });
         yield* Deferred.await(secondAppend);
-        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "speech-second-owner",
+          voiceSessionToken: secondToken,
+        });
         assert.equal(
           requests.filter((method) => method === "thread/realtime/appendSpeech").length,
           2,
@@ -2006,6 +2021,211 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
         ),
       ),
+  );
+
+  it.effect(
+    "releases a definitively rejected native start without waiting for a nonexistent close",
+    () =>
+      Effect.gen(function* () {
+        const threadId = "voice-rejected-start";
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: threadId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: threadId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              voiceStartEntries(threadId, 3)[0]!,
+              {
+                type: "emit_inbound",
+                frame: { id: 3, error: { code: -32601, message: "Method not found" } },
+              },
+              ...voiceStartEntries(threadId, 4),
+              ...voiceStopEntries(threadId, 5),
+            ],
+          }),
+        );
+        const rejected = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result);
+        const pinnedAfterRejection = yield* harness.runtime.hasActiveRealtimeVoice!();
+        const replacement = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result);
+        assert.deepEqual(
+          { rejection: rejected._tag, pinnedAfterRejection, replacement: replacement._tag },
+          { rejection: "Failure", pinnedAfterRejection: false, replacement: "Success" },
+        );
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const replay = yield* Ref.get(harness.replayDriver.state);
+        assert.isNull(replay.failure);
+        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each([
+    "internal-error",
+    "invalid-params",
+    "observed-native-start",
+    "observed-sdp",
+  ] as const)("keeps an uncertain %s startup quarantined through orphan expiry", (mode) =>
+    Effect.gen(function* () {
+      const threadId = `voice-start-uncertain-${mode}`;
+      const observed = mode === "observed-native-start" || mode === "observed-sdp";
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: threadId,
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId: threadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            voiceStartEntries(threadId, 3)[0]!,
+            ...(observed
+              ? [
+                  {
+                    type: "emit_inbound" as const,
+                    frame:
+                      mode === "observed-native-start"
+                        ? {
+                            method: "thread/realtime/started",
+                            params: { threadId, realtimeSessionId: threadId, version: "v3" },
+                          }
+                        : {
+                            method: "thread/realtime/sdp",
+                            params: { threadId, sdp: "answer-before-error" },
+                          },
+                  },
+                ]
+              : []),
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                error: {
+                  code: observed ? -32601 : mode === "invalid-params" ? -32602 : -32603,
+                  message: "Rejected with uncertain session state",
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: { id: 4, method: "thread/realtime/stop", params: { threadId } },
+            },
+            {
+              type: "emit_inbound",
+              frame: { id: 4, error: { code: -32603, message: "Stop outcome unknown" } },
+            },
+          ],
+        }),
+      );
+      const started = yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      }).pipe(Effect.result);
+      assert.equal(started._tag, "Failure");
+      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      assert.equal(
+        (yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      yield* TestClock.adjust("4 hours");
+      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      assert.equal(
+        (yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("does not free an uncertain timed-out start when no native closure arrives", () =>
+    Effect.gen(function* () {
+      const threadId = "voice-start-timeout-quarantine";
+      const startAcknowledged = yield* Deferred.make<void>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: threadId,
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId: threadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            voiceStartEntries(threadId, 3)[0]!,
+            { type: "emit_inbound", frame: { id: 3, result: {} } },
+            {
+              type: "expect_outbound",
+              frame: { id: 4, method: "thread/realtime/stop", params: { threadId } },
+            },
+            {
+              type: "emit_inbound",
+              frame: { id: 4, error: { code: -32603, message: "Stop outcome unknown" } },
+            },
+          ],
+        }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (method) =>
+          method === "thread/realtime/start"
+            ? Deferred.succeed(startAcknowledged, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      const started = yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      }).pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(startAcknowledged);
+      yield* TestClock.adjust("20 seconds");
+      assert.equal((yield* Fiber.join(started))._tag, "Failure");
+      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      assert.equal(
+        (yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      yield* TestClock.adjust("4 hours");
+      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      assert.equal(
+        (yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
   );
 
   it.effect("starts realtime voice with the matching SDP notification and stops it", () =>

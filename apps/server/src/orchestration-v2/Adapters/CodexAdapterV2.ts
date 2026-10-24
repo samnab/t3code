@@ -2044,6 +2044,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           readonly token?: string;
           readonly expiresAt: DateTime.Utc;
           nativeSessionId?: string;
+          nativeStarted: boolean;
           stopping: boolean;
           stopAcknowledged: boolean;
           expired: boolean;
@@ -5237,8 +5238,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         yield* client.handleServerNotification("thread/realtime/started", (payload) =>
           Effect.sync(() => {
             const session = realtimeThreads.get(payload.threadId);
-            if (session !== undefined && isNativeRealtimeSessionId(payload.realtimeSessionId))
-              session.nativeSessionId = payload.realtimeSessionId;
+            if (session !== undefined) {
+              session.nativeStarted = true;
+              if (isNativeRealtimeSessionId(payload.realtimeSessionId))
+                session.nativeSessionId = payload.realtimeSessionId;
+            }
           }),
         );
         yield* client.handleServerNotification("thread/realtime/error", (payload) =>
@@ -8442,6 +8446,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     expiresAt: DateTime.makeUnsafe(
                       DateTime.toEpochMillis(now) + 4 * 60 * 60 * 1000,
                     ),
+                    nativeStarted: false,
                     stopping: false,
                     stopAcknowledged: false,
                     expired: false,
@@ -8466,13 +8471,38 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   yield* rememberRootProviderThread(voiceInput.providerThread);
                   return yield* ensureInitialized.pipe(
                     Effect.andThen(
-                      client.raw.request("thread/realtime/start", {
-                        threadId,
-                        clientManagedHandoffs: true,
-                        outputModality: "audio",
-                        version: "v3",
-                        transport: { type: "webrtc", sdp: voiceInput.sdp },
-                      }),
+                      client.raw
+                        .request("thread/realtime/start", {
+                          threadId,
+                          clientManagedHandoffs: true,
+                          outputModality: "audio",
+                          version: "v3",
+                          transport: { type: "webrtc", sdp: voiceInput.sdp },
+                        })
+                        .pipe(
+                          Effect.catchTags({
+                            CodexAppServerRequestError: (error) =>
+                              Effect.gen(function* () {
+                                // Method-not-found proves no invocation. Internal errors, invalid SDP, timeouts and observed native activity do not prove absence of a call.
+                                if (
+                                  error.code === -32601 &&
+                                  error.operation === "receive-response" &&
+                                  error.method === "thread/realtime/start" &&
+                                  !session.nativeStarted &&
+                                  !(yield* Deferred.isDone(answer)) &&
+                                  !Array.from(realtimeTurns.values()).some(
+                                    (held) => held.voiceSession === session,
+                                  )
+                                )
+                                  yield* closeRealtime(
+                                    threadId,
+                                    "Codex rejected realtime startup before opening a session.",
+                                    session,
+                                  );
+                                return yield* error;
+                              }),
+                          }),
+                        ),
                     ),
                     Effect.andThen(Deferred.await(answer)),
                     Effect.timeout("20 seconds"),
@@ -8497,6 +8527,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                         Effect.andThen(Deferred.await(session.closed)),
                         Effect.timeout("5 seconds"),
                         Effect.catch(() => Effect.void),
+                        // The caller receives no call. Retain the slot quarantine for uncertain native work, but let idle runtime teardown reap it.
+                        Effect.ensuring(
+                          Effect.sync(() => {
+                            session.expired = true;
+                          }),
+                        ),
                       ),
                     ),
                     Effect.ensuring(

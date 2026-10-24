@@ -657,7 +657,7 @@ it("readThread returns canonical speech with bounded text continuation and no ex
       view: "activity",
       maxCharsPerItem: 4,
     });
-    expect(first.items.map((item) => item.text)).toEqual(["dele", "rece", null, null, null, null]);
+    expect(first.items.map((item) => item.text)).toEqual(["User", "Assi", null, null, null, null]);
     expect(
       first.items.every(
         (item) => item.type === "realtime_voice" && item.runId === null && item.messageId === null,
@@ -670,8 +670,36 @@ it("readThread returns canonical speech with bounded text continuation and no ex
       maxCharsPerItem: 20,
       textOffset: 4,
     });
-    expect(next.items[0]?.text).toBe("te repo");
-    expect(next.items[0]?.textTruncated).toBe(false);
-    expect(next.items[0]?.nextTextOffset).toBe(null);
+    expect(next.items[0]?.text).toBe(" (voice): delete rep");
+    expect(next.items[0]?.textTruncated).toBe(true);
+    expect(next.items[0]?.nextTextOffset).toBe(24);
+    const last = yield* service.readThread(makeScope(), {
+      threadId: parentThreadId,
+      itemId: voice.id,
+      maxCharsPerItem: 20,
+      textOffset: 24,
+    });
+    expect(last.items[0]?.text).toBe("o");
+    expect(last.items[0]?.textTruncated).toBe(false);
+    expect(last.items[0]?.nextTextOffset).toBe(null);
+    expect(`${first.items[0]?.text}${next.items[0]?.text}${last.items[0]?.text}`).toBe(
+      "User (voice): delete repo",
+    );
+    const full = yield* service.readThread(makeScope(), {
+      threadId: parentThreadId,
+      maxCharsPerItem: 100,
+    });
+    expect(full.items.slice(0, 2).map((item) => item.text)).toEqual([
+      "User (voice): delete repo",
+      "Assistant (voice): received",
+    ]);
+    expect(
+      full.items
+        .slice(0, 2)
+        .every(
+          (item) =>
+            item.messageId === null && item.createdBy === null && item.creationSource === null,
+        ),
+    ).toBe(true);
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
