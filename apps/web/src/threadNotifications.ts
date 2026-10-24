@@ -111,7 +111,11 @@ export function unlockNotificationAudio() {
 export async function playNotificationSound(
   kind: "completion" | "input",
   shouldPlay: () => boolean,
-  options: { readonly tone?: CompletionAudioSettings["tone"]; readonly volume?: number } = {},
+  options: {
+    readonly tone?: CompletionAudioSettings["tone"];
+    readonly volume?: number;
+    readonly burst?: boolean;
+  } = {},
 ): Promise<boolean> {
   if (!audioContext || audioContext.state !== "running") return false;
   const context = audioContext;
@@ -131,7 +135,8 @@ export async function playNotificationSound(
     // clipping. One playback stands for the burst. Checked after the decode, since every caller
     // in a burst is waiting on it. The other kind keeps its own slot, so an input alert is still
     // heard over a completion.
-    if (context.currentTime < (playingUntil.get(kind) ?? 0)) return false;
+    if (options.burst !== false && context.currentTime < (playingUntil.get(kind) ?? 0))
+      return false;
     const source = context.createBufferSource();
     source.buffer = decoded;
     const gain = context.createGain();
@@ -140,7 +145,7 @@ export async function playNotificationSound(
     source.connect(gain);
     gain.connect(context.destination);
     source.start();
-    playingUntil.set(kind, context.currentTime + decoded.duration);
+    if (options.burst !== false) playingUntil.set(kind, context.currentTime + decoded.duration);
     return true;
   } catch {
     buffers.delete(url);
@@ -156,7 +161,7 @@ export async function previewCompletionSound(
   try {
     unlockNotificationAudio();
     await audioContext?.resume();
-    return await playNotificationSound("completion", () => true, { tone, volume });
+    return await playNotificationSound("completion", () => true, { tone, volume, burst: false });
   } catch {
     return false;
   }

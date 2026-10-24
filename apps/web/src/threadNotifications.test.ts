@@ -157,3 +157,13 @@ it("previews only on an explicit call using the same inert player and saved gain
   expect(audio.started).toBe(1);
   expect(audio.gain).toBe(0.6);
 });
+
+it("allows consecutive explicit previews without treating the burst slot as failure", async () => {
+  const { previewCompletionSound, playNotificationSound } = await loadUnlocked();
+  expect(await playNotificationSound("completion", () => true)).toBe(true);
+  expect(await previewCompletionSound("completion", 0.5)).toBe(true);
+  expect(await previewCompletionSound("input", 0.5)).toBe(true);
+  expect(audio.started).toBe(3);
+  expect(await playNotificationSound("completion", () => true)).toBe(false);
+  expect(audio.started).toBe(3);
+});

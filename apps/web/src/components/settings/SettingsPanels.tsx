@@ -422,7 +422,6 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.notificationMode !== DEFAULT_UNIFIED_SETTINGS.notificationMode
       ? ["Thread notifications"]
       : []),
-    ...(settings.completionAudio.defaultMode !== "off" ? ["Completion audio for new threads"] : []),
     ...(settings.inAppNotificationsEnabled !== DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled
       ? ["In-app notifications"]
       : []),
