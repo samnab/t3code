@@ -22,7 +22,7 @@ type HistoryEntry = ProviderAdapter.ProviderAdapterV2RealtimeHistoryEntry;
 class RealtimeVoiceReconciliationError extends Schema.TaggedError<RealtimeVoiceReconciliationError>()(
   "RealtimeVoiceReconciliationError",
   {
-    reason: Schema.Literals(["binding_mismatch", "inconsistent_history", "history_truncated"]),
+    reason: Schema.Literals(["binding_mismatch", "inconsistent_history"]),
   },
 ) {
   override get message(): string {
@@ -45,9 +45,10 @@ const entryIdentity = (entry: HistoryEntry) =>
 
 /**
  * Reads the bound provider history and returns the canonical voice items the projection is
- * missing, stitched against recorded coding turns. Output is descriptive turn items only: nothing
- * here starts, adopts, or queues provider work. Call outside the provider's serial notification
- * reader, and write the result through the same guarded ingestion as live voice.
+ * missing, stitched against recorded coding turns, and whether the whole history was read.
+ * Output is descriptive turn items only: nothing here starts, adopts, or queues provider work.
+ * Call outside the provider's serial notification reader, and write the result through the
+ * same guarded ingestion as live voice.
  */
 export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReconciler.reconcile")(
   function* (input: {
@@ -64,9 +65,9 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
 
     const byIdentity = new Map<string, HistoryEntry>();
     let cursor: string | null = null;
-    for (let page = 0; ; page += 1) {
-      if (page === MAX_REALTIME_HISTORY_PAGES)
-        return yield* new RealtimeVoiceReconciliationError({ reason: "history_truncated" });
+    let complete = false;
+    // A longer history keeps what was read; the caller discloses the rest as missing.
+    for (let page = 0; page < MAX_REALTIME_HISTORY_PAGES; page += 1) {
       const result: ProviderAdapter.ProviderAdapterV2RealtimeHistoryResult =
         yield* input.readRealtimeHistoryPage({ providerThread, cursor });
       if (
@@ -76,7 +77,7 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
         result.nativeThreadId !== nativeThreadId
       )
         return yield* new RealtimeVoiceReconciliationError({ reason: "binding_mismatch" });
-      if (result.type === "unsupported") return [];
+      if (result.type === "unsupported") return { items: [], complete: true };
       for (const entry of result.entries) {
         if (!Number.isSafeInteger(entry.position) || entry.position < 0)
           return yield* new RealtimeVoiceReconciliationError({ reason: "inconsistent_history" });
@@ -92,7 +93,10 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
           return yield* new RealtimeVoiceReconciliationError({ reason: "inconsistent_history" });
         byIdentity.set(identity, entry);
       }
-      if (result.nextCursor === null) break;
+      if (result.nextCursor === null) {
+        complete = true;
+        break;
+      }
       cursor = result.nextCursor;
     }
     const entries = [...byIdentity.values()].sort((left, right) => left.position - right.position);
@@ -107,7 +111,7 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
       "turnItems",
       "providerTurns",
     ]);
-    return planRealtimeVoiceRecovery({
+    const items = planRealtimeVoiceRecovery({
       providerThread,
       threadId,
       nativeThreadId,
@@ -117,6 +121,7 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
       deriveId: idAllocator.derive.realtimeVoiceTurnItem,
       now: yield* DateTime.now,
     });
+    return { items, complete };
   },
 );
 
@@ -192,6 +197,7 @@ export function planRealtimeVoiceRecovery(input: {
     entries,
     turnSpans,
     codingOrdinals,
+    occupiedOrdinals: new Set(turnItems.map((item) => item.ordinal)),
     existingVoice: new Map(
       [...existing].flatMap(([key, item]) =>
         // Only committed neighbors bound a gap; a tail about to be upgraded keeps its own slot.

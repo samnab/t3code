@@ -27,7 +27,7 @@ export interface TurnItemPositionStoreV2Shape {
     readonly appendAfterLatest?: boolean;
     /** Gap left after the latest ordinal when appending. */
     readonly appendStep?: number;
-    /** Exact ordinal already chosen by a stitch; ties sort by item id. */
+    /** Ordinal already chosen by a stitch. A taken slot falls through to the append rule. */
     readonly fixedOrdinal?: number;
   }) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
@@ -69,7 +69,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
             yield* sql`
             INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
             VALUES (${threadId}, ${turnItemId}, ${fixedOrdinal})
-            ON CONFLICT(thread_id, turn_item_id) DO NOTHING
+            ON CONFLICT DO NOTHING
           `;
           }
 
@@ -137,14 +137,25 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           // Voice and capture warnings have no run bucket; keep them at the receipt position.
           // Live voice leaves room so recovered speech can be stitched between receipts.
           ...(item.type === "realtime_voice"
-            ? item.sourceOrder === "provider_anchored"
-              ? { fixedOrdinal: item.ordinal }
-              : { appendAfterLatest: true, appendStep: REALTIME_VOICE_ORDINAL_STEP }
+            ? {
+                appendAfterLatest: true,
+                appendStep: REALTIME_VOICE_ORDINAL_STEP,
+                ...(item.sourceOrder === "provider_anchored" ? { fixedOrdinal: item.ordinal } : {}),
+              }
             : item.type === "error" && item.failure.code === "voice_history_incomplete"
               ? { appendAfterLatest: true }
               : {}),
           ...(runOrdinal === undefined ? {} : { runOrdinal }),
-        }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal }))),
+        }).pipe(
+          Effect.map((ordinal) =>
+            item.ordinal === ordinal
+              ? item
+              : // A stitched slot taken by a concurrent receipt keeps receipt order, and says so.
+                item.type === "realtime_voice" && item.sourceOrder === "provider_anchored"
+                ? { ...item, ordinal, sourceOrder: "unreconciled" }
+                : { ...item, ordinal },
+          ),
+        ),
     });
   }),
 );

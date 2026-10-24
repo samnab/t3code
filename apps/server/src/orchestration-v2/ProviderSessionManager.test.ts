@@ -4116,6 +4116,82 @@ it.effect.each([
   }),
 );
 
+it.effect("ProviderSessionManagerV2 keeps a capped history read and marks the rest missing", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    // Every page points at another one, so the read stops at its page bound.
+    const endless: NonNullable<
+      ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"]
+    > = (request) => {
+      const page = request.cursor == null ? 0 : Number(request.cursor);
+      return makeHistoryReader(
+        Ref.makeUnsafe<ReadonlyMap<string | null, HistoryPage>>(
+          new Map([
+            [
+              request.cursor ?? null,
+              { entries: [historySpeech(page + 1, `p${page}`)], nextCursor: String(page + 1) },
+            ],
+          ]),
+        ),
+      )(request);
+    };
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-capped-history");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const marker = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "turn-item.updated" && stored.event.payload.type === "error",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      yield* Fiber.join(marker);
+      const recovered = (yield* projections.getThreadProjection(threadId)).turnItems.filter(
+        (item) => item.type === "realtime_voice" && item.historyCoverage === "provider_history",
+      );
+      assert.lengthOf(recovered, 40);
+    }).pipe(
+      Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, readRealtimeHistoryPage: endless })),
+    );
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 keeps late voice from a binding that is no longer active", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);

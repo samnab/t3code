@@ -39,6 +39,7 @@ it("places speech between the coding turns it was spoken between", () => {
       ["t2", { first: 2_000_001, last: 2_000_003 }],
     ]),
     codingOrdinals: [1_000_001, 1_000_002, 1_000_004, 2_000_001, 2_000_003],
+    occupiedOrdinals: new Set(),
     existingVoice: new Map(),
   });
   const opening = placements.get(key("opening"))!;
@@ -63,6 +64,7 @@ it("fills a gap between live receipts in native order", () => {
     ],
     turnSpans: new Map([["t1", { first: 1_000_001, last: 1_000_002 }]]),
     codingOrdinals: [1_000_001, 1_000_002],
+    occupiedOrdinals: new Set(),
     existingVoice: new Map([
       [key("received-a"), 1_000_066],
       [key("received-b"), 1_000_130],
@@ -79,6 +81,7 @@ it("keeps receipt order when no slot or anchor exists", () => {
     entries: [turn("turnCompleted", 1, "t1"), speech(2, "a"), speech(3, "missed"), speech(4, "b")],
     turnSpans: new Map([["t1", { first: 1, last: 1 }]]),
     codingOrdinals: [1],
+    occupiedOrdinals: new Set(),
     existingVoice: new Map([
       [key("a"), 10],
       [key("b"), 11],
@@ -89,6 +92,7 @@ it("keeps receipt order when no slot or anchor exists", () => {
     entries: [speech(1, "alone"), turn("turnStarted", 2, "unknown-turn")],
     turnSpans: new Map(),
     codingOrdinals: [5],
+    occupiedOrdinals: new Set(),
     existingVoice: new Map(),
   });
   assert.isNull(unanchored.get(key("alone")));
@@ -120,9 +124,22 @@ it("anchors a promoted request before the coding turn it started", () => {
       ["t2", { first: 2_000_001, last: 2_000_004 }],
     ]),
     codingOrdinals: [1_000_001, 1_000_003, 2_000_001, 2_000_004],
+    occupiedOrdinals: new Set(),
     existingVoice: new Map(),
   });
   const request = placements.get(key("request"))!;
   const promotion = placements.get(key("promotion"))!;
   assert.isTrue(1_000_003 < request && request < promotion && promotion < 2_000_001);
+});
+
+it("skips ordinals another item already holds", () => {
+  const placements = stitchRealtimeVoiceHistory({
+    entries: [turn("turnCompleted", 1, "t1"), speech(2, "a"), speech(3, "b")],
+    turnSpans: new Map([["t1", { first: 1, last: 1 }]]),
+    codingOrdinals: [1, 100],
+    existingVoice: new Map(),
+    // Another native thread's voice sits where an even split would land.
+    occupiedOrdinals: new Set([1, 34, 100]),
+  });
+  assert.deepEqual([placements.get(key("a")), placements.get(key("b"))], [35, 68]);
 });

@@ -17,6 +17,8 @@ interface RealtimeVoiceStitchInput {
   readonly codingOrdinals: ReadonlyArray<number>;
   /** Ordinals of voice items already projected, by `realtimeVoiceKey`. */
   readonly existingVoice: ReadonlyMap<string, number>;
+  /** Every ordinal the thread already uses; ordinals are unique per thread. */
+  readonly occupiedOrdinals: ReadonlySet<number>;
 }
 
 /**
@@ -61,13 +63,24 @@ export function stitchRealtimeVoiceHistory(
   // No recorded coding turn anywhere in the read: there is nothing to anchor against.
   for (const key of opening) placements.set(key, null);
 
+  const occupied = new Set(input.occupiedOrdinals);
   const place = (keys: ReadonlyArray<string>, lower: number, upper: number) => {
-    if (keys.length === 0) return;
     const step =
       upper === Number.POSITIVE_INFINITY
         ? REALTIME_VOICE_ORDINAL_STEP
         : Math.floor((upper - lower) / (keys.length + 1));
-    keys.forEach((key, index) => placements.set(key, step < 1 ? null : lower + step * (index + 1)));
+    let previous = lower;
+    for (const key of keys) {
+      let candidate = previous + step;
+      while (occupied.has(candidate) && candidate < upper) candidate += 1;
+      if (step < 1 || candidate >= upper) {
+        placements.set(key, null);
+        continue;
+      }
+      occupied.add(candidate);
+      placements.set(key, candidate);
+      previous = candidate;
+    }
   };
   for (const [lower, keys] of gaps) {
     const upper = nextCodingAfter(lower);

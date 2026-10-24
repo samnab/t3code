@@ -2130,8 +2130,8 @@ export const layerWithOptions = (
 
       /**
        * Persists one canonical voice record; callers hold the session's request permit. Returns the
-       * provider thread it belongs to, or null when the binding does not vouch for it. A binding
-       * that is no longer active still vouches for late records of its own native thread.
+       * provider thread when it is still the thread's active binding, or null. A binding that is
+       * no longer active still vouches for late records of its own native thread.
        */
       const persistVoiceItem = Effect.fn("ProviderSessionManager.persistVoiceItem")(function* (
         entry: LiveSessionEntry,
@@ -2176,7 +2176,8 @@ export const layerWithOptions = (
           threadId: item.threadId,
           event: { type: "turn_item.updated", driver: entry.runtime.driver, turnItem: item },
         });
-        return providerThread;
+        // Only the active binding's history can be read back through this session.
+        return thread.activeProviderThreadId === providerThread.id ? providerThread : null;
       });
 
       /**
@@ -2204,11 +2205,19 @@ export const layerWithOptions = (
         }).pipe(
           Effect.provideService(ProjectionStore.ProjectionStoreV2, projectionStore),
           Effect.provideService(IdAllocator.IdAllocatorV2, idAllocator),
-          Effect.flatMap((items) =>
+          Effect.flatMap(({ items, complete }) =>
             Effect.forEach(
               items,
               (item) => persistVoiceItem(entry, item).pipe(entry.requestEventPermit.withPermits(1)),
               { discard: true },
+            ).pipe(
+              Effect.andThen(
+                complete
+                  ? Effect.void
+                  : markVoiceHistoryIncomplete(entry, threadId, "reconciliation").pipe(
+                      entry.requestEventPermit.withPermits(1),
+                    ),
+              ),
             ),
           ),
           Effect.catchCause((cause) =>
@@ -2285,6 +2294,17 @@ export const layerWithOptions = (
                 candidate.appThreadId === item.threadId &&
                 candidate.nativeThreadRef?.nativeId === item.nativeThreadId,
             ),
+          ),
+          Effect.flatMap((providerThread) =>
+            projectionStore
+              .getThread(item.threadId)
+              .pipe(
+                Effect.map((thread) =>
+                  thread?.activeProviderThreadId === providerThread?.id
+                    ? providerThread
+                    : undefined,
+                ),
+              ),
           ),
           Effect.flatMap((providerThread) =>
             providerThread === undefined
