@@ -56,6 +56,7 @@ interface Attempt {
   stopRequested: boolean;
   releaseOwner: (() => void) | null;
   ownerLost: boolean;
+  capturePending: boolean;
 }
 
 /** The shared mode/generation/owner authority. Platform transports enforce local teardown.
@@ -85,8 +86,14 @@ export function createRealtimeVoiceController(deps: {
   };
   const current = (value: Attempt) =>
     attempt === value && !value.cancelled && value.generation === generation;
+  const releaseOwner = (value: Attempt) => {
+    const release = value.releaseOwner;
+    value.releaseOwner = null;
+    release?.();
+  };
   const finish = (value: Attempt, reason: string | null) => {
     if (attempt !== value) return;
+    releaseOwner(value);
     attempt = null;
     publish({ mode: "off", owner: null, reason, replacementBlocked: value.remoteRequested });
   };
@@ -111,14 +118,14 @@ export function createRealtimeVoiceController(deps: {
     generation += 1;
     // Local capture and playback stop before entering the serialized RPC queue.
     value.transport?.close();
-    value.releaseOwner?.();
     publish({
       mode: "ending",
       owner: value.owner,
       reason,
       replacementBlocked: value.remoteRequested,
     });
-    if (value.remoteReady) void stopRemote(value);
+    if (!value.remoteRequested && !value.capturePending) finish(value, reason);
+    else if (value.remoteReady) void stopRemote(value);
   };
   const markConnected = (value: Attempt) => {
     if (!current(value) || !value.descriptionReady || !value.transport?.isConnected()) return;
@@ -138,6 +145,7 @@ export function createRealtimeVoiceController(deps: {
       stopRequested: false,
       releaseOwner: null,
       ownerLost: false,
+      capturePending: false,
     };
     attempt = value;
     publish({ mode: "connecting", owner: value.owner, reason: null, replacementBlocked: false });
@@ -149,7 +157,7 @@ export function createRealtimeVoiceController(deps: {
         }
       });
       if (!current(value)) {
-        value.releaseOwner();
+        releaseOwner(value);
         return;
       }
       const transport = deps.createTransport({
@@ -159,7 +167,12 @@ export function createRealtimeVoiceController(deps: {
         },
       });
       value.transport = transport;
-      await transport.acquireMicrophone();
+      value.capturePending = true;
+      try {
+        await transport.acquireMicrophone();
+      } finally {
+        value.capturePending = false;
+      }
       if (!current(value)) return;
       const offer = await transport.createOffer();
       if (!current(value)) return;
@@ -184,11 +197,7 @@ export function createRealtimeVoiceController(deps: {
       if (!value.cancelled) end(`Voice ended: ${deps.describeError(error)}`);
       // A rejected/ambiguous start is not proof that this client owns the provider session.
       // Thread-only stop could terminate a different client's call, so do not issue it.
-      if (!value.remoteReady)
-        finish(
-          value,
-          value.cancelled && snapshot.reason !== null ? snapshot.reason : deps.describeError(error),
-        );
+      if (!value.remoteReady) finish(value, snapshot.reason);
     } finally {
       // getUserMedia cannot be aborted. Keep the reservation until its late stream
       // has been stopped, so another attempt cannot acquire a second microphone.

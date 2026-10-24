@@ -25,7 +25,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function fixture(holdAt?: Stage) {
+function fixture(holdAt?: Stage, requireMountedOwner = false) {
   const entered = deferred();
   const gate = deferred();
   const operations: string[] = [];
@@ -59,7 +59,12 @@ function fixture(holdAt?: Stage) {
     threadTitle: "Conversation B",
   };
   let ownerLost: (reason: string) => void = () => {};
+  let ownerMounted = false;
+  const releaseOwner = vi.fn(() => {
+    ownerMounted = false;
+  });
   const stopProvider = vi.fn(async () => {
+    if (requireMountedOwner && !ownerMounted) throw new Error("Owner detail was dropped");
     operations.push("stop");
   });
   const startProvider = vi.fn(async () => {
@@ -70,7 +75,8 @@ function fixture(holdAt?: Stage) {
     describeError: (error) => (error instanceof Error ? error.message : String(error)),
     watchOwner: (_owner, lost) => {
       ownerLost = lost;
-      return () => {};
+      ownerMounted = true;
+      return releaseOwner;
     },
     startProvider,
     stopProvider,
@@ -114,6 +120,7 @@ function fixture(holdAt?: Stage) {
     transports,
     startProvider,
     stopProvider,
+    releaseOwner,
     loseOwner: (reason: string) => ownerLost(reason),
   };
 }
@@ -131,6 +138,60 @@ function whenOff(controller: RealtimeVoiceController): Promise<void> {
 }
 
 describe("app-owned realtime voice", () => {
+  it("retains the owner detail subscription until cancelled provider startup is cleaned up", async () => {
+    const f = fixture("provider", true);
+    const pending = f.controller.start(f.owner);
+    await f.entered.promise;
+    f.controller.end();
+    expect(f.releaseOwner).not.toHaveBeenCalled();
+    const off = whenOff(f.controller);
+    f.gate.resolve();
+    await pending;
+    await off;
+    expect(f.stopProvider).toHaveBeenCalledOnce();
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", reason: null });
+    expect(f.releaseOwner).toHaveBeenCalledOnce();
+  });
+
+  it.each<Stage>(["offer", "local", "ice"])(
+    "finishes local cancellation even when %s never settles",
+    async (stage) => {
+      const f = fixture(stage);
+      void f.controller.start(f.owner);
+      await f.entered.promise;
+      f.controller.end();
+      expect(f.transports[0]?.closed).toBe(true);
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", replacementBlocked: false });
+      expect(f.releaseOwner).toHaveBeenCalledOnce();
+      await f.controller.start(f.other);
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", owner: f.other });
+    },
+  );
+
+  it("keeps deliberate cancellation when a later microphone denial arrives", async () => {
+    const f = fixture("microphone");
+    const pending = f.controller.start(f.owner);
+    await f.entered.promise;
+    f.controller.end();
+    f.gate.reject(new Error("late permission denial"));
+    await pending;
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", reason: null });
+    expect(f.releaseOwner).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a cancelled negotiation rejecting after its replacement is transmitting", async () => {
+    const f = fixture("offer");
+    const pending = f.controller.start(f.owner);
+    await f.entered.promise;
+    f.controller.end();
+    await f.controller.start(f.other);
+    f.gate.reject(new Error("old closed peer"));
+    await pending;
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", owner: f.other });
+    expect(f.transports[1]?.closed).toBe(false);
+    expect(f.releaseOwner).toHaveBeenCalledOnce();
+  });
+
   it("captures the immutable environment/thread before permission and rejects a second owner", async () => {
     const f = fixture("microphone");
     const pending = f.controller.start(f.owner);
@@ -262,6 +323,7 @@ describe("app-owned realtime voice", () => {
     expect(f.transports[0]?.closed).toBe(true);
     expect(f.stopProvider).not.toHaveBeenCalled();
     expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", replacementBlocked: true });
+    expect(f.releaseOwner).toHaveBeenCalledOnce();
   });
 
   it("retains the replacement gate after failed stop and sends stop only once", async () => {
@@ -280,5 +342,6 @@ describe("app-owned realtime voice", () => {
       replacementBlocked: true,
       reason: expect.stringContaining("host unavailable"),
     });
+    expect(f.releaseOwner).toHaveBeenCalledOnce();
   });
 });

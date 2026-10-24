@@ -24,8 +24,8 @@ export function RealtimeVoiceControl({
         ? "End voice in this conversation"
         : `Voice in ${owner.threadTitle} · Return to conversation. Moving calls is unavailable until ownership-safe stop is supported.`
       : snapshot.replacementBlocked
-        ? VOICE_REPLACEMENT_GATE
-        : "Talk with Codex by voice";
+        ? [snapshot.reason, VOICE_REPLACEMENT_GATE].filter(Boolean).join(" ")
+        : (snapshot.reason ?? "Talk with Codex by voice");
   const activate = () => {
     if (owner !== null) {
       if (isOwner) end();

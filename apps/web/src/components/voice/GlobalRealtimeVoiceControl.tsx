@@ -1,11 +1,10 @@
 import { AudioLinesIcon, MicOffIcon } from "lucide-react";
-import { VOICE_REPLACEMENT_GATE } from "@t3tools/client-runtime/realtime-voice";
 import { Button } from "../ui/button";
 import { useRealtimeVoice } from "./RealtimeVoiceProvider";
 
 export function GlobalRealtimeVoiceControl() {
   const { snapshot, end, returnToOwner } = useRealtimeVoice();
-  if (snapshot.mode === "off" && !snapshot.reason && !snapshot.replacementBlocked) return null;
+  if (snapshot.mode === "off") return null;
   const owner = snapshot.owner;
   const status =
     snapshot.mode === "transmitting"
@@ -21,7 +20,7 @@ export function GlobalRealtimeVoiceControl() {
       role="region"
       aria-label="Voice conversation"
     >
-      <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-3 rounded-xl bg-popover px-3 py-2 text-popover-foreground shadow-lg">
+      <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-3 rounded-xl bg-popover px-3 py-2 text-popover-foreground shadow-lg [-webkit-app-region:no-drag]">
         {snapshot.mode === "transmitting" ? (
           <AudioLinesIcon className="size-4 shrink-0" aria-hidden="true" />
         ) : (
@@ -34,10 +33,8 @@ export function GlobalRealtimeVoiceControl() {
               {owner.threadTitle} · {owner.environmentLabel}
             </p>
           )}
-          {(snapshot.reason || (snapshot.mode === "off" && snapshot.replacementBlocked)) && (
-            <p className="max-w-md text-xs text-muted-foreground">
-              {snapshot.reason ?? VOICE_REPLACEMENT_GATE}
-            </p>
+          {snapshot.reason && (
+            <p className="max-w-md text-xs text-muted-foreground">{snapshot.reason}</p>
           )}
         </div>
         {owner && (
