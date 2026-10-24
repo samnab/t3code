@@ -5,7 +5,9 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnItemId,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as DateTime from "effect/DateTime";
@@ -176,6 +178,85 @@ it.layer(layerTest)("ThreadSearch", (it) => {
       );
       assert.lengthOf((yield* search.search({ query: "needle", limit: 1 })).matches, 1);
       assert.deepEqual((yield* search.search({ query: "ne%le" })).matches, []);
+    }),
+  );
+
+  it.effect("finds finalized voice speech and marks it as voice", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const project = ProjectId.make("project:voice");
+      yield* createProject(project);
+      const spoken = ThreadId.make("thread:spoken");
+      const reply = ThreadId.make("thread:reply");
+      const voice = (
+        threadId: ThreadId,
+        id: string,
+        content: Extract<OrchestrationV2TurnItem, { type: "realtime_voice" }>["content"],
+        status: OrchestrationV2TurnItem["status"] = "completed",
+      ): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`voice:${id}`),
+        type: "turn-item.updated",
+        threadId,
+        providerInstanceId,
+        occurredAt: at(2),
+        payload: {
+          id: TurnItemId.make(id),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status,
+          title: null,
+          startedAt: null,
+          completedAt: at(2),
+          updatedAt: at(2),
+          type: "realtime_voice",
+          providerInstanceId,
+          nativeThreadId: "native:voice",
+          realtimeSessionId: "voice-session",
+          nativeRealtimeItemId: id,
+          content,
+          captureState: "canonical_completed",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        },
+      });
+      const events: ReadonlyArray<OrchestrationV2DomainEvent> = [
+        thread(spoken, project),
+        voice(spoken, "voice:user", { type: "transcriptSegment", role: "user", text: "say ZEBRA" }),
+        thread(reply, project),
+        voice(reply, "voice:assistant", {
+          type: "transcriptSegment",
+          role: "assistant",
+          text: `${"long ".repeat(60)}zebra reply`,
+        }),
+        voice(
+          reply,
+          "voice:running",
+          { type: "transcriptSegment", role: "user", text: "zebra partial" },
+          "running",
+        ),
+      ];
+      yield* Effect.forEach(events, projections.apply, { discard: true });
+
+      const result = yield* search.search({ query: "zebra", limit: 20 });
+      assert.deepEqual(
+        result.matches.map((match) => [match.threadId, match.source, match.snippet.slice(0, 9)]),
+        [
+          [spoken, "user", "(voice) s"],
+          [reply, "assistant", "(voice) …"],
+        ],
+      );
+      assert.equal(result.matches[0]!.snippet, "(voice) say ZEBRA");
+      assert.isAtMost(result.matches[1]!.snippet.length, 240);
+      assert.include(result.matches[1]!.snippet, "zebra reply");
+      assert.equal(result.matches[0]!.messageCreatedAt, DateTime.formatIso(at(2)));
     }),
   );
 });

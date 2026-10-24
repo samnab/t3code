@@ -363,6 +363,77 @@ describe("V2 thread find", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("finds finalized voice transcripts by their turn item", () =>
+    Effect.gen(function* () {
+      const projection = yield* setup;
+      const voice = (
+        id: string,
+        ordinal: number,
+        content: Extract<OrchestrationV2TurnItem, { type: "realtime_voice" }>["content"],
+        status: OrchestrationV2TurnItem["status"] = "completed",
+      ): OrchestrationV2TurnItem => ({
+        id: TurnItemId.make(id),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        status,
+        title: null,
+        startedAt: null,
+        completedAt: at(2),
+        updatedAt: at(2),
+        type: "realtime_voice",
+        providerInstanceId,
+        nativeThreadId: "native:voice",
+        realtimeSessionId: "voice-session",
+        nativeRealtimeItemId: id,
+        content,
+        captureState: "canonical_completed",
+        historyCoverage: "live_only",
+        sourceOrder: "unreconciled",
+        timestampProvenance: "observed",
+      });
+      yield* putItems([
+        item("typed", 1, "typed zebra"),
+        voice("voice:user", 2, {
+          type: "transcriptSegment",
+          role: "user",
+          text: "Zebra **zebra**",
+        }),
+        voice("voice:assistant", 3, {
+          type: "transcriptSegment",
+          role: "assistant",
+          text: "zebra heard",
+        }),
+        voice(
+          "voice:running",
+          4,
+          { type: "transcriptSegment", role: "user", text: "zebra" },
+          "running",
+        ),
+        voice("voice:start", 5, { type: "realtimeSessionStarted" }),
+      ]);
+      const result = yield* projection.searchThread({ threadId, query: "zebra" });
+      assert.equal(result.totalMatches, 4);
+      assert.deepEqual(
+        result.navigation?.map(({ entryId, runId: entryRunId, count }) => [
+          entryId,
+          entryRunId,
+          count,
+        ]),
+        [
+          ["typed", runId, 1],
+          ["voice:user", null, 2],
+          ["voice:assistant", null, 1],
+        ],
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("searches displayed skill labels and invalidates parsed text when labels change", () =>
     Effect.gen(function* () {
       const projection = yield* setup;
