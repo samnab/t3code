@@ -7,6 +7,9 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { REALTIME_VOICE_ORDINAL_STEP } from "./realtimeVoiceStitch.ts";
 
+/** Each run owns ordinals `[run.ordinal * TURN_ITEM_RUN_BUCKET, +999_999]`; runless items sit below. */
+export const TURN_ITEM_RUN_BUCKET = 1_000_000;
+
 export class TurnItemPositionStoreError extends Schema.TaggedError<TurnItemPositionStoreError>()(
   "TurnItemPositionStoreError",
   {
@@ -83,7 +86,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
                 LIMIT 1
               `;
           const runOrdinal = suppliedRunOrdinal ?? runRows[0]?.ordinal ?? null;
-          const lowerBound = runOrdinal === null ? 0 : runOrdinal * 1_000_000;
+          const lowerBound = runOrdinal === null ? 0 : runOrdinal * TURN_ITEM_RUN_BUCKET;
           const upperBound = appendAfterLatest
             ? Number.MAX_SAFE_INTEGER
             : runOrdinal === null

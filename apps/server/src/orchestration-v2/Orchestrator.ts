@@ -150,6 +150,7 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+import { TURN_ITEM_RUN_BUCKET } from "./TurnItemPositionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -866,6 +867,36 @@ function latestContextTransfer(
   }, undefined);
 }
 
+/**
+ * Runless finalized voice is part of the conversation a handoff covers. It joins the covered
+ * items by run bucket, in timeline order; `historicalMessage` labels it as past speech and drops
+ * uncommitted tails. Speech the target provider thread already holds natively stays out.
+ */
+export function withHandoffVoice(input: {
+  readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
+  readonly voice: ReadonlyArray<OrchestrationV2TurnItem>;
+  readonly fromRunOrdinal: number;
+  readonly toRunOrdinal: number | null;
+  readonly targetProviderThreadId: OrchestrationV2ProviderThread["id"];
+}): ReadonlyArray<OrchestrationV2TurnItem> {
+  const lower = input.fromRunOrdinal <= 1 ? 0 : input.fromRunOrdinal * TURN_ITEM_RUN_BUCKET;
+  const upper =
+    input.toRunOrdinal === null
+      ? Number.POSITIVE_INFINITY
+      : (input.toRunOrdinal + 1) * TURN_ITEM_RUN_BUCKET;
+  const voice = input.voice.filter(
+    (item) =>
+      item.type === "realtime_voice" &&
+      item.runId === null &&
+      item.providerThreadId !== input.targetProviderThreadId &&
+      item.ordinal >= lower &&
+      item.ordinal < upper,
+  );
+  return voice.length === 0
+    ? input.items
+    : [...input.items, ...voice].sort((left, right) => left.ordinal - right.ordinal);
+}
+
 function visibleDeltaRunOrdinals(
   projection: Pick<OrchestrationV2ThreadProjection, "runs">,
   items: ReadonlyArray<OrchestrationV2TurnItem>,
@@ -1097,6 +1128,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           visibleTurnItems: [],
           updatedAt: records.thread.updatedAt,
         })),
+        Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+      );
+
+  const readHandoffVoice = (threadId: ThreadId) =>
+    projectionStore
+      .getThreadRecords(threadId, ["turnItems"], { turnItemTypes: ["realtime_voice"] })
+      .pipe(
+        Effect.map((records) => records.turnItems),
         Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
       );
 
@@ -6397,12 +6436,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const portableForkItems =
       !requiresPortableFork || sourceProjection === null || sourceRun === null
         ? []
-        : yield* readHandoffItems(sourceProjection.thread.id, [
-            ...sourceProjection.runs
-              .filter((run) => run.ordinal <= sourceRun.ordinal)
-              .map((run) => run.id),
-            ...(sourceProjection.thread.historyOrigin === "v1_import" ? [null] : []),
-          ]);
+        : withHandoffVoice({
+            items: yield* readHandoffItems(sourceProjection.thread.id, [
+              ...sourceProjection.runs
+                .filter((run) => run.ordinal <= sourceRun.ordinal)
+                .map((run) => run.id),
+              ...(sourceProjection.thread.historyOrigin === "v1_import" ? [null] : []),
+            ]),
+            voice: yield* readHandoffVoice(sourceProjection.thread.id),
+            fromRunOrdinal: 1,
+            toRunOrdinal: sourceRun.ordinal,
+            targetProviderThreadId: ensuredProviderThread.id,
+          });
     const portableForkHandoff =
       !requiresPortableFork ||
       pendingForkTransfer === undefined ||
@@ -6459,10 +6504,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             (targetProviderThread === undefined || requiresFullProviderSwitchContext)
               ? legacyImportItems
               : []),
-            ...(yield* readHandoffItems(
-              command.threadId,
-              providerSwitchCoveredRuns.map((run) => run.id),
-            )),
+            ...withHandoffVoice({
+              items: yield* readHandoffItems(
+                command.threadId,
+                providerSwitchCoveredRuns.map((run) => run.id),
+              ),
+              voice: yield* readHandoffVoice(command.threadId),
+              fromRunOrdinal: providerSwitchCoveredRuns[0]!.ordinal,
+              // Speech after the latest covered run is the newest context the target lacks.
+              toRunOrdinal: null,
+              targetProviderThreadId: ensuredProviderThread.id,
+            }),
           ];
     const providerSwitchTransferId =
       providerSwitchCoveredRuns.length === 0 || latestHandoffRun === undefined
@@ -6619,12 +6671,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const mergeBackDeltaItems =
       mergeBackSourceProjection === null || mergeBackSourceRun === null
         ? []
-        : yield* readHandoffItems(
-            mergeBackSourceProjection.thread.id,
-            mergeBackSourceProjection.runs
-              .filter((run) => run.ordinal <= mergeBackSourceRun.ordinal)
-              .map((run) => run.id),
-          );
+        : withHandoffVoice({
+            items: yield* readHandoffItems(
+              mergeBackSourceProjection.thread.id,
+              mergeBackSourceProjection.runs
+                .filter((run) => run.ordinal <= mergeBackSourceRun.ordinal)
+                .map((run) => run.id),
+            ),
+            voice: yield* readHandoffVoice(mergeBackSourceProjection.thread.id),
+            fromRunOrdinal: 1,
+            toRunOrdinal: mergeBackSourceRun.ordinal,
+            targetProviderThreadId: providerThread.id,
+          });
     const mergeBackHandoff =
       pendingMergeBackTransfer === undefined ||
       mergeBackSourceProjection === null ||
