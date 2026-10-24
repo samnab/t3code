@@ -959,7 +959,7 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
   switch (item.type) {
     case "realtime_voice":
       return item.status === "completed" && item.content.type === "transcriptSegment"
-        ? `${item.content.role === "user" ? "User" : "Assistant"} (voice): ${item.content.text}`
+        ? `${item.content.role === "user" ? "User" : "Assistant"} (voice session ${item.realtimeSessionId}): ${item.content.text}`
         : null;
     case "notification":
       return [item.summary, item.detail].filter((part) => part !== undefined).join("\n");

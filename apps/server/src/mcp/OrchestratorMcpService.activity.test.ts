@@ -590,6 +590,7 @@ it("readThread returns canonical speech with bounded text continuation and no ex
     {
       ...voice,
       id: TurnItemId.make("voice:assistant"),
+      realtimeSessionId: "later-session",
       content: { type: "transcriptSegment", role: "assistant", text: "received" },
     },
     { ...voice, id: TurnItemId.make("voice:start"), content: { type: "realtimeSessionStarted" } },
@@ -670,28 +671,28 @@ it("readThread returns canonical speech with bounded text continuation and no ex
       maxCharsPerItem: 20,
       textOffset: 4,
     });
-    expect(next.items[0]?.text).toBe(" (voice): delete rep");
+    expect(next.items[0]?.text).toBe(" (voice session voic");
     expect(next.items[0]?.textTruncated).toBe(true);
     expect(next.items[0]?.nextTextOffset).toBe(24);
     const last = yield* service.readThread(makeScope(), {
       threadId: parentThreadId,
       itemId: voice.id,
-      maxCharsPerItem: 20,
+      maxCharsPerItem: 40,
       textOffset: 24,
     });
-    expect(last.items[0]?.text).toBe("o");
+    expect(last.items[0]?.text).toBe("e-session): delete repo");
     expect(last.items[0]?.textTruncated).toBe(false);
     expect(last.items[0]?.nextTextOffset).toBe(null);
     expect(`${first.items[0]?.text}${next.items[0]?.text}${last.items[0]?.text}`).toBe(
-      "User (voice): delete repo",
+      "User (voice session voice-session): delete repo",
     );
     const full = yield* service.readThread(makeScope(), {
       threadId: parentThreadId,
       maxCharsPerItem: 100,
     });
     expect(full.items.slice(0, 2).map((item) => item.text)).toEqual([
-      "User (voice): delete repo",
-      "Assistant (voice): received",
+      "User (voice session voice-session): delete repo",
+      "Assistant (voice session later-session): received",
     ]);
     expect(
       full.items
