@@ -88,6 +88,10 @@ describe("withVoiceNotificationsEnv", () => {
       PATH: "/bin",
       T3_VOICE_NOTIFICATIONS: "1",
     });
+    expect(withVoiceNotificationsEnv(baseEnv, undefined)).toEqual({
+      PATH: "/bin",
+      T3_VOICE_NOTIFICATIONS: "0",
+    });
     expect(baseEnv.T3_VOICE_NOTIFICATIONS).toBe("inherited");
   });
 });

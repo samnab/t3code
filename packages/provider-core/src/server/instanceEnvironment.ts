@@ -34,5 +34,5 @@ export function withVoiceNotificationsEnv(
   env: NodeJS.ProcessEnv,
   enabled: boolean | undefined,
 ): NodeJS.ProcessEnv {
-  return { ...env, T3_VOICE_NOTIFICATIONS: enabled === false ? "0" : "1" };
+  return { ...env, T3_VOICE_NOTIFICATIONS: enabled === true ? "1" : "0" };
 }

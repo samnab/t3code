@@ -1672,7 +1672,7 @@ export function threadShellFromProjection(
     snoozedAt: projection.thread.snoozedAt ?? null,
     goal: projection.thread.goal ?? null,
     goalLoop: projection.thread.goalLoop ?? null,
-    voiceNotifications: projection.thread.voiceNotifications ?? true,
+    voiceNotifications: projection.thread.voiceNotifications ?? false,
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
@@ -1918,7 +1918,7 @@ function shellFromState(input: {
     snoozedAt: input.state.thread.snoozedAt ?? null,
     goal: input.state.thread.goal ?? null,
     goalLoop: input.state.thread.goalLoop ?? null,
-    voiceNotifications: input.state.thread.voiceNotifications ?? true,
+    voiceNotifications: input.state.thread.voiceNotifications ?? false,
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,

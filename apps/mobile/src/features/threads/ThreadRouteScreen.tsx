@@ -833,7 +833,7 @@ function ThreadRouteContent(
         modelSelection: selectedThread.modelSelection,
         runtimeMode: selectedThread.runtimeMode,
         interactionMode: selectedThread.interactionMode,
-        voiceNotifications: selectedThread.voiceNotifications ?? true,
+        voiceNotifications: selectedThread.voiceNotifications ?? false,
         workspaceMode: "local",
         branch: null,
         worktreePath: null,

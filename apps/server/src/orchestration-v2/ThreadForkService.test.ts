@@ -230,6 +230,18 @@ it.effect("preserves pull request context without inheriting any watches", () =>
   }),
 );
 
+it.effect("starts a fork with completion voice off when its source opted in", () =>
+  Effect.gen(function* () {
+    const run = makeSourceRun("completed");
+    const source = makeSourceProjection(run);
+    const projection = { ...source, thread: { ...source.thread, voiceNotifications: true } };
+    const result = yield* planFork(run, projection);
+
+    assert.isFalse(result.targetThread.voiceNotifications);
+    assert.isTrue(projection.thread.voiceNotifications);
+  }),
+);
+
 it.effect("rejects in-progress and rolled-back fork sources", () =>
   Effect.gen(function* () {
     for (const status of ["running", "rolled_back"] as const) {

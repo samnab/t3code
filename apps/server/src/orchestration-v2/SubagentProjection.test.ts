@@ -117,6 +117,25 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
   });
 });
 
+it("starts a child with completion voice off when its parent opted in", () => {
+  const parentThread = { ...makeParentThread(), voiceNotifications: true };
+  const child = makeSubagentChildThread({
+    parentThread,
+    childThreadId,
+    parentNodeId: NodeId.make("node:voice-parent"),
+    activeProviderThreadId: null,
+    providerInstanceId: childProviderInstanceId,
+    modelSelection: childModelSelection,
+    title: "Quiet child",
+    now: childCreatedAt,
+    createdBy: "agent",
+    creationSource: "mcp",
+  });
+
+  assert.isFalse(child.voiceNotifications);
+  assert.isTrue(parentThread.voiceNotifications);
+});
+
 function taskFixture() {
   const projection = emptyProjection({
     type: "thread.created",

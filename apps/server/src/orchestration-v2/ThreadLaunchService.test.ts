@@ -339,6 +339,33 @@ it.effect("creates the first turn with draft goal and voice settings already act
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, RuntimePolicy.layer)));
 });
 
+it.effect.each([
+  { voiceNotifications: undefined, expected: false },
+  { voiceNotifications: true, expected: true },
+])(
+  "starts completion voice at $expected for preference $voiceNotifications",
+  ({ voiceNotifications, expected }) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const launched = yield* launches.launch({
+        ...launchInput({
+          command: "command:launch:voice-default",
+          thread: "thread:launch:voice-default",
+        }),
+        ...(voiceNotifications === undefined ? {} : { voiceNotifications }),
+      });
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const runtimePolicy = yield* policy.resolve({
+        thread: launched.projection.thread,
+        modelSelection,
+      });
+      assert.equal(launched.projection.thread.voiceNotifications, expected);
+      assert.equal(runtimePolicy.voiceNotifications, expected);
+    }).pipe(Effect.provide(Layer.mergeAll(harness.layer, RuntimePolicy.layer)));
+  },
+);
+
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>
     (["user", "agent"] as const).map((createdBy) => ({ target, createdBy })),

@@ -28,7 +28,7 @@ export function readThreadGoalState(thread: {
 export function readThreadVoiceNotifications(thread: {
   readonly voiceNotifications?: boolean;
 }): boolean {
-  return thread.voiceNotifications ?? true;
+  return thread.voiceNotifications ?? false;
 }
 
 export type ThreadGoalCommand =

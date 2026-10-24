@@ -624,7 +624,7 @@ export function NewTaskFlowProvider(
   const interactionMode = planModeEnabled
     ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
     : DEFAULT_PROVIDER_INTERACTION_MODE;
-  const voiceNotifications = selectedProjectDraft.voiceNotifications ?? true;
+  const voiceNotifications = selectedProjectDraft.voiceNotifications ?? false;
   const setSelectedModelKey = (
     key: string | null,
     options?: ReadonlyArray<ProviderOptionSelection>,
@@ -1065,7 +1065,7 @@ export function NewTaskFlowProvider(
           (candidate) => candidate.instanceId === draftModelSelection.instanceId,
         ),
       }),
-      voiceNotifications: draft.voiceNotifications ?? true,
+      voiceNotifications: draft.voiceNotifications ?? false,
       creation: {
         projectId: selectedProject.id,
         ...(projectTitle !== undefined ? { projectTitle } : {}),

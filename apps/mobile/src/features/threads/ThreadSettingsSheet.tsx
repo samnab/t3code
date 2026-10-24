@@ -930,7 +930,7 @@ function ThreadSettingsOptionsItem(props: {
             <SwitchRow
               isLast={session.reloadAgent === undefined}
               label="Voice notifications"
-              value={session.voiceNotifications ?? true}
+              value={session.voiceNotifications ?? false}
               onValueChange={session.onUpdateVoiceNotifications}
             />
           </Animated.View>

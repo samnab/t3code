@@ -2551,7 +2551,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       snoozedAt: null,
       goal: command.goal ?? null,
       goalLoop: null,
-      voiceNotifications: command.voiceNotifications ?? true,
+      voiceNotifications: command.voiceNotifications ?? false,
       lastVisitedAt: null,
       deletedAt: null,
     };
