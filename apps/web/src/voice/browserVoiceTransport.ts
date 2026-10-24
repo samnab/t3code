@@ -9,14 +9,21 @@ export function createBrowserVoiceTransport(events: {
   connected(): void;
   failed(reason: string): void;
 }): VoiceTransport {
-  const peer = new RTCPeerConnection();
+  // Created and resumed inside the user gesture that starts or resumes voice, so autoplay policy
+  // lets it run. Until it runs the transport reports not connected and the gate stays shut.
+  // Created first: if this constructor throws, no peer exists yet to leak.
+  const context = new AudioContext();
+  void context.resume().catch(() => {});
+  let peer: RTCPeerConnection;
+  try {
+    peer = new RTCPeerConnection();
+  } catch (error) {
+    void context.close().catch(() => {});
+    throw error;
+  }
   const audio = document.createElement("audio");
   audio.autoplay = true;
   const channel = peer.createDataChannel("oai-events");
-  // Created and resumed inside the user gesture that starts or resumes voice, so autoplay policy
-  // lets it run. Until it runs the transport reports not connected and the gate stays shut.
-  const context = new AudioContext();
-  void context.resume().catch(() => {});
   let microphone: MediaStream | null = null;
   let graph: {
     readonly source: MediaStreamAudioSourceNode;
