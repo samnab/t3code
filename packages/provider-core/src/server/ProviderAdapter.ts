@@ -520,6 +520,53 @@ export interface ProviderAdapterV2HistoricalContext {
   readonly context: string;
 }
 
+export type ProviderAdapterV2RealtimeHistoryEntry =
+  | {
+      readonly type: "realtime";
+      readonly position: number;
+      readonly item: Extract<
+        OrchestrationV2TurnItem,
+        { readonly type: "realtime_voice" }
+      >["content"] & {
+        readonly id: string;
+        readonly realtimeSessionId: string;
+      };
+    }
+  | {
+      readonly type: "item";
+      readonly position: number;
+      readonly nativeTurnId: string;
+      readonly nativeItemId: string;
+      readonly itemType: string;
+    }
+  | { readonly type: "turnStarted"; readonly position: number; readonly nativeTurnId: string }
+  | {
+      readonly type: "turnCompleted";
+      readonly position: number;
+      readonly nativeTurnId: string;
+      readonly status: "inProgress" | "completed" | "interrupted" | "failed";
+    };
+
+export interface ProviderAdapterV2RealtimeHistoryBinding {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly providerSessionId: ProviderSessionId;
+  readonly providerThreadId: ProviderThreadId;
+  readonly nativeThreadId: string;
+}
+
+/** Descriptive provider history only. Positions are native anchors, not T3 ordinals or capture times. */
+export type ProviderAdapterV2RealtimeHistoryResult = ProviderAdapterV2RealtimeHistoryBinding &
+  (
+    | {
+        readonly type: "page";
+        readonly entries: ReadonlyArray<ProviderAdapterV2RealtimeHistoryEntry>;
+        readonly activeRealtimeSessionAtPageStart: string | null;
+        readonly nextCursor: string | null;
+      }
+    | { readonly type: "unsupported"; readonly reason: "method_unavailable" }
+  );
+
 export interface ProviderAdapterV2McpTool {
   readonly name: string;
   readonly _meta?: unknown;
@@ -643,6 +690,13 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly readThreadSnapshot: (
     input: ProviderAdapterV2ReadThreadSnapshotInput,
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
+  /** One explicit bounded read of an already loaded binding; never executes or reconciles historical work. */
+  // Call outside the provider's serial notification reader; the RPC reply uses that reader.
+  readonly readRealtimeHistoryPage?: (input: {
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly cursor?: string | null;
+    readonly limit?: number;
+  }) => Effect.Effect<ProviderAdapterV2RealtimeHistoryResult, ProviderAdapterV2Error>;
   readonly uploadFeedback?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly reason?: string;

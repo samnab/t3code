@@ -259,6 +259,67 @@ describe("CodexAdapterV2 process spawning", () => {
 });
 
 describe("CodexAdapterV2 native protocol logging", () => {
+  it.effect(
+    "omits timeline requests, transcript replies, and provider error payloads from protocol logs",
+    () =>
+      Effect.gen(function* () {
+        const writes: unknown[] = [];
+        const logger = CodexAdapterV2.makeCodexAppServerProtocolLogger({
+          nativeEventLogger: {
+            filePath: "/tmp/synthetic.log",
+            write: (event) =>
+              Effect.sync(() => {
+                writes.push(event);
+              }),
+            close: () => Effect.void,
+          },
+          threadId: ThreadId.make("history-log"),
+          providerSessionId: ProviderSessionId.make("history-log-session"),
+        });
+        assert.isDefined(logger);
+        if (logger === undefined) return;
+        for (const id of [3, "4"]) {
+          yield* logger({
+            direction: "outgoing",
+            stage: "decoded",
+            payload: {
+              id,
+              method: "thread/timeline/list",
+              params: { threadId: "native", cursor: "private-cursor" },
+            },
+          });
+          yield* logger({ direction: "incoming", stage: "raw", payload: "private-transcript" });
+          yield* logger({
+            direction: "incoming",
+            stage: "decode_failed",
+            payload: { unsafeFixture: "private-transcript" },
+          });
+          yield* logger({
+            direction: "incoming",
+            stage: "decoded",
+            payload:
+              id === 3
+                ? { id, result: { data: [{ text: "private-transcript" }] } }
+                : {
+                    id,
+                    error: {
+                      code: -32000,
+                      message: "private-transcript",
+                      data: "private-transcript",
+                    },
+                  },
+          });
+        }
+        assert.isEmpty(writes);
+        yield* logger({
+          direction: "incoming",
+          stage: "decoded",
+          payload: { id: 5, result: { safeOtherResponse: true } },
+        });
+        assert.lengthOf(writes, 1);
+      }),
+  );
+
   it.effect("logs decoded app-server frames once with credentials redacted", () =>
     Effect.gen(function* () {
       const writes: Array<{
@@ -911,6 +972,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
     onResponse: (method: string) => Effect.Effect<void> = () => Effect.void,
+    onNotification: (method: string) => Effect.Effect<void> = () => Effect.void,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -943,6 +1005,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      handleServerNotification: (method, handler) =>
+                        client.handleServerNotification(method, (payload) =>
+                          handler(payload).pipe(Effect.tap(() => onNotification(method))),
+                        ),
                       raw: {
                         ...client.raw,
                         request: (method, params) =>
@@ -1045,6 +1111,442 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         awaitTerminal: (count: number) => changes.until(() => terminalEvents().length >= count),
       };
     });
+
+  it.effect(
+    "reads two synthetic timeline pages with opaque cursors and overlap without executing history",
+    () =>
+      Effect.gen(function* () {
+        const nativeId = "history-pages";
+        const realtime = (position: number, role: "user" | "assistant") => ({
+          type: "realtime",
+          position,
+          item: {
+            type: "transcriptSegment",
+            id: `segment-${position}`,
+            realtimeSessionId: "reused-session-id",
+            role,
+            text: "Synthetic history",
+          },
+        });
+        const pages = [
+          {
+            data: [
+              { type: "turnStarted", position: 1, turn_id: "old-turn" },
+              {
+                type: "item",
+                position: 2,
+                turnId: "old-turn",
+                item: {
+                  type: "userMessage",
+                  id: "old-user",
+                  content: [{ type: "text", text: "Historical command" }],
+                },
+              },
+              realtime(3, "user"),
+            ],
+            activeRealtimeSessionAtPageStart: null,
+            nextCursor: "opaque/%?cursor",
+          },
+          {
+            data: [
+              realtime(3, "user"),
+              realtime(4, "assistant"),
+              { type: "turnCompleted", position: 5, turn_id: "old-turn", status: "completed" },
+            ],
+            activeRealtimeSessionAtPageStart: "reused-session-id",
+            nextCursor: null,
+          },
+        ];
+        const requests: string[] = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: nativeId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 3 },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 3, result: pages[0] } },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 3, cursor: "opaque/%?cursor" },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: pages[1] } },
+            ],
+          }),
+          undefined,
+          (method) =>
+            Effect.sync(() => {
+              requests.push(method);
+            }),
+        );
+        const first = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+          limit: 3,
+        });
+        assert.equal(first.type, "page");
+        if (first.type !== "page") return;
+        assert.equal(first.threadId, harness.threadId);
+        assert.equal(first.providerThreadId, harness.providerThread.id);
+        assert.equal(first.nativeThreadId, nativeId);
+        assert.equal(first.providerSessionId, harness.providerThread.providerSessionId);
+        assert.equal(first.providerInstanceId, harness.providerThread.providerInstanceId);
+        assert.deepEqual(first.entries[1], {
+          type: "item",
+          position: 2,
+          nativeTurnId: "old-turn",
+          nativeItemId: "old-user",
+          itemType: "userMessage",
+        });
+        const second = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+          limit: 3,
+          cursor: first.nextCursor,
+        });
+        assert.equal(second.type, "page");
+        if (second.type !== "page") return;
+        assert.deepEqual(second.entries[0], first.entries[2]);
+        assert.isNull(second.nextCursor);
+        assert.equal(second.activeRealtimeSessionAtPageStart, "reused-session-id");
+        assert.deepEqual(requests, [
+          "initialize",
+          "thread/start",
+          "thread/timeline/list",
+          "thread/timeline/list",
+        ]);
+        assert.isEmpty(harness.events);
+        assert.isEmpty(harness.continuationRequests);
+        assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each(["unsupported", "fault", "malformed"])(
+    "handles timeline %s without fallback or payload-bearing errors",
+    (kind) =>
+      Effect.gen(function* () {
+        const nativeId = `history-${kind}`;
+        const requests: string[] = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: nativeId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame:
+                  kind === "malformed"
+                    ? { id: 3, result: { data: [{ type: "secret-invalid-transcript" }] } }
+                    : {
+                        id: 3,
+                        error: {
+                          code: kind === "unsupported" ? -32601 : -32000,
+                          message: "secret-invalid-transcript",
+                          data: "secret-invalid-transcript",
+                        },
+                      },
+              },
+            ],
+          }),
+          undefined,
+          (method) =>
+            Effect.sync(() => {
+              requests.push(method);
+            }),
+        );
+        const result = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.result);
+        if (kind === "unsupported") {
+          assert.equal(result._tag, "Success");
+          if (result._tag === "Success") assert.equal(result.success.type, "unsupported");
+        } else {
+          assert.equal(result._tag, "Failure");
+          assert.notInclude(JSON.stringify(result), "secret-invalid-transcript");
+        }
+        assert.deepEqual(requests, ["initialize", "thread/start", "thread/timeline/list"]);
+        assert.isEmpty(harness.events);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect(
+    "rejects wrong bindings before RPC and an unload/reload ABA while a page is pending",
+    () =>
+      Effect.gen(function* () {
+        const nativeId = "history-binding-race";
+        const responseReceived = yield* Deferred.make<void>();
+        const releaseResponse = yield* Deferred.make<void>();
+        let historyResponses = 0;
+        const preamble = codexReplayPreamble({
+          nativeThreadId: nativeId,
+          nativeTurnId: "unused",
+          prompt: "unused",
+        });
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...preamble.slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 3, result: { data: [] } } },
+              {
+                type: "expect_outbound",
+                frame: { id: 4, method: "thread/unsubscribe", params: { threadId: nativeId } },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: { status: "unsubscribed" } } },
+              ...preamble.slice(3, 5).map((entry) => withReplayRequestId(entry, 5)),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 6,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 6, result: { data: [] } } },
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (method) =>
+            Effect.gen(function* () {
+              if (method !== "thread/timeline/list" || ++historyResponses !== 1) return;
+              yield* Deferred.succeed(responseReceived, undefined);
+              yield* Deferred.await(releaseResponse);
+            }),
+        );
+        for (const providerThread of [
+          { ...harness.providerThread, id: ProviderThreadId.make("unknown-provider-thread") },
+          { ...harness.providerThread, appThreadId: ThreadId.make("foreign-app") },
+          {
+            ...harness.providerThread,
+            providerSessionId: ProviderSessionId.make("foreign-session"),
+          },
+          {
+            ...harness.providerThread,
+            providerInstanceId: ProviderInstanceId.make("foreign-instance"),
+          },
+          {
+            ...harness.providerThread,
+            nativeThreadRef: {
+              driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+              nativeId: "foreign-native",
+              strength: "strong",
+            },
+          } satisfies OrchestrationV2ProviderThread,
+        ]) {
+          yield* harness.runtime.readRealtimeHistoryPage!({ providerThread }).pipe(Effect.flip);
+        }
+        yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+          limit: 76,
+        }).pipe(Effect.flip);
+        const pending = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(responseReceived);
+        yield* harness.runtime.unloadThread!({ providerThread: harness.providerThread });
+        yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.flip);
+        const reloaded = yield* harness.runtime.ensureThread({
+          threadId: harness.threadId,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        });
+        yield* Deferred.succeed(releaseResponse, undefined);
+        assert.equal((yield* Fiber.join(pending))._tag, "Failure");
+        assert.equal(
+          (yield* harness.runtime.readRealtimeHistoryPage!({ providerThread: reloaded })).type,
+          "page",
+        );
+        assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+        assert.isEmpty(harness.events);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each([true, false])(
+    "invalidates only the matching loaded binding on native close: %s",
+    (matching) =>
+      Effect.gen(function* () {
+        const nativeId = `history-close-${matching}`;
+        const closedHandled = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: nativeId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "thread/closed",
+                  params: { threadId: matching ? nativeId : "unrelated-native" },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 3, result: { data: [] } } },
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (method) =>
+            method === "thread/timeline/list" ? Deferred.await(closedHandled) : Effect.void,
+          (method) =>
+            method === "thread/closed"
+              ? Deferred.succeed(closedHandled, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        );
+        const result = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.result);
+        assert.equal(result._tag, matching ? "Failure" : "Success");
+        assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each(["cancel", "timeout"])(
+    "bounds a pending history read and allows later reads after %s",
+    (mode) =>
+      Effect.gen(function* () {
+        const nativeId = `history-${mode}`;
+        const responseBlocked = yield* Deferred.make<void>();
+        const releaseResponse = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: nativeId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "blocked-page",
+                frame: { id: 3, result: { data: [] } },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: { data: [] } } },
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          (entry) =>
+            entry.label === "blocked-page"
+              ? Deferred.succeed(responseBlocked, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseResponse)),
+                )
+              : Effect.void,
+        );
+        const pending = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(responseBlocked);
+        if (mode === "cancel") yield* Fiber.interrupt(pending);
+        else {
+          yield* TestClock.adjust("10 seconds");
+          const result = yield* Fiber.join(pending);
+          assert.equal(result._tag, "Failure");
+          assert.notInclude(JSON.stringify(result), "Synthetic");
+        }
+        yield* Deferred.succeed(releaseResponse, undefined);
+        assert.equal(
+          (yield* harness.runtime.readRealtimeHistoryPage!({
+            providerThread: harness.providerThread,
+          })).type,
+          "page",
+        );
+        assert.isEmpty(harness.events);
+        assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
 
   const voiceStartEntries = (
     threadId: string,

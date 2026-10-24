@@ -1,3 +1,8 @@
+import {
+  decodeRealtimeHistoryPage,
+  isValidRealtimeHistoryRequest,
+  MAX_REALTIME_HISTORY_ITEMS,
+} from "./CodexRealtimeHistory.ts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
@@ -1606,7 +1611,25 @@ export function makeCodexAppServerProtocolLogger(input: {
     return undefined;
   }
 
+  const historyRequests = new Set<string | number>();
   return (event) => {
+    // Timeline pages contain historical transcripts, including error payloads. Keep them out of logs.
+    if (event.stage === "decoded" && Predicate.isObject(event.payload)) {
+      const frame = event.payload;
+      if (event.direction === "outgoing" && frame.method === "thread/timeline/list") {
+        if (typeof frame.id === "string" || typeof frame.id === "number")
+          historyRequests.add(frame.id);
+        return Effect.void;
+      }
+      if (
+        event.direction === "incoming" &&
+        (typeof frame.id === "string" || typeof frame.id === "number") &&
+        historyRequests.delete(frame.id)
+      ) {
+        return Effect.void;
+      }
+    }
+    if (event.stage === "decode_failed" && historyRequests.size > 0) return Effect.void;
     if (!shouldPersistProviderEvent("native", event)) return Effect.void;
     return nativeEventLogger
       .write(
@@ -2253,6 +2276,42 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const turnTerminalizationPermit = yield* Semaphore.make(1);
         const goalsByNativeThread = new Map<string, OrchestrationV2ProviderGoal | null>();
         const rootProviderThreads = new Map<string, OrchestrationV2ProviderThread>();
+        const historyBindings = new Map<
+          ProviderThreadId,
+          ProviderAdapter.ProviderAdapterV2RealtimeHistoryBinding
+        >();
+        let historyBindingEpoch = 0;
+        let historyRuntimeClosed = false;
+        const forgetHistoryBinding = (nativeThreadId: string) => {
+          historyBindingEpoch += 1;
+          for (const [id, binding] of historyBindings) {
+            if (binding.nativeThreadId === nativeThreadId) historyBindings.delete(id);
+          }
+        };
+        const rememberHistoryBinding = (thread: OrchestrationV2ProviderThread, epoch: number) => {
+          if (
+            historyRuntimeClosed ||
+            epoch !== historyBindingEpoch ||
+            thread.nativeThreadRef?.driver !== CODEX_PROVIDER ||
+            thread.nativeThreadRef.nativeId === null ||
+            thread.nativeThreadRef.nativeId.trim().length === 0 ||
+            thread.appThreadId === null
+          )
+            return;
+          historyBindings.set(thread.id, {
+            threadId: thread.appThreadId,
+            providerInstanceId: adapterOptions.instanceId,
+            providerSessionId: input.providerSessionId,
+            providerThreadId: thread.id,
+            nativeThreadId: thread.nativeThreadRef.nativeId,
+          });
+        };
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            historyRuntimeClosed = true;
+            historyBindings.clear();
+          }),
+        );
         const goalHolds = new Map<string, CodexGoalHold>();
         const goalRuns = new Map<ProviderTurnId, Array<ActiveCodexTurnContext>>();
         const goalActivations = new Map<string, { stopped: boolean }>();
@@ -5444,6 +5503,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // their command items, while the shared provider session stays alive.
         yield* client.handleServerNotification("thread/closed", (payload) =>
           Effect.gen(function* () {
+            forgetHistoryBinding(payload.threadId);
             const completedAt = yield* DateTime.now;
             for (const context of (yield* Ref.get(settledTurns)).values()) {
               if (context.providerThread.nativeThreadRef?.nativeId !== payload.threadId) continue;
@@ -7472,41 +7532,49 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
           ensureThread: (threadInput) =>
-            attachThreadOptimizers(threadInput.threadId, threadInput.runtimePolicy.cwd).pipe(
-              Effect.andThen(ensureInitialized),
-              Effect.andThen(mcpSessions.read(threadInput.threadId)),
-              Effect.flatMap((mcpSession) =>
-                client.request(
-                  "thread/start",
-                  codexThreadRuntimeParams({
-                    threadId: threadInput.threadId,
-                    mcpSession,
-                    modelSelection: threadInput.modelSelection,
-                    runtimePolicy: threadInput.runtimePolicy,
+            Effect.suspend(() => {
+              const epoch = historyBindingEpoch;
+              return attachThreadOptimizers(
+                threadInput.threadId,
+                threadInput.runtimePolicy.cwd,
+              ).pipe(
+                Effect.andThen(ensureInitialized),
+                Effect.andThen(mcpSessions.read(threadInput.threadId)),
+                Effect.flatMap((mcpSession) =>
+                  client.request(
+                    "thread/start",
+                    codexThreadRuntimeParams({
+                      threadId: threadInput.threadId,
+                      mcpSession,
+                      modelSelection: threadInput.modelSelection,
+                      runtimePolicy: threadInput.runtimePolicy,
+                    }),
+                  ),
+                ),
+                Effect.map((response): OrchestrationV2ProviderThread =>
+                  providerThreadFromCodexThread({
+                    appThreadId: threadInput.threadId,
+                    idAllocator,
+                    ownerNodeId: null,
+                    providerSessionId: input.providerSessionId,
+                    providerInstanceId: adapterOptions.instanceId,
+                    thread: response.thread,
                   }),
                 ),
-              ),
-              Effect.map((response): OrchestrationV2ProviderThread =>
-                providerThreadFromCodexThread({
-                  appThreadId: threadInput.threadId,
-                  idAllocator,
-                  ownerNodeId: null,
-                  providerSessionId: input.providerSessionId,
-                  providerInstanceId: adapterOptions.instanceId,
-                  thread: response.thread,
-                }),
-              ),
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterEnsureThreadError({
-                    driver: CODEX_PROVIDER,
-                    threadId: threadInput.threadId,
-                    cause: normalizeCodexCause(cause),
-                  }),
-              ),
-            ),
+                Effect.tap((thread) => Effect.sync(() => rememberHistoryBinding(thread, epoch))),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                      driver: CODEX_PROVIDER,
+                      threadId: threadInput.threadId,
+                      cause: normalizeCodexCause(cause),
+                    }),
+                ),
+              );
+            }),
           resumeThread: Effect.fn("CodexAdapterV2.resumeThread")(
             function* (threadInput) {
+              const epoch = historyBindingEpoch;
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
               yield* attachThreadOptimizers(
                 threadInput.threadId ?? threadInput.providerThread.appThreadId,
@@ -7551,7 +7619,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
                 Effect.flatMap(decodeCodexResumeMetadata),
               );
-              return {
+              const resumed = {
                 ...threadInput.providerThread,
                 providerSessionId: input.providerSessionId,
                 providerInstanceId: adapterOptions.instanceId,
@@ -7564,6 +7632,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 nativeConversationHeadRef: threadInput.providerThread.nativeConversationHeadRef,
                 updatedAt: codexTimestamp(response.thread.updatedAt),
               } satisfies OrchestrationV2ProviderThread;
+              rememberHistoryBinding(resumed, epoch);
+              return resumed;
             },
             (effect, threadInput) =>
               effect.pipe(
@@ -7731,11 +7801,78 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
               ),
           ),
+          readRealtimeHistoryPage: Effect.fn("CodexAdapterV2.readRealtimeHistoryPage")(
+            function* (request) {
+              const rejected = () =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Realtime history read rejected: invalid request or inactive binding.",
+                });
+              const binding = historyBindings.get(request.providerThread.id);
+              const matches = () =>
+                !historyRuntimeClosed &&
+                binding !== undefined &&
+                historyBindings.get(request.providerThread.id) === binding &&
+                request.providerThread.driver === CODEX_PROVIDER &&
+                request.providerThread.appThreadId === binding.threadId &&
+                request.providerThread.providerSessionId === binding.providerSessionId &&
+                request.providerThread.providerInstanceId === binding.providerInstanceId &&
+                request.providerThread.nativeThreadRef?.driver === CODEX_PROVIDER &&
+                request.providerThread.nativeThreadRef.nativeId === binding.nativeThreadId;
+              if (!isValidRealtimeHistoryRequest(request) || binding === undefined || !matches())
+                return yield* rejected();
+              yield* ensureInitialized.pipe(
+                Effect.mapError(
+                  () =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CODEX_PROVIDER,
+                      detail: "Realtime history initialization failed.",
+                    }),
+                ),
+              );
+              if (!matches()) return yield* rejected();
+              const response = yield* client.raw
+                .request("thread/timeline/list", {
+                  threadId: binding.nativeThreadId,
+                  limit: request.limit ?? MAX_REALTIME_HISTORY_ITEMS,
+                  ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+                })
+                .pipe(Effect.timeout("10 seconds"), Effect.result);
+              if (!matches()) return yield* rejected();
+              if (response._tag === "Failure") {
+                const error = response.failure;
+                if (
+                  error._tag === "CodexAppServerRequestError" &&
+                  error.operation === "receive-response" &&
+                  error.method === "thread/timeline/list" &&
+                  error.code === -32601
+                ) {
+                  return { ...binding, type: "unsupported", reason: "method_unavailable" };
+                }
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Realtime history read failed.",
+                });
+              }
+              const page = yield* decodeRealtimeHistoryPage(response.success, request).pipe(
+                Effect.mapError(
+                  (error) =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CODEX_PROVIDER,
+                      detail: `Realtime history page rejected: ${error.reason}.`,
+                    }),
+                ),
+              );
+              if (!matches()) return yield* rejected();
+              return { ...binding, type: "page", ...page };
+            },
+          ),
           // Dropping this connection's subscription lets the shared app-server
           // shut the native thread (and its MCP servers) down once it is idle.
           unloadThread: Effect.fn("CodexAdapterV2.unloadThread")(
             function* (unloadInput) {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
+              forgetHistoryBinding(nativeThreadId);
               sessionApprovals.delete(nativeThreadId);
               yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
             },
