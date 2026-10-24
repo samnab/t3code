@@ -15,6 +15,11 @@ import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { createBrowserVoiceTransport } from "../../voice/browserVoiceTransport";
+import {
+  isVoiceShortcutCommand,
+  voiceShortcutAction,
+  type VoiceShortcutCommand,
+} from "../../voice/voiceShortcut";
 import { randomUUID } from "../../lib/utils";
 import {
   createRealtimeVoiceController,
@@ -60,6 +65,16 @@ function resumeVoice(controller: RealtimeVoiceController) {
   } catch (error) {
     reportUnavailable(error);
   }
+}
+function runVoiceShortcut(
+  controller: RealtimeVoiceController,
+  command: VoiceShortcutCommand,
+  mayResume: boolean,
+) {
+  const action = voiceShortcutAction(controller.getSnapshot().mode, command, mayResume);
+  if (action === "end") controller.end();
+  else if (action === "pause") controller.pause();
+  else if (action === "resume") resumeVoice(controller);
 }
 
 interface VoiceContext {
@@ -153,6 +168,11 @@ export function RealtimeVoiceProvider({
     const stopDesktopPause = window.desktopBridge?.onVoicePrivacyPause?.(() =>
       controller.pause("Paused because this computer locked or went to sleep."),
     );
+    // Chords claimed inside a focused Browser-panel guest arrive as menu actions. Agents can type
+    // into a guest, so these can only revoke.
+    const stopForwarded = window.desktopBridge?.onMenuAction((action) => {
+      if (isVoiceShortcutCommand(action)) runVoiceShortcut(controller, action, false);
+    });
     window.addEventListener("pagehide", end);
     window.addEventListener("offline", offline);
     document.addEventListener("freeze", end);
@@ -160,6 +180,7 @@ export function RealtimeVoiceProvider({
     return () => {
       end();
       stopDesktopPause?.();
+      stopForwarded?.();
       window.removeEventListener("pagehide", end);
       window.removeEventListener("offline", offline);
       document.removeEventListener("freeze", end);
@@ -174,12 +195,10 @@ export function RealtimeVoiceProvider({
       const command = resolveShortcutCommand(event, keybindings, {
         context: { voiceActive: true },
       });
-      if (command !== "voice.togglePause" && command !== "voice.micOff") return;
+      if (!isVoiceShortcutCommand(command)) return;
       event.preventDefault();
-      if (event.repeat) return;
-      if (command === "voice.micOff") controller.end();
-      else if (controller.getSnapshot().mode === "paused") resumeVoice(controller);
-      else controller.pause();
+      // A rendered page's keys are replayed as untrusted events; they cannot resume.
+      if (!event.repeat) runVoiceShortcut(controller, command, event.isTrusted);
     };
     window.addEventListener("keydown", shortcut);
     return () => window.removeEventListener("keydown", shortcut);
@@ -213,4 +232,10 @@ export function useRealtimeVoice(): VoiceContext {
   const value = useContext(Context);
   if (value === null) throw new Error("Realtime voice controls require the app voice provider.");
   return value;
+}
+
+/** Whether a voice session exists. Unlike `useRealtimeVoice`, safe to call without the provider. */
+export function useRealtimeVoiceActive(): boolean {
+  const value = useContext(Context);
+  return value !== null && value.snapshot.mode !== "off";
 }

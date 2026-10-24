@@ -42,12 +42,14 @@ import {
   resolveThreadRouteTarget,
 } from "../threadRoutes";
 import { toastManager } from "./ui/toast";
+import { useRealtimeVoiceActive } from "./voice/RealtimeVoiceProvider";
 
 const PREVIEW_FORWARDED_LAYOUT_COMMANDS = [
   "sidebar.toggle",
   "rightPanel.toggle",
   "rightPanel.toggleMaximized",
 ] as const;
+const PREVIEW_FORWARDED_VOICE_COMMANDS = ["voice.togglePause", "voice.micOff"] as const;
 
 const isGlobalPullRequests = (ref: ScopedThreadRef) =>
   scopedThreadKey(ref) === scopedThreadKey(PULL_REQUESTS_PANEL_REF);
@@ -178,11 +180,13 @@ export function ReopenClosedViewShortcut() {
     };
   }, [keybindings, previewOpen, terminalOpen]);
 
+  const voiceActive = useRealtimeVoiceActive();
   useEffect(() => {
     const preview = window.desktopBridge?.preview;
     if (!preview?.setForwardedShortcuts) return;
     const options = {
       context: {
+        voiceActive,
         previewFocus: true,
         previewOpen: true,
         terminalFocus: false,
@@ -195,10 +199,12 @@ export function ReopenClosedViewShortcut() {
     };
     // A focused browser page is a separate process, so these chords never reach
     // the app's keydown listeners. The desktop claims them in the guest and
-    // sends each command back as a menu action.
+    // sends each command back as a menu action. Voice chords are claimed only
+    // during a call, and the voice owner lets their menu actions only revoke.
     const commands = [
       ...(hasHistory ? (["view.reopenClosed"] as const) : []),
       ...PREVIEW_FORWARDED_LAYOUT_COMMANDS,
+      ...(voiceActive ? PREVIEW_FORWARDED_VOICE_COMMANDS : []),
     ];
     void preview
       .setForwardedShortcuts(
@@ -213,7 +219,7 @@ export function ReopenClosedViewShortcut() {
     return () => {
       void preview.setForwardedShortcuts?.([]).catch(() => undefined);
     };
-  }, [hasHistory, keybindings, terminalOpen]);
+  }, [hasHistory, keybindings, terminalOpen, voiceActive]);
 
   return null;
 }
