@@ -18,6 +18,7 @@ import {
   useId,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { AppState, Platform } from "react-native";
@@ -30,6 +31,7 @@ import {
   rememberMicrophones,
 } from "../../lib/microphonePriority";
 import { realtimeVoiceOwnsAudio } from "../../native/realtimeVoiceAudio";
+import { microphoneArbiter } from "../realtime-voice/microphoneArbiter";
 import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { getNativeShowcaseScene } from "../showcase/nativeShowcaseScene";
@@ -58,20 +60,27 @@ const VOICE_RECORDING_OPTIONS = {
 };
 
 async function releaseVoiceRecordingAudio(): Promise<void> {
-  // expo-audio's mode setter stops every recorder and replaces the category, which
-  // would cut and deactivate an active realtime voice session.
-  if (realtimeVoiceOwnsAudio()) return;
   try {
-    await setAudioModeAsync({ allowsRecording: false });
+    // expo-audio's mode setter stops every recorder and replaces the category, which
+    // would cut and deactivate an active realtime voice session.
+    if (realtimeVoiceOwnsAudio()) return;
+    try {
+      await setAudioModeAsync({ allowsRecording: false });
+    } finally {
+      // Expo does not deactivate AVAudioSession when recording stops or its
+      // category changes. Explicit deactivation resumes interrupted app audio.
+      await setIsAudioActiveAsync(false);
+    }
   } finally {
-    // Expo does not deactivate AVAudioSession when recording stops or its
-    // category changes. Explicit deactivation resumes interrupted app audio.
-    await setIsAudioActiveAsync(false);
+    // Released only after teardown so realtime voice cannot claim a still-recording session.
+    microphoneArbiter.release("dictation");
   }
 }
 
 async function configureVoiceRecordingAudio(): Promise<void> {
-  if (realtimeVoiceOwnsAudio()) throw new Error("The microphone is in use by voice conversation.");
+  if (realtimeVoiceOwnsAudio() || !microphoneArbiter.acquire("dictation")) {
+    throw new Error("The microphone is in use by voice conversation.");
+  }
   try {
     await setAudioModeAsync({
       allowsRecording: true,
@@ -253,8 +262,14 @@ function useVoiceInputRuntime() {
   const stop = useCallback(() => controller.stop(), [controller]);
   const cancel = useCallback(() => controller.cancel(), [controller]);
 
+  const realtimeVoiceHoldsMicrophone =
+    useSyncExternalStore(microphoneArbiter.subscribe, microphoneArbiter.holder) ===
+    "realtime-voice";
+
   return {
-    isAvailable: getLocalVoiceTranscriber() !== null || getNativeShowcaseScene() !== null,
+    isAvailable:
+      !realtimeVoiceHoldsMicrophone &&
+      (getLocalVoiceTranscriber() !== null || getNativeShowcaseScene() !== null),
     state,
     audioLevels,
     elapsedSeconds,
