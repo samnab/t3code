@@ -3687,6 +3687,55 @@ function makeHistoryReader(pages: Ref.Ref<ReadonlyMap<string | null, HistoryPage
   >;
 }
 
+// A live record already captured, so loading the thread reads provider history.
+function seededVoiceEvent(input: {
+  readonly ids: IdAllocator.IdAllocatorV2["Service"];
+  readonly threadId: ThreadId;
+  readonly providerThread: OrchestrationV2ProviderThread;
+  readonly now: DateTime.Utc;
+  readonly nativeItemId: string;
+}) {
+  return Effect.gen(function* () {
+    return {
+      id: yield* input.ids.allocate.event({ threadId: input.threadId }),
+      threadId: input.threadId,
+      type: "turn-item.updated" as const,
+      occurredAt: input.now,
+      payload: {
+        id: input.ids.derive.realtimeVoiceTurnItem({
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "session",
+          nativeItemId: input.nativeItemId,
+        }),
+        threadId: input.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: input.providerThread.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: input.now,
+        updatedAt: input.now,
+        type: "realtime_voice",
+        providerInstanceId: modelSelection.instanceId,
+        nativeThreadId: "native-thread",
+        realtimeSessionId: "session",
+        nativeRealtimeItemId: input.nativeItemId,
+        content: { type: "transcriptSegment", role: "user", text: input.nativeItemId },
+        captureState: "canonical_completed",
+        historyCoverage: "live_only",
+        sourceOrder: "unreconciled",
+        timestampProvenance: "observed",
+      } satisfies OrchestrationV2TurnItem,
+    };
+  });
+}
+
 const historySpeech = (
   position: number,
   id: string,
@@ -3733,6 +3782,7 @@ it.effect(
               occurredAt: now,
               payload: providerThread,
             },
+            yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "s1" }),
           ],
         });
         const voiceWrites = (count: number) =>
@@ -3755,9 +3805,10 @@ it.effect(
           modelSelection,
           runtimePolicy,
         });
-        const recovered = yield* voiceWrites(3);
+        // s1 was captured live; the overlapping pages add only s2 and s3.
+        const recovered = yield* voiceWrites(2);
         yield* runtime.resumeThread({ threadId, providerThread });
-        assert.lengthOf(Array.from(yield* Fiber.join(recovered)), 3);
+        assert.lengthOf(Array.from(yield* Fiber.join(recovered)), 2);
 
         // Native close triggers a second read that replays everything plus one new commit.
         yield* Ref.set(
@@ -3824,9 +3875,9 @@ it.effect(
           "s4",
         ]);
         for (const item of voice) {
-          if (item.nativeRealtimeItemId === "close") continue;
-          assert.equal(item.historyCoverage, "provider_history");
-          assert.equal(item.timestampProvenance, "recovered");
+          const recoveredItem = !["close", "s1"].includes(item.nativeRealtimeItemId);
+          assert.equal(item.historyCoverage, recoveredItem ? "provider_history" : "live_only");
+          assert.equal(item.timestampProvenance, recoveredItem ? "recovered" : "observed");
         }
         assert.lengthOf(projection.runs, 0);
         assert.lengthOf(projection.turnItems, voice.length);
@@ -4012,6 +4063,7 @@ it.effect.each([
             occurredAt: now,
             payload: providerThread,
           },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
         ],
       });
       const runtime = yield* manager.open({
@@ -4036,7 +4088,12 @@ it.effect.each([
           stored.event.payload.failure.message.includes("could not be recovered"),
       );
       const projection = yield* projections.getThreadProjection(threadId);
-      assert.isFalse(projection.turnItems.some((item) => item.type === "realtime_voice"));
+      assert.deepEqual(
+        projection.turnItems.flatMap((item) =>
+          item.type === "realtime_voice" ? [item.nativeRealtimeItemId] : [],
+        ),
+        ["seed"],
+      );
     }).pipe(
       Effect.provide(
         layerTest({

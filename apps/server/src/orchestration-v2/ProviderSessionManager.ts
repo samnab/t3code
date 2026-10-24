@@ -1811,13 +1811,12 @@ export const layerWithOptions = (
                 loaded
                   ? Effect.succeed(input.providerThread)
                   : runtime.resumeThread(input).pipe(
-                      // Loading is where speech committed while T3 was away becomes visible.
                       Effect.tap((providerThread) =>
                         Ref.get(sessions).pipe(
                           Effect.flatMap((current) => {
                             const entry = current.get(sessionKey(providerSessionId));
                             return entry?.runtime === runtime
-                              ? scheduleVoiceReconciliation(entry, providerThread)
+                              ? scheduleVoiceReconciliationOnLoad(entry, providerThread)
                               : Effect.void;
                           }),
                         ),
@@ -2242,6 +2241,37 @@ export const layerWithOptions = (
           Effect.forkIn(entry.scope),
         );
       });
+
+      // Loading is where speech committed while T3 was away becomes visible. Only threads that
+      // already hold voice from this native thread pay for a provider history read.
+      const scheduleVoiceReconciliationOnLoad = (
+        entry: LiveSessionEntry,
+        providerThread: OrchestrationV2ProviderThread,
+      ) =>
+        providerThread.appThreadId === null || entry.runtime.readRealtimeHistoryPage === undefined
+          ? Effect.void
+          : projectionStore
+              .getThreadRecords(providerThread.appThreadId, ["turnItems"], {
+                turnItemTypes: ["realtime_voice"],
+              })
+              .pipe(
+                Effect.flatMap(({ turnItems }) =>
+                  turnItems.some(
+                    (item) =>
+                      item.type === "realtime_voice" &&
+                      item.nativeThreadId === providerThread.nativeThreadRef?.nativeId,
+                  )
+                    ? scheduleVoiceReconciliation(entry, providerThread)
+                    : Effect.void,
+                ),
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.interrupt
+                    : Effect.logWarning("orchestration-v2.driver-session.voice-reconcile-skipped", {
+                        providerSessionId: entry.runtime.providerSessionId,
+                      }),
+                ),
+              );
 
       const scheduleVoiceReconciliationForItem = (
         entry: LiveSessionEntry,
