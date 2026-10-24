@@ -488,6 +488,52 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
       ]);
     });
 
+    it("shows recovered voice stitched between loaded rows below the watermark", () => {
+      const first = runItem("item-first", steerRunId, 3_000_001);
+      const later = runItem("item-later", steerRunId, 3_000_003);
+      const voice = (id: string, ordinal: number): OrchestrationV2TurnItem => ({
+        id: TurnItemId.make(id),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: now,
+        updatedAt: now,
+        type: "realtime_voice",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        nativeThreadId: "native-thread",
+        realtimeSessionId: "session",
+        nativeRealtimeItemId: id,
+        content: { type: "transcriptSegment", role: "user", text: id },
+        captureState: "canonical_completed",
+        historyCoverage: "provider_history",
+        sourceOrder: "provider_anchored",
+        timestampProvenance: "recovered",
+      });
+      const projection = windowOf([run, steerRun], [first, later]);
+      const options = { partialTimeline: true, latestLocalTurnOrdinal: later.ordinal } as const;
+
+      const stitched = voice("voice-stitched", 3_000_002);
+      const next = applyOrchestrationV2ProjectionEvent(projection, itemEvent(stitched), options);
+      expect(next?.visibleTurnItems.map((row) => row.item.id)).toEqual([
+        first.id,
+        stitched.id,
+        later.id,
+      ]);
+      // Below the oldest loaded row it is unloaded history that paging returns.
+      const older = voice("voice-older", 2_000_001);
+      expect(applyOrchestrationV2ProjectionEvent(projection, itemEvent(older), options)).toBe(
+        projection,
+      );
+    });
+
     it.each([
       { name: "keeps an item of a run already in the window", itemRunId: steerRunId, kept: true },
       { name: "drops an item of a finished run outside the window", itemRunId: runId, kept: false },
