@@ -1033,16 +1033,12 @@ export const make = Effect.gen(function* () {
     readonly subject: string;
     readonly label?: string;
     readonly purpose?: "startup";
-    readonly desktopSessionTtlDays?: number;
   }) =>
     createPairingLink({
       scopes: input.scopes,
       subject: input.subject,
       ...(input.label ? { label: input.label } : {}),
       ...(input.purpose ? { purpose: input.purpose } : {}),
-      ...(input.desktopSessionTtlDays === undefined
-        ? {}
-        : { desktopSessionTtlDays: input.desktopSessionTtlDays }),
     }).pipe(
       Effect.map(
         (issued) =>
@@ -1162,9 +1158,6 @@ export const make = Effect.gen(function* () {
       scopes: input?.scopes ?? AuthStandardClientScopes,
       subject: "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
-      ...(input?.desktopSessionTtlDays === undefined
-        ? {}
-        : { desktopSessionTtlDays: input.desktopSessionTtlDays }),
     }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
 
   const issueStartupPairingCredential: EnvironmentAuth["Service"]["issueStartupPairingCredential"] =

@@ -92,7 +92,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         { ...requestMetadata, deviceType: "mobile", os: "iOS" },
       );
       const phoneBefore = yield* sessions.verify(phoneAccess.access_token);
-      const desktopGrant = yield* auth.issuePairingCredential({ desktopSessionTtlDays: 180 });
+      const desktopGrant = yield* auth.createPairingLink({ desktopSessionTtlDays: 180 });
       const desktop = yield* auth.exchangeBootstrapCredentialForAccessToken(
         desktopGrant.credential,
         undefined,
@@ -100,7 +100,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
       );
       expect(desktop.expires_in).toBe(180 * 24 * 60 * 60);
       expect(yield* sessions.verify(phoneAccess.access_token)).toEqual(phoneBefore);
-      const relayGrant = yield* auth.issuePairingCredential({ desktopSessionTtlDays: 180 });
+      const relayGrant = yield* auth.createPairingLink({ desktopSessionTtlDays: 180 });
       const relay = yield* auth.exchangeBootstrapCredentialForAccessToken(
         relayGrant.credential,
         undefined,

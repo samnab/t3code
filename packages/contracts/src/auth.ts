@@ -375,13 +375,12 @@ export const AuthRevokeClientSessionInput = Schema.Struct({
 });
 export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.Type;
 
-/** Lifetime of a desktop bearer session minted from a one-time pairing grant. */
+/** Operator-only grant policy. Remote pairing requests cannot choose a session lifetime. */
 export const AuthDesktopSessionTtlDays = Schema.Int.check(
   Schema.isBetween({ minimum: 1, maximum: 365 }),
 );
 
 export const AuthCreatePairingCredentialInput = Schema.Struct({
-  desktopSessionTtlDays: Schema.optionalKey(AuthDesktopSessionTtlDays),
   label: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthGrantScopes),
 });
