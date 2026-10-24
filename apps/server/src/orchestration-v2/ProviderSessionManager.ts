@@ -169,6 +169,11 @@ export interface ProviderSessionManagerV2Shape {
     ProviderSessionManagerV2Error
   >;
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  /** Whether a live session holds the thread loaded under any model or runtime settings. */
+  readonly isThreadLoaded: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<boolean>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -2722,6 +2727,15 @@ export const layerWithOptions = (
         isLive: (providerSessionId) =>
           Ref.get(sessions).pipe(
             Effect.map((current) => current.has(sessionKey(providerSessionId))),
+          ),
+        isThreadLoaded: ({ providerSessionId, threadId }) =>
+          Ref.get(sessions).pipe(
+            Effect.map(
+              (current) =>
+                current
+                  .get(sessionKey(providerSessionId))
+                  ?.loadedProviderThreadKeyByThread.has(threadId) ?? false,
+            ),
           ),
         get: Effect.fn("ProviderSessionManager.get")(
           function* (providerSessionId) {

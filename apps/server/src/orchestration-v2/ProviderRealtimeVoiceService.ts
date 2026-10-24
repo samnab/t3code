@@ -63,6 +63,7 @@ export const layer: Layer.Layer<
         "providerThreads",
         "providerSessions",
         "runs",
+        "contextHandoffs",
       ]);
       const providerThread =
         source.providerThreadId === undefined
@@ -92,12 +93,29 @@ export const layer: Layer.Layer<
       }
       if (providerThread.nativeThreadRef?.nativeId == null)
         return yield* fail(threadId, "Send a message in this conversation before starting voice.");
+      // Only a turn delivers handoffs; voice on this thread would start without that history.
+      if (
+        records.contextHandoffs.some(
+          (handoff) =>
+            handoff.status === "ready" && handoff.toProviderThreadId === providerThread.id,
+        )
+      )
+        return yield* fail(
+          threadId,
+          "Send a message first so the agent receives this conversation's earlier history.",
+        );
+      // A loaded thread is never reloaded for voice: that could change its model or reset a
+      // turn that started after the run check.
       if (
         live !== null &&
-        records.runs.some((run) => PROVIDER_HOLDING_RUN_STATUSES.has(run.status))
+        (records.runs.some((run) => PROVIDER_HOLDING_RUN_STATUSES.has(run.status)) ||
+          (yield* sessions.isThreadLoaded({ providerSessionId, threadId })))
       )
         return { providerThread, runtime: live };
-      const modelSelection = records.thread.modelSelection;
+      // Load with the settings this thread's last turn used, as the next turn would find it.
+      const modelSelection =
+        records.runs.findLast((run) => run.providerThreadId === providerThread.id)
+          ?.modelSelection ?? records.thread.modelSelection;
       const resolvedPolicy = yield* runtimePolicy.resolve({
         thread: records.thread,
         modelSelection,

@@ -14,8 +14,10 @@ import {
   type Project,
   ProjectId,
   ProviderDriverKind,
+  ContextHandoffId,
   ProviderInstanceId,
   type ProviderSessionId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -4666,6 +4668,53 @@ it.effect("ProviderRealtimeVoiceServiceV2 starts voice on an unloaded thread wit
       assert.equal(runtime.resumeCount, 1);
       assert.equal(yield* Ref.get(voiceStarts), 1);
       assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
+
+      // The thread is now loaded, so another start must not reload it with other settings.
+      const thread = yield* projections.getThread(threadId);
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "thread.model-selection-updated",
+            occurredAt: now,
+            payload: { ...thread!, modelSelection: { ...modelSelection, model: "gpt-5.5" } },
+          },
+        ],
+      });
+      yield* voice.start({ threadId, sdp: "offer" });
+      assert.equal((yield* Ref.get(state)).resumeCount, 1);
+      assert.equal(yield* Ref.get(voiceStarts), 2);
+
+      // Earlier history waiting for this provider thread is only delivered by a turn.
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "context-handoff.updated",
+            occurredAt: now,
+            payload: {
+              id: ContextHandoffId.make("handoff:voice"),
+              threadId,
+              targetRunId: RunId.make("run:voice-handoff"),
+              fromProviderThreadIds: [],
+              toProviderThreadId: providerThread.id,
+              coveredRunOrdinals: { from: 1, to: 1 },
+              strategy: "full_thread_summary",
+              status: "ready",
+              summaryMessageId: null,
+              summaryText: "",
+              createdByProviderInstanceId: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      const blocked = yield* voice.start({ threadId, sdp: "offer" }).pipe(Effect.flip);
+      assert.equal(blocked._tag, "ProviderRealtimeVoiceError");
+      assert.equal(yield* Ref.get(voiceStarts), 2);
     }).pipe(
       Effect.provide(
         ProviderRealtimeVoiceService.layer.pipe(
