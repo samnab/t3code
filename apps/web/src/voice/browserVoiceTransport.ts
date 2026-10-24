@@ -13,12 +13,16 @@ export function createBrowserVoiceTransport(events: {
   const audio = document.createElement("audio");
   audio.autoplay = true;
   const channel = peer.createDataChannel("oai-events");
+  // Created and resumed inside the user gesture that starts or resumes voice, so autoplay policy
+  // lets it run. Until it runs the transport reports not connected and the gate stays shut.
+  const context = new AudioContext();
+  void context.resume().catch(() => {});
   let microphone: MediaStream | null = null;
   let graph: {
-    readonly context: AudioContext;
     readonly source: MediaStreamAudioSourceNode;
     readonly output: MediaStreamAudioDestinationNode;
   } | null = null;
+  let gateOpen = false;
   let closed = false;
   let cancelIce: (() => void) | undefined;
   const cleanups: Array<() => void> = [];
@@ -52,13 +56,21 @@ export function createBrowserVoiceTransport(events: {
   const onAudioError = () => {
     if (!closed) events.failed("Voice playback failed.");
   };
+  // A suspended context carries no audio: unready before the gate opens, an ended call after.
+  const onContextState = () => {
+    if (closed) return;
+    if (context.state === "running") events.connected();
+    else if (gateOpen || context.state === "closed") fail();
+  };
   peer.addEventListener("track", onTrack);
   peer.addEventListener("connectionstatechange", onConnectionState);
   channel.addEventListener("close", onChannelClose);
   channel.addEventListener("open", onChannelOpen);
   channel.addEventListener("error", onChannelError);
   audio.addEventListener("error", onAudioError);
+  context.addEventListener("statechange", onContextState);
   cleanups.push(() => {
+    context.removeEventListener("statechange", onContextState);
     peer.removeEventListener("track", onTrack);
     peer.removeEventListener("connectionstatechange", onConnectionState);
     channel.removeEventListener("close", onChannelClose);
@@ -83,21 +95,13 @@ export function createBrowserVoiceTransport(events: {
           track.removeEventListener("mute", fail);
         });
       }
-      const context = new AudioContext();
       graph = {
-        context,
         source: context.createMediaStreamSource(stream),
         output: context.createMediaStreamDestination(),
       };
       for (const track of graph.output.stream.getAudioTracks()) {
         peer.addTrack(track, graph.output.stream);
       }
-      // A context the platform suspends or closes stops carrying audio; end rather than mislabel.
-      const onContextState = () => {
-        if (context.state !== "running") fail();
-      };
-      context.addEventListener("statechange", onContextState);
-      cleanups.push(() => context.removeEventListener("statechange", onContextState));
       navigator.mediaDevices.addEventListener("devicechange", fail);
       cleanups.push(() => navigator.mediaDevices.removeEventListener("devicechange", fail));
     },
@@ -135,12 +139,15 @@ export function createBrowserVoiceTransport(events: {
       return sdp;
     },
     setRemoteDescription: (sdp) => peer.setRemoteDescription({ type: "answer", sdp }),
-    isConnected: () => peer.connectionState === "connected" && channel.readyState === "open",
+    isConnected: () =>
+      peer.connectionState === "connected" &&
+      channel.readyState === "open" &&
+      context.state === "running",
     enableMicrophone() {
-      if (closed || graph === null) return;
+      if (closed || graph === null || context.state !== "running") return;
+      gateOpen = true;
       for (const track of microphone?.getTracks() ?? []) track.enabled = true;
       graph.source.connect(graph.output);
-      void graph.context.resume().catch(fail);
     },
     close() {
       if (closed) return;
@@ -154,7 +161,7 @@ export function createBrowserVoiceTransport(events: {
       }
       microphone = null;
       for (const track of graph?.output.stream.getTracks() ?? []) track.stop();
-      void graph?.context.close().catch(() => {});
+      void context.close().catch(() => {});
       graph = null;
       cancelIce?.();
       channel.close();

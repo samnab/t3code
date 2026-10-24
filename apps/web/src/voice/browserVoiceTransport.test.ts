@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { createBrowserVoiceTransport } from "./browserVoiceTransport";
 
-function fixture() {
+function fixture(contextState: AudioContextState = "running") {
   let grant: (stream: { getTracks(): Track[] }) => void = () => {};
   const permission = new Promise<{ getTracks(): Track[] }>((resolve) => {
     grant = resolve;
@@ -46,12 +46,18 @@ function fixture() {
   };
   const captureFrame = (frame: string) => source.target?.receive(frame);
   const closeContext = vi.fn(async () => {});
+  const resumeContext = vi.fn(async () => {});
+  const contexts: FakeAudioContext[] = [];
   class FakeAudioContext extends EventTarget {
-    state = "running";
+    state = contextState;
     createMediaStreamSource = () => source;
     createMediaStreamDestination = () => output;
-    resume = async () => {};
+    resume = resumeContext;
     close = closeContext;
+    constructor() {
+      super();
+      contexts.push(this);
+    }
   }
   const audio = Object.assign(new EventTarget(), {
     autoplay: false,
@@ -65,7 +71,8 @@ function fixture() {
   vi.stubGlobal("document", { createElement: () => audio });
   vi.stubGlobal("navigator", { mediaDevices: devices });
   const failed = vi.fn();
-  const transport = createBrowserVoiceTransport({ connected: vi.fn(), failed });
+  const connected = vi.fn();
+  const transport = createBrowserVoiceTransport({ connected, failed });
   const track = new Track();
   const stream = { getTracks: () => [track] };
   return {
@@ -84,6 +91,12 @@ function fixture() {
     sent,
     captureFrame,
     closeContext,
+    resumeContext,
+    connected,
+    setContextState: (state: AudioContextState) => {
+      contexts[0]!.state = state;
+      contexts[0]!.dispatchEvent(new Event("statechange"));
+    },
   };
 }
 
@@ -144,5 +157,25 @@ describe("browser voice resource ownership", () => {
       f.closePeer.mock.invocationCallOrder[0]!,
     );
     expect(f.outputTrack.stop).toHaveBeenCalledOnce();
+  });
+
+  it("reports not connected and sends nothing while autoplay keeps the audio context suspended", async () => {
+    const f = fixture("suspended");
+    expect(f.resumeContext).toHaveBeenCalledOnce();
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    expect(f.transport.isConnected()).toBe(false);
+    f.transport.enableMicrophone();
+    f.captureFrame("while-suspended");
+    f.setContextState("running");
+    expect(f.connected).toHaveBeenCalledOnce();
+    expect(f.transport.isConnected()).toBe(true);
+    f.transport.enableMicrophone();
+    f.captureFrame("running");
+    expect(f.sent).toEqual(["running"]);
+    expect(f.failed).not.toHaveBeenCalled();
+    f.setContextState("suspended");
+    expect(f.failed).toHaveBeenCalledOnce();
   });
 });
