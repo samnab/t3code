@@ -24,7 +24,10 @@ function propertyType(value: unknown, name: string, type: string): boolean {
     isRecord(value) &&
     isRecord(value.properties) &&
     isRecord(value.properties[name]) &&
-    value.properties[name].type === type
+    (value.properties[name].type === type ||
+      (Array.isArray(value.properties[name].type) &&
+        value.properties[name].type.includes(type) &&
+        value.properties[name].type.every((entry: unknown) => entry === type || entry === "null")))
   );
 }
 
@@ -58,7 +61,7 @@ const executableIdentity = Effect.fn("CodexRealtimeVoiceCapabilities.executableI
   },
 );
 
-/** Pin the opened runtime's executable; replacement requires a new runtime and a new probe. */
+/** Pin the resolved launcher's file identity; wrappers may delegate to a different native binary. */
 export const makeCapabilityCheck = Effect.fn("CodexRealtimeVoiceCapabilities.makeCapabilityCheck")(
   function* (input: { readonly executable: string; readonly environment: NodeJS.ProcessEnv }) {
     const fs = yield* FileSystem.FileSystem;

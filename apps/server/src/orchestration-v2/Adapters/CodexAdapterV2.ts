@@ -167,6 +167,8 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const CODEX_PROVIDER = ProviderDriverKind.make("codex");
+const isNativeRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const isProviderProtocolError = Schema.is(ProviderAdapter.ProviderAdapterProtocolError);
 const isRealtimeVoiceCapabilityError = Schema.is(RealtimeVoiceCapabilities.CapabilityError);
 const isNativeRealtimeSessionId = Schema.is(TrimmedNonEmptyString);
 
@@ -2056,10 +2058,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const uncertainRealtimeSpeech = new Set<string>();
         type SpeechClaim = {
           readonly session: RealtimeVoiceSession;
-          readonly accepted: Effect.Effect<boolean>;
+          accepted: boolean;
         };
         const speechClaims = new Map<string, SpeechClaim>();
-        const speechFinalTexts = new Map<string, Set<string>>();
+        const speechFinalTexts = new Map<string, string>();
         const requestedSpeechSessions = new WeakMap<
           ProviderAdapter.ProviderAdapterV2TurnMessage,
           RealtimeVoiceSession
@@ -2519,7 +2521,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           )
             speechClaims.set(input.nativeTurnId, {
               session: requestedSession,
-              accepted: Effect.succeed(true),
+              accepted: true,
             });
           const providerTurnId = idAllocator.derive.providerTurn({
             driver: CODEX_PROVIDER,
@@ -2649,21 +2651,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeTurnId,
               startedAt: held.startedAt,
             });
+            // The available protocol does not correlate this user item to a realtime-origin request. Adoption remains written until that provenance is verified.
             if (
               turnInput.message.messageId === held.messageId &&
-              turnInput.message.createdBy === "user" &&
-              turnInput.message.creationSource === "provider" &&
-              turnInput.message.scheduledTaskId == null &&
-              turnInput.message.senderThreadId == null &&
-              realtimeThreads.get(held.nativeThreadId) === held.voiceSession &&
-              !held.voiceSession.stopping &&
-              !held.voiceSession.expired &&
-              !held.voiceSession.failed
+              turnInput.message.creationSource === "provider"
             )
-              speechClaims.set(nativeTurnId, {
-                session: held.voiceSession,
-                accepted: Effect.succeed(true),
-              });
+              yield* Effect.logDebug(
+                "Codex native handoff has no verified direct-speech provenance; result remains written.",
+              );
             if (turnInput.message.messageId === held.messageId && held.userItemId !== undefined)
               context.realtimeInputItemId = held.userItemId;
             else if (held.userItemId !== undefined) context.realtimeInputMessageId = held.messageId;
@@ -5973,12 +5968,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const finalAnswer = payload.item.phase !== "commentary";
             if (
               finalAnswer &&
-              speechClaims.has(payload.turnId) &&
+              speechClaims.get(payload.turnId)?.accepted === true &&
               payload.item.text.trim().length > 0
             ) {
-              const texts = speechFinalTexts.get(payload.turnId) ?? new Set<string>();
-              texts.add(payload.item.text);
-              speechFinalTexts.set(payload.turnId, texts);
+              speechFinalTexts.set(payload.turnId, payload.item.text);
             }
             if (finalAnswer) {
               yield* Ref.update(finalAnswerItemIdsByTurn, (current) => {
@@ -6798,62 +6791,64 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* planDeltas.flushTurn(input.nativeTurnId);
               const speechClaim = speechClaims.get(input.nativeTurnId);
               speechClaims.delete(input.nativeTurnId);
-              const speechText = Array.from(speechFinalTexts.get(input.nativeTurnId) ?? [])
-                .join("\n\n")
-                .trim();
+              const speechText = speechFinalTexts.get(input.nativeTurnId)?.trim() ?? "";
               speechFinalTexts.delete(input.nativeTurnId);
               if (
                 input.status === "completed" &&
                 input.context.subagent === null &&
-                speechClaim !== undefined &&
+                speechClaim?.accepted === true &&
                 speechText.length > 0
               ) {
                 const threadId = input.context.providerThread.nativeThreadRef?.nativeId;
                 const speechSession = speechClaim.session;
                 // The notification reader also delivers RPC replies: never await the append here.
-                yield* speechClaim.accepted.pipe(
-                  Effect.flatMap((accepted) =>
-                    accepted
-                      ? realtimeVoiceLock.withLock(
-                          threadId ?? "",
-                          Effect.gen(function* () {
-                            if (
-                              threadId == null ||
-                              realtimeThreads.get(threadId) !== speechSession ||
-                              speechSession.stopping ||
-                              speechSession.expired ||
-                              speechSession.failed ||
-                              (yield* Ref.get(interruptingNativeTurns)).has(input.nativeTurnId) ||
-                              uncertainRealtimeSpeech.has(threadId)
-                            )
-                              return;
-                            yield* client.raw
-                              .request("thread/realtime/appendSpeech", {
-                                threadId,
-                                text: speechText,
-                              })
-                              .pipe(
-                                Effect.timeout("5 seconds"),
-                                Effect.catchCauseIf(
-                                  (cause) => !Cause.hasInterruptsOnly(cause),
-                                  () =>
-                                    Effect.gen(function* () {
-                                      uncertainRealtimeSpeech.add(threadId);
-                                      yield* Effect.logWarning(
-                                        "Codex realtime speech delivery is uncertain; voice restart requires a new provider runtime.",
-                                      );
-                                      yield* requestRealtimeStop(threadId, speechSession).pipe(
-                                        Effect.catch(() => Effect.void),
-                                      );
-                                    }),
-                                ),
-                              );
-                          }),
-                        )
-                      : Effect.void,
-                  ),
-                  Effect.forkIn(scope, { startImmediately: true }),
-                );
+                yield* realtimeVoiceLock
+                  .withLock(
+                    threadId ?? "",
+                    Effect.gen(function* () {
+                      if (
+                        threadId == null ||
+                        realtimeThreads.get(threadId) !== speechSession ||
+                        speechSession.stopping ||
+                        speechSession.expired ||
+                        speechSession.failed ||
+                        (yield* Ref.get(interruptingNativeTurns)).has(input.nativeTurnId) ||
+                        uncertainRealtimeSpeech.has(threadId)
+                      )
+                        return;
+                      yield* client.raw
+                        .request("thread/realtime/appendSpeech", {
+                          threadId,
+                          text: speechText,
+                        })
+                        .pipe(
+                          Effect.timeout("5 seconds"),
+                          Effect.catchCauseIf(
+                            (cause) => !Cause.hasInterruptsOnly(cause),
+                            (cause) =>
+                              Effect.gen(function* () {
+                                const failure = Cause.findErrorOption(cause);
+                                const notInvoked =
+                                  Option.isSome(failure) &&
+                                  isNativeRequestError(failure.value) &&
+                                  failure.value.operation === "receive-response" &&
+                                  failure.value.method === "thread/realtime/appendSpeech" &&
+                                  failure.value.code === -32601;
+                                if (!notInvoked) uncertainRealtimeSpeech.add(threadId);
+                                yield* Effect.logWarning(
+                                  notInvoked
+                                    ? "Codex rejected the realtime speech method before invocation; no speech retry was attempted."
+                                    : "Codex realtime speech delivery is uncertain; voice restart requires a new provider runtime.",
+                                );
+                                yield* requestRealtimeStop(threadId, speechSession).pipe(
+                                  Effect.catch(() => Effect.void),
+                                );
+                              }),
+                          ),
+                        );
+                    }),
+                  )
+                  .pipe(Effect.forkIn(scope, { startImmediately: true }));
               }
               for (const [key, part] of reasoningParts) {
                 if (part.turnId === input.nativeTurnId) reasoningParts.delete(key);
@@ -7895,18 +7890,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               }
 
               const codexInput = yield* toCodexInput(turnInput);
-              const accepted = yield* Deferred.make<boolean>();
+              let upgrade: SpeechClaim | undefined;
               if (
                 intentionalHumanMessage(turnInput.message) &&
                 requestedSession !== undefined &&
                 currentSpeechSession(threadId) === requestedSession &&
-                speechClaims.get(activeTurn.nativeTurnId)?.session !== requestedSession
+                !(
+                  speechClaims.get(activeTurn.nativeTurnId)?.session === requestedSession &&
+                  speechClaims.get(activeTurn.nativeTurnId)?.accepted === true
+                )
               ) {
                 speechFinalTexts.delete(activeTurn.nativeTurnId);
-                speechClaims.set(activeTurn.nativeTurnId, {
-                  session: requestedSession,
-                  accepted: Deferred.await(accepted),
-                });
+                upgrade = { session: requestedSession, accepted: false };
+                speechClaims.set(activeTurn.nativeTurnId, upgrade);
               }
               yield* client
                 .request("turn/steer", {
@@ -7915,8 +7911,26 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   threadId,
                 })
                 .pipe(
-                  Effect.tap(() => Deferred.succeed(accepted, true)),
-                  Effect.ensuring(Deferred.succeed(accepted, false)),
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      if (
+                        upgrade !== undefined &&
+                        speechClaims.get(activeTurn.nativeTurnId) === upgrade
+                      )
+                        upgrade.accepted = true;
+                    }),
+                  ),
+                  Effect.onError(() =>
+                    Effect.sync(() => {
+                      if (
+                        upgrade !== undefined &&
+                        speechClaims.get(activeTurn.nativeTurnId) === upgrade
+                      ) {
+                        speechClaims.delete(activeTurn.nativeTurnId);
+                        speechFinalTexts.delete(activeTurn.nativeTurnId);
+                      }
+                    }),
+                  ),
                 );
             },
             (effect, turnInput) =>
@@ -8545,15 +8559,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 }),
               );
             },
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterProtocolError({
-                  driver: CODEX_PROVIDER,
-                  detail: isRealtimeVoiceCapabilityError(cause)
-                    ? cause.message
-                    : "Failed to start Codex realtime voice.",
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              isProviderProtocolError(cause)
+                ? cause
+                : new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CODEX_PROVIDER,
+                    detail: isRealtimeVoiceCapabilityError(cause)
+                      ? cause.message
+                      : "Failed to start Codex realtime voice.",
+                    cause,
+                  }),
             ),
           ),
           stopRealtimeVoice: Effect.fn("CodexAdapterV2.stopRealtimeVoice")(

@@ -1237,6 +1237,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           "interrupted",
           "partial-only",
           "rejected-human-steer",
+          "human-steer-terminal-first",
         ].includes(kind);
         const steer =
           kind === "agent-steer" ||
@@ -1459,7 +1460,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const threadId = `speech-adoption-${kind}`;
         const turnId = "held-speech";
         const typed = kind !== "native-voice";
-        const audible = kind !== "callback-race";
+        const audible = kind === "human-race";
         const appended = yield* Deferred.make<void>();
         const preamble = codexReplayPreamble({
           nativeThreadId: threadId,
@@ -1716,13 +1717,14 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
-  it.effect(
-    "never retries ambiguous append failure and quarantines replacement after native closure",
-    () =>
+  it.effect.each(["ambiguous", "method-not-found"] as const)(
+    "never retries %s append failure and preserves safe restart semantics",
+    (mode) =>
       Effect.gen(function* () {
-        const threadId = "speech-uncertain";
+        const threadId = `speech-append-${mode}`;
         const turnId = "uncertain-turn";
         const stopReplied = yield* Deferred.make<void>();
+        const closedPersisted = yield* Deferred.make<void>();
         const preamble = codexReplayPreamble({
           nativeThreadId: threadId,
           nativeTurnId: turnId,
@@ -1748,13 +1750,42 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               },
               {
                 type: "emit_inbound",
-                frame: { id: 5, error: { code: -32603, message: "uncertain" } },
+                frame: {
+                  id: 5,
+                  error: {
+                    code: mode === "ambiguous" ? -32603 : -32601,
+                    message: "Rejected append",
+                  },
+                },
               },
               ...voiceStopEntries(threadId, 6),
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "thread/realtime/item/completed",
+                  params: {
+                    threadId,
+                    item: {
+                      id: "append-closed",
+                      realtimeSessionId: threadId,
+                      type: "realtimeSessionClosed",
+                      outcome: "ended",
+                    },
+                  },
+                },
+              },
               ...speechFinalEntries(threadId, turnId),
+              ...(mode === "method-not-found"
+                ? [...voiceStartEntries(threadId, 7), ...voiceStopEntries(threadId, 8)]
+                : []),
             ],
           }),
-          undefined,
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "realtime_voice" &&
+            event.turnItem.nativeRealtimeItemId === "append-closed"
+              ? Deferred.succeed(closedPersisted, undefined).pipe(Effect.asVoid)
+              : Effect.void,
           undefined,
           undefined,
           undefined,
@@ -1777,11 +1808,14 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           }),
         );
         yield* Deferred.await(stopReplied);
+        yield* Deferred.await(closedPersisted);
         const replacement = yield* harness.runtime.startRealtimeVoice!({
           providerThread: harness.providerThread,
           sdp: "offer",
         }).pipe(Effect.result);
-        assert.equal(replacement._tag, "Failure");
+        assert.equal(replacement._tag, mode === "ambiguous" ? "Failure" : "Success");
+        if (mode === "method-not-found")
+          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
         const replay = yield* Ref.get(harness.replayDriver.state);
         assert.isNull(replay.failure);
         assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
@@ -2226,6 +2260,149 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
+  );
+
+  it.effect.each(["pre-ack-final", "rejected-then-accepted"] as const)(
+    "speaks only an accepted human steer result after %s",
+    (mode) =>
+      Effect.gen(function* () {
+        const threadId = `speech-steer-boundary-${mode}`;
+        const turnId = "quiet-turn";
+        const finalsAllowed = yield* Deferred.make<void>();
+        const attempt = yield* Deferred.make<unknown>();
+        const appended = yield* Deferred.make<void>();
+        const preamble = codexReplayPreamble({
+          nativeThreadId: threadId,
+          nativeTurnId: turnId,
+          prompt: "Request",
+        });
+        const nextId = mode === "pre-ack-final" ? 6 : 7;
+        const steerRequest = (id: number): CodexReplay.CodexAppServerReplayEntry => ({
+          type: "expect_outbound",
+          frame: {
+            id,
+            method: "turn/steer",
+            params: { threadId, expectedTurnId: turnId, input: [{ type: "text", text: "Steer" }] },
+          },
+        });
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: threadId,
+            entries: [
+              ...preamble.slice(0, 5),
+              ...voiceStartEntries(threadId, 3),
+              ...preamble
+                .slice(5)
+                .map((entry, index) => (index < 2 ? withReplayRequestId(entry, 4) : entry)),
+              steerRequest(5),
+              ...(mode === "pre-ack-final"
+                ? [
+                    {
+                      type: "emit_inbound" as const,
+                      frame: {
+                        method: "item/completed",
+                        params: {
+                          threadId,
+                          turnId,
+                          item: {
+                            type: "agentMessage",
+                            id: "old-background-final",
+                            text: "Background final",
+                            phase: "final_answer",
+                            memoryCitation: null,
+                          },
+                        },
+                      },
+                    },
+                    { type: "emit_inbound" as const, frame: { id: 5, result: { turnId } } },
+                  ]
+                : [
+                    {
+                      type: "emit_inbound" as const,
+                      frame: { id: 5, error: { code: -32602, message: "Rejected first steer" } },
+                    },
+                    steerRequest(6),
+                    { type: "emit_inbound" as const, frame: { id: 6, result: { turnId } } },
+                  ]),
+              ...speechFinalEntries(threadId, turnId).map((entry, index) =>
+                index === 0 ? { ...entry, label: "post-acceptance-final" } : entry,
+              ),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: nextId,
+                  method: "thread/realtime/appendSpeech",
+                  params: { threadId, text: "Selected final" },
+                },
+              },
+              { type: "emit_inbound", frame: { id: nextId, result: {} } },
+              ...voiceStopEntries(threadId, nextId + 1),
+            ],
+          }),
+          undefined,
+          (method, params) =>
+            method === "thread/realtime/appendSpeech"
+              ? Deferred.succeed(attempt, params).pipe(Effect.asVoid)
+              : Effect.void,
+          undefined,
+          (entry) =>
+            entry.label === "post-acceptance-final" ? Deferred.await(finalsAllowed) : Effect.void,
+          (method) =>
+            method === "thread/realtime/appendSpeech"
+              ? Deferred.succeed(appended, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        );
+        yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        });
+        const input = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make(threadId),
+          text: "Request",
+        });
+        yield* harness.runtime.startTurn({
+          ...input,
+          message: { ...input.message, createdBy: "agent", creationSource: "mcp" },
+        });
+        yield* harness.until(() =>
+          harness.events.some(
+            (event) =>
+              event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+          ),
+        );
+        const started = harness.events.find(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        if (started?.type !== "provider_turn.updated")
+          return yield* Effect.die("Missing running turn");
+        const steer = {
+          ...input,
+          providerTurnId: started.providerTurn.id,
+          message: { ...input.message, text: "Steer" },
+        };
+        const first = yield* harness.runtime.steerTurn(steer).pipe(Effect.result);
+        assert.equal(first._tag, mode === "pre-ack-final" ? "Success" : "Failure");
+        if (mode === "rejected-then-accepted") yield* harness.runtime.steerTurn(steer);
+        yield* Deferred.succeed(finalsAllowed, undefined);
+        yield* harness.firstTerminal;
+        if (mode === "rejected-then-accepted")
+          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        assert.deepEqual(yield* Deferred.await(attempt), { threadId, text: "Selected final" });
+        yield* Deferred.await(appended);
+        if (mode === "pre-ack-final")
+          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const replay = yield* Ref.get(harness.replayDriver.state);
+        assert.isNull(replay.failure);
+        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
   );
 
   it.effect("starts realtime voice with the matching SDP notification and stops it", () =>

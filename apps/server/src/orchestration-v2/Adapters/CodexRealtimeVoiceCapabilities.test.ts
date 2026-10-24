@@ -16,7 +16,7 @@ const out = process.argv[process.argv.indexOf('--out') + 1];
 fs.appendFileSync(path.join(__dirname, 'invocations'), 'probe\\n');
 if (process.argv.slice(2, 6).join(' ') !== 'app-server generate-json-schema --experimental --out') process.exit(7);
 fs.mkdirSync(path.join(out, 'v2'), {recursive:true});
-fs.writeFileSync(path.join(out, 'v2/ThreadRealtimeStartParams.json'), ${mode === "malformed" ? "'{'" : mode === "unsupported" ? "'{}'" : '\'{"properties":{"clientManagedHandoffs":{"type":"boolean"}}}\''});
+fs.writeFileSync(path.join(out, 'v2/ThreadRealtimeStartParams.json'), ${mode === "malformed" ? "'{'" : mode === "unsupported" ? "'{}'" : '\'{"properties":{"clientManagedHandoffs":{"type":["boolean","null"]}}}\''});
 fs.writeFileSync(path.join(out, 'v2/ThreadRealtimeAppendSpeechParams.json'), '{"properties":{"text":{"type":"string"},"threadId":{"type":"string"}}}');
 fs.writeFileSync(path.join(out, 'ClientRequest.json'), '{"oneOf":[{"properties":{"method":{"enum":["thread/realtime/start"]}}},{"properties":{"method":{"enum":["thread/realtime/appendSpeech"]}}}]}');
 `;
