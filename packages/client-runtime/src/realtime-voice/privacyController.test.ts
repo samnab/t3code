@@ -313,7 +313,7 @@ describe("app-owned realtime voice", () => {
   });
 
   it.each(["legacy", "operation", "token", "provider", "expiry"] as const)(
-    "fails closed on a %s ownership response without an unowned stop",
+    "fails closed on a %s ownership response",
     async (kind) => {
       const f = fixture();
       const result = {
@@ -325,6 +325,11 @@ describe("app-owned realtime voice", () => {
         providerSessionId: f.owner.providerSessionId,
         expiresAt: "2026-10-24T00:00:00.000Z",
       };
+      const returnedProvider = {
+        providerInstanceId: ProviderInstanceId.make("replacement-codex"),
+        providerThreadId: ProviderThreadId.make("replacement-thread"),
+        providerSessionId: ProviderSessionId.make("replacement-session"),
+      };
       f.startProvider.mockResolvedValueOnce(
         kind === "legacy"
           ? { sdp: "answer" }
@@ -332,17 +337,34 @@ describe("app-owned realtime voice", () => {
               ...result,
               ...(kind === "operation" ? { operationId: "old-operation" } : {}),
               ...(kind === "token" ? { voiceSessionToken: "" } : {}),
-              ...(kind === "provider"
-                ? { providerSessionId: ProviderSessionId.make("other-session") }
-                : {}),
+              ...(kind === "provider" ? returnedProvider : {}),
               ...(kind === "expiry" ? { expiresAt: "not-a-time" } : {}),
             },
       );
       await f.controller.start(f.owner);
-      expect(f.stopProvider).not.toHaveBeenCalled();
+      await whenOff(f.controller);
       expect(f.operations).not.toContain("remote");
       expect(f.transports[0]?.sending).toBe(false);
       expect(f.transports[0]?.closed).toBe(true);
+      if (kind === "provider") {
+        expect(f.stopProvider).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ ...f.owner, operationId: "operation-1" }),
+          {
+            ...returnedProvider,
+            operationId: result.operationId,
+            voiceSessionToken: result.voiceSessionToken,
+            expiresAt: result.expiresAt,
+          },
+        );
+        expect(f.controller.getSnapshot()).toMatchObject({
+          mode: "off",
+          replacementBlocked: false,
+          reason: expect.stringContaining("provider changed"),
+        });
+        expect(f.controller.getSnapshot().reason).not.toContain("Update the T3 host");
+        return;
+      }
+      expect(f.stopProvider).not.toHaveBeenCalled();
       expect(f.controller.getSnapshot()).toMatchObject({
         mode: "off",
         replacementBlocked: true,
@@ -350,6 +372,59 @@ describe("app-owned realtime voice", () => {
       });
       await f.controller.start(f.other);
       expect(f.transports).toHaveLength(1);
+    },
+  );
+
+  it.each([false, true])(
+    "cleans up a drifted binding after owner loss and retains its reason (cleanup fails=%s)",
+    async (cleanupFails) => {
+      const f = fixture();
+      const result = {
+        sdp: "answer",
+        operationId: "operation-1",
+        voiceSessionToken: "drift-token",
+        providerInstanceId: ProviderInstanceId.make("replacement-codex"),
+        providerThreadId: ProviderThreadId.make("replacement-thread"),
+        providerSessionId: ProviderSessionId.make("replacement-session"),
+        expiresAt: "2026-10-24T00:00:00.000Z",
+      };
+      f.startProvider.mockImplementationOnce(async () => {
+        f.entered.resolve();
+        await f.gate.promise;
+        return result;
+      });
+      if (cleanupFails) f.stopProvider.mockRejectedValue(new Error("Native closure unconfirmed"));
+      const pending = f.controller.start(f.owner);
+      await f.entered.promise;
+      const ownerLossReason = "The conversation's provider changed while starting voice.";
+      f.loseOwner(ownerLossReason);
+      f.gate.resolve();
+      await pending;
+      await whenOff(f.controller);
+      expect(f.stopProvider).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ ...f.owner, operationId: "operation-1" }),
+        {
+          operationId: result.operationId,
+          voiceSessionToken: result.voiceSessionToken,
+          providerInstanceId: result.providerInstanceId,
+          providerThreadId: result.providerThreadId,
+          providerSessionId: result.providerSessionId,
+          expiresAt: result.expiresAt,
+        },
+      );
+      expect(f.operations).not.toContain("remote");
+      expect(f.transports[0]?.sending).toBe(false);
+      expect(f.transports[0]?.closed).toBe(true);
+      expect(f.controller.getSnapshot()).toMatchObject({
+        mode: "off",
+        replacementBlocked: cleanupFails,
+        reason: expect.stringContaining(ownerLossReason),
+      });
+      expect(f.controller.getSnapshot().reason).not.toContain("Update the T3 host");
+      if (cleanupFails) {
+        await f.controller.start(f.other);
+        expect(f.transports).toHaveLength(1);
+      }
     },
   );
 

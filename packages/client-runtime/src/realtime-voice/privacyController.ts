@@ -95,9 +95,9 @@ function readOwnership(
   if (
     result.operationId !== owner.operationId ||
     !result.voiceSessionToken ||
-    result.providerInstanceId !== owner.providerInstanceId ||
-    result.providerThreadId !== owner.providerThreadId ||
-    result.providerSessionId !== owner.providerSessionId ||
+    result.providerInstanceId === undefined ||
+    result.providerThreadId === undefined ||
+    result.providerSessionId === undefined ||
     result.expiresAt === undefined ||
     !Number.isFinite(Date.parse(result.expiresAt))
   ) {
@@ -180,7 +180,9 @@ export function createRealtimeVoiceController(deps: {
       await deps.stopProvider(value.owner, value.ownership);
       finish(value, true);
     } catch (error) {
-      value.reason = `${VOICE_REPLACEMENT_GATE} ${deps.describeError(error)}`;
+      value.reason = [value.reason, VOICE_REPLACEMENT_GATE, deps.describeError(error)]
+        .filter(Boolean)
+        .join(" ");
       finish(value, false);
     }
   };
@@ -294,6 +296,19 @@ export function createRealtimeVoiceController(deps: {
       const result = await deps.startProvider(value.owner, offerSdp);
       if (attempt !== value) return;
       value.ownership = readOwnership(value.owner, result);
+      if (
+        value.ownership.providerInstanceId !== value.owner.providerInstanceId ||
+        value.ownership.providerThreadId !== value.owner.providerThreadId ||
+        value.ownership.providerSessionId !== value.owner.providerSessionId
+      ) {
+        // This operation owns the returned binding for cleanup, but cannot authorize its audio.
+        end(
+          value.reason ??
+            "Microphone off. The conversation's provider changed during voice startup.",
+        );
+        void stopRemote(value);
+        return;
+      }
       if (!current(value)) {
         void stopRemote(value);
         return;
