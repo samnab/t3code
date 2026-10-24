@@ -1,3 +1,4 @@
+import { resolveCompletionAudio } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequests";
 import type {
   OrchestrationV2DomainEvent,
@@ -262,7 +263,8 @@ export function applyOrchestrationV2ProjectionEvent(
         ...base,
         thread: {
           ...base.thread,
-          voiceNotifications: event.payload.voiceNotifications,
+          completionAudio: resolveCompletionAudio(event.payload),
+          voiceNotifications: resolveCompletionAudio(event.payload) === "voice",
           updatedAt: event.payload.updatedAt,
         },
       };

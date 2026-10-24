@@ -307,6 +307,73 @@ function launchInput(input: {
   };
 }
 
+it.effect.each([
+  { completionAudio: undefined, voiceNotifications: undefined, expected: "sound" },
+  { completionAudio: undefined, voiceNotifications: false, expected: "off" },
+  { completionAudio: undefined, voiceNotifications: true, expected: "voice" },
+  { completionAudio: "off", voiceNotifications: true, expected: "off" },
+  { completionAudio: "voice", voiceNotifications: false, expected: "voice" },
+  { completionAudio: "sound", voiceNotifications: true, expected: "sound" },
+] as const)(
+  "snapshots completion audio $expected with mode $completionAudio and voice bit $voiceNotifications",
+  ({ completionAudio, voiceNotifications, expected }) => {
+    const harness = makeHarness({ serverSettings: { completionAudio: { defaultMode: "sound" } } });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const launched = yield* launches.launch({
+        ...launchInput({ command: "completion:launch", thread: "thread:completion:launch" }),
+        ...(completionAudio === undefined ? {} : { completionAudio }),
+        ...(voiceNotifications === undefined ? {} : { voiceNotifications }),
+      });
+      assert.equal(launched.projection.thread.completionAudio, expected);
+      assert.equal(launched.projection.thread.voiceNotifications, expected === "voice");
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect(
+  "keeps the original creation snapshot when the default changes before a receipt retry",
+  () => {
+    const harness = makeHarness({ serverSettings: { completionAudio: { defaultMode: "voice" } } });
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const command = {
+        type: "thread.create",
+        commandId: CommandId.make("completion:default:create"),
+        threadId: ThreadId.make("thread:completion:default"),
+        projectId,
+        title: "Default snapshot",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      } as const;
+      const created = yield* threads.dispatch(command);
+      assert.equal((yield* threads.getThreadShell(command.threadId))?.completionAudio, "voice");
+      yield* settings.updateSettings({
+        completionAudio: { defaultMode: "off", tone: "input", volume: 0.5 },
+      });
+      const retried = yield* threads.dispatch(command);
+      assert.equal(retried.sequence, created.sequence);
+      assert.deepEqual(retried.storedEvents, created.storedEvents);
+      assert.equal((yield* threads.getThreadShell(command.threadId))?.completionAudio, "voice");
+      yield* threads.dispatch({
+        ...command,
+        commandId: CommandId.make("completion:next:create"),
+        threadId: ThreadId.make("thread:completion:next"),
+      });
+      assert.equal(
+        (yield* threads.getThreadShell(ThreadId.make("thread:completion:next")))?.completionAudio,
+        "off",
+      );
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
 it.effect("creates the first turn with draft goal and voice settings already active", () => {
   const harness = makeHarness();
   return Effect.gen(function* () {

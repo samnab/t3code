@@ -163,6 +163,90 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("keeps completion modes exclusive through legacy controls and receipt retries", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:completion-controls");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("completion:create"),
+      threadId,
+      projectId: ProjectId.make("project:completion-controls"),
+      title: "Completion controls",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      completionAudio: "sound",
+      voiceNotifications: true,
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    assert.equal((yield* projections.getThread(threadId)).voiceNotifications, false);
+    const read = (mode: "off" | "voice" | "sound") =>
+      Effect.gen(function* () {
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        const shell = yield* projections.getThreadShell(threadId);
+        assert.equal(projection.thread.completionAudio, mode);
+        assert.equal(projection.thread.voiceNotifications, mode === "voice");
+        assert.equal(shell?.completionAudio, mode);
+        assert.equal(shell?.voiceNotifications, mode === "voice");
+      });
+    yield* orchestrator.dispatch({
+      type: "thread.voice-notifications.set",
+      commandId: CommandId.make("completion:legacy-off"),
+      threadId,
+      voiceNotifications: false,
+    });
+    yield* read("sound");
+    yield* orchestrator.dispatch({
+      type: "thread.voice-notifications.set",
+      commandId: CommandId.make("completion:legacy-on"),
+      threadId,
+      voiceNotifications: true,
+    });
+    yield* read("voice");
+    yield* orchestrator.dispatch({
+      type: "thread.voice-notifications.set",
+      commandId: CommandId.make("completion:legacy-clear"),
+      threadId,
+      voiceNotifications: false,
+    });
+    yield* read("off");
+    const sound = {
+      type: "thread.completion-audio.set",
+      commandId: CommandId.make("completion:sound"),
+      threadId,
+      mode: "sound",
+    } as const;
+    const result = yield* orchestrator.dispatch(sound);
+    assert.deepEqual(
+      result.storedEvents.map((stored) => stored.event.payload),
+      [
+        {
+          threadId,
+          completionAudio: "sound",
+          voiceNotifications: false,
+          updatedAt: (yield* projections.getThread(threadId)).updatedAt,
+        },
+      ],
+    );
+    yield* read("sound");
+    yield* orchestrator.dispatch({
+      type: "thread.completion-audio.set",
+      commandId: CommandId.make("completion:off"),
+      threadId,
+      mode: "off",
+    });
+    yield* read("off");
+    const retried = yield* orchestrator.dispatch(sound);
+    assert.equal(retried.sequence, result.sequence);
+    yield* read("off");
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect(
   "records approval feedback and targets only its runtime request without dispatching a parent turn",
   () =>

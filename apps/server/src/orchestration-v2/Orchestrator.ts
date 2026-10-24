@@ -20,6 +20,7 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  resolveCompletionAudio,
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   MessageId,
@@ -470,6 +471,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.metadata.update":
     case "thread.goal.loop":
     case "thread.voice-notifications.set":
+    case "thread.completion-audio.set":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
     case "thread.pull-request-link.sync":
@@ -2522,6 +2524,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
+    const completionAudio = resolveCompletionAudio(command);
     const thread: OrchestrationV2AppThread = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
@@ -2551,7 +2554,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       snoozedAt: null,
       goal: command.goal ?? null,
       goalLoop: null,
-      voiceNotifications: command.voiceNotifications ?? false,
+      completionAudio,
+      voiceNotifications: completionAudio === "voice",
       lastVisitedAt: null,
       deletedAt: null,
     };
@@ -2753,7 +2757,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchThreadVoiceNotificationsSet = Effect.fn(
     "orchestrationV2.dispatch.threadVoiceNotificationsSet",
   )(function* (
-    command: Extract<OrchestrationV2Command, { readonly type: "thread.voice-notifications.set" }>,
+    command: Extract<
+      OrchestrationV2Command,
+      { readonly type: "thread.voice-notifications.set" | "thread.completion-audio.set" }
+    >,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
     const thread = yield* projectionStore
@@ -2770,6 +2777,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Thread ${command.threadId} is deleted.`,
       });
     }
+    const currentMode = resolveCompletionAudio(thread);
+    const completionAudio =
+      command.type === "thread.completion-audio.set"
+        ? command.mode
+        : command.voiceNotifications
+          ? "voice"
+          : currentMode === "voice"
+            ? "off"
+            : currentMode;
     const now = yield* DateTime.now;
     yield* emit(
       events,
@@ -2781,7 +2797,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: {
         threadId: command.threadId,
-        voiceNotifications: command.voiceNotifications,
+        completionAudio,
+        voiceNotifications: completionAudio === "voice",
         updatedAt: now,
       },
     });
@@ -7260,6 +7277,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           createdBy: command.createdBy,
           creationSource: command.creationSource,
         }),
+        completionAudio: "off",
+        voiceNotifications: false,
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
         ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
@@ -11621,6 +11640,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchThreadGoalLoop(command, events);
         break;
       case "thread.voice-notifications.set":
+      case "thread.completion-audio.set":
         yield* dispatchThreadVoiceNotificationsSet(command, events);
         break;
       case "thread.auto-settle": {

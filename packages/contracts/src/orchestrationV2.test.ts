@@ -8,6 +8,7 @@ import {
   OrchestrationV2AppThread,
   OrchestrationV2Command,
   OrchestrationV2DomainEvent,
+  OrchestrationV2DomainEventJson,
   OrchestrationV2InternalCommand,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
@@ -76,6 +77,7 @@ describe("orchestration V2 contracts", () => {
     expect(thread.goal).toBeNull();
     expect(thread.goalLoop).toBeNull();
     expect(thread.voiceNotifications).toBe(false);
+    expect(thread.completionAudio).toBeUndefined();
   });
 
   it("decodes thread goal-loop and voice commands and events", () => {
@@ -159,6 +161,35 @@ describe("orchestration V2 contracts", () => {
         action: "sync",
       }),
     ).toThrow();
+  });
+
+  it("preserves optional completion modes on commands and historical event JSON", () => {
+    const command = decodeOrchestrationV2Command({
+      type: "thread.completion-audio.set",
+      commandId: "completion:set",
+      threadId: "thread-1",
+      mode: "sound",
+    });
+    expect(command).toMatchObject({ mode: "sound" });
+    const decodeJson = Schema.decodeUnknownSync(OrchestrationV2DomainEventJson);
+    const legacy = {
+      id: "event:voice",
+      type: "thread.voice-notifications-set",
+      threadId: "thread-1",
+      occurredAt: DateTime.formatIso(now),
+      payload: {
+        threadId: "thread-1",
+        voiceNotifications: true,
+        updatedAt: DateTime.formatIso(now),
+      },
+    };
+    expect(decodeJson(legacy)).toMatchObject({ payload: { voiceNotifications: true } });
+    expect(
+      decodeJson({
+        ...legacy,
+        payload: { ...legacy.payload, voiceNotifications: false, completionAudio: "sound" },
+      }),
+    ).toMatchObject({ payload: { voiceNotifications: false, completionAudio: "sound" } });
   });
 
   it("decodes thread event types from a newer server as skippable items", () => {

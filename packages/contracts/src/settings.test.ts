@@ -30,6 +30,27 @@ const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
 
+describe("ServerSettings completion audio", () => {
+  it("defaults older settings to Off and preserves the environment sound settings", () => {
+    expect(decodeServerSettings({}).completionAudio).toEqual({
+      defaultMode: "off",
+      tone: "completion",
+      volume: 1,
+    });
+    const completionAudio = { defaultMode: "sound", tone: "input", volume: 0.25 };
+    expect(encodeServerSettings(decodeServerSettings({ completionAudio }))).toMatchObject({
+      completionAudio,
+    });
+    expect(decodeServerSettingsPatch({ completionAudio })).toEqual({ completionAudio });
+  });
+
+  it.each([-0.1, 1.1, NaN, Infinity, -Infinity])("rejects completion volume %s", (volume) => {
+    const completionAudio = { defaultMode: "sound", tone: "completion", volume };
+    expect(() => decodeServerSettings({ completionAudio })).toThrow();
+    expect(() => decodeServerSettingsPatch({ completionAudio })).toThrow();
+  });
+});
+
 describe("ServerSettings delegation tiers", () => {
   it("decodes an empty default for older settings files", () => {
     expect(decodeServerSettings({}).delegationTiers).toEqual({

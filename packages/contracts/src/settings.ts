@@ -1,3 +1,4 @@
+import { CompletionAudioSettings, DEFAULT_COMPLETION_AUDIO_SETTINGS } from "./completionAudio.ts";
 import { EasDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthOrchestrationOperateScope,
@@ -1207,6 +1208,9 @@ export const DelegationTiers = Schema.Struct({
 export type DelegationTiers = typeof DelegationTiers.Type;
 
 export const ServerSettings = Schema.Struct({
+  completionAudio: CompletionAudioSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_COMPLETION_AUDIO_SETTINGS)),
+  ),
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1565,6 +1569,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  completionAudio: Schema.optionalKey(CompletionAudioSettings),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),

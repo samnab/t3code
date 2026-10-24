@@ -42,6 +42,7 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
+  resolveCompletionAudio,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -827,7 +828,8 @@ export function applyToProjection(
         ...base,
         thread: {
           ...base.thread,
-          voiceNotifications: event.payload.voiceNotifications,
+          completionAudio: resolveCompletionAudio(event.payload),
+          voiceNotifications: resolveCompletionAudio(event.payload) === "voice",
           updatedAt: event.payload.updatedAt,
         },
       };
@@ -1672,7 +1674,8 @@ export function threadShellFromProjection(
     snoozedAt: projection.thread.snoozedAt ?? null,
     goal: projection.thread.goal ?? null,
     goalLoop: projection.thread.goalLoop ?? null,
-    voiceNotifications: projection.thread.voiceNotifications ?? false,
+    completionAudio: projection.thread.completionAudio,
+    voiceNotifications: resolveCompletionAudio(projection.thread) === "voice",
     pinnedAt: projection.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: projection.thread.autoSettleDisabledAt ?? null,
@@ -1918,7 +1921,8 @@ function shellFromState(input: {
     snoozedAt: input.state.thread.snoozedAt ?? null,
     goal: input.state.thread.goal ?? null,
     goalLoop: input.state.thread.goalLoop ?? null,
-    voiceNotifications: input.state.thread.voiceNotifications ?? false,
+    completionAudio: input.state.thread.completionAudio,
+    voiceNotifications: resolveCompletionAudio(input.state.thread) === "voice",
     pinnedAt: input.state.thread.pinnedAt ?? null,
 
     autoSettleDisabledAt: input.state.thread.autoSettleDisabledAt ?? null,
@@ -2054,7 +2058,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   ? { ...thread, goalLoop: event.payload.loop, updatedAt: event.occurredAt }
                   : {
                       ...thread,
-                      voiceNotifications: event.payload.voiceNotifications,
+                      completionAudio: resolveCompletionAudio(event.payload),
+                      voiceNotifications: resolveCompletionAudio(event.payload) === "voice",
                       updatedAt: event.payload.updatedAt,
                     };
               const payloadJson = yield* encodeThreadPayload(updatedThread);

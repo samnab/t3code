@@ -94,6 +94,31 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("persists and publishes environment completion audio through normal settings", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        assert.deepEqual((yield* service.getSettings).completionAudio, {
+          defaultMode: "off",
+          tone: "completion",
+          volume: 1,
+        });
+        const changes = yield* service.subscribeChanges;
+        const completionAudio = { defaultMode: "sound", tone: "input", volume: 0.4 } as const;
+        yield* service.updateSettings({ completionAudio });
+        const received = Option.getOrThrow(yield* Stream.runHead(changes));
+        assert.deepEqual(received.completionAudio, completionAudio);
+        const saved = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepEqual(saved.completionAudio, completionAudio);
+        assert.deepEqual((yield* service.getSettings).completionAudio, completionAudio);
+      }),
+    ).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;

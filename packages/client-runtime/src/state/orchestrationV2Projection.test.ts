@@ -220,6 +220,29 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     expect(withVoice?.thread.voiceNotifications).toBe(false);
   });
 
+  it("replays completion audio and historical voice events without stale canonical state", () => {
+    let projection = emptyProjection;
+    for (const [index, payload] of [
+      { completionAudio: "sound" as const, voiceNotifications: false },
+      { voiceNotifications: true },
+      { voiceNotifications: false },
+    ].entries()) {
+      const next = applyOrchestrationV2ProjectionEvent(projection, {
+        id: EventId.make(`event-completion-audio-${index}`),
+        type: "thread.voice-notifications-set",
+        threadId,
+        occurredAt: now,
+        payload: { threadId, updatedAt: now, ...payload },
+      });
+      expect(next).not.toBeNull();
+      projection = next!;
+      expect(projection.thread.completionAudio).toBe(
+        index === 0 ? "sound" : index === 1 ? "voice" : "off",
+      );
+      expect(projection.thread.voiceNotifications).toBe(index === 1);
+    }
+  });
+
   it("preserves visible row identity when run updates do not change membership", () => {
     const item = commandItem("item-stable");
     const visibleTurnItems = [

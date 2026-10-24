@@ -150,6 +150,7 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "thread.metadata.update":
     case "thread.goal.loop":
     case "thread.voice-notifications.set":
+    case "thread.completion-audio.set":
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
     case "thread.pull-request-link.sync":
