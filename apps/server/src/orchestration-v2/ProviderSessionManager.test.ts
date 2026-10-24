@@ -51,6 +51,8 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProviderRealtimeVoiceService from "./ProviderRealtimeVoiceService.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -339,6 +341,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
     readonly readRealtimeHistoryPage?: ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"];
+    readonly startRealtimeVoice?: ProviderAdapter.ProviderAdapterV2SessionRuntime["startRealtimeVoice"];
   } = {},
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -423,6 +426,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
           ...(options.readRealtimeHistoryPage === undefined
             ? {}
             : { readRealtimeHistoryPage: options.readRealtimeHistoryPage }),
+          ...(options.startRealtimeVoice === undefined
+            ? {}
+            : { startRealtimeVoice: options.startRealtimeVoice }),
           ...(options.hasPendingBackgroundWork === undefined
             ? {}
             : { hasPendingBackgroundWork: options.hasPendingBackgroundWork }),
@@ -493,6 +499,7 @@ function layerTest(input: {
   };
   readonly hasActiveRealtimeVoice?: Effect.Effect<boolean>;
   readonly readRealtimeHistoryPage?: ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"];
+  readonly startRealtimeVoice?: ProviderAdapter.ProviderAdapterV2SessionRuntime["startRealtimeVoice"];
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
@@ -559,6 +566,9 @@ function layerTest(input: {
       ...(input.readRealtimeHistoryPage === undefined
         ? {}
         : { readRealtimeHistoryPage: input.readRealtimeHistoryPage }),
+      ...(input.startRealtimeVoice === undefined
+        ? {}
+        : { startRealtimeVoice: input.startRealtimeVoice }),
       ...(input.hasPendingBackgroundWork === undefined
         ? {}
         : { hasPendingBackgroundWork: input.hasPendingBackgroundWork }),
@@ -4195,6 +4205,70 @@ it.effect("ProviderSessionManagerV2 keeps late voice from a binding that is no l
         "previous-native-thread",
       );
     }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
+it.effect("ProviderRealtimeVoiceServiceV2 starts voice on an unloaded thread without a turn", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const voiceStarts = yield* Ref.make(0);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const voice = yield* ProviderRealtimeVoiceService.ProviderRealtimeVoiceServiceV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-unloaded-start");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
+      });
+      // Stopping never opens a session for a call that cannot exist.
+      const stop = yield* voice.stop({ threadId }).pipe(Effect.flip);
+      assert.equal(stop._tag, "ProviderRealtimeVoiceError");
+      assert.equal((yield* Ref.get(state)).openCount, 0);
+
+      assert.deepEqual(yield* voice.start({ threadId, sdp: "offer" }), { sdp: "answer" });
+      const runtime = yield* Ref.get(state);
+      assert.equal(runtime.openCount, 1);
+      assert.equal(runtime.resumeCount, 1);
+      assert.equal(yield* Ref.get(voiceStarts), 1);
+      assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
+    }).pipe(
+      Effect.provide(
+        ProviderRealtimeVoiceService.layer.pipe(
+          Layer.provideMerge(
+            Layer.merge(
+              layerTest({
+                state,
+                idleTimeoutMs: 60_000,
+                startTurn: Effect.die("voice must not start a coding turn"),
+                startRealtimeVoice: () =>
+                  Ref.update(voiceStarts, (count) => count + 1).pipe(Effect.as({ sdp: "answer" })),
+              }),
+              RuntimePolicy.layer,
+            ),
+          ),
+        ),
+      ),
+    );
   }),
 );
 

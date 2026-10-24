@@ -43,20 +43,20 @@ export function readVoiceOwner(environmentId: EnvironmentId, threadId: ThreadId)
   const session = projection?.providerSessions.find(
     (candidate) => candidate.id === providerSessionId,
   );
+  // Starting voice reloads a stopped session on the server; a failed one needs a new message.
   if (
     !providerSessionId ||
     !session ||
-    session.status === "stopped" ||
     session.status === "error" ||
     providerThread?.status === "closed" ||
     providerThread?.status === "error"
   ) {
     throw new Error(
-      "Voice needs a loaded provider session. Send a message in this conversation first.",
+      "Voice needs a working provider session. Send a message in this conversation first.",
     );
   }
   if (session.driver !== "codex") {
-    throw new Error("Realtime voice is currently available for loaded Codex conversations.");
+    throw new Error("Realtime voice is currently available for Codex conversations.");
   }
   return {
     environmentId,
