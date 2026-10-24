@@ -183,7 +183,7 @@ it there.
 
 The environment's completion audio default applies to future top-level threads,
 independently of existing threads' choices. Children and forks start Off and need
-separate opt-in. Change the default in **Settings → Notifications** on web and
+separate opt-in. Change the default in **Settings → General → Behavior** on web and
 desktop, or **Settings → Thread behavior** on mobile.
 
 **Turn off existing thread audio** includes archived threads and children. It
