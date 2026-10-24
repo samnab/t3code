@@ -2238,12 +2238,12 @@ export const layerWithOptions = (
                         event,
                       });
                     }).pipe(
-                      entry.requestEventPermit.withPermits(1),
                       Effect.catchCause((cause) =>
                         Cause.hasInterruptsOnly(cause)
                           ? Effect.interrupt
                           : markVoiceHistoryIncomplete(entry, item.threadId, "persistence"),
                       ),
+                      entry.requestEventPermit.withPermits(1),
                     );
                     return;
                   }

@@ -466,6 +466,10 @@ function layerTest(input: {
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
   readonly failVoiceWrites?: boolean;
+  readonly pauseVoiceMarkerWrite?: {
+    readonly paused: Deferred.Deferred<void>;
+    readonly resume: Deferred.Deferred<void>;
+  };
   readonly failEventStream?: boolean;
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
   readonly mcpConfigs?: Ref.Ref<
@@ -495,6 +499,7 @@ function layerTest(input: {
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
+  const inputOptions = input;
   const layerVoiceFailingSink = Layer.effect(
     EventSink.EventSinkV2,
     Effect.gen(function* () {
@@ -507,7 +512,22 @@ function layerTest(input: {
               event.type === "turn-item.updated" && event.payload.type === "realtime_voice",
           )
             ? Effect.fail(new EventSink.EventSinkWriteError({ eventCount: input.events.length }))
-            : sink.write(input),
+            : Effect.gen(function* () {
+                const pause = inputOptions.pauseVoiceMarkerWrite;
+                if (
+                  pause !== undefined &&
+                  input.events.some(
+                    (event) =>
+                      event.type === "turn-item.updated" &&
+                      event.payload.type === "error" &&
+                      event.payload.failure.code === "voice_history_incomplete",
+                  )
+                ) {
+                  yield* Deferred.succeed(pause.paused, undefined);
+                  yield* Deferred.await(pause.resume);
+                }
+                return yield* sink.write(input);
+              }),
       });
     }),
   ).pipe(Layer.provide(layerTestEventSink));
@@ -3782,4 +3802,102 @@ it.effect.each(["malformed", "unpersistable"] as const)(
         ),
       );
     }),
+);
+
+it.effect("ProviderSessionManagerV2 finishes a failed voice marker before session removal", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const pause = { paused: yield* Deferred.make<void>(), resume: yield* Deferred.make<void>() };
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-marker-release");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      if (events === undefined) return yield* Effect.die("Missing provider event queue");
+      yield* Queue.offer(events, {
+        type: "turn_item.updated",
+        driver: CODEX_DRIVER,
+        turnItem: {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "session",
+            nativeItemId: "speech",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "session",
+          nativeRealtimeItemId: "speech",
+          content: { type: "transcriptSegment", role: "assistant", text: "fixture speech" },
+          captureState: "canonical_completed",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        },
+      });
+      yield* Deferred.await(pause.paused);
+      const closed = yield* manager
+        .close(providerSessionId)
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+      yield* Deferred.succeed(pause.resume, undefined);
+      yield* Fiber.join(closed);
+      assert.isFalse(yield* manager.isLive(providerSessionId));
+      const projection = yield* projections.getThreadProjection(threadId);
+      assert.equal(
+        projection.turnItems.filter(
+          (item) => item.type === "error" && item.failure.code === "voice_history_incomplete",
+        ).length,
+        1,
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          failVoiceWrites: true,
+          pauseVoiceMarkerWrite: pause,
+        }),
+      ),
+    );
+  }),
 );
