@@ -173,6 +173,24 @@ Stashes containing uploaded files must be restored in their original environment
 Those files are retained for 24 hours. After an upload expires, restore the prompt
 and use **Attach again** or remove the missing file before sending.
 
+## Completion audio
+
+Choose **Off**, **Voice** or **Sound** in the composer's completion audio controls.
+Off is the default. Voice uses configured provider hooks where supported;
+switching Off may not cancel speech already started. Sound plays on web and
+desktop, using your chosen tone and volume. Preview plays only when you request
+it there.
+
+The environment's completion audio default applies to future top-level threads,
+independently of existing threads' choices. Children and forks start Off and need
+separate opt-in. Change the default in **Settings → Notifications** on web and
+desktop, or **Settings → Thread behavior** on mobile.
+
+**Turn off existing thread audio** includes archived threads and children. It
+does not reset the future default. Written notifications and system alerts,
+including [mobile push notifications](./mobile-notifications.md), remain
+independent of completion audio.
+
 ## Voice input on iPhone
 
 On supported iPhones with iOS 26 or later, use the composer's microphone to record,
