@@ -20,5 +20,6 @@ Pod::Spec.new do |s|
   }
   s.resource_bundles = { 'T3NativeControlIcons' => ['Resources/Icons/pull-request*.png'] }
   s.source_files = '**/*.{h,m,mm,swift,hpp,cpp}'
-  s.exclude_files = 'Tests/**'
+  # Host-only test harnesses. '**' alone does not recurse in CocoaPods' FNM_PATHNAME globs.
+  s.exclude_files = 'Tests/**/*'
 end

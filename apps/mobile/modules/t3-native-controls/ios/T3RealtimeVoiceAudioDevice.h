@@ -133,6 +133,19 @@ class SendGate {
   uint64_t nextEpoch_ = 1;
 };
 
+/// ADM thread, after an accepted route change. WebRTC replaces the buffers its IO callbacks
+/// use when parameters change, so `notify` may run only once `stop` reported IO stopped.
+/// A failed stop leaves the buffers alone and revokes; restart happens only while armed.
+template <class Stop, class Notify, class Start>
+void RefreshIOParameters(bool running, SendGate &gate, Stop stop, Notify notify, Start start) {
+  if (running && !stop()) {
+    gate.revoke();
+    return;
+  }
+  notify();
+  if (running && gate.armed() && !start()) gate.revoke();
+}
+
 }  // namespace t3voice
 #endif
 

@@ -135,6 +135,34 @@ int main() {
     check(gate.open(0, 2, 10 * kSecond) == SendGate::kClosed, "open refused after fault");
     check(!gate.arm(since), "stale prepare cannot arm over a fault");
   }
+  {
+    // Review r2 R2-2: a failed IO stop must not let WebRTC replace buffers or restart.
+    SendGate gate;
+    gate.arm(gate.revocations());
+    uint64_t epoch = gate.open(0, 0, 10 * kSecond);
+    int notified = 0, started = 0;
+    t3voice::RefreshIOParameters(
+        true, gate, [] { return false; }, [&] { notified++; }, [&] { started++; return true; });
+    check(notified == 0 && started == 0, "failed stop skips parameter updates and restart");
+    check(!gate.armed() && gate.epoch() == SendGate::kClosed, "failed stop revokes");
+    check(!gate.renew(epoch, 1, 10 * kSecond), "failed stop epoch cannot renew");
+  }
+  {
+    SendGate gate;
+    gate.arm(gate.revocations());
+    int notified = 0, started = 0;
+    t3voice::RefreshIOParameters(
+        true, gate, [] { return true; }, [&] { notified++; }, [&] { started++; return true; });
+    check(notified == 1 && started == 1 && gate.armed(), "stopped IO updates then restarts while armed");
+    gate.revoke();
+    t3voice::RefreshIOParameters(
+        true, gate, [] { return true; }, [&] { notified++; }, [&] { started++; return true; });
+    check(notified == 2 && started == 1, "revoked capture stays stopped after the update");
+    gate.arm(gate.revocations());
+    t3voice::RefreshIOParameters(
+        true, gate, [] { return true; }, [] {}, [] { return false; });
+    check(!gate.armed(), "failed restart revokes");
+  }
   if (failures == 0) std::puts("T3RealtimeVoiceSendGateTest: all checks passed");
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

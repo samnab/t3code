@@ -10,13 +10,21 @@ final class T3RealtimeVoiceAudioDevice {
   var captureArmed = false
   var openEpoch: UInt64 = 0
   var revocationCount: UInt64 = 0
+  var afterRevoke: (() -> Void)?
   var parameterChanges = 0
   func armCapture(since: UInt64) -> Bool {
     guard revocationCount == since else { return false }
     captureArmed = true
     return true
   }
-  func revokeCapture() { revocationCount += 1; captureArmed = false; openEpoch = 0 }
+  func revokeCapture() {
+    revocationCount += 1
+    captureArmed = false
+    openEpoch = 0
+    let hook = afterRevoke
+    afterRevoke = nil
+    hook?()
+  }
   func revokeCaptureAndResetUnit() { revokeCapture() }
   func notifyRouteParametersChanged() { parameterChanges += 1 }
   func openGate(withLeaseSeconds seconds: Double) -> UInt64 {
@@ -102,6 +110,75 @@ func check(_ ok: Bool, _ what: String) {
     check(ownerB.generation != owner.generation, "replacement owner has a new generation")
     check(!session.end(module: a), "late cleanup from the old module is a no-op")
     check(session.ownsAudioSession, "replacement owner survives old cleanup")
+    _ = session.end(module: b)
+
+    // Review r2 R2-1: an interruption after prepare's own revoke but before it reads the
+    // device counter must still fail that prepare.
+    _ = try session.prepare(owner: "a", module: a)
+    device.afterRevoke = interrupt
+    check((try? session.prepare(owner: "a", module: a)) == nil, "prepare interrupted before its counter read throws")
+    check(!device.captureArmed, "interruption before counter read stays disarmed")
+    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == 0, "no epoch after early interruption")
+    _ = session.end(module: a)
+
+    // Review r2 R2-3: foreign category during activation, unknown reason, empty route.
+    audio.onActivate = {
+      try! audio.setCategory(.playback, mode: .default, options: [])
+      routeChange(.categoryChange)
+    }
+    check((try? session.prepare(owner: "a", module: a)) == nil, "foreign category during activation fails prepare")
+    check(!device.captureArmed && !session.ownsAudioSession, "foreign category leaves nothing armed or owned")
+    audio.onActivate = nil
+    _ = try session.prepare(owner: "a", module: a)
+    _ = try session.openGate(owner: "a", module: a, leaseSeconds: 30)
+    center.post(name: AVAudioSession.routeChangeNotification, object: nil,
+      userInfo: [AVAudioSessionRouteChangeReasonKey: UInt(9999)])
+    check(!device.captureArmed && device.openEpoch == 0, "unrecognized route reason revokes")
+    _ = session.end(module: a)
+    audio.currentRoute = AVAudioSessionRouteDescription(inputs: [], outputs: [])
+    do {
+      _ = try session.prepare(owner: "a", module: a)
+      check(false, "empty route must not authorize")
+    } catch {
+      check(error as? T3RealtimeVoiceSessionError == .invalidRoute, "empty route reports invalidRoute")
+    }
+    check(!device.captureArmed && !session.ownsAudioSession, "empty route leaves nothing armed or owned")
+    audio.currentRoute = AVAudioSessionRouteDescription(inputs: ["old-mic"], outputs: [])
+    check((try? session.prepare(owner: "a", module: a)) == nil, "input-only route must not authorize")
+    audio.currentRoute = headset
+
+    // Review r2 R2-4: an observer already running for an ended owner must not revoke, or
+    // speak for, the replacement. Semaphores order the threads; nothing sleeps.
+    let old = try session.prepare(owner: "a", module: a)
+    var staleEvents: [T3RealtimeVoiceSession.Owner] = []
+    session.setRevokedListener(module: a) { _, owner in staleEvents.append(owner) }
+    let entered = DispatchSemaphore(value: 0)
+    let resume = DispatchSemaphore(value: 0)
+    let done = DispatchSemaphore(value: 0)
+    AVAudioSession.onSharedInstance = {
+      if Thread.current.name == "old-route" {
+        entered.signal()
+        resume.wait()
+      }
+    }
+    let thread = Thread {
+      Thread.current.name = "old-route"
+      routeChange(.oldDeviceUnavailable)
+      done.signal()
+    }
+    thread.start()
+    entered.wait()
+    _ = session.end(module: a)
+    let replacement = try session.prepare(owner: "b", module: b)
+    var replacementEvents: [T3RealtimeVoiceSession.Owner] = []
+    session.setRevokedListener(module: b) { _, owner in replacementEvents.append(owner) }
+    let fresh = try session.openGate(owner: "b", module: b, leaseSeconds: 30)
+    resume.signal()
+    done.wait()
+    AVAudioSession.onSharedInstance = nil
+    check(replacement.generation != old.generation, "replacement has its own generation")
+    check(device.captureArmed && device.openEpoch == fresh, "stale observer does not revoke the replacement")
+    check(replacementEvents.isEmpty && staleEvents.isEmpty, "stale observer emits no event")
     _ = session.end(module: b)
 
     if failures == 0 { print("T3RealtimeVoiceSession harness: all checks passed") }

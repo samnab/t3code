@@ -125,18 +125,18 @@ uint64_t SecondsToHostTicks(double seconds) {
 
 - (void)notifyRouteParametersChanged {
   [self postToADM:^(id<RTCAudioDeviceDelegate> delegate) {
-    // WebRTC replaces its fine audio buffers on a parameter change while IO callbacks use
-    // them, so IO must be stopped first. AudioOutputUnitStop returns after the in-flight
-    // render cycle; upstream libwebrtc's AudioDeviceIOS relies on the same boundary.
-    BOOL running = self->_unit && (self->_playing || self->_recording);
-    if (running) AudioOutputUnitStop(self->_unit);
-    [delegate notifyAudioInputInterrupted];
-    [delegate notifyAudioOutputInterrupted];
-    [delegate notifyAudioInputParametersChange];
-    [delegate notifyAudioOutputParametersChange];
-    // Revoked meanwhile: stay stopped. WebRTC must start a new capture after a new prepare.
-    if (!running || !self->_gate.armed()) return;
-    if (AudioOutputUnitStart(self->_unit) != noErr) self->_gate.revoke();
+    // AudioOutputUnitStop's noErr is taken as "the in-flight render cycle finished";
+    // upstream libwebrtc's AudioDeviceIOS relies on the same boundary before rebuilding.
+    t3voice::RefreshIOParameters(
+        self->_unit && (self->_playing || self->_recording), self->_gate,
+        [&] { return AudioOutputUnitStop(self->_unit) == noErr; },
+        [&] {
+          [delegate notifyAudioInputInterrupted];
+          [delegate notifyAudioOutputInterrupted];
+          [delegate notifyAudioInputParametersChange];
+          [delegate notifyAudioOutputParametersChange];
+        },
+        [&] { return AudioOutputUnitStart(self->_unit) == noErr; });
   }];
 }
 

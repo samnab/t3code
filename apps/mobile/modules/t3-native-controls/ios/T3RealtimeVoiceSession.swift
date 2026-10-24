@@ -6,6 +6,7 @@ enum T3RealtimeVoiceSessionError: String, Error {
   case permissionDenied
   case notOwner
   case interrupted
+  case invalidRoute
 }
 
 /// Owns AVAudioSession for realtime voice between an explicit `prepare` and `end`.
@@ -32,6 +33,12 @@ final class T3RealtimeVoiceSession {
       inputs = route.inputs.map(\.uid)
       outputs = route.outputs.map(\.uid)
     }
+
+    var isDuplex: Bool { !inputs.isEmpty && !outputs.isEmpty }
+  }
+
+  private static func isVoice(_ session: AVAudioSession) -> Bool {
+    session.category == .playAndRecord && session.mode == .voiceChat
   }
 
   private typealias Listener = (_ reason: String, _ owner: Owner) -> Void
@@ -44,13 +51,19 @@ final class T3RealtimeVoiceSession {
   private var nextGeneration: UInt64 = 1
   private var observers: [NSObjectProtocol] = []
   private var previous: (AVAudioSession.Category, AVAudioSession.Mode, AVAudioSession.CategoryOptions)?
+  // Observers capture the owner they were installed for and act only while it is still
+  // `observed`, checking and revoking under `stateLock`. A callback already running for an
+  // ended owner therefore cannot revoke, or speak for, its replacement.
   private let stateLock = NSLock()
-  private var publishedOwner: Owner?
+  private var observed: Owner?
+  // External revocations (interruption, route, reset). Prepare compares it across the whole
+  // attempt, so its own deliberate revoke is not mistaken for one.
+  private var invalidations: UInt64 = 0
   private var authorizedRoute: Route?
   private var listener: (module: ObjectIdentifier, notify: Listener)?
 
   /// Read by other audio-session users (video preview) so they leave voice alone.
-  var ownsAudioSession: Bool { stateLock.withLock { publishedOwner != nil } }
+  var ownsAudioSession: Bool { stateLock.withLock { observed != nil } }
 
   /// Receives revocations for owners prepared by `module`, after the gate is already closed.
   func setRevokedListener(module: AnyObject, _ notify: @escaping (String, Owner) -> Void) {
@@ -82,36 +95,44 @@ final class T3RealtimeVoiceSession {
       if owner == nil, session.category == .playAndRecord, session.mode != .voiceChat {
         throw T3RealtimeVoiceSessionError.busy
       }
-      if owner != nil { device.revokeCapture() }
-      stateLock.withLock { authorizedRoute = nil }
+      let candidate = owner ?? Owner(token: token, generation: nextGeneration, module: moduleId)
+      if owner == nil { nextGeneration += 1 }
+      let attempt = stateLock.withLock { () -> UInt64 in
+        observed = candidate
+        authorizedRoute = nil
+        return invalidations
+      }
+      // A fresh capture lifetime: any open epoch closes, and the caller opens a new one.
+      device.revokeCapture()
       let restore = owner == nil ? (session.category, session.mode, session.categoryOptions) : previous
-      // Observe before activating so an interruption during activation invalidates this prepare.
-      if owner == nil { observe() }
+      if owner == nil { observe(candidate) }
       let revocations = device.revocationCount
+      let failed = { [self] (error: Error) -> Error in
+        device.revokeCapture()
+        if owner == nil { release(restore) } else { stateLock.withLock { authorizedRoute = nil } }
+        return error
+      }
       do {
         try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
         try session.setActive(true)
       } catch {
-        if owner == nil { release(restore) }
-        throw error
+        throw failed(error)
       }
       let route = Route(session.currentRoute)
+      guard Self.isVoice(session), route.isDuplex else {
+        throw failed(T3RealtimeVoiceSessionError.invalidRoute)
+      }
       stateLock.withLock { authorizedRoute = route }
-      // Route changes before this point are not compared, so check the route once more
-      // after arming. Either failure leaves capture disarmed.
-      guard device.armCapture(since: revocations), Route(session.currentRoute) == route else {
-        device.revokeCapture()
-        if owner == nil { release(restore) } else { stateLock.withLock { authorizedRoute = nil } }
-        throw T3RealtimeVoiceSessionError.interrupted
+      // Observers bump `invalidations` before revoking, under the same lock this check takes,
+      // so an external event either fails this check or disarms after it.
+      let armed = device.armCapture(since: revocations)
+      let unchanged = stateLock.withLock { invalidations == attempt }
+      guard armed, unchanged, Self.isVoice(session), Route(session.currentRoute) == route else {
+        throw failed(T3RealtimeVoiceSessionError.interrupted)
       }
-      let current = owner ?? Owner(token: token, generation: nextGeneration, module: moduleId)
-      if owner == nil {
-        nextGeneration += 1
-        previous = restore
-      }
-      owner = current
-      stateLock.withLock { publishedOwner = current }
-      return current
+      if owner == nil { previous = restore }
+      owner = candidate
+      return candidate
     }
   }
 
@@ -137,6 +158,10 @@ final class T3RealtimeVoiceSession {
     lock.withLock {
       guard let owner, owner.module == ObjectIdentifier(module), token == nil || owner.token == token
       else { return false }
+      stateLock.withLock {
+        observed = nil
+        authorizedRoute = nil
+      }
       device.revokeCapture()
       self.owner = nil
       release(previous)
@@ -146,7 +171,7 @@ final class T3RealtimeVoiceSession {
   }
 
   func snapshot() -> [String: Any] {
-    let owner = stateLock.withLock { publishedOwner }
+    let owner = stateLock.withLock { observed }
     return [
       "installed": T3RealtimeVoiceAudioDevice.installedInWebRTCModuleOptions,
       "adopted": device.adoptedByWebRTC,
@@ -163,7 +188,7 @@ final class T3RealtimeVoiceSession {
     observers.forEach(NotificationCenter.default.removeObserver)
     observers = []
     stateLock.withLock {
-      publishedOwner = nil
+      observed = nil
       authorizedRoute = nil
     }
     let session = AVAudioSession.sharedInstance()
@@ -171,7 +196,7 @@ final class T3RealtimeVoiceSession {
     try? session.setActive(false, options: [.notifyOthersOnDeactivation])
   }
 
-  private func observe() {
+  private func observe(_ observer: Owner) {
     let center = NotificationCenter.default
     observers = [
       center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) {
@@ -180,49 +205,65 @@ final class T3RealtimeVoiceSession {
         guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
           AVAudioSession.InterruptionType(rawValue: raw) == .began
         else { return }
-        self?.revoke("interruption")
+        self?.revoke(observer, "interruption")
       },
       center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) {
         [weak self] note in
-        guard let self else { return }
         let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
-        let reason = raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
         let session = AVAudioSession.sharedInstance()
-        let authorized = stateLock.withLock { self.authorizedRoute }
-        if reason == .oldDeviceUnavailable || reason == .noSuitableRouteForCategory {
-          revoke("route:\(raw ?? 0)")
-          return
+        let expected: Bool
+        switch raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) {
+        case nil, .unknown?, .oldDeviceUnavailable?, .noSuitableRouteForCategory?:
+          expected = false
+        default:
+          expected = Self.isVoice(session)
         }
-        // While preparing there is no authorized route yet; prepare re-checks after arming.
-        guard let authorized else { return }
-        // Any other input or output, including a newly connected headset or a speaker
-        // override, stays private until the user prepares again.
-        if session.category != .playAndRecord || session.mode != .voiceChat
-          || Route(session.currentRoute) != authorized
-        {
-          revoke("route:\(raw ?? 0)")
-        } else {
-          device.notifyRouteParametersChanged()
-        }
+        self?.routeChanged(observer, "route:\(raw ?? 0)", expected: expected, route: Route(session.currentRoute))
       },
       center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil) {
         [weak self] _ in
-        self?.device.revokeCaptureAndResetUnit()
-        self?.notify("mediaServicesReset")
+        self?.revoke(observer, "mediaServicesReset", resetUnit: true)
       },
     ]
   }
 
-  private func revoke(_ reason: String) {
-    device.revokeCapture()
-    notify(reason)
+  private func routeChanged(_ observer: Owner, _ reason: String, expected: Bool, route: Route) {
+    enum Action { case ignore, refresh, revoked }
+    let action = stateLock.withLock { () -> Action in
+      guard observed == observer else { return .ignore }
+      // Any other input or output, including a newly connected headset or a speaker
+      // override, stays private until the user prepares again.
+      if expected, let authorized = authorizedRoute, authorized == route { return .refresh }
+      // While preparing there is no authorized route yet; prepare validates after arming.
+      if expected, authorizedRoute == nil { return .ignore }
+      revokeLocked(resetUnit: false)
+      return .revoked
+    }
+    switch action {
+    case .ignore: break
+    case .refresh: device.notifyRouteParametersChanged()
+    case .revoked: notify(reason, observer)
+    }
   }
 
-  private func notify(_ reason: String) {
-    let target = stateLock.withLock { () -> (Listener, Owner)? in
-      guard let owner = publishedOwner, let listener, listener.module == owner.module else { return nil }
-      return (listener.notify, owner)
+  private func revoke(_ observer: Owner, _ reason: String, resetUnit: Bool = false) {
+    let current = stateLock.withLock { () -> Bool in
+      guard observed == observer else { return false }
+      revokeLocked(resetUnit: resetUnit)
+      return true
     }
-    if let (notify, owner) = target { notify(reason, owner) }
+    if current { notify(reason, observer) }
+  }
+
+  /// Caller holds `stateLock`. The device only takes its own locks and posts to the ADM thread.
+  private func revokeLocked(resetUnit: Bool) {
+    invalidations += 1
+    authorizedRoute = nil
+    if resetUnit { device.revokeCaptureAndResetUnit() } else { device.revokeCapture() }
+  }
+
+  private func notify(_ reason: String, _ owner: Owner) {
+    let notify = stateLock.withLock { listener?.module == owner.module ? listener?.notify : nil }
+    notify?(reason, owner)
   }
 }

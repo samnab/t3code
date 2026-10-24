@@ -52,7 +52,9 @@ public final class AVAudioSession {
   public static let routeChangeNotification = Notification.Name("mockRoute")
   public static let mediaServicesWereResetNotification = Notification.Name("mockReset")
   public static let singleton = AVAudioSession()
-  public static func sharedInstance() -> AVAudioSession { singleton }
+  /// Lets a harness pause a specific thread when it reaches the shared session.
+  public static var onSharedInstance: (() -> Void)?
+  public static func sharedInstance() -> AVAudioSession { onSharedInstance?(); return singleton }
   public var category: Category = .playback
   public var mode: Mode = .default
   public var categoryOptions: CategoryOptions = []
