@@ -37,7 +37,13 @@ export interface RealtimeVoiceAudio {
   readonly closeGate: (epoch: number) => boolean;
   readonly end: (owner: string) => Promise<boolean>;
   readonly snapshot: () => RealtimeVoiceAudioSnapshot;
-  /** Fires after native code already closed the gate (interruption, route loss, reset). */
+  /**
+   * Terminal. Fires once after a fault (`interruption`, `route:N`, `mediaServicesReset` or
+   * `audioFault`) only when native code has already closed the gate, ended the owner and
+   * released the audio session. Never fires for a deliberate `end`. After any end, `prepare`
+   * may reject `busy` until native teardown finishes; for a fault, that is when this fires.
+   * Prepare again only on a new user action.
+   */
   readonly addRevokedListener: (listener: (event: RealtimeVoiceAudioRevoked) => void) => {
     remove: () => void;
   };

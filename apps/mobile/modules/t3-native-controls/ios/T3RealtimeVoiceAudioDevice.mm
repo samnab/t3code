@@ -126,8 +126,9 @@ uint64_t SecondsToHostTicks(double seconds) {
 
 - (void)endCaptureWithCompletion:(dispatch_block_t)completion {
   _gate.revoke();
+  dispatch_block_t end = [completion copy];
   os_unfair_lock_lock(&_delegateLock);
-  [_pendingEnds addObject:[completion copy]];
+  [_pendingEnds addObject:end];
   BOOL adopted = _delegate != nil;
   os_unfair_lock_unlock(&_delegateLock);
   // Never adopted, or already terminated: there is no ADM thread and no unit.
@@ -136,6 +137,12 @@ uint64_t SecondsToHostTicks(double seconds) {
     return;
   }
   [self postToADM:^(id<RTCAudioDeviceDelegate> delegate) {
+    // Already finished by `terminateDevice`: any unit now belongs to a later factory and
+    // its own thread, and this delegate is gone.
+    os_unfair_lock_lock(&self->_delegateLock);
+    BOOL pending = [self->_pendingEnds indexOfObjectIdenticalTo:end] != NSNotFound;
+    os_unfair_lock_unlock(&self->_delegateLock);
+    if (!pending) return;
     [self disposeUnit];
     [delegate notifyAudioInputInterrupted];
     [delegate notifyAudioOutputInterrupted];

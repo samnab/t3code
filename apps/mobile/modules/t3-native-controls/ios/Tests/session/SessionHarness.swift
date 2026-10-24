@@ -156,6 +156,8 @@ func check(_ ok: Bool, _ what: String) {
     audio.currentRoute = AVAudioSessionRouteDescription(inputs: ["headset-mic"], outputs: ["speaker"])
     routeChange(.override)
     check(!device.captureArmed, "speaker override revokes")
+    faultWatches.drainLive()
+    settle()
     audio.currentRoute = headset
     _ = try session.prepare(owner: "a", module: a)
     audio.currentRoute = AVAudioSessionRouteDescription(inputs: ["airpods-mic"], outputs: ["airpods"])
@@ -308,7 +310,8 @@ func check(_ ok: Bool, _ what: String) {
     check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == nil, "control drain ends the faulted owner")
     // F1: the session is released only once the ADM thread stopped and disposed the unit.
     check(device.adm.count == 1, "control drain asks the ADM thread to tear the unit down")
-    check(session.ownsAudioSession && audio.active && audio.category == .playAndRecord && faultEvents.isEmpty,
+    check(!session.ownsAudioSession, "other audio users see voice gone once release starts")
+    check(audio.active && audio.category == .playAndRecord && faultEvents.isEmpty,
       "nothing is released or published while the unit may still run")
     check((try? session.prepare(owner: "a", module: a)) == nil, "nothing prepares before teardown finishes")
     settle()
@@ -328,18 +331,22 @@ func check(_ ok: Bool, _ what: String) {
     faultWatches.drainLive()
     check(session.ownsAudioSession && device.captureArmed && faultEvents.count == 1, "ticks without a fault are inert")
 
-    // Explicit retry after an undrained old fault: the same owner prepares again, and the old
-    // incarnation's delayed tick neither ends it nor reports.
+    // Review r2 M1: a retry before the watch drains a fault must not swallow it. The retry
+    // rejects, and the faulted incarnation is torn down and reported once.
+    let undrained = try session.prepare(owner: "a", module: a)
     let oldWatch = faultWatches.watches.count - 1
+    device.unitLive = true
     device.fault()
-    let retried = try session.prepare(owner: "a", module: a)
-    check(faultWatches.cancelled(oldWatch), "re-prepare stops the old watch")
+    check((try? session.prepare(owner: "a", module: a)) == nil, "retry over an undrained fault rejects")
+    check(faultWatches.cancelled(oldWatch), "rejected retry stops the faulted watch")
+    settle()
     faultWatches.tick(oldWatch)
     faultWatches.drainLive()
-    check(session.ownsAudioSession && device.captureArmed, "old fault tick does not end the retried owner")
-    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 != 0, "retried owner opens")
-    check(faultEvents.count == 1, "old fault tick does not report")
-    _ = retried
+    check(!device.unitLive && !session.ownsAudioSession && !audio.active, "undrained fault still tears down and releases")
+    check(faultEvents.count == 2 && faultEvents.last?.0 == "audioFault" && faultEvents.last?.1 == undrained,
+      "undrained fault is reported once")
+    _ = try session.prepare(owner: "a", module: a)
+    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 != 0, "a later retry opens")
 
     // Replacement: A's tick, delayed past A's end and B's prepare, must not revoke B or report
     // under B's generation, and B's own watch ignores the old fault.
@@ -354,7 +361,7 @@ func check(_ ok: Bool, _ what: String) {
     faultWatches.tick(watchA)
     faultWatches.drainLive()
     check(device.captureArmed && device.openEpoch == epochB, "stale fault tick leaves the replacement open")
-    check(eventsB.isEmpty && faultEvents.count == 1, "stale fault tick emits nothing")
+    check(eventsB.isEmpty && faultEvents.count == 2, "stale fault tick emits nothing")
 
     // Destroy: module end stops the watch; a later fault and tick do nothing for that owner.
     let watchB = faultWatches.watches.count - 1
