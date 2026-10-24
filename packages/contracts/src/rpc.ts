@@ -1,4 +1,9 @@
 import {
+  CompletionAudioBulkOffInput,
+  CompletionAudioBulkOffResult,
+  CompletionAudioError,
+} from "./completionAudio.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -496,6 +501,7 @@ export const WS_METHODS = {
   serverRunStorageCleanup: "server.runStorageCleanup",
   serverGetStorageCleanupReport: "server.getStorageCleanupReport",
   serverGetDatabaseStorage: "server.getDatabaseStorage",
+  completionNotificationsBulkOff: "completionNotifications.bulkOff",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -767,6 +773,12 @@ const WsServerGetDatabaseStorageRpc = Rpc.make(WS_METHODS.serverGetDatabaseStora
   success: Schema.NullOr(DatabaseStorageStatus),
   stream: true,
   error: EnvironmentAuthorizationError,
+});
+
+const WsCompletionNotificationsBulkOffRpc = Rpc.make(WS_METHODS.completionNotificationsBulkOff, {
+  payload: CompletionAudioBulkOffInput,
+  success: CompletionAudioBulkOffResult,
+  error: Schema.Union([CompletionAudioError, EnvironmentAuthorizationError]),
 });
 
 const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
@@ -1959,6 +1971,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetStorageCleanupReportRpc,
   WsServerGetDatabaseStorageRpc,
   WsServerGetSettingsRpc,
+  WsCompletionNotificationsBulkOffRpc,
   WsOptimizersGetStatusRpc,
   WsOptimizersStartHeadroomRpc,
   WsServerUpdateSettingsRpc,

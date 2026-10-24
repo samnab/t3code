@@ -1,5 +1,5 @@
 import {
-  CommandId,
+  type CommandId,
   OrchestratorMcpFailure,
   type OrchestrationV2AppThread,
   type OrchestrationV2Command,
@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { scopedThreadCommandId } from "../orchestration-v2/scopedThreadCommandId.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { threadNotFound } from "./OrchestratorMcpService.ts";
 
@@ -42,29 +43,6 @@ function threadLookupFailure(
   return error._tag === "ThreadManagementThreadNotFoundError"
     ? failure("thread_not_found", error.message)
     : failure("orchestration_error", error.message);
-}
-
-function stablePart(value: string): string {
-  return encodeURIComponent(value);
-}
-
-function commandId(input: {
-  readonly scope: McpInvocationScope;
-  readonly threadId: ThreadId;
-  readonly action: ThreadMetadataMcpAction;
-  readonly requestKey: string;
-}): CommandId {
-  return CommandId.make(
-    [
-      "command",
-      "mcp",
-      stablePart(input.scope.requestNamespace),
-      "thread-update",
-      stablePart(input.threadId),
-      stablePart(input.action),
-      stablePart(input.requestKey),
-    ].join(":"),
-  );
 }
 
 function metadataCommand(input: {
@@ -177,8 +155,8 @@ const make = Effect.gen(function* () {
       input.clientRequestId === undefined
         ? yield* crypto.randomUUIDv4().pipe(Effect.orDie)
         : input.clientRequestId;
-    const updateCommandId = commandId({
-      scope,
+    const updateCommandId = scopedThreadCommandId({
+      requestNamespace: scope.requestNamespace,
       threadId,
       action: input.action,
       requestKey,
