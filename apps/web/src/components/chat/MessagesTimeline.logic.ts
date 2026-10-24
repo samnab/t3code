@@ -1388,6 +1388,9 @@ function timelineVoiceProjectedItem(entry: TimelineEntry) {
  * spoken user segment of that realtime session before the record to the coding message row.
  */
 function voicePromotionTargets(entries: ReadonlyArray<TimelineEntry>): ReadonlyMap<string, string> {
+  const targets = new Map<string, string>();
+  // Threads without voice skip the coding-row index entirely.
+  if (!entries.some((entry) => timelineVoiceProjectedItem(entry) !== undefined)) return targets;
   const codingRowByNativeItem = new Map<string, string>();
   for (const entry of entries) {
     const nativeId =
@@ -1396,7 +1399,6 @@ function voicePromotionTargets(entries: ReadonlyArray<TimelineEntry>): ReadonlyM
         : null;
     if (nativeId != null) codingRowByNativeItem.set(nativeId, entry.id);
   }
-  const targets = new Map<string, string>();
   const latestRequest = new Map<string, string>();
   for (const entry of entries) {
     const item = timelineVoiceProjectedItem(entry)?.item;
