@@ -24,7 +24,7 @@ export function readThreadGoalState(thread: {
   return { goal: thread.goal ?? null, goalLoop: thread.goalLoop ?? null };
 }
 
-/** Older v2 snapshots predate the field and preserve the enabled default. */
+/** Older v2 snapshots predate the field and use the disabled default. */
 export function readThreadVoiceNotifications(thread: {
   readonly voiceNotifications?: boolean;
 }): boolean {

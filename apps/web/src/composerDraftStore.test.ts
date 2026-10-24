@@ -1934,19 +1934,32 @@ describe("composerDraftStore fork thread settings", () => {
     resetComposerDraftStore();
   });
 
-  it("stores goal and voice settings before the server thread exists", () => {
-    const store = useComposerDraftStore.getState();
+  it.each([false, true])(
+    "persists a voice choice of %s before the server thread exists",
+    (voiceNotifications) => {
+      const store = useComposerDraftStore.getState();
 
-    store.setComposerThreadSettings(threadRef, {
-      goal: "Ship the port",
-      voiceNotifications: false,
-    });
+      store.setComposerThreadSettings(threadRef, {
+        goal: "Ship the port",
+        voiceNotifications,
+      });
 
-    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
-      goal: "Ship the port",
-      voiceNotifications: false,
-    });
-  });
+      expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+        goal: "Ship the port",
+        voiceNotifications,
+      });
+
+      const merge = useComposerDraftStore.persist.getOptions().merge!;
+      const hydrated = merge(
+        structuredClone(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+        useComposerDraftStore.getInitialState(),
+      );
+      expect(hydrated.draftsByThreadKey[scopedThreadKey(threadRef)]).toMatchObject({
+        goal: "Ship the port",
+        voiceNotifications,
+      });
+    },
+  );
 
   it("removes empty settings-only drafts when overrides are cleared", () => {
     const store = useComposerDraftStore.getState();

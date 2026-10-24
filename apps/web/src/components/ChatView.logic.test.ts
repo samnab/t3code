@@ -63,17 +63,20 @@ const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
 
 describe("draft thread creation settings", () => {
-  it("carries explicit goal and voice choices into thread creation", () => {
-    expect(
-      resolveDraftThreadCreationSettings({
-        goal: "Ship the launch fix",
-        voiceNotifications: false,
-      }),
-    ).toEqual({ goal: "Ship the launch fix", voiceNotifications: false });
-    expect(resolveDraftThreadCreationSettings({ goal: null, voiceNotifications: null })).toEqual(
-      {},
-    );
-  });
+  it.each([false, true])(
+    "carries an explicit voice choice of %s into thread creation",
+    (voiceNotifications) => {
+      expect(
+        resolveDraftThreadCreationSettings({
+          goal: "Ship the launch fix",
+          voiceNotifications,
+        }),
+      ).toEqual({ goal: "Ship the launch fix", voiceNotifications });
+      expect(resolveDraftThreadCreationSettings({ goal: null, voiceNotifications: null })).toEqual(
+        {},
+      );
+    },
+  );
 });
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
