@@ -162,6 +162,14 @@ export interface LocalThreadMessage {
 
 type RawThreadFeedEntry =
   | {
+      readonly type: "realtime-voice";
+      readonly id: string;
+      readonly createdAt: string;
+      readonly runId: null;
+      readonly messageId: null;
+      readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+    }
+  | {
       readonly type: "message";
       readonly id: string;
       readonly createdAt: string;
@@ -199,7 +207,7 @@ export type ThreadFeedEntry = ThreadFeedEntryContent & {
 };
 
 type ThreadFeedEntryContent =
-  | Extract<RawThreadFeedEntry, { type: "message" | "html-render" | "mcp-app" }>
+  | Extract<RawThreadFeedEntry, { type: "message" | "html-render" | "mcp-app" | "realtime-voice" }>
   | {
       readonly type: "activity-group";
       readonly id: string;
@@ -568,6 +576,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "user_input_request":
     case "user_message":
     case "assistant_message":
+    case "realtime_voice":
       return "message";
     case "dynamic_tool":
       return isJavaScriptReplTool(item.toolName) ? "code" : "wrench";
@@ -672,6 +681,8 @@ function itemSummary(
       return "User message";
     case "assistant_message":
       return "Assistant message";
+    case "realtime_voice":
+      return "Voice conversation";
   }
 }
 
@@ -722,6 +733,8 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "user_message":
     case "assistant_message":
       return item.text || null;
+    case "realtime_voice":
+      return item.content.type === "transcriptSegment" ? item.content.text || null : null;
   }
 }
 
@@ -964,6 +977,7 @@ function groupAdjacentActivities(
       continue;
     }
 
+    const sameRun = openGroupActivities[0]?.runId === entry.runId;
     const isStandaloneActivity =
       entry.activity.workEntry.questionAnswer !== undefined ||
       entry.activity.projectedItem.item.type === "compaction" ||
@@ -974,7 +988,7 @@ function groupAdjacentActivities(
       entry.activity.prominent ||
       (entry.activity.projectedItem.item.type === "subagent") !==
         (firstActivityEntry?.activity.projectedItem.item.type === "subagent") ||
-      firstActivityEntry?.runId !== entry.runId ||
+      !sameRun ||
       (entry.activity.projectedItem.item.type === "subagent" &&
         firstActivityEntry?.activity.projectedItem.item.providerTurnId !==
           entry.activity.projectedItem.item.providerTurnId) ||
@@ -2087,6 +2101,30 @@ export function buildThreadFeed(
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
     if (item.type === "run_interrupt_request") {
+      continue;
+    }
+    if (item.type === "realtime_voice") {
+      if (
+        item.status !== "completed" ||
+        item.content.type === "bemItemPromoted" ||
+        (item.content.type === "transcriptSegment" && item.content.text.trim().length === 0)
+      )
+        continue;
+      const cachedVoice = projectedEntriesCache.get(row)?.entry;
+      const entry: RawThreadFeedEntry =
+        cachedVoice?.type === "realtime-voice"
+          ? cachedVoice
+          : {
+              type: "realtime-voice",
+              id: `realtime-voice:${row.visibility}:${row.sourceThreadId}:${row.sourceItemId}`,
+              createdAt: DateTime.formatIso(item.updatedAt),
+              runId: null,
+              messageId: null,
+              projectedItem: row,
+            };
+      projectedEntriesCache.set(row, { attemptId: null, entry });
+      entries.push(entry);
+      entryRows.push(index);
       continue;
     }
     const attemptId = resolveAttemptId(item);

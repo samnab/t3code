@@ -35,6 +35,135 @@ import {
   workEntryDisplayLabel,
 } from "./MessagesTimeline.logic";
 
+function voiceProjectedItem(
+  id: string,
+  content: Extract<OrchestrationV2TurnItem, { type: "realtime_voice" }>["content"],
+  position: number,
+): OrchestrationV2ProjectedTurnItem {
+  const fixture = makeStreamingTimelineFixture();
+  const observedAt = DateTime.makeUnsafe(fixture.time(1));
+  return {
+    position,
+    visibility: "local",
+    sourceThreadId: fixture.threadId,
+    sourceItemId: TurnItemId.make(id),
+    item: {
+      id: TurnItemId.make(id),
+      threadId: fixture.threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: position,
+      status: "completed",
+      title: null,
+      startedAt: observedAt,
+      completedAt: observedAt,
+      updatedAt: observedAt,
+      type: "realtime_voice",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      nativeThreadId: "native-thread",
+      realtimeSessionId: "voice-session",
+      nativeRealtimeItemId: id,
+      content,
+      captureState: "canonical_completed",
+      historyCoverage: "live_only",
+      sourceOrder: "unreconciled",
+      timestampProvenance: "observed",
+    },
+  };
+}
+
+describe("historical voice timeline", () => {
+  const rows = (visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>) =>
+    deriveMessagesTimelineRows({
+      timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems,
+        optimisticMessages: [],
+      }),
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: true,
+    });
+
+  it("only presents completed, nonempty canonical transcript text", () => {
+    const source = voiceProjectedItem(
+      "voice-pending",
+      { type: "transcriptSegment", role: "user", text: "Still speaking" },
+      0,
+    );
+    const pending: OrchestrationV2ProjectedTurnItem = {
+      ...source,
+      item: { ...source.item, status: "running" },
+    };
+    const empty = voiceProjectedItem(
+      "voice-empty",
+      { type: "transcriptSegment", role: "assistant", text: " " },
+      1,
+    );
+    expect(rows([pending, empty])).toEqual([]);
+  });
+
+  it("retains voice roles and identity without message ids or historical execution actions", () => {
+    const user = voiceProjectedItem(
+      "voice-user",
+      { type: "transcriptSegment", role: "user", text: "Run checks" },
+      0,
+    );
+    const assistant = voiceProjectedItem(
+      "voice-assistant",
+      { type: "transcriptSegment", role: "assistant", text: "Run checks" },
+      1,
+    );
+    const result = rows([user, assistant]);
+    expect(result).toMatchObject([
+      { kind: "event", id: user.item.id, projectedItem: user },
+      { kind: "event", id: assistant.item.id, projectedItem: assistant },
+    ]);
+    for (const row of result) {
+      expect(row).not.toHaveProperty("message");
+      expect(row).not.toHaveProperty("revertTurnCount");
+      if (row.kind !== "event") throw new Error("Expected a voice event");
+      expect(row.projectedItem.item.runId).toBeNull();
+      expect(row.projectedItem.item).not.toHaveProperty("messageId");
+    }
+  });
+
+  it("keeps boundaries and transcript order without duplicating promoted coding records", () => {
+    const started = voiceProjectedItem("voice-started", { type: "realtimeSessionStarted" }, 0);
+    const spoken = voiceProjectedItem(
+      "voice-spoken",
+      { type: "transcriptSegment", role: "user", text: "Please work" },
+      1,
+    );
+    const promoted = voiceProjectedItem(
+      "voice-promoted",
+      {
+        type: "bemItemPromoted",
+        item_id: "coding-item",
+        turn_id: "coding-turn",
+        presentation: { type: "wholeItem" },
+      },
+      2,
+    );
+    const coding = makeStreamingTimelineFixture().visibleTurnItems[0]!;
+    const closed = voiceProjectedItem(
+      "voice-closed",
+      { type: "realtimeSessionClosed", outcome: "ended" },
+      4,
+    );
+    const result = rows([started, spoken, promoted, coding, closed]);
+    expect(result.map((row) => row.kind)).toEqual(["event", "event", "message", "event"]);
+    expect(result.filter((row) => row.kind === "event").map((row) => row.id)).toEqual([
+      started.item.id,
+      spoken.item.id,
+      closed.item.id,
+    ]);
+  });
+});
+
 describe("computeMessageDurationStart", () => {
   it("uses the previous completed assistant updatedAt for subsequent assistant responses", () => {
     const result = computeMessageDurationStart([

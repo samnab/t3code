@@ -1372,7 +1372,27 @@ function settleSupersededReasoning(entries: ReadonlyArray<TimelineEntry>) {
 }
 
 function timelineRowEntries(entries: ReadonlyArray<TimelineEntry>) {
-  return withoutSubagentDelegationRows(settleSupersededReasoning(entries));
+  const historicalVoiceEntries = entries.flatMap((entry): TimelineEntry[] => {
+    const projectedItem =
+      entry.kind === "work"
+        ? entry.entry.projectedItem
+        : entry.kind === "event"
+          ? entry.projectedItem
+          : undefined;
+    if (projectedItem === undefined || projectedItem.item.type !== "realtime_voice") return [entry];
+    const item = projectedItem.item;
+    if (
+      item.status !== "completed" ||
+      item.content.type === "bemItemPromoted" ||
+      (item.content.type === "transcriptSegment" && item.content.text.trim().length === 0)
+    )
+      return [];
+    // Speech remains a typed historical event, outside message rollback and coding-run folds.
+    return [
+      { kind: "event", id: entry.id, createdAt: DateTime.formatIso(item.updatedAt), projectedItem },
+    ];
+  });
+  return withoutSubagentDelegationRows(settleSupersededReasoning(historicalVoiceEntries));
 }
 
 function deriveTimelineTurnFolds(
