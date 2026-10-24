@@ -894,7 +894,7 @@ export function useComposerSend(input: ComposerSendInput) {
     const stagedDraft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
     const draftCreationSettings = resolveDraftThreadCreationSettings({
       goal: stagedDraft?.goal ?? null,
-      voiceNotifications: stagedDraft?.voiceNotifications ?? null,
+      completionAudio: stagedDraft?.completionAudio ?? null,
     });
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();

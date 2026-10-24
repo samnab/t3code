@@ -1,3 +1,4 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import type { ChatComposerProps } from "./ChatComposer";
 import type { PromptUltrathink } from "./TraitsPicker";
 import type { ProviderInstanceEntry } from "../../providerInstances";
@@ -83,8 +84,11 @@ export function ComposerControlsBar(props: {
   onModelPickerOpenChange: (open: boolean) => void;
   modelPickerIconClassName: string | undefined;
   getModelDisabledReason: ChatComposerProps["getModelDisabledReason"];
-  voiceNotifications: boolean;
-  onVoiceNotificationsChange: (enabled: boolean) => void;
+  completionAudio: CompletionAudioMode;
+  supportsCompletionSound: boolean;
+  completionAudioIsDefault: boolean;
+  canChangeCompletionAudio: boolean;
+  onCompletionAudioChange: (mode: CompletionAudioMode) => void;
   renderRealtimeVoiceControl?: ((size: ComposerControlSize) => ReactNode) | null | undefined;
 }) {
   const {
@@ -135,8 +139,11 @@ export function ComposerControlsBar(props: {
     onModelPickerOpenChange,
     modelPickerIconClassName,
     getModelDisabledReason,
-    voiceNotifications,
-    onVoiceNotificationsChange,
+    completionAudio,
+    supportsCompletionSound,
+    completionAudioIsDefault,
+    canChangeCompletionAudio,
+    onCompletionAudioChange,
     renderRealtimeVoiceControl,
   } = props;
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
@@ -207,12 +214,15 @@ export function ComposerControlsBar(props: {
           interactionMode={interactionMode}
           runtimeMode={compatibleRuntimeMode}
           runtimeModeOptions={compatibleRuntimeModeOptions}
-          voiceNotifications={voiceNotifications}
+          completionAudio={completionAudio}
+          supportsCompletionSound={supportsCompletionSound}
+          completionAudioIsDefault={completionAudioIsDefault}
+          canChangeCompletionAudio={canChangeCompletionAudio}
           size={composerControlsCollapsed ? "xs" : "sm"}
           hidden={composerControlsHidden || restingHiddenBlockCount > 0}
           onToggleInteractionMode={toggleInteractionMode}
           onRuntimeModeChange={handleRuntimeModeChange}
-          onVoiceNotificationsChange={onVoiceNotificationsChange}
+          onCompletionAudioChange={onCompletionAudioChange}
         />
       ),
     },
@@ -339,7 +349,10 @@ export function ComposerControlsBar(props: {
           <CompactComposerControlsMenu
             interactionMode={interactionMode}
             runtimeMode={compatibleRuntimeMode}
-            voiceNotifications={voiceNotifications}
+            completionAudio={completionAudio}
+            supportsCompletionSound={supportsCompletionSound}
+            completionAudioIsDefault={completionAudioIsDefault}
+            canChangeCompletionAudio={canChangeCompletionAudio}
             runtimeModeOptions={compatibleRuntimeModeOptions}
             size={composerControlsCollapsed ? "xs" : "sm"}
             hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
@@ -349,7 +362,7 @@ export function ComposerControlsBar(props: {
             }
             onToggleInteractionMode={toggleInteractionMode}
             onRuntimeModeChange={handleRuntimeModeChange}
-            onVoiceNotificationsChange={onVoiceNotificationsChange}
+            onCompletionAudioChange={onCompletionAudioChange}
           />
         </div>
       </>

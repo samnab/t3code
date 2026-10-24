@@ -1,4 +1,8 @@
-import { CompletionAudioSettings, DEFAULT_COMPLETION_AUDIO_SETTINGS } from "./completionAudio.ts";
+import {
+  CompletionAudioSettings,
+  CompletionAudioSettingsPatch,
+  DEFAULT_COMPLETION_AUDIO_SETTINGS,
+} from "./completionAudio.ts";
 import { EasDeviceHostConfigs, SshDeviceHostConfigs } from "./device.ts";
 import {
   AuthOrchestrationOperateScope,
@@ -1569,7 +1573,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
-  completionAudio: Schema.optionalKey(CompletionAudioSettings),
+  completionAudio: Schema.optionalKey(CompletionAudioSettingsPatch),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),

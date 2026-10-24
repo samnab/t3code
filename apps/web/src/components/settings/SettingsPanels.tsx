@@ -1,5 +1,5 @@
 import { SettingsGroup } from "./SettingsGroup";
-import { NotificationSettings } from "./NotificationSettings";
+import { NotificationSettings, CompletionAudioSettings } from "./NotificationSettings";
 import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { CheckIcon, ChevronRightIcon } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -422,6 +422,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.notificationMode !== DEFAULT_UNIFIED_SETTINGS.notificationMode
       ? ["Thread notifications"]
       : []),
+    ...(settings.completionAudio.defaultMode !== "off" ? ["Completion audio for new threads"] : []),
     ...(settings.inAppNotificationsEnabled !== DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled
       ? ["In-app notifications"]
       : []),
@@ -1165,6 +1166,7 @@ export function GeneralSettingsPanel() {
             />
           }
         />
+        <CompletionAudioSettings />
         <SettingsRow
           {...searchableSetting("time-format")}
           description="System default follows your browser or OS clock preference."

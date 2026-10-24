@@ -63,18 +63,20 @@ const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
 
 describe("draft thread creation settings", () => {
-  it.each([false, true])(
+  it.each(["off", "voice", "sound"] as const)(
     "carries an explicit voice choice of %s into thread creation",
-    (voiceNotifications) => {
+    (completionAudio) => {
       expect(
         resolveDraftThreadCreationSettings({
           goal: "Ship the launch fix",
-          voiceNotifications,
+          completionAudio,
         }),
-      ).toEqual({ goal: "Ship the launch fix", voiceNotifications });
-      expect(resolveDraftThreadCreationSettings({ goal: null, voiceNotifications: null })).toEqual(
-        {},
-      );
+      ).toEqual({
+        goal: "Ship the launch fix",
+        completionAudio,
+        voiceNotifications: completionAudio === "voice",
+      });
+      expect(resolveDraftThreadCreationSettings({ goal: null, completionAudio: null })).toEqual({});
     },
   );
 });

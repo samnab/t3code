@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
   ServerSettings,
+  ServerSettingsPatch,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -33,6 +34,7 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
+const decodeCompletionPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 
 const layerServerSettings = () =>
   ServerSettingsModule.layer.pipe(
@@ -115,6 +117,22 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         );
         assert.deepEqual(saved.completionAudio, completionAudio);
         assert.deepEqual((yield* service.getSettings).completionAudio, completionAudio);
+        yield* service.updateSettings(
+          yield* decodeCompletionPatch({ completionAudio: { volume: 0.25 } }),
+        );
+        assert.deepEqual((yield* service.getSettings).completionAudio, {
+          defaultMode: "sound",
+          tone: "input",
+          volume: 0.25,
+        });
+        const partialSaved = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepEqual(partialSaved.completionAudio, {
+          defaultMode: "sound",
+          tone: "input",
+          volume: 0.25,
+        });
       }),
     ).pipe(Effect.provide(layerServerSettings())),
   );

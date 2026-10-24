@@ -1,3 +1,8 @@
+import {
+  type CompletionAudioMode,
+  completionAudioCreationFields,
+  readStoredCompletionAudio,
+} from "@t3tools/contracts";
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
   type ThreadLinkedPullRequest,
@@ -77,6 +82,7 @@ export interface CreateThreadInput extends CommandMetadata {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly goal?: ThreadGoal | null;
+  readonly completionAudio?: CompletionAudioMode;
   readonly voiceNotifications?: boolean;
   readonly branch: string | null;
   readonly worktreePath: string | null;
@@ -168,6 +174,7 @@ interface StartThreadBootstrap {
     readonly runtimeMode: RuntimeMode;
     readonly interactionMode: ProviderInteractionMode;
     readonly goal?: ThreadGoal | null;
+    readonly completionAudio?: CompletionAudioMode;
     readonly voiceNotifications?: boolean;
     readonly branch: string | null;
     readonly worktreePath: string | null;
@@ -428,9 +435,7 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
     ...(input.goal === undefined ? {} : { goal: input.goal }),
-    ...(input.voiceNotifications === undefined
-      ? {}
-      : { voiceNotifications: input.voiceNotifications }),
+    ...completionAudioCreationFields(input.completionAudio ?? readStoredCompletionAudio(input)),
     branch: input.branch,
     worktreePath: input.worktreePath,
   });
@@ -655,6 +660,20 @@ export const controlThreadGoalLoop = Effect.fn("EnvironmentCommands.controlThrea
   },
 );
 
+export interface SetThreadCompletionAudioInput extends ThreadCommandInput {
+  readonly mode: CompletionAudioMode;
+}
+export const setThreadCompletionAudio = Effect.fn("EnvironmentCommands.setThreadCompletionAudio")(
+  function* (input: SetThreadCompletionAudioInput) {
+    return yield* dispatch({
+      type: "thread.completion-audio.set",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      mode: input.mode,
+    });
+  },
+);
+
 export const setThreadVoiceNotifications = Effect.fn(
   "EnvironmentCommands.setThreadVoiceNotifications",
 )(function* (input: SetThreadVoiceNotificationsInput) {
@@ -748,9 +767,9 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       ...(bootstrap?.goal === undefined ? {} : { goal: bootstrap.goal }),
-      ...(bootstrap?.voiceNotifications === undefined
-        ? {}
-        : { voiceNotifications: bootstrap.voiceNotifications }),
+      ...completionAudioCreationFields(
+        bootstrap?.completionAudio ?? readStoredCompletionAudio(bootstrap ?? {}),
+      ),
       workspaceStrategy,
       initialMessage: {
         messageId: input.message.messageId,

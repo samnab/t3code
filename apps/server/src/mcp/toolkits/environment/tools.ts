@@ -55,7 +55,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
 const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update", {
   ...shared,
   description:
-    "Update selected environment-wide preferences through normal settings persistence and notifications. Requires a live full-access/default calling thread. Omitted fields are preserved; empty customInstructions clears them. completionAudio stores defaultMode/tone/volume for this environment; changing it does not rewrite existing threads or cancel native hooks. Use t3_completion_audio_bulk_off separately for existing threads. Sound is web/desktop-only and requires a supporting client.",
+    "Update selected environment-wide preferences through normal settings persistence and notifications. Requires a live full-access/default calling thread. Omitted fields are preserved; empty customInstructions clears them. completionAudio updates any of defaultMode/tone/volume for this environment and keeps omitted fields; changing it does not rewrite existing threads or cancel native hooks. Use t3_completion_audio_bulk_off separately for existing threads. Sound is web/desktop-only and requires a supporting client.",
   parameters: Schema.Struct({
     completionAudio: ServerSettingsPatch.fields.completionAudio,
     defaultThreadEnvMode: ServerSettingsPatch.fields.defaultThreadEnvMode,

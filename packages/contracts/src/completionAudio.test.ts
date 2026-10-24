@@ -7,6 +7,8 @@ import {
   CompletionAudioBulkOffInput,
   CompletionAudioBulkOffResult,
   resolveCompletionAudio,
+  readStoredCompletionAudio,
+  completionAudioCreationFields,
 } from "./completionAudio.ts";
 
 const decodeRead = Schema.decodeUnknownSync(CompletionAudioReadInput);
@@ -62,4 +64,18 @@ describe("completion audio API boundaries", () => {
       }),
     ).toThrow();
   });
+});
+
+it.each([
+  [{ completionAudio: "sound", voiceNotifications: true }, "sound"],
+  [{ voiceNotifications: true }, "voice"],
+  [{ voiceNotifications: false }, "off"],
+  [{}, null],
+  [{ completionAudio: "invalid", voiceNotifications: false }, "off"],
+  [{ completionAudio: "invalid" }, null],
+] as const)("preserves canonical/legacy/untouched draft semantics for %j", (stored, mode) => {
+  expect(readStoredCompletionAudio(stored)).toBe(mode);
+  expect(completionAudioCreationFields(readStoredCompletionAudio(stored))).toEqual(
+    mode === null ? {} : { completionAudio: mode, voiceNotifications: mode === "voice" },
+  );
 });

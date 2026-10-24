@@ -38,6 +38,8 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFixtures.ts";
 import {
   archiveThread,
+  createThread,
+  setThreadCompletionAudio,
   clearThreadGoal,
   controlThreadGoalLoop,
   interruptThreadTurn,
@@ -263,6 +265,72 @@ describe("V2 environment commands", () => {
       ]);
       expect(stoppedBackgroundTasks).toEqual([{ threadId, taskId: "task-1" }]);
     }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect.each([
+    { completionAudio: "sound", voiceNotifications: true, expected: "sound" },
+    { completionAudio: undefined, voiceNotifications: false, expected: "off" },
+    { completionAudio: undefined, voiceNotifications: true, expected: "voice" },
+    { completionAudio: undefined, voiceNotifications: undefined, expected: undefined },
+  ] as const)(
+    "preserves completion creation precedence $expected through direct and bootstrap paths",
+    ({ completionAudio, voiceNotifications, expected }) =>
+      Effect.gen(function* () {
+        const commands: OrchestrationV2Command[] = [];
+        const launches: OrchestrationV2ThreadLaunchInput[] = [];
+        const supervisor = yield* makeSupervisor({ commands, projects: [], launches });
+        const choice = {
+          ...(completionAudio === undefined ? {} : { completionAudio }),
+          ...(voiceNotifications === undefined ? {} : { voiceNotifications }),
+        };
+        const create = {
+          projectId: ProjectId.make("project-1"),
+          title: "Audio",
+          modelSelection: v2Projection.thread.modelSelection,
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+          branch: null,
+          worktreePath: null,
+          ...choice,
+        };
+        yield* createThread({
+          commandId: CommandId.make("create-audio"),
+          threadId: v2ThreadId,
+          ...create,
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        yield* startThreadTurn({
+          commandId: CommandId.make("bootstrap-audio"),
+          threadId: v2ThreadId,
+          message: {
+            messageId: MessageId.make("audio-message"),
+            role: "user",
+            text: "Start",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          bootstrap: { createThread: { ...create, createdAt: "2026-06-20T00:00:00.000Z" } },
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        for (const payload of [commands[0], launches[0]]) {
+          if (expected === undefined) {
+            expect(payload).not.toHaveProperty("completionAudio");
+            expect(payload).not.toHaveProperty("voiceNotifications");
+          } else
+            expect(payload).toMatchObject({
+              completionAudio: expected,
+              voiceNotifications: expected === "voice",
+            });
+        }
+        yield* setThreadCompletionAudio({
+          commandId: CommandId.make("set-audio"),
+          threadId: v2ThreadId,
+          mode: "sound",
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        expect(commands.at(-1)).toMatchObject({
+          type: "thread.completion-audio.set",
+          mode: "sound",
+        });
+      }).pipe(Effect.provide(layerTestCrypto)),
   );
 
   it.effect("resolves run ordinal zero to the persisted thread-start checkpoint", () =>

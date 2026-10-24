@@ -77,21 +77,10 @@ const make = Effect.gen(function* () {
   const all = Effect.fn("CompletionNotificationService.all")(function* (
     projectId?: CompletionAudioListInput["projectId"],
   ) {
-    const active = yield* threads
-      .getShellSnapshot({ location: "active" })
+    const snapshot = yield* threads
+      .getShellSnapshot()
       .pipe(Effect.mapError(() => new CompletionAudioError({ reason: "failed" })));
-    const archive = yield* threads
-      .getShellSnapshot({ location: "archive" })
-      .pipe(Effect.mapError(() => new CompletionAudioError({ reason: "failed" })));
-    const unique = new Map(
-      [
-        ...active.threads,
-        ...active.archivedThreads,
-        ...archive.threads,
-        ...archive.archivedThreads,
-      ].map((thread) => [thread.id, thread]),
-    );
-    return [...unique.values()]
+    return [...snapshot.threads, ...snapshot.archivedThreads]
       .filter(
         (thread) =>
           thread.deletedAt === null && (projectId === undefined || thread.projectId === projectId),

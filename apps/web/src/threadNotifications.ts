@@ -1,4 +1,9 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type {
+  CompletionAudioMode,
+  CompletionAudioSettings,
+  EnvironmentId,
+  ThreadId,
+} from "@t3tools/contracts";
 import type { ClientSettings } from "@t3tools/contracts/settings";
 
 import completionUrl from "./assets/notification-completion.mp3";
@@ -14,6 +19,18 @@ export const NOTIFICATION_MODE_LABELS = {
 
 export function hasNotificationSound(mode: NotificationMode) {
   return mode === "sound" || mode === "notifications-and-sound";
+}
+
+export function shouldPlayThreadSound(input: {
+  readonly kind: "completion" | "input";
+  readonly mode: NotificationMode;
+  readonly completionAudio: CompletionAudioMode;
+  readonly supportsCompletionAudio: boolean;
+  readonly isChild: boolean;
+}) {
+  if (input.kind === "completion" && input.supportsCompletionAudio)
+    return input.completionAudio === "sound";
+  return !input.isChild && hasNotificationSound(input.mode);
 }
 
 export function hasDesktopNotifications(mode: NotificationMode) {
@@ -82,7 +99,7 @@ export function setNotificationBadge(count: number) {
 
 let audioContext: AudioContext | undefined;
 const buffers = new Map<string, Promise<AudioBuffer>>();
-/** When each sound's current playback ends, on the audio context's clock. */
+/** Completion and input bursts keep separate slots, even when they choose the same asset. */
 const playingUntil = new Map<string, number>();
 
 /** Called from a gesture so browsers allow later background playback. */
@@ -94,10 +111,12 @@ export function unlockNotificationAudio() {
 export async function playNotificationSound(
   kind: "completion" | "input",
   shouldPlay: () => boolean,
-) {
-  if (!audioContext || audioContext.state !== "running") return;
+  options: { readonly tone?: CompletionAudioSettings["tone"]; readonly volume?: number } = {},
+): Promise<boolean> {
+  if (!audioContext || audioContext.state !== "running") return false;
   const context = audioContext;
-  const url = kind === "completion" ? completionUrl : inputUrl;
+  const tone = options.tone ?? kind;
+  const url = tone === "completion" ? completionUrl : inputUrl;
   try {
     let buffer = buffers.get(url);
     if (!buffer) {
@@ -107,18 +126,38 @@ export async function playNotificationSound(
       buffers.set(url, buffer);
     }
     const decoded = await buffer;
-    if (!shouldPlay() || context.state !== "running") return;
+    if (!shouldPlay() || context.state !== "running") return false;
     // Threads that finish together each ask for this sound, and full-volume copies sum into
     // clipping. One playback stands for the burst. Checked after the decode, since every caller
     // in a burst is waiting on it. The other kind keeps its own slot, so an input alert is still
     // heard over a completion.
-    if (context.currentTime < (playingUntil.get(url) ?? 0)) return;
+    if (context.currentTime < (playingUntil.get(kind) ?? 0)) return false;
     const source = context.createBufferSource();
     source.buffer = decoded;
-    source.connect(context.destination);
+    const gain = context.createGain();
+    const volume = options.volume ?? 1;
+    gain.gain.value = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1;
+    source.connect(gain);
+    gain.connect(context.destination);
     source.start();
-    playingUntil.set(url, context.currentTime + decoded.duration);
+    playingUntil.set(kind, context.currentTime + decoded.duration);
+    return true;
   } catch {
     buffers.delete(url);
+    return false;
+  }
+}
+
+/** Only call from an explicit preview gesture; this never changes a preference. */
+export async function previewCompletionSound(
+  tone: CompletionAudioSettings["tone"],
+  volume: number,
+): Promise<boolean> {
+  try {
+    unlockNotificationAudio();
+    await audioContext?.resume();
+    return await playNotificationSound("completion", () => true, { tone, volume });
+  } catch {
+    return false;
   }
 }

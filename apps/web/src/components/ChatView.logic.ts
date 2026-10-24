@@ -1,3 +1,4 @@
+import { type CompletionAudioMode, completionAudioCreationFields } from "@t3tools/contracts";
 import { type OrchestrationV2ProviderTurn, type RunAttemptId } from "@t3tools/contracts";
 import {
   deriveLatestThreadRun,
@@ -117,11 +118,11 @@ const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 /** Settings staged on a draft must be part of its create command, before its first run opens. */
 export function resolveDraftThreadCreationSettings(input: {
   readonly goal: string | null;
-  readonly voiceNotifications: boolean | null;
+  readonly completionAudio: CompletionAudioMode | null;
 }) {
   return {
     ...(input.goal === null ? {} : { goal: ThreadGoal.make(input.goal) }),
-    ...(input.voiceNotifications === null ? {} : { voiceNotifications: input.voiceNotifications }),
+    ...completionAudioCreationFields(input.completionAudio),
   };
 }
 

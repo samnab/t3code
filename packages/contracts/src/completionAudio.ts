@@ -18,6 +18,32 @@ export const CompletionAudioSettings = Schema.Struct({
 });
 export type CompletionAudioSettings = typeof CompletionAudioSettings.Type;
 
+export const CompletionAudioSettingsPatch = Schema.Struct({
+  defaultMode: Schema.optionalKey(CompletionAudioSettings.fields.defaultMode),
+  tone: Schema.optionalKey(CompletionAudioSettings.fields.tone),
+  volume: Schema.optionalKey(CompletionAudioSettings.fields.volume),
+});
+
+const isCompletionAudioMode = Schema.is(CompletionAudioMode);
+
+/** Preserve an explicit stored false as Off; missing fields leave a draft untouched. */
+export function readStoredCompletionAudio(stored: {
+  readonly completionAudio?: unknown;
+  readonly voiceNotifications?: unknown;
+}): CompletionAudioMode | null {
+  if (isCompletionAudioMode(stored.completionAudio)) return stored.completionAudio;
+  return typeof stored.voiceNotifications === "boolean"
+    ? stored.voiceNotifications
+      ? "voice"
+      : "off"
+    : null;
+}
+
+/** Untouched creation omits both fields so the destination's current default applies. */
+export function completionAudioCreationFields(mode: CompletionAudioMode | null | undefined) {
+  return mode == null ? {} : { completionAudio: mode, voiceNotifications: mode === "voice" };
+}
+
 export const DEFAULT_COMPLETION_AUDIO_SETTINGS = {
   defaultMode: "off",
   tone: "completion",
