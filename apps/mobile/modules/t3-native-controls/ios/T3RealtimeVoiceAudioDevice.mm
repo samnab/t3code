@@ -4,6 +4,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <WebRTC/WebRTC.h>
 #import <mach/mach_time.h>
+#import <os/lock.h>
 #include <time.h>
 #include <vector>
 
@@ -47,9 +48,12 @@ uint64_t SecondsToHostTicks(double seconds) {
 
 @implementation T3RealtimeVoiceAudioDevice {
   t3voice::SendGate _gate;
-  // Everything below is touched only on the WebRTC ADM thread, except that the IO
-  // callbacks read the unit, scratch buffer and the two delegate blocks.
+  // Guards `_delegate` for control threads. Held while posting to the ADM thread, so a
+  // post cannot race `terminateDevice` (which runs on that thread) clearing it.
+  os_unfair_lock _delegateLock;
   id<RTCAudioDeviceDelegate> _delegate;
+  // Everything below is written only on the WebRTC ADM thread while IO is stopped.
+  // The IO callbacks read the unit, scratch buffer and the two delegate blocks.
   RTCAudioDeviceDeliverRecordedDataBlock _deliverRecordedData;
   RTCAudioDeviceGetPlayoutDataBlock _getPlayoutData;
   AudioUnit _unit;
@@ -76,23 +80,39 @@ uint64_t SecondsToHostTicks(double seconds) {
 }
 
 - (instancetype)init {
-  if (self = [super init]) _inputScratch.resize(kMaxFramesPerSlice);
+  if (self = [super init]) {
+    _delegateLock = OS_UNFAIR_LOCK_INIT;
+    _inputScratch.resize(kMaxFramesPerSlice);
+  }
   return self;
+}
+
+/// Posts to the ADM thread with the delegate current at post time. No-op once terminated.
+- (void)postToADM:(void (^)(id<RTCAudioDeviceDelegate> delegate))work {
+  os_unfair_lock_lock(&_delegateLock);
+  id<RTCAudioDeviceDelegate> delegate = _delegate;
+  [delegate dispatchAsync:^{ work(delegate); }];
+  os_unfair_lock_unlock(&_delegateLock);
 }
 
 #pragma mark - Gate
 
-- (BOOL)adoptedByWebRTC { return _deliverRecordedData != nil; }
+- (BOOL)adoptedByWebRTC {
+  os_unfair_lock_lock(&_delegateLock);
+  BOOL adopted = _delegate != nil;
+  os_unfair_lock_unlock(&_delegateLock);
+  return adopted;
+}
 - (BOOL)captureArmed { return _gate.armed(); }
 - (uint64_t)openEpoch { return _gate.epoch(); }
+- (uint64_t)revocationCount { return _gate.revocations(); }
 
-- (void)armCapture { _gate.arm(); }
+- (BOOL)armCaptureSince:(uint64_t)revocationCount { return _gate.arm(revocationCount); }
 
 - (void)revokeCapture {
   _gate.revoke();
-  id<RTCAudioDeviceDelegate> delegate = _delegate;
   // Once interrupted, WebRTC accepts IO callbacks from a new thread after restart.
-  [delegate dispatchAsync:^{
+  [self postToADM:^(id<RTCAudioDeviceDelegate> delegate) {
     [delegate notifyAudioInputInterrupted];
     [delegate notifyAudioOutputInterrupted];
   }];
@@ -100,15 +120,23 @@ uint64_t SecondsToHostTicks(double seconds) {
 
 - (void)revokeCaptureAndResetUnit {
   [self revokeCapture];
-  id<RTCAudioDeviceDelegate> delegate = _delegate;
-  [delegate dispatchAsync:^{ [self disposeUnit]; }];
+  [self postToADM:^(id<RTCAudioDeviceDelegate>) { [self disposeUnit]; }];
 }
 
 - (void)notifyRouteParametersChanged {
-  id<RTCAudioDeviceDelegate> delegate = _delegate;
-  [delegate dispatchAsync:^{
+  [self postToADM:^(id<RTCAudioDeviceDelegate> delegate) {
+    // WebRTC replaces its fine audio buffers on a parameter change while IO callbacks use
+    // them, so IO must be stopped first. AudioOutputUnitStop returns after the in-flight
+    // render cycle; upstream libwebrtc's AudioDeviceIOS relies on the same boundary.
+    BOOL running = self->_unit && (self->_playing || self->_recording);
+    if (running) AudioOutputUnitStop(self->_unit);
+    [delegate notifyAudioInputInterrupted];
+    [delegate notifyAudioOutputInterrupted];
     [delegate notifyAudioInputParametersChange];
     [delegate notifyAudioOutputParametersChange];
+    // Revoked meanwhile: stay stopped. WebRTC must start a new capture after a new prepare.
+    if (!running || !self->_gate.armed()) return;
+    if (AudioOutputUnitStart(self->_unit) != noErr) self->_gate.revoke();
   }];
 }
 
@@ -129,22 +157,31 @@ uint64_t SecondsToHostTicks(double seconds) {
 
 #pragma mark - IO callbacks (real-time thread: no locks, no allocation, no ObjC messaging)
 
+// Any IO failure latches a fault: sending stays closed until the session prepares again.
 static OSStatus T3RealtimeVoiceInput(void *refCon, AudioUnitRenderActionFlags *flags,
                                      const AudioTimeStamp *timestamp, UInt32 bus, UInt32 frames,
-                                     AudioBufferList *unused) {
+                                     AudioBufferList *) {
   T3RealtimeVoiceAudioDevice *self = (__bridge T3RealtimeVoiceAudioDevice *)refCon;
-  if (frames > self->_inputScratch.size()) return kAudio_ParamError;
+  if (frames > self->_inputScratch.size()) {
+    self->_gate.fault();
+    return kAudio_ParamError;
+  }
   AudioBufferList list;
   list.mNumberBuffers = 1;
   list.mBuffers[0].mNumberChannels = 1;
   list.mBuffers[0].mDataByteSize = frames * sizeof(int16_t);
   list.mBuffers[0].mData = self->_inputScratch.data();
   OSStatus status = AudioUnitRender(self->_unit, flags, timestamp, kInputBus, frames, &list);
-  if (status != noErr) return status;
+  if (status != noErr) {
+    self->_gate.fault();
+    return status;
+  }
   self->_gate.filter(self->_inputScratch.data(), frames,
                      (timestamp->mFlags & kAudioTimeStampHostTimeValid) != 0,
                      timestamp->mHostTime, LeaseNowNanos());
-  return self->_deliverRecordedData(flags, timestamp, bus, frames, &list, nullptr, nil);
+  status = self->_deliverRecordedData(flags, timestamp, bus, frames, &list, nullptr, nil);
+  if (status != noErr) self->_gate.fault();
+  return status;
 }
 
 static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *flags,
@@ -152,9 +189,10 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
                                       AudioBufferList *ioData) {
   T3RealtimeVoiceAudioDevice *self = (__bridge T3RealtimeVoiceAudioDevice *)refCon;
   OSStatus status = self->_getPlayoutData(flags, timestamp, bus, frames, ioData);
-  // A revoked session (route loss, interruption) must not announce assistant
+  if (status != noErr) self->_gate.fault();
+  // A revoked session (route loss, interruption, fault) must not announce assistant
   // speech through an unexpected speaker.
-  if (status == noErr && !self->_gate.armed()) {
+  if (!self->_gate.armed()) {
     for (UInt32 i = 0; i < ioData->mNumberBuffers; i++) {
       memset(ioData->mBuffers[i].mData, 0, ioData->mBuffers[i].mDataByteSize);
     }
@@ -182,15 +220,22 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
 // Runs when react-native-webrtc creates its factory. Must stay free of audio
 // session or microphone side effects.
 - (BOOL)initializeWithDelegate:(id<RTCAudioDeviceDelegate>)delegate {
-  _delegate = delegate;
   _deliverRecordedData = delegate.deliverRecordedData;
   _getPlayoutData = delegate.getPlayoutData;
+  os_unfair_lock_lock(&_delegateLock);
+  _delegate = delegate;
+  os_unfair_lock_unlock(&_delegateLock);
   return YES;
 }
 
+// WebRTC may terminate without stopping recording first, so this ends the capture
+// lifetime on its own. A later factory needs a fresh prepare and epoch.
 - (BOOL)terminateDevice {
+  _gate.revoke();
   [self disposeUnit];
+  os_unfair_lock_lock(&_delegateLock);
   _delegate = nil;
+  os_unfair_lock_unlock(&_delegateLock);
   _deliverRecordedData = nil;
   _getPlayoutData = nil;
   return YES;
@@ -232,7 +277,10 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
       AudioUnitSetProperty(_unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, kInputBus, &input, sizeof(input)) == noErr &&
       AudioUnitSetProperty(_unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, kOutputBus, &output, sizeof(output)) == noErr &&
       AudioUnitInitialize(_unit) == noErr;
-  if (!configured) [self disposeUnit];
+  if (!configured) {
+    _gate.revoke();
+    [self disposeUnit];
+  }
   return configured;
 }
 
@@ -252,7 +300,9 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
 - (BOOL)startUnitIfNeeded {
   if (!_unit || !_gate.armed()) return NO;
   if (_playing || _recording) return YES;
-  return AudioOutputUnitStart(_unit) == noErr;
+  if (AudioOutputUnitStart(_unit) == noErr) return YES;
+  _gate.revoke();
+  return NO;
 }
 
 - (BOOL)startPlayout { return _playing = [self startUnitIfNeeded]; }
@@ -265,8 +315,9 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
 }
 
 - (BOOL)stopRecording {
-  // Capture ended: the current epoch is over even if WebRTC restarts recording later.
-  _gate.close(_gate.epoch());
+  // Capture ended. Revoking is atomic against a concurrent open; reading the epoch and
+  // closing it separately would let an epoch opened in between survive.
+  _gate.revoke();
   _recording = NO;
   if (!_playing) [self disposeUnit];
   return YES;

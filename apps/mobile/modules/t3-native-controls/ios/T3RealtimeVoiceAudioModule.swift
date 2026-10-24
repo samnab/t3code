@@ -2,6 +2,7 @@ import ExpoModulesCore
 
 /// JS control surface for the native voice audio owner. Every call follows an
 /// explicit local user action; native observers revoke without waiting for JS.
+/// Destroying the module (bridge reload, app context teardown) ends its owner.
 public final class T3RealtimeVoiceAudioModule: Module {
   private let session = T3RealtimeVoiceSession.shared
 
@@ -10,14 +11,22 @@ public final class T3RealtimeVoiceAudioModule: Module {
     Events("onRevoked")
 
     OnCreate {
-      session.onRevoked = { [weak self] reason in
-        self?.sendEvent("onRevoked", ["reason": reason])
+      session.setRevokedListener(module: self) { [weak self] reason, owner in
+        self?.sendEvent(
+          "onRevoked",
+          ["reason": reason, "owner": owner.token, "generation": Double(owner.generation)]
+        )
       }
     }
 
-    AsyncFunction("prepare") { (owner: String) throws in
+    OnDestroy {
+      session.clearRevokedListener(module: self)
+      _ = session.end(module: self)
+    }
+
+    AsyncFunction("prepare") { (owner: String) throws -> Double in
       do {
-        try session.prepare(owner: owner)
+        return Double(try session.prepare(owner: owner, module: self).generation)
       } catch let error as T3RealtimeVoiceSessionError {
         throw RealtimeVoiceAudioException(error.rawValue)
       }
@@ -25,7 +34,7 @@ public final class T3RealtimeVoiceAudioModule: Module {
 
     Function("openGate") { (owner: String, leaseSeconds: Double) throws -> Double in
       do {
-        return Double(try session.openGate(owner: owner, leaseSeconds: leaseSeconds))
+        return Double(try session.openGate(owner: owner, module: self, leaseSeconds: leaseSeconds))
       } catch let error as T3RealtimeVoiceSessionError {
         throw RealtimeVoiceAudioException(error.rawValue)
       }
@@ -42,7 +51,7 @@ public final class T3RealtimeVoiceAudioModule: Module {
     }
 
     AsyncFunction("end") { (owner: String) -> Bool in
-      session.end(owner: owner)
+      session.end(module: self, owner: owner)
     }
 
     Function("snapshot") {

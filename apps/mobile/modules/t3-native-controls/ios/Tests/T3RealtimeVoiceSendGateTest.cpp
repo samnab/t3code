@@ -38,7 +38,7 @@ int main() {
   }
   {
     SendGate gate;
-    gate.arm();
+    gate.arm(gate.revocations());
     uint64_t epoch = gate.open(/*cutoff*/ 1000, /*now*/ 0, 10 * kSecond);
     check(epoch != SendGate::kClosed, "armed open returns epoch");
     check(sent(gate, 999, 1) == 0, "block captured before cutoff is zeroed");
@@ -47,7 +47,7 @@ int main() {
   }
   {
     SendGate gate;
-    gate.arm();
+    gate.arm(gate.revocations());
     uint64_t epoch = gate.open(0, 0, 10 * kSecond);
     check(sent(gate, 5, 10 * kSecond) == 0, "nothing sent at lease deadline");
     check(gate.epoch() == SendGate::kClosed, "expiry closes the gate on the IO path");
@@ -56,14 +56,14 @@ int main() {
   }
   {
     SendGate gate;
-    gate.arm();
+    gate.arm(gate.revocations());
     uint64_t epoch = gate.open(0, 0, 10 * kSecond);
     check(!gate.renew(epoch, 10 * kSecond, 10 * kSecond), "renew at deadline fails without IO");
     check(gate.epoch() == SendGate::kClosed, "late renew closes instead of extending");
   }
   {
     SendGate gate;
-    gate.arm();
+    gate.arm(gate.revocations());
     uint64_t epoch = gate.open(0, 0, 10 * kSecond);
     check(gate.renew(epoch, 9 * kSecond, 10 * kSecond), "renew before deadline extends");
     check(sent(gate, 5, 18 * kSecond) == 480, "renewed lease still sends");
@@ -73,14 +73,14 @@ int main() {
   }
   {
     SendGate gate;
-    gate.arm();
+    gate.arm(gate.revocations());
     uint64_t epoch = gate.open(0, 0, 1000 * kSecond);
     check(sent(gate, 5, SendGate::kMaxLeaseNanos) == 0, "lease is clamped to the maximum");
     check(!gate.renew(epoch, SendGate::kMaxLeaseNanos, 1000 * kSecond), "clamped lease stays expired");
   }
   {
     SendGate gate;
-    gate.arm();
+    gate.arm(gate.revocations());
     uint64_t stale = gate.open(100, 0, 10 * kSecond);
     uint64_t current = gate.open(500, 0, 10 * kSecond);
     check(current != stale, "fresh epoch differs");
@@ -92,16 +92,48 @@ int main() {
   }
   {
     SendGate gate;
-    gate.arm();
+    gate.arm(gate.revocations());
     uint64_t before = gate.open(0, 0, 10 * kSecond);
     gate.revoke();  // interruption, route loss, media reset
     check(sent(gate, 5, 1) == 0, "revoke stops sending");
     check(!gate.renew(before, 1, 10 * kSecond), "revoke cannot be undone by renew");
     check(gate.open(0, 1, 10 * kSecond) == SendGate::kClosed, "open refused until re-armed");
-    gate.arm();
+    gate.arm(gate.revocations());
     uint64_t after = gate.open(900, 2, 10 * kSecond);
     check(after > before, "re-armed open uses a new epoch");
     check(sent(gate, 899, 3) == 0, "pre-cutoff frames stay private after re-arm");
+  }
+  {
+    // Review r1 F2: capture stop raced a concurrent open. Stop now revokes, which is
+    // atomic against open, instead of reading the epoch and closing it separately.
+    SendGate gate;
+    gate.arm(gate.revocations());
+    gate.open(10, 0, 10 * kSecond);
+    gate.revoke();  // stopRecording / terminateDevice
+    check(gate.open(20, 1, 10 * kSecond) == SendGate::kClosed, "open after capture stop is refused");
+    check(sent(gate, 20, 2) == 0, "nothing sent after capture stop");
+  }
+  {
+    // Review r1 F3: a revocation observed while preparing must not be undone by arming.
+    SendGate gate;
+    uint64_t since = gate.revocations();
+    gate.revoke();  // interruption during activation
+    check(!gate.arm(since), "arm refused after a revocation during prepare");
+    check(gate.open(0, 0, 10 * kSecond) == SendGate::kClosed, "no epoch after a refused arm");
+    check(gate.arm(gate.revocations()), "a fresh prepare can arm");
+  }
+  {
+    // Review r1 F7: an IO fault latches closed until a fresh arm.
+    SendGate gate;
+    uint64_t since = gate.revocations();
+    gate.arm(since);
+    uint64_t epoch = gate.open(0, 0, 10 * kSecond);
+    gate.fault();  // render or delivery error on the IO thread
+    check(sent(gate, 5, 1) == 0, "fault stops sending");
+    check(!gate.renew(epoch, 1, 10 * kSecond), "renew after fault fails");
+    check(sent(gate, 6, 2) == 0, "later good callback still sends nothing");
+    check(gate.open(0, 2, 10 * kSecond) == SendGate::kClosed, "open refused after fault");
+    check(!gate.arm(since), "stale prepare cannot arm over a fault");
   }
   if (failures == 0) std::puts("T3RealtimeVoiceSendGateTest: all checks passed");
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -10,10 +10,14 @@ namespace t3voice {
 /// Default-deny send gate for raw microphone blocks.
 ///
 /// Control calls (arm, revoke, open, renew, close) may come from any non-real-time
-/// thread and are serialized by a mutex. `admit` runs on the real-time IO thread and
-/// only touches atomics. Clocks are injected so tests drive them:
+/// thread and are serialized by a mutex. `admit`, `filter` and `fault` run on the
+/// real-time IO thread and only touch atomics. Clocks are injected so tests drive them:
 /// - capture ticks share the domain of `AudioTimeStamp.mHostTime` (mach_absolute_time);
 /// - lease nanos come from a clock that keeps counting while the device sleeps.
+///
+/// Every revocation (control `revoke` or IO `fault`) bumps a counter. `arm` takes the
+/// counter read before the caller started preparing, so a revocation observed during
+/// preparation can never be overwritten by that preparation.
 ///
 /// This is an epoch/lease gate only. It is not per-block local detector authorization.
 class SendGate {
@@ -21,63 +25,84 @@ class SendGate {
   static constexpr uint64_t kClosed = 0;
   static constexpr uint64_t kMaxLeaseNanos = 30ull * 1000 * 1000 * 1000;
 
-  /// The voice session owns an active audio session; opening becomes possible.
-  void arm() {
+  /// Read before preparing a capture lifetime; pass to `arm`.
+  uint64_t revocations() const { return revocations_.load(); }
+
+  /// Enables `open` unless anything revoked since `sinceRevocations` was read.
+  bool arm(uint64_t sinceRevocations) {
     std::lock_guard<std::mutex> lock(control_);
-    armed_.store(true, std::memory_order_release);
+    if (revocations_.load() != sinceRevocations) return false;
+    armed_.store(true);
+    // A concurrent IO fault bumps the counter before disarming, so one of the two
+    // always observes the other.
+    if (revocations_.load() == sinceRevocations) return true;
+    armed_.store(false);
+    return false;
   }
 
-  /// Interruption, route loss, media reset, capture end. Only a fresh `arm` re-enables `open`.
+  /// Interruption, route loss, media reset, capture end, device termination.
+  /// Atomic against `open`; only a fresh `arm` re-enables it.
   void revoke() {
     std::lock_guard<std::mutex> lock(control_);
-    armed_.store(false, std::memory_order_release);
-    epoch_.store(kClosed, std::memory_order_release);
+    revocations_.fetch_add(1);
+    armed_.store(false);
+    epoch_.store(kClosed);
+  }
+
+  /// IO thread. Latches an audio fault without locking: same effect as `revoke`.
+  void fault() {
+    revocations_.fetch_add(1);
+    armed_.store(false);
+    epoch_.store(kClosed);
   }
 
   /// Starts a fresh epoch. Blocks captured before `cutoffTicks` are never admitted.
   /// Returns kClosed when disarmed or the lease is empty.
   uint64_t open(uint64_t cutoffTicks, uint64_t nowLeaseNanos, uint64_t leaseNanos) {
     std::lock_guard<std::mutex> lock(control_);
-    epoch_.store(kClosed, std::memory_order_release);
-    if (!armed_.load(std::memory_order_acquire) || leaseNanos == 0) return kClosed;
+    epoch_.store(kClosed);
+    if (!armed_.load() || leaseNanos == 0) return kClosed;
     uint64_t epoch = nextEpoch_++;
-    cutoffTicks_.store(cutoffTicks, std::memory_order_release);
-    leaseDeadline_.store(nowLeaseNanos + clamp(leaseNanos), std::memory_order_release);
-    epoch_.store(epoch, std::memory_order_release);
-    return epoch;
+    cutoffTicks_.store(cutoffTicks);
+    leaseDeadline_.store(nowLeaseNanos + clamp(leaseNanos));
+    epoch_.store(epoch);
+    // An IO fault may have disarmed between the check and the publish.
+    if (armed_.load()) return epoch;
+    epoch_.store(kClosed);
+    return kClosed;
   }
 
   /// Extends a still-open, unexpired epoch. Never reopens a closed or expired one.
   bool renew(uint64_t epoch, uint64_t nowLeaseNanos, uint64_t leaseNanos) {
     std::lock_guard<std::mutex> lock(control_);
-    if (epoch == kClosed || epoch_.load(std::memory_order_acquire) != epoch) return false;
-    if (leaseNanos == 0 || nowLeaseNanos >= leaseDeadline_.load(std::memory_order_acquire)) {
-      epoch_.store(kClosed, std::memory_order_release);
+    if (epoch == kClosed || epoch_.load() != epoch || !armed_.load()) return false;
+    if (leaseNanos == 0 || nowLeaseNanos >= leaseDeadline_.load()) {
+      epoch_.store(kClosed);
       return false;
     }
-    leaseDeadline_.store(nowLeaseNanos + clamp(leaseNanos), std::memory_order_release);
-    // The IO thread may have expired the epoch between the checks and the store.
-    return epoch_.load(std::memory_order_acquire) == epoch;
+    leaseDeadline_.store(nowLeaseNanos + clamp(leaseNanos));
+    // The IO thread may have expired or faulted the epoch between the checks and the store.
+    return epoch_.load() == epoch && armed_.load();
   }
 
   /// Closes only the named epoch, so stale cleanup cannot close a newer one.
   bool close(uint64_t epoch) {
     std::lock_guard<std::mutex> lock(control_);
-    if (epoch == kClosed || epoch_.load(std::memory_order_acquire) != epoch) return false;
-    epoch_.store(kClosed, std::memory_order_release);
+    if (epoch == kClosed || epoch_.load() != epoch) return false;
+    epoch_.store(kClosed);
     return true;
   }
 
   /// IO thread. True when a block whose first sample was captured at `blockTicks`
   /// may carry real samples. Expired leases close the gate here without JS.
   bool admit(uint64_t blockTicks, uint64_t nowLeaseNanos) {
-    uint64_t epoch = epoch_.load(std::memory_order_acquire);
-    if (epoch == kClosed) return false;
-    uint64_t deadline = leaseDeadline_.load(std::memory_order_acquire);
-    uint64_t cutoff = cutoffTicks_.load(std::memory_order_acquire);
-    if (epoch_.load(std::memory_order_acquire) != epoch) return false;
+    uint64_t epoch = epoch_.load();
+    if (epoch == kClosed || !armed_.load()) return false;
+    uint64_t deadline = leaseDeadline_.load();
+    uint64_t cutoff = cutoffTicks_.load();
+    if (epoch_.load() != epoch) return false;
     if (nowLeaseNanos >= deadline) {
-      epoch_.compare_exchange_strong(epoch, kClosed, std::memory_order_acq_rel);
+      epoch_.compare_exchange_strong(epoch, kClosed);
       return false;
     }
     return blockTicks >= cutoff;
@@ -91,8 +116,8 @@ class SendGate {
     return admitted;
   }
 
-  uint64_t epoch() const { return epoch_.load(std::memory_order_acquire); }
-  bool armed() const { return armed_.load(std::memory_order_acquire); }
+  uint64_t epoch() const { return epoch_.load(); }
+  bool armed() const { return armed_.load(); }
 
  private:
   static uint64_t clamp(uint64_t leaseNanos) {
@@ -100,6 +125,7 @@ class SendGate {
   }
 
   std::mutex control_;
+  std::atomic<uint64_t> revocations_{0};
   std::atomic<bool> armed_{false};
   std::atomic<uint64_t> epoch_{kClosed};
   std::atomic<uint64_t> cutoffTicks_{UINT64_MAX};
@@ -133,14 +159,18 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) BOOL adoptedByWebRTC;
 @property(nonatomic, readonly) BOOL captureArmed;
 @property(nonatomic, readonly) uint64_t openEpoch;
+/// Read before preparing; any revocation after this read makes `armCaptureSince:` fail.
+@property(nonatomic, readonly) uint64_t revocationCount;
 
-/// Called by the voice session after it activated its own AVAudioSession.
-- (void)armCapture;
+/// Called by the voice session after it activated its own AVAudioSession. Returns NO,
+/// leaving capture disarmed, if anything revoked since `revocationCount` was read.
+- (BOOL)armCaptureSince:(uint64_t)revocationCount NS_SWIFT_NAME(armCapture(since:));
 /// Closes sending and silences playout immediately, from any thread.
 - (void)revokeCapture;
 /// Revokes and tells WebRTC the audio unit must be rebuilt (media services reset).
 - (void)revokeCaptureAndResetUnit;
-/// Tells WebRTC IO buffer/latency may have changed after a route change.
+/// After an accepted route change: stops IO, lets WebRTC rebuild its buffers for the
+/// new IO parameters, then restarts IO only if capture is still armed.
 - (void)notifyRouteParametersChanged;
 
 /// Fresh epoch for blocks captured after now plus input latency. 0 when disarmed
