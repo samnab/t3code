@@ -28,7 +28,11 @@ export interface RealtimeVoiceAudioRevoked {
 }
 
 export interface RealtimeVoiceAudio {
-  /** Resolves with the owner generation. */
+  /**
+   * Resolves with the owner generation. Rejects `interrupted`
+   * (`ERR_REALTIME_VOICE_INTERRUPTED`) when native code ended the owner; prepare again only on
+   * a new user action.
+   */
   readonly prepare: (owner: string) => Promise<number>;
   /** Returns an opaque epoch, or 0 when the gate could not open. */
   readonly openGate: (owner: string, leaseSeconds: number) => number;

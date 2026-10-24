@@ -85,13 +85,14 @@ final class T3RealtimeVoiceSession {
   private var authorizedRoute: Route?
   // The latest observer fault, stamped with the device fault count it produced.
   private var observerFault: (count: UInt64, reason: String)?
-  private var listener: (module: ObjectIdentifier, notify: Listener)?
-  // Guarded by `lock`. An ended owner's audio unit is still being torn down; nothing may
-  // prepare until the device reports it gone.
+  // An ended owner whose audio unit is still being torn down: the session stays active,
+  // and nothing may prepare, until the device reports the unit gone.
   private var releasing = false
+  private var listener: (module: ObjectIdentifier, notify: Listener)?
 
-  /// Read by other audio-session users (video preview, dictation) so they leave voice alone.
-  var ownsAudioSession: Bool { stateLock.withLock { observed != nil } }
+  /// Read by other audio-session users (video preview, dictation) so they leave voice alone,
+  /// including while a release is pending: it still restores and deactivates the session.
+  var ownsAudioSession: Bool { stateLock.withLock { observed != nil || releasing } }
 
   /// Receives faults that ended owners prepared by `module`, once the gate is closed and the
   /// owner, audio unit and audio session are released. A deliberate `end` reports nothing.
@@ -120,7 +121,7 @@ final class T3RealtimeVoiceSession {
       }
       // Arming before an ended owner's teardown finished would let that teardown dispose the
       // new lifetime's audio unit.
-      guard !releasing else { throw T3RealtimeVoiceSessionError.busy }
+      guard !stateLock.withLock({ releasing }) else { throw T3RealtimeVoiceSessionError.busy }
       let moduleId = ObjectIdentifier(module)
       if let owner, owner.token != token || owner.module != moduleId {
         throw T3RealtimeVoiceSessionError.busy
@@ -240,8 +241,8 @@ final class T3RealtimeVoiceSession {
     stateLock.withLock {
       observed = nil
       authorizedRoute = nil
+      releasing = true
     }
-    releasing = true
     owner = nil
     previous = nil
     device.endCapture { [weak self] in
@@ -255,7 +256,7 @@ final class T3RealtimeVoiceSession {
       let session = AVAudioSession.sharedInstance()
       if let restore { try? session.setCategory(restore.0, mode: restore.1, options: restore.2) }
       try? session.setActive(false, options: [.notifyOthersOnDeactivation])
-      releasing = false
+      stateLock.withLock { releasing = false }
     }
     if let reason { notify(reason, ended) }
   }
@@ -272,7 +273,7 @@ final class T3RealtimeVoiceSession {
     return [
       "installed": T3RealtimeVoiceAudioDevice.installedInWebRTCModuleOptions,
       "adopted": device.adoptedByWebRTC,
-      "owned": owner != nil,
+      "owned": ownsAudioSession,
       "generation": Double(owner?.generation ?? 0),
       "armed": device.captureArmed,
       "epoch": Double(device.openEpoch),

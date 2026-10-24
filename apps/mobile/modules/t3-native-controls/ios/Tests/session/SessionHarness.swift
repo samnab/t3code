@@ -310,13 +310,15 @@ func check(_ ok: Bool, _ what: String) {
     check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == nil, "control drain ends the faulted owner")
     // F1: the session is released only once the ADM thread stopped and disposed the unit.
     check(device.adm.count == 1, "control drain asks the ADM thread to tear the unit down")
-    check(!session.ownsAudioSession, "other audio users see voice gone once release starts")
+    check(session.ownsAudioSession && session.snapshot()["owned"] as? Bool == true,
+      "other audio users stay off the session until release completes")
     check(audio.active && audio.category == .playAndRecord && faultEvents.isEmpty,
       "nothing is released or published while the unit may still run")
     check((try? session.prepare(owner: "a", module: a)) == nil, "nothing prepares before teardown finishes")
     settle()
     check(!device.unitLive, "teardown disposes the audio unit")
-    check(!session.ownsAudioSession && !audio.active, "release deactivates after teardown")
+    check(!session.ownsAudioSession && session.snapshot()["owned"] as? Bool == false && !audio.active,
+      "release deactivates after teardown")
     check(audio.category == .playback, "control drain restores the previous audio session")
     check(faultEvents.count == 1 && faultEvents.first?.0 == "audioFault" && faultEvents.first?.1 == faulted,
       "one audioFault event with the faulted owner and generation")
