@@ -71,6 +71,7 @@ import {
 } from "@t3tools/contracts";
 import {
   createOrchestrationV2TurnItemVisibility,
+  isOrchestrationV2MessageHistoryItem,
   isOrchestrationV2SupersededInterrupt,
 } from "@t3tools/shared/orchestrationV2Timeline";
 import {
@@ -5359,6 +5360,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       >["inputIntent"];
       readonly createdBy?: "user" | "agent" | "system";
       readonly messageId?: MessageId;
+      readonly status?: OrchestrationV2TurnItem["status"];
+      readonly captureState?: string;
+      readonly content?: { readonly type: string };
     };
     type TimelineIndexRow = {
       readonly sourceThreadId: ThreadId;
@@ -5385,10 +5389,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           run_id: string | null;
           node_id: string | null;
           type: OrchestrationV2TurnItem["type"];
+          status: OrchestrationV2TurnItem["status"];
+          voice_content_type: string | null;
+          voice_capture_state: string | null;
           input_intent: NonNullable<TimelineIndexItem["inputIntent"]> | null;
           created_by: "user" | "agent" | "system" | null;
           message_id: string | null;
-        }>`SELECT turn_item_id, run_id, node_id, type,
+        }>`SELECT turn_item_id, run_id, node_id, type, status,
+          CASE WHEN type = 'realtime_voice' THEN json_extract(payload_json, '$.content.type') END AS voice_content_type,
+          CASE WHEN type = 'realtime_voice' THEN json_extract(payload_json, '$.captureState') END AS voice_capture_state,
           CASE WHEN type = 'user_message' THEN json_extract(payload_json, '$.inputIntent') END AS input_intent,
           CASE WHEN type = 'user_message' THEN json_extract(payload_json, '$.createdBy') END AS created_by,
           CASE WHEN type IN ('user_message', 'assistant_message') THEN json_extract(payload_json, '$.messageId') END AS message_id
@@ -5400,6 +5409,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           runId: row.run_id === null ? null : RunId.make(row.run_id),
           nodeId: row.node_id === null ? null : NodeId.make(row.node_id),
           type: row.type,
+          status: row.status,
+          ...(row.voice_content_type === null ? {} : { content: { type: row.voice_content_type } }),
+          ...(row.voice_capture_state === null ? {} : { captureState: row.voice_capture_state }),
           ...(row.input_intent === null ? {} : { inputIntent: row.input_intent }),
           ...(row.created_by === null ? {} : { createdBy: row.created_by }),
           ...(row.message_id === null ? {} : { messageId: MessageId.make(row.message_id) }),
@@ -5592,10 +5604,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               .filter((row) =>
                 options.itemId === undefined
                   ? row.position > (options.afterPosition ?? -1) &&
-                    (options.view === "activity" ||
-                      ["user_message", "assistant_message", "proposed_plan"].includes(
-                        row.item.type,
-                      ))
+                    (options.view === "activity" || isOrchestrationV2MessageHistoryItem(row.item))
                   : row.sourceItemId === options.itemId,
               );
             const page = matching.slice(0, options.limit);
@@ -7403,8 +7412,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             const matching = projection.visibleTurnItems.filter((row) =>
               options.itemId === undefined
                 ? row.position > (options.afterPosition ?? -1) &&
-                  (options.view === "activity" ||
-                    ["user_message", "assistant_message", "proposed_plan"].includes(row.item.type))
+                  (options.view === "activity" || isOrchestrationV2MessageHistoryItem(row.item))
                 : row.sourceItemId === options.itemId,
             );
             return {

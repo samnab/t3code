@@ -5838,3 +5838,110 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 });
+
+it.effect.each([
+  ["memory", ProjectionStore.layerMemory],
+  ["SQL", layerTest],
+] as const)(
+  "%s message history pages include only completed canonical voice transcripts",
+  ([, layer]) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("voice-message-history");
+      const now = yield* DateTime.now;
+      const voice = {
+        id: TurnItemId.make("voice:user"),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 3,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: now,
+        updatedAt: now,
+        type: "realtime_voice",
+        providerInstanceId,
+        nativeThreadId: "native:voice",
+        realtimeSessionId: "session:voice",
+        nativeRealtimeItemId: "native:user",
+        content: { type: "transcriptSegment", role: "user", text: "historical instruction" },
+        captureState: "canonical_completed",
+        historyCoverage: "live_only",
+        sourceOrder: "unreconciled",
+        timestampProvenance: "observed",
+      } satisfies OrchestrationV2TurnItem;
+      const items: ReadonlyArray<OrchestrationV2TurnItem> = [
+        {
+          ...voice,
+          id: TurnItemId.make("voice:opened"),
+          ordinal: 2,
+          content: { type: "realtimeSessionStarted" },
+        },
+        voice,
+        {
+          ...voice,
+          id: TurnItemId.make("voice:promoted"),
+          ordinal: 4,
+          content: {
+            type: "bemItemPromoted",
+            item_id: "work",
+            turn_id: "turn",
+            presentation: { type: "wholeItem" },
+          },
+        },
+        {
+          ...voice,
+          id: TurnItemId.make("voice:assistant"),
+          ordinal: 5,
+          content: { type: "transcriptSegment", role: "assistant", text: "historical answer" },
+        },
+        {
+          ...voice,
+          id: TurnItemId.make("voice:unfinished"),
+          ordinal: 6,
+          status: "running",
+          completedAt: null,
+        },
+      ];
+      for (const item of items)
+        yield* store.apply({
+          id: EventId.make(`event:${item.id}`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: item,
+        });
+      const first = yield* store.getTimelinePage(threadId, { view: "messages", limit: 1 });
+      assert.deepEqual(
+        first.items.map((row) => row.item.id),
+        [voice.id],
+      );
+      assert.isTrue(first.hasMore);
+      const second = yield* store.getTimelinePage(threadId, {
+        view: "messages",
+        limit: 1,
+        afterPosition: first.items[0]!.position,
+      });
+      assert.deepEqual(
+        second.items.map((row) => row.item.id),
+        [TurnItemId.make("voice:assistant")],
+      );
+      assert.isFalse(second.hasMore);
+      assert.equal(second.items[0]!.item.type, "realtime_voice");
+      assert.equal(second.items[0]!.item.runId, null);
+      assert.lengthOf(
+        (yield* store.getTimelinePage(threadId, { view: "activity", limit: 10 })).items,
+        5,
+      );
+      const byId = yield* store.getTimelinePage(threadId, {
+        itemId: TurnItemId.make("voice:opened"),
+        limit: 1,
+      });
+      assert.equal(byId.items[0]?.item.type, "realtime_voice");
+    }).pipe(Effect.provide(layer)),
+);

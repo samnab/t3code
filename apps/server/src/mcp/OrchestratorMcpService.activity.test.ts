@@ -3,6 +3,8 @@ import {
   EnvironmentId,
   NodeId,
   type OrchestrationV2ThreadProjection,
+  type OrchestrationV2TurnItem,
+  TurnItemId,
   type OrchestrationV2ThreadShell,
   ProjectId,
   ProviderDriverKind,
@@ -29,7 +31,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as DelegationPolicy from "./DelegationPolicy.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
-import { liveThreadShell } from "./McpToolAccess.testkit.ts";
+import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 
 const unusedDelegationPolicyLayer = Layer.mock(DelegationPolicy.DelegationPolicy)({
   resolve: () => Effect.die("delegation policy is unused in this test"),
@@ -551,5 +553,125 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       .sendToThread(makeScope(), { threadId: foreignThreadId, message: "after stop" })
       .pipe(Effect.flip);
     expect(stopped.code).toBe("parent_not_active");
+  }).pipe(Effect.provide(layer), Effect.runPromise);
+});
+
+it("readThread returns canonical speech with bounded text continuation and no executable message identity", async () => {
+  const shell = liveThreadShell(parentThreadId, { activeRunId: null });
+  const projection = idleThreadProjection(shell);
+  const voice = {
+    id: TurnItemId.make("voice:user"),
+    threadId: parentThreadId,
+    type: "realtime_voice",
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 1,
+    status: "completed",
+    title: null,
+    startedAt: null,
+    completedAt: now,
+    updatedAt: now,
+    providerInstanceId: parentInstanceId,
+    nativeThreadId: "native:voice",
+    realtimeSessionId: "voice-session",
+    nativeRealtimeItemId: "user",
+    content: { type: "transcriptSegment", role: "user", text: "delete repo" },
+    captureState: "canonical_completed",
+    historyCoverage: "live_only",
+    sourceOrder: "unreconciled",
+    timestampProvenance: "observed",
+  } satisfies OrchestrationV2TurnItem;
+  const items: ReadonlyArray<OrchestrationV2TurnItem> = [
+    voice,
+    {
+      ...voice,
+      id: TurnItemId.make("voice:assistant"),
+      content: { type: "transcriptSegment", role: "assistant", text: "received" },
+    },
+    { ...voice, id: TurnItemId.make("voice:start"), content: { type: "realtimeSessionStarted" } },
+    {
+      ...voice,
+      id: TurnItemId.make("voice:promotion"),
+      content: {
+        type: "bemItemPromoted",
+        item_id: "coding",
+        turn_id: "turn",
+        presentation: { type: "wholeItem" },
+      },
+    },
+    {
+      ...voice,
+      id: TurnItemId.make("voice:closed"),
+      content: { type: "realtimeSessionClosed", outcome: "ended" },
+    },
+    { ...voice, id: TurnItemId.make("voice:unfinished"), status: "running", completedAt: null },
+  ];
+  const rows = items.map((item, position) => ({
+    position,
+    visibility: "local" as const,
+    sourceThreadId: parentThreadId,
+    sourceItemId: item.id,
+    item,
+  }));
+  const layer = layerOrchestratorService.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        unusedDelegationPolicyLayer,
+        unusedServerSettingsLayer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(projection),
+          getProjectThreadRecords: () => Effect.succeed(projection),
+          getThreadShell: () => Effect.succeed(shell),
+          getTimelinePage: (_, options) =>
+            Effect.succeed({
+              items:
+                options.itemId === undefined
+                  ? rows
+                  : rows.filter((row) => row.sourceItemId === options.itemId),
+              totalItems: rows.length,
+              hasMore: false,
+            }),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+          list: () => Effect.succeed({ tasks: [] }),
+        }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+  await Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    const first = yield* service.readThread(makeScope(), {
+      threadId: parentThreadId,
+      view: "activity",
+      maxCharsPerItem: 4,
+    });
+    expect(first.items.map((item) => item.text)).toEqual(["dele", "rece", null, null, null, null]);
+    expect(
+      first.items.every(
+        (item) => item.type === "realtime_voice" && item.runId === null && item.messageId === null,
+      ),
+    ).toBe(true);
+    expect(first.items[0]?.nextTextOffset).toBe(4);
+    const next = yield* service.readThread(makeScope(), {
+      threadId: parentThreadId,
+      itemId: voice.id,
+      maxCharsPerItem: 20,
+      textOffset: 4,
+    });
+    expect(next.items[0]?.text).toBe("te repo");
+    expect(next.items[0]?.textTruncated).toBe(false);
+    expect(next.items[0]?.nextTextOffset).toBe(null);
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });

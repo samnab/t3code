@@ -5,6 +5,7 @@ import type {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { isOrchestrationV2MessageHistoryItem } from "@t3tools/shared/orchestrationV2Timeline";
 
 /**
  * Item/byte budgets only apply to histories without turn starts; tool activity
@@ -18,7 +19,10 @@ export const THREAD_HISTORY_PAGE_POLICY = {
 
 export const OLDER_THREAD_USER_TURN_LIMIT = 20;
 
-export function isConversationHistoryItem(item: Pick<OrchestrationV2TurnItem, "type">): boolean {
+export function isConversationHistoryItem(
+  item: Parameters<typeof isOrchestrationV2MessageHistoryItem>[0],
+): boolean {
+  if (item.type === "realtime_voice") return isOrchestrationV2MessageHistoryItem(item);
   return !["command_execution", "reasoning", "file_change", "dynamic_tool"].includes(item.type);
 }
 export const THREAD_HISTORY_MAX_RAW_TURNS = 150;

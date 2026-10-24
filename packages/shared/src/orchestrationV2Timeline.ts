@@ -11,6 +11,28 @@ type TimelineTurnItem = Pick<OrchestrationV2TurnItem, "type" | "runId" | "nodeId
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
 };
 
+/** Selects readable messages without giving historical speech user-message execution semantics. */
+export function isOrchestrationV2MessageHistoryItem(
+  item: Pick<OrchestrationV2TurnItem, "type"> & {
+    readonly status?: OrchestrationV2TurnItem["status"];
+    readonly captureState?: string;
+    readonly content?: { readonly type: string };
+  },
+): boolean {
+  if (item.type === "realtime_voice") {
+    return (
+      item.status === "completed" &&
+      item.captureState === "canonical_completed" &&
+      item.content?.type === "transcriptSegment"
+    );
+  }
+  return (
+    item.type === "user_message" ||
+    item.type === "assistant_message" ||
+    item.type === "proposed_plan"
+  );
+}
+
 export function isOrchestrationV2SupersededInterrupt(input: {
   readonly item: TimelineTurnItem;
   readonly attempts: ReadonlyArray<TimelineRunAttempt>;
