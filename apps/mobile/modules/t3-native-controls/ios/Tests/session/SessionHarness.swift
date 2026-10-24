@@ -36,7 +36,25 @@ final class T3RealtimeVoiceAudioDevice {
     hook?()
     AVAudioSession.onPoint?("afterRevoke")
   }
-  func revokeCaptureAndResetUnit() { revokeCapture() }
+  func faultCapture() { fault() }
+  /// Models a running audio unit that only the ADM thread may stop.
+  var unitLive = false
+  /// Blocks posted to the fake ADM thread; `runADM` runs them.
+  var adm: [() -> Void] = []
+  func endCapture(completion: @escaping () -> Void) {
+    revocationCount += 1
+    captureArmed = false
+    openEpoch = 0
+    adm.append { [self] in
+      unitLive = false
+      completion()
+    }
+  }
+  func runADM() {
+    let work = adm
+    adm = []
+    work.forEach { $0() }
+  }
   func notifyRouteParametersChanged() { parameterChanges += 1 }
   func openGate(withLeaseSeconds seconds: Double) -> UInt64 {
     guard captureArmed else { return 0 }
@@ -96,6 +114,11 @@ func check(_ ok: Bool, _ what: String) {
         userInfo: [AVAudioSessionRouteChangeReasonKey: reason.rawValue])
     }
     let headset = AVAudioSessionRouteDescription(inputs: ["headset-mic"], outputs: ["headset"])
+    /// Lets the ADM thread finish any teardown, then waits for the release it schedules.
+    func settle() {
+      device.runADM()
+      T3RealtimeVoiceSession.controlQueue.sync {}
+    }
 
     // F3: interruption during a first prepare's activation.
     let a = FakeModule()
@@ -106,6 +129,7 @@ func check(_ ok: Bool, _ what: String) {
     } catch {
       check(error as? T3RealtimeVoiceSessionError == .interrupted, "first prepare reports interrupted")
     }
+    settle()
     check(!device.captureArmed && !session.ownsAudioSession, "interrupted first prepare leaves nothing owned or armed")
 
     // F3: interruption during a same-owner re-prepare (the reviewer's reproduction).
@@ -120,8 +144,9 @@ func check(_ ok: Bool, _ what: String) {
     } catch {}
     audio.onActivate = nil
     check(!device.captureArmed, "interrupted re-prepare stays disarmed")
-    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == 0, "no epoch after interrupted re-prepare")
-    check(events.last?.1 == owner, "revocation event carries owner and generation")
+    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 == 0, "no epoch after interrupted re-prepare")
+    settle()
+    check(events.last?.0 == "interruption" && events.last?.1 == owner, "revocation event carries reason, owner and generation")
 
     // F6: speaker override and a newly connected device both revoke; same route does not.
     _ = try session.prepare(owner: "a", module: a)
@@ -144,11 +169,13 @@ func check(_ ok: Bool, _ what: String) {
     session.clearRevokedListener(module: b)
     check(!session.end(module: b), "other module cannot end the owner")
     check(session.end(module: a), "destroying the owning module ends its owner")
+    settle()
     let ownerB = try session.prepare(owner: "a", module: b)
     check(ownerB.generation != owner.generation, "replacement owner has a new generation")
     check(!session.end(module: a), "late cleanup from the old module is a no-op")
     check(session.ownsAudioSession, "replacement owner survives old cleanup")
     _ = session.end(module: b)
+    settle()
 
     // Review r2 R2-1: an interruption after prepare's own revoke but before it reads the
     // device counter must still fail that prepare.
@@ -156,8 +183,9 @@ func check(_ ok: Bool, _ what: String) {
     device.afterRevoke = interrupt
     check((try? session.prepare(owner: "a", module: a)) == nil, "prepare interrupted before its counter read throws")
     check(!device.captureArmed, "interruption before counter read stays disarmed")
-    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == 0, "no epoch after early interruption")
+    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 == 0, "no epoch after early interruption")
     _ = session.end(module: a)
+    settle()
 
     // Review r2 R2-3: foreign category during activation, unknown reason, empty route.
     audio.onActivate = {
@@ -165,6 +193,7 @@ func check(_ ok: Bool, _ what: String) {
       routeChange(.categoryChange)
     }
     check((try? session.prepare(owner: "a", module: a)) == nil, "foreign category during activation fails prepare")
+    settle()
     check(!device.captureArmed && !session.ownsAudioSession, "foreign category leaves nothing armed or owned")
     audio.onActivate = nil
     _ = try session.prepare(owner: "a", module: a)
@@ -173,6 +202,7 @@ func check(_ ok: Bool, _ what: String) {
       userInfo: [AVAudioSessionRouteChangeReasonKey: UInt(9999)])
     check(!device.captureArmed && device.openEpoch == 0, "unrecognized route reason revokes")
     _ = session.end(module: a)
+    settle()
     audio.currentRoute = AVAudioSessionRouteDescription(inputs: [], outputs: [])
     do {
       _ = try session.prepare(owner: "a", module: a)
@@ -180,9 +210,11 @@ func check(_ ok: Bool, _ what: String) {
     } catch {
       check(error as? T3RealtimeVoiceSessionError == .invalidRoute, "empty route reports invalidRoute")
     }
+    settle()
     check(!device.captureArmed && !session.ownsAudioSession, "empty route leaves nothing armed or owned")
     audio.currentRoute = AVAudioSessionRouteDescription(inputs: ["old-mic"], outputs: [])
     check((try? session.prepare(owner: "a", module: a)) == nil, "input-only route must not authorize")
+    settle()
     audio.currentRoute = headset
 
     // Review r2 R2-4: an observer already running for an ended owner must not revoke, or
@@ -207,6 +239,7 @@ func check(_ ok: Bool, _ what: String) {
     thread.start()
     entered.wait()
     _ = session.end(module: a)
+    settle()
     let replacement = try session.prepare(owner: "b", module: b)
     var replacementEvents: [T3RealtimeVoiceSession.Owner] = []
     session.setRevokedListener(module: b) { _, owner in replacementEvents.append(owner) }
@@ -218,6 +251,7 @@ func check(_ ok: Bool, _ what: String) {
     check(device.captureArmed && device.openEpoch == fresh, "stale observer does not revoke the replacement")
     check(replacementEvents.isEmpty && staleEvents.isEmpty, "stale observer emits no event")
     _ = session.end(module: b)
+    settle()
 
     // Council repair: every point inside prepare, after its native lock entry, must fail the
     // attempt for both an IO fault (no observer) and an interruption (observer), and a fresh
@@ -243,10 +277,12 @@ func check(_ ok: Bool, _ what: String) {
         check(seen >= occurrence, "\(name): injection point reached")
         check(rejected, "\(name): prepare fails")
         check(!device.captureArmed, "\(name): stays disarmed")
-        check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == 0, "\(name): no epoch")
+        check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 == 0, "\(name): no epoch")
+        settle()
         _ = try? session.prepare(owner: "a", module: a)
         check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 != 0, "\(name): fresh retry opens")
         _ = session.end(module: a)
+        settle()
       }
     }
     // A fault before the attempt's lock entry belongs to the old lifetime.
@@ -254,6 +290,7 @@ func check(_ ok: Bool, _ what: String) {
     _ = try session.prepare(owner: "a", module: a)
     check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 != 0, "old fault does not block a new prepare")
     _ = session.end(module: a)
+    settle()
 
     // F7: a fault in the current incarnation is cleaned up natively and reported once.
     var faultEvents: [(String, T3RealtimeVoiceSession.Owner)] = []
@@ -266,8 +303,17 @@ func check(_ ok: Bool, _ what: String) {
       "IO fault closes before any control work")
     check(session.ownsAudioSession && faultEvents.isEmpty, "nothing is published before the control drain")
     let faultedWatch = faultWatches.watches.count - 1
+    device.unitLive = true
     faultWatches.drainLive()
-    check(!session.ownsAudioSession, "control drain ends the faulted owner")
+    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == nil, "control drain ends the faulted owner")
+    // F1: the session is released only once the ADM thread stopped and disposed the unit.
+    check(device.adm.count == 1, "control drain asks the ADM thread to tear the unit down")
+    check(session.ownsAudioSession && audio.active && audio.category == .playAndRecord && faultEvents.isEmpty,
+      "nothing is released or published while the unit may still run")
+    check((try? session.prepare(owner: "a", module: a)) == nil, "nothing prepares before teardown finishes")
+    settle()
+    check(!device.unitLive, "teardown disposes the audio unit")
+    check(!session.ownsAudioSession && !audio.active, "release deactivates after teardown")
     check(audio.category == .playback, "control drain restores the previous audio session")
     check(faultEvents.count == 1 && faultEvents.first?.0 == "audioFault" && faultEvents.first?.1 == faulted,
       "one audioFault event with the faulted owner and generation")
@@ -300,6 +346,7 @@ func check(_ ok: Bool, _ what: String) {
     let watchA = faultWatches.watches.count - 1
     device.fault()
     check(session.end(module: a), "JS ends A after its fault")
+    settle()
     var eventsB: [(String, T3RealtimeVoiceSession.Owner)] = []
     _ = try session.prepare(owner: "b", module: b)
     session.setRevokedListener(module: b) { eventsB.append(($0, $1)) }
@@ -315,14 +362,44 @@ func check(_ ok: Bool, _ what: String) {
     check(faultWatches.cancelled(watchB), "module end stops the fault watch")
     device.fault()
     faultWatches.tick(watchB)
+    settle()
     check(eventsB.isEmpty && !session.ownsAudioSession, "fault after destroy emits nothing")
 
-    // A fault inside prepare still fails that attempt and leaves no watch running for it.
-    _ = try session.prepare(owner: "a", module: a)
+    // F2: a fault inside a re-prepare fails it, leaves no watch, and ends the retained owner
+    // natively before anyone calls end.
+    session.setRevokedListener(module: a) { faultEvents.append(($0, $1)) }
+    let reprepared = try session.prepare(owner: "a", module: a)
+    let eventsBefore = faultEvents.count
     device.afterRevoke = { device.fault() }
     check((try? session.prepare(owner: "a", module: a)) == nil, "fault inside prepare still fails it")
     check(faultWatches.watches.allSatisfy(\.cancelled), "failed prepare starts no fault watch")
-    _ = session.end(module: a)
+    settle()
+    check(!session.ownsAudioSession && !audio.active && audio.category == .playback,
+      "failed re-prepare releases the owner and audio session without end")
+    check(faultEvents.count == eventsBefore + 1 && faultEvents.last?.0 == "audioFault" && faultEvents.last?.1 == reprepared,
+      "failed re-prepare reports its fault once")
+    check(!session.end(module: a), "nothing is left for an explicit end")
+
+    // Interruption, route loss and media reset are faults too: the gate closes at once, and
+    // the watch ends the owner natively and reports the specific reason after teardown.
+    let observerFaults: [(String, () -> Void)] = [
+      ("interruption", interrupt),
+      ("route:2", { routeChange(.oldDeviceUnavailable) }),
+      ("mediaServicesReset", { center.post(name: AVAudioSession.mediaServicesWereResetNotification, object: nil) }),
+    ]
+    for (reason, post) in observerFaults {
+      let faultedOwner = try session.prepare(owner: "a", module: a)
+      let epoch = try session.openGate(owner: "a", module: a, leaseSeconds: 30)
+      let before = faultEvents.count
+      post()
+      check(!device.captureArmed && !device.renewLease(forEpoch: epoch, leaseSeconds: 30), "\(reason): closes synchronously")
+      check(faultEvents.count == before, "\(reason): nothing is published before cleanup")
+      faultWatches.drainLive()
+      settle()
+      check(!session.ownsAudioSession && !audio.active, "\(reason): owner and audio session released without JS")
+      check(faultEvents.count == before + 1 && faultEvents.last?.0 == reason && faultEvents.last?.1 == faultedOwner,
+        "\(reason): reported once with its reason")
+    }
 
     if failures == 0 { print("T3RealtimeVoiceSession harness: all checks passed") }
     exit(failures == 0 ? 0 : 1)

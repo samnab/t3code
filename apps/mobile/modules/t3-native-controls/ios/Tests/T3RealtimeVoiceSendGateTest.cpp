@@ -141,10 +141,12 @@ int main() {
     gate.arm(gate.revocations());
     uint64_t epoch = gate.open(0, 0, 10 * kSecond);
     int notified = 0, started = 0;
+    uint64_t faults = gate.faults();
     t3voice::RefreshIOParameters(
         true, gate, [] { return false; }, [&] { notified++; }, [&] { started++; return true; });
     check(notified == 0 && started == 0, "failed stop skips parameter updates and restart");
     check(!gate.armed() && gate.epoch() == SendGate::kClosed, "failed stop revokes");
+    check(gate.faults() == faults + 1, "failed stop is a fault the session cleans up");
     check(!gate.renew(epoch, 1, 10 * kSecond), "failed stop epoch cannot renew");
   }
   {
@@ -158,10 +160,12 @@ int main() {
     t3voice::RefreshIOParameters(
         true, gate, [] { return true; }, [&] { notified++; }, [&] { started++; return true; });
     check(notified == 2 && started == 1, "revoked capture stays stopped after the update");
+    check(gate.faults() == 0, "a refresh and a deliberate revoke are not faults");
     gate.arm(gate.revocations());
     t3voice::RefreshIOParameters(
         true, gate, [] { return true; }, [] {}, [] { return false; });
     check(!gate.armed(), "failed restart revokes");
+    check(gate.faults() == 1, "failed restart is a fault the session cleans up");
   }
   {
     // Ordering the session's prepare relies on: baseline = revocations() + 1 read at lock
@@ -182,7 +186,7 @@ int main() {
     check(attempt(gate, false, false), "fault before lock entry does not block a fresh prepare");
   }
   {
-    // F7: only IO faults move the fault count, and once it has moved the gate is closed.
+    // F7: only genuine faults move the fault count, and once it has moved the gate is closed.
     SendGate gate;
     gate.arm(gate.revocations());
     gate.open(0, 0, 10 * kSecond);

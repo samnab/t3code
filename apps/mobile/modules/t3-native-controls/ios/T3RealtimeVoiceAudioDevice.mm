@@ -52,6 +52,8 @@ uint64_t SecondsToHostTicks(double seconds) {
   // post cannot race `terminateDevice` (which runs on that thread) clearing it.
   os_unfair_lock _delegateLock;
   id<RTCAudioDeviceDelegate> _delegate;
+  // `endCapture` completions waiting for the unit to be gone. Guarded by `_delegateLock`.
+  NSMutableArray<dispatch_block_t> *_pendingEnds;
   // Everything below is written only on the WebRTC ADM thread while IO is stopped.
   // The IO callbacks read the unit, scratch buffer and the two delegate blocks.
   RTCAudioDeviceDeliverRecordedDataBlock _deliverRecordedData;
@@ -82,6 +84,7 @@ uint64_t SecondsToHostTicks(double seconds) {
 - (instancetype)init {
   if (self = [super init]) {
     _delegateLock = OS_UNFAIR_LOCK_INIT;
+    _pendingEnds = [NSMutableArray new];
     _inputScratch.resize(kMaxFramesPerSlice);
   }
   return self;
@@ -119,9 +122,35 @@ uint64_t SecondsToHostTicks(double seconds) {
   }];
 }
 
-- (void)revokeCaptureAndResetUnit {
-  [self revokeCapture];
-  [self postToADM:^(id<RTCAudioDeviceDelegate>) { [self disposeUnit]; }];
+- (void)faultCapture { _gate.fault(); }
+
+- (void)endCaptureWithCompletion:(dispatch_block_t)completion {
+  _gate.revoke();
+  os_unfair_lock_lock(&_delegateLock);
+  [_pendingEnds addObject:[completion copy]];
+  BOOL adopted = _delegate != nil;
+  os_unfair_lock_unlock(&_delegateLock);
+  // Never adopted, or already terminated: there is no ADM thread and no unit.
+  if (!adopted) {
+    [self finishPendingEnds];
+    return;
+  }
+  [self postToADM:^(id<RTCAudioDeviceDelegate> delegate) {
+    [self disposeUnit];
+    [delegate notifyAudioInputInterrupted];
+    [delegate notifyAudioOutputInterrupted];
+    [self finishPendingEnds];
+  }];
+}
+
+/// Runs each waiting `endCapture` completion exactly once. Call only where no unit exists:
+/// on the ADM thread right after disposing it, or with no ADM thread left.
+- (void)finishPendingEnds {
+  os_unfair_lock_lock(&_delegateLock);
+  NSArray<dispatch_block_t> *ends = [_pendingEnds copy];
+  [_pendingEnds removeAllObjects];
+  os_unfair_lock_unlock(&_delegateLock);
+  for (dispatch_block_t end in ends) end();
 }
 
 - (void)notifyRouteParametersChanged {
@@ -158,7 +187,7 @@ uint64_t SecondsToHostTicks(double seconds) {
 
 #pragma mark - IO callbacks (real-time thread: no locks, no allocation, no ObjC messaging)
 
-// Any IO failure latches a fault: sending stays closed until the session prepares again.
+// Any IO failure latches a fault: sending stays closed, and the session ends its owner.
 static OSStatus T3RealtimeVoiceInput(void *refCon, AudioUnitRenderActionFlags *flags,
                                      const AudioTimeStamp *timestamp, UInt32 bus, UInt32 frames,
                                      AudioBufferList *) {
@@ -239,6 +268,8 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
   os_unfair_lock_unlock(&_delegateLock);
   _deliverRecordedData = nil;
   _getPlayoutData = nil;
+  // A teardown posted behind this call may never run once WebRTC stops this thread.
+  [self finishPendingEnds];
   return YES;
 }
 
@@ -254,6 +285,7 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
   AudioComponent component = AudioComponentFindNext(nullptr, &desc);
   if (!component || AudioComponentInstanceNew(component, &_unit) != noErr) {
     _unit = nullptr;
+    _gate.fault();
     return NO;
   }
   UInt32 one = 1;
@@ -279,7 +311,7 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
       AudioUnitSetProperty(_unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, kOutputBus, &output, sizeof(output)) == noErr &&
       AudioUnitInitialize(_unit) == noErr;
   if (!configured) {
-    _gate.revoke();
+    _gate.fault();
     [self disposeUnit];
   }
   return configured;
@@ -302,7 +334,7 @@ static OSStatus T3RealtimeVoiceOutput(void *refCon, AudioUnitRenderActionFlags *
   if (!_unit || !_gate.armed()) return NO;
   if (_playing || _recording) return YES;
   if (AudioOutputUnitStart(_unit) == noErr) return YES;
-  _gate.revoke();
+  _gate.fault();
   return NO;
 }
 

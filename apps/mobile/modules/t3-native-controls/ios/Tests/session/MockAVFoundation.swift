@@ -77,8 +77,10 @@ public final class AVAudioSession {
     AVAudioSession.onPoint?("setCategory")
     self.category = category; self.mode = mode; self.categoryOptions = options
   }
+  public private(set) var active = false
   public func setActive(_ active: Bool, options: SetActiveOptions = []) throws {
     if active { AVAudioSession.onPoint?("setActive") }
+    self.active = active
     if active { onActivate?() }
   }
 }

@@ -15,9 +15,11 @@ namespace t3voice {
 /// - capture ticks share the domain of `AudioTimeStamp.mHostTime` (mach_absolute_time);
 /// - lease nanos come from a clock that keeps counting while the device sleeps.
 ///
-/// Every revocation (control `revoke` or IO `fault`) bumps a counter. `arm` takes the
+/// Every revocation (control `revoke` or `fault`) bumps a counter. `arm` takes the
 /// counter read before the caller started preparing, so a revocation observed during
-/// preparation can never be overwritten by that preparation.
+/// preparation can never be overwritten by that preparation. Only genuine faults (IO,
+/// unit setup or restart, interruption, route loss, media reset) also bump `faults`;
+/// deliberate ends and WebRTC stops do not.
 ///
 /// This is an epoch/lease gate only. It is not per-block local detector authorization.
 class SendGate {
@@ -49,8 +51,8 @@ class SendGate {
     epoch_.store(kClosed);
   }
 
-  /// IO thread. Latches an audio fault without locking: same effect as `revoke`. The fault
-  /// count moves last, so a control thread that sees it also sees the gate disarmed.
+  /// Any thread, including IO. Latches an audio fault without locking: same effect as
+  /// `revoke`. The fault count moves last, so a thread that sees it also sees the gate disarmed.
   void fault() {
     revocations_.fetch_add(1);
     armed_.store(false);
@@ -141,15 +143,15 @@ class SendGate {
 
 /// ADM thread, after an accepted route change. WebRTC replaces the buffers its IO callbacks
 /// use when parameters change, so `notify` may run only once `stop` reported IO stopped.
-/// A failed stop leaves the buffers alone and revokes; restart happens only while armed.
+/// A failed stop leaves the buffers alone and faults; restart happens only while armed.
 template <class Stop, class Notify, class Start>
 void RefreshIOParameters(bool running, SendGate &gate, Stop stop, Notify notify, Start start) {
   if (running && !stop()) {
-    gate.revoke();
+    gate.fault();
     return;
   }
   notify();
-  if (running && gate.armed() && !start()) gate.revoke();
+  if (running && gate.armed() && !start()) gate.fault();
 }
 
 }  // namespace t3voice
@@ -180,16 +182,21 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) uint64_t openEpoch;
 /// Read before preparing; any revocation after this read makes `armCaptureSince:` fail.
 @property(nonatomic, readonly) uint64_t revocationCount;
-/// IO faults latched since launch. A change means the gate was already closed by the fault.
+/// Genuine faults latched since launch. A change means the gate was already closed by it.
 @property(nonatomic, readonly) uint64_t faultCount;
 
 /// Called by the voice session after it activated its own AVAudioSession. Returns NO,
 /// leaving capture disarmed, if anything revoked since `revocationCount` was read.
 - (BOOL)armCaptureSince:(uint64_t)revocationCount NS_SWIFT_NAME(armCapture(since:));
-/// Closes sending and silences playout immediately, from any thread.
+/// Closes sending and silences playout immediately, from any thread. Deliberate, not a fault.
 - (void)revokeCapture;
-/// Revokes and tells WebRTC the audio unit must be rebuilt (media services reset).
-- (void)revokeCaptureAndResetUnit;
+/// A genuine fault seen outside IO (interruption, route loss, media reset). Closes now and
+/// moves `faultCount`, exactly as an IO fault does. Atomics only.
+- (void)faultCapture;
+/// Closes sending now, then on the ADM thread stops and disposes the audio unit and clears
+/// its running state. `completion` runs exactly once, after the unit is gone, on an
+/// arbitrary thread and possibly before this returns, so it must not take caller locks.
+- (void)endCaptureWithCompletion:(dispatch_block_t)completion NS_SWIFT_NAME(endCapture(completion:));
 /// After an accepted route change: stops IO, lets WebRTC rebuild its buffers for the
 /// new IO parameters, then restarts IO only if capture is still armed.
 - (void)notifyRouteParametersChanged;
