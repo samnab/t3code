@@ -495,6 +495,7 @@ export class EnvironmentAuth extends Context.Service<
     >;
     readonly createPairingLink: (input?: {
       readonly ttl?: Duration.Duration;
+      readonly desktopSessionTtlDays?: number;
       readonly label?: string;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly subject?: string;
@@ -922,7 +923,7 @@ export const make = Effect.gen(function* () {
 
   type ResolvedBootstrapGrant = Pick<
     PairingGrantStore.BootstrapGrant,
-    "scopes" | "subject" | "label"
+    "scopes" | "subject" | "label" | "desktopSessionTtlDays"
   > & {
     readonly method: PairingGrantStore.BootstrapGrant["method"] | "reusable-dev-token";
   };
@@ -986,6 +987,11 @@ export const make = Effect.gen(function* () {
                       ttl: Duration.hours(1),
                     }
                   : {}),
+                ...(!input?.proofKeyThumbprint &&
+                requestMetadata.deviceType === "desktop" &&
+                grant.desktopSessionTtlDays !== undefined
+                  ? { ttl: Duration.days(grant.desktopSessionTtlDays) }
+                  : {}),
                 replaceActiveForSubjectAndMethod: grant.method === "desktop-bootstrap",
                 client: {
                   ...requestMetadata,
@@ -1027,12 +1033,16 @@ export const make = Effect.gen(function* () {
     readonly subject: string;
     readonly label?: string;
     readonly purpose?: "startup";
+    readonly desktopSessionTtlDays?: number;
   }) =>
     createPairingLink({
       scopes: input.scopes,
       subject: input.subject,
       ...(input.label ? { label: input.label } : {}),
       ...(input.purpose ? { purpose: input.purpose } : {}),
+      ...(input.desktopSessionTtlDays === undefined
+        ? {}
+        : { desktopSessionTtlDays: input.desktopSessionTtlDays }),
     }).pipe(
       Effect.map(
         (issued) =>
@@ -1054,6 +1064,9 @@ export const make = Effect.gen(function* () {
         scopes: input?.scopes ?? AuthStandardClientScopes,
         subject: input?.subject ?? "one-time-token",
         ...(input?.ttl ? { ttl: input.ttl } : {}),
+        ...(input?.desktopSessionTtlDays === undefined
+          ? {}
+          : { desktopSessionTtlDays: input.desktopSessionTtlDays }),
         ...(input?.label ? { label: input.label } : {}),
         ...(input?.proofKeyThumbprint ? { proofKeyThumbprint: input.proofKeyThumbprint } : {}),
         ...(input?.purpose ? { purpose: input.purpose } : {}),
@@ -1149,6 +1162,9 @@ export const make = Effect.gen(function* () {
       scopes: input?.scopes ?? AuthStandardClientScopes,
       subject: "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
+      ...(input?.desktopSessionTtlDays === undefined
+        ? {}
+        : { desktopSessionTtlDays: input.desktopSessionTtlDays }),
     }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
 
   const issueStartupPairingCredential: EnvironmentAuth["Service"]["issueStartupPairingCredential"] =

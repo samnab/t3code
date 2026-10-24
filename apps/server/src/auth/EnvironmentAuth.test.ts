@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { authScopeResponse, AuthStandardClientScopes } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 
@@ -69,6 +70,79 @@ const requestMetadata = {
 };
 
 it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
+  it.effect.each([0, 366, -1, 1.5, Number.POSITIVE_INFINITY])(
+    "rejects invalid desktop session days %s before persisting a grant",
+    (days) =>
+      Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const result = yield* Effect.flip(auth.createPairingLink({ desktopSessionTtlDays: days }));
+        expect(result._tag).toBe("ServerAuthPairingLinkCreationError");
+        expect(yield* auth.listPairingLinks()).toEqual([]);
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
+  it.effect("does not extend DPoP sessions or replace an existing phone session", () =>
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const phoneGrant = yield* auth.issuePairingCredential();
+      const phoneAccess = yield* auth.exchangeBootstrapCredentialForAccessToken(
+        phoneGrant.credential,
+        undefined,
+        { ...requestMetadata, deviceType: "mobile", os: "iOS" },
+      );
+      const phoneBefore = yield* sessions.verify(phoneAccess.access_token);
+      const desktopGrant = yield* auth.issuePairingCredential({ desktopSessionTtlDays: 180 });
+      const desktop = yield* auth.exchangeBootstrapCredentialForAccessToken(
+        desktopGrant.credential,
+        undefined,
+        requestMetadata,
+      );
+      expect(desktop.expires_in).toBe(180 * 24 * 60 * 60);
+      expect(yield* sessions.verify(phoneAccess.access_token)).toEqual(phoneBefore);
+      const relayGrant = yield* auth.issuePairingCredential({ desktopSessionTtlDays: 180 });
+      const relay = yield* auth.exchangeBootstrapCredentialForAccessToken(
+        relayGrant.credential,
+        undefined,
+        requestMetadata,
+        { proofKeyThumbprint: "relay-proof-key" },
+      );
+      expect(relay.expires_in).toBe(60 * 60);
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
+  it.effect.each([
+    { days: undefined, deviceType: "desktop" as const, expectedDays: 30 },
+    { days: 180, deviceType: "desktop" as const, expectedDays: 180 },
+    { days: 180, deviceType: "mobile" as const, expectedDays: 30 },
+  ])(
+    "keeps the pairing redemption window separate from $deviceType session duration $days",
+    ({ days, deviceType, expectedDays }) =>
+      Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const now = yield* DateTime.now;
+        const grant = yield* auth.createPairingLink(
+          days === undefined ? {} : { desktopSessionTtlDays: days },
+        );
+        expect(grant.expiresAt.epochMilliseconds - now.epochMilliseconds).toBe(5 * 60 * 1000);
+        const access = yield* auth.exchangeBootstrapCredentialForAccessToken(
+          grant.credential,
+          undefined,
+          { ...requestMetadata, deviceType },
+        );
+        expect(access.expires_in).toBe(expectedDays * 24 * 60 * 60);
+        const session = yield* (yield* SessionStore.SessionStore).verify(access.access_token);
+        expect(session.scopes).toEqual(AuthStandardClientScopes);
+        const reused = yield* Effect.flip(
+          auth.exchangeBootstrapCredentialForAccessToken(grant.credential, undefined, {
+            ...requestMetadata,
+            deviceType,
+          }),
+        );
+        expect(reused._tag).toBe("ServerAuthInvalidCredentialError");
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
   it.effect("uses the reusable dev cookie without overriding a normal scoped cookie", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

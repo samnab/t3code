@@ -72,6 +72,7 @@ import Migration0065 from "./Migrations/065_CodexUsageNativeTurnIndex.ts";
 import Migration0066 from "./Migrations/066_RepairClientSettlementTimestamps.ts";
 import Migration0067 from "./Migrations/067_WebhookDedupe.ts";
 import Migration0068 from "./Migrations/068_ShellStopRequestIndex.ts";
+import Migration0069 from "./Migrations/069_AuthDesktopPairingSessionTtl.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -143,6 +144,7 @@ const migrationEntries = [
   [66, "RepairClientSettlementTimestamps", Migration0066],
   [67, "WebhookDedupe", Migration0067],
   [68, "ShellStopRequestIndex", Migration0068],
+  [69, "AuthDesktopPairingSessionTtl", Migration0069],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -196,6 +198,36 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
   });
 });
 
+// The narrowly deployed VM backport used the next id after its frozen release.
+// Retain its additive column while allowing this branch's 57–68 migrations to run.
+const reconcileDesktopPairingBackport = Effect.fn("reconcileDesktopPairingBackport")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (tables.length === 0) return;
+  const rows = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+    SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
+  `;
+  if (!rows.some((row) => row.migration_id === 57 && row.name === "AuthDesktopPairingSessionTtl"))
+    return;
+  const prefix = migrationManifest.filter(([id]) => id <= 56);
+  const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(auth_pairing_links)`;
+  if (
+    rows.length !== prefix.length + 1 ||
+    !prefix.every(
+      ([id, name], index) => rows[index]?.migration_id === id && rows[index]?.name === name,
+    ) ||
+    !columns.some((column) => column.name === "desktop_session_ttl_days")
+  ) {
+    return yield* new Migrator.MigrationError({
+      kind: "BadState",
+      message: "Desktop pairing backport migration history does not match the supported release.",
+    });
+  }
+  yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 57 AND name = 'AuthDesktopPairingSessionTtl'`;
+});
+
 const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
@@ -210,6 +242,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
   const forkMigrations = includesV2 ? yield* reconcileForkMigrationLedger() : [];
   if (includesV2) {
+    yield* reconcileDesktopPairingBackport();
     yield* assertV2MigrationsCanRun(toMigrationInclusive);
   }
   const executedMigrations = [

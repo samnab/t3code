@@ -1,4 +1,8 @@
-import { AuthSessionId, AuthStandardClientScopes } from "@t3tools/contracts";
+import {
+  AuthDesktopSessionTtlDays,
+  AuthSessionId,
+  AuthStandardClientScopes,
+} from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -52,6 +56,14 @@ const ttlFlag = Flag.String("ttl").pipe(
   Flag.optional,
 );
 
+export const desktopSessionDaysFlag = Flag.Int("desktop-session-days").pipe(
+  Flag.withSchema(AuthDesktopSessionTtlDays),
+  Flag.withDescription(
+    "Desktop bearer session lifetime in days (1–365). Defaults to 30; separate from the pairing code TTL.",
+  ),
+  Flag.optional,
+);
+
 const jsonFlag = Flag.Boolean("json").pipe(
   Flag.withDescription("Emit JSON instead of human-readable output."),
   Flag.withDefault(false),
@@ -81,6 +93,7 @@ const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
   scopes: authScopesFlag(AuthStandardClientScopes),
   ttl: ttlFlag,
+  desktopSessionDays: desktopSessionDaysFlag,
   label: labelFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
@@ -94,6 +107,9 @@ const pairingCreateCommand = Command.make("create", {
           const issued = yield* environmentAuth.createPairingLink({
             scopes: flags.scopes,
             subject: "one-time-token",
+            ...(Option.isSome(flags.desktopSessionDays)
+              ? { desktopSessionTtlDays: flags.desktopSessionDays.value }
+              : {}),
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });

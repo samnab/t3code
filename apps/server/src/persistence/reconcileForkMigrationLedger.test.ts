@@ -6,6 +6,7 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
+import DesktopPairingMigration from "./Migrations/069_AuthDesktopPairingSessionTtl.ts";
 import { reconcileForkMigrationLedger } from "./reconcileForkMigrationLedger.ts";
 
 const forkHistory = [
@@ -370,6 +371,47 @@ describe("fork migration ledger reconciliation", () => {
         WHERE type = 'table' AND name IN ${sql.in(forkTableNames)}
       `;
       assert.strictEqual(tables.length, forkTableNames.length);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+});
+
+describe("desktop pairing backport upgrade", () => {
+  it.effect(
+    "retains grant policy while applying upstream migrations after the frozen release",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 56 });
+        yield* DesktopPairingMigration;
+        yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (57, 'AuthDesktopPairingSessionTtl')`;
+        yield* sql`INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at, desktop_session_ttl_days)
+        VALUES ('kept-grant', 'test-credential', 'one-time-token', '[]', 'one-time-token', '2026-01-01T00:00:00Z', '2027-01-01T00:00:00Z', 180)`;
+        yield* runMigrations();
+        const history = yield* readHistory;
+        assert.strictEqual(
+          history.find((row) => row.migration_id === 57)?.name,
+          "ScheduledTaskWebhooks",
+        );
+        assert.strictEqual(
+          history.find((row) => row.migration_id === 69)?.name,
+          "AuthDesktopPairingSessionTtl",
+        );
+        assert.strictEqual(history.length, migrationManifest.length);
+        assert.deepStrictEqual(
+          yield* sql`SELECT desktop_session_ttl_days FROM auth_pairing_links WHERE id = 'kept-grant'`,
+          [{ desktop_session_ttl_days: 180 }],
+        );
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+  it.effect("rejects an unexpected backport history without changing its ledger", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 56 });
+      yield* DesktopPairingMigration;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (57, 'AuthDesktopPairingSessionTtl'), (58, 'UnexpectedMigration')`;
+      const before = yield* readHistory;
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
+      assert.deepStrictEqual(yield* readHistory, before);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });

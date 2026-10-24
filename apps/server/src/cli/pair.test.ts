@@ -3,6 +3,7 @@ import * as NodeHttp from "node:http";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { AuthStandardClientScopes } from "@t3tools/contracts";
@@ -188,6 +189,35 @@ describe("t3 pair", () => {
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("persists a desktop session lifetime from auth pairing create", () =>
+    Effect.gen(function* () {
+      const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pair-days-test-"));
+      yield* captureStdout(
+        runCli([
+          "auth",
+          "pairing",
+          "create",
+          "--base-dir",
+          baseDir,
+          "--desktop-session-days",
+          "180",
+          "--json",
+        ]),
+      );
+      const database = new NodeSqlite.DatabaseSync(
+        NodePath.join(baseDir, "userdata", "statev2.sqlite"),
+        { readOnly: true },
+      );
+      try {
+        expect(
+          database.prepare("SELECT desktop_session_ttl_days FROM auth_pairing_links").all(),
+        ).toEqual([{ desktop_session_ttl_days: 180 }]);
+      } finally {
+        database.close();
+      }
+    }),
+  );
+
   it.effect("mints a token and prints a QR pairing URL for a live server", () =>
     withDescriptorServer((origin) =>
       Effect.gen(function* () {
@@ -202,7 +232,25 @@ describe("t3 pair", () => {
           }),
         });
 
-        const output = yield* captureStdout(runCli(["pair", "--base-dir", baseDir]));
+        const output = yield* captureStdout(
+          runCli(["pair", "--base-dir", baseDir, "--desktop-session-days", "180"]),
+        );
+        const database = new NodeSqlite.DatabaseSync(
+          NodePath.join(baseDir, "userdata", "statev2.sqlite"),
+          {
+            readOnly: true,
+          },
+        );
+        try {
+          const grants = database
+            .prepare(
+              "SELECT desktop_session_ttl_days FROM auth_pairing_links WHERE consumed_at IS NULL",
+            )
+            .all();
+          expect(grants).toEqual([{ desktop_session_ttl_days: 180 }]);
+        } finally {
+          database.close();
+        }
 
         assert.include(output, `Pairing with pair-test (${origin})`);
         assert.include(output, `Pairing URL: ${origin}/pair#token=`);

@@ -44,6 +44,7 @@ import {
 } from "../startupAccess.ts";
 import { authScopesFlag } from "./authScopes.ts";
 import { baseDirFlag, DurationFromString } from "./config.ts";
+import { desktopSessionDaysFlag } from "./auth.ts";
 
 const WELL_KNOWN_ENVIRONMENT_PATH = "/.well-known/t3/environment";
 const PAIR_PROBE_TIMEOUT = Duration.millis(2_500);
@@ -430,6 +431,7 @@ const mintPairingLink = Effect.fn("pair.mintPairingLink")(function* (input: {
   readonly config: ServerConfig.ServerConfig["Service"];
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly ttl: Option.Option<Duration.Duration>;
+  readonly desktopSessionDays: Option.Option<number>;
   readonly label: Option.Option<string>;
 }) {
   return yield* Effect.gen(function* () {
@@ -437,6 +439,9 @@ const mintPairingLink = Effect.fn("pair.mintPairingLink")(function* (input: {
     return yield* environmentAuth.createPairingLink({
       scopes: input.scopes,
       subject: "one-time-token",
+      ...(Option.isSome(input.desktopSessionDays)
+        ? { desktopSessionTtlDays: input.desktopSessionDays.value }
+        : {}),
       label: Option.getOrElse(input.label, () => "t3 pair"),
       ...(Option.isSome(input.ttl) ? { ttl: input.ttl.value } : {}),
     });
@@ -480,6 +485,7 @@ export const pairCommand = Command.make("pair", {
   baseDir: baseDirFlag,
   scopes: authScopesFlag(AuthStandardClientScopes),
   ttl: ttlFlag,
+  desktopSessionDays: desktopSessionDaysFlag,
   label: labelFlag,
   tailscale: tailscaleFlag,
   tailscaleServePort: tailscaleServePortFlag,
@@ -523,6 +529,7 @@ export const pairCommand = Command.make("pair", {
         scopes: flags.scopes,
         ttl: flags.ttl,
         label: flags.label,
+        desktopSessionDays: flags.desktopSessionDays,
       });
       const pairingUrl = buildPairingUrl(pairingBaseUrl, issued.credential);
 
