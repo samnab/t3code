@@ -26,6 +26,9 @@ const PreferenceFields = {
     customInstructions: Schema.String,
     truncated: Schema.Boolean,
   }),
+  sidebarAutoSettleAfterDays: ServerSettings.fields.sidebarAutoSettleAfterDays,
+  sidebarAutoSettleOnMerge: ServerSettings.fields.sidebarAutoSettleOnMerge,
+  sidebarAutoSettleKeepPullRequests: ServerSettings.fields.sidebarAutoSettleKeepPullRequests,
 };
 const shared = {
   failure: OrchestratorMcpFailure,
@@ -63,6 +66,9 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
     enableProviderUpdateChecks: ServerSettingsPatch.fields.enableProviderUpdateChecks,
     backgroundActivity: Schema.optionalKey(Schema.Struct({ profile: BackgroundActivityProfile })),
     sourceControlWritingStyle: ServerSettingsPatch.fields.sourceControlWritingStyle,
+    sidebarAutoSettleAfterDays: ServerSettingsPatch.fields.sidebarAutoSettleAfterDays,
+    sidebarAutoSettleOnMerge: ServerSettingsPatch.fields.sidebarAutoSettleOnMerge,
+    sidebarAutoSettleKeepPullRequests: ServerSettingsPatch.fields.sidebarAutoSettleKeepPullRequests,
   }),
   success: Schema.Struct(PreferenceFields),
 }).annotate(Tool.Destructive, true);
