@@ -190,7 +190,6 @@ export function layer(input: {
       ? CodexReplay.layerReplay(input.transcript)
       : CodexReplay.layerReplayWithDriver(input.driver);
   const layerReplayClientFactory = Layer.succeed(CodexAdapterV2.CodexAppServerClientFactory, {
-    verifyRealtimeVoiceCapabilities: () => Effect.void,
     open: (openInput) =>
       Effect.gen(function* () {
         const context = yield* Layer.build(layerReplay).pipe(

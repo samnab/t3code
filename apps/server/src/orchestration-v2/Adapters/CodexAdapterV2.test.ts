@@ -1,4 +1,3 @@
-import * as RealtimeVoiceCapabilities from "./CodexRealtimeVoiceCapabilities.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import {
   makeProviderTextDeltaCoalescer,
@@ -26,7 +25,6 @@ import {
   ProviderTurnId,
   RunAttemptId,
   RunId,
-  ScheduledTaskId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -913,7 +911,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
     onResponse: (method: string) => Effect.Effect<void> = () => Effect.void,
-    capabilityCheck: Effect.Effect<void, RealtimeVoiceCapabilities.CapabilityError> = Effect.void,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -927,7 +924,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       const continuationRequests: Array<ProviderContinuationRequests.ProviderContinuationRequest> =
         [];
       const clientFactory: CodexAdapterV2.CodexAppServerClientFactoryShape = {
-        verifyRealtimeVoiceCapabilities: () => capabilityCheck,
         open: (openInput) =>
           Layer.build(CodexReplay.layerReplayWithDriver(replayDriver)).pipe(
             Effect.mapError(
@@ -1050,48 +1046,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
     });
 
-  it.effect(
-    "fails closed before native voice startup when the opened runtime has no verified capability",
-    () =>
-      Effect.gen(function* () {
-        const harness = yield* makeCodexReplayHarness(
-          makeCodexReplayTranscript({
-            scenario: "unsupported-voice-runtime",
-            entries: codexReplayPreamble({
-              nativeThreadId: "unsupported",
-              nativeTurnId: "unused",
-              prompt: "unused",
-            }).slice(0, 5),
-          }),
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          Effect.fail(
-            new RealtimeVoiceCapabilities.CapabilityError({
-              message: RealtimeVoiceCapabilities.UNSUPPORTED_REALTIME_VOICE,
-            }),
-          ),
-        );
-        const result = yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-        }).pipe(Effect.result);
-        assert.equal(result._tag, "Failure");
-        if (result._tag === "Failure" && result.failure._tag === "ProviderAdapterProtocolError")
-          assert.equal(result.failure.detail, RealtimeVoiceCapabilities.UNSUPPORTED_REALTIME_VOICE);
-        assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
-        const replay = yield* Ref.get(harness.replayDriver.state);
-        assert.isNull(replay.failure);
-        assert.equal(replay.cursor, 5);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-  );
-
   const voiceStartEntries = (
     threadId: string,
     id: number,
@@ -1103,7 +1057,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         method: "thread/realtime/start",
         params: {
           threadId,
-          clientManagedHandoffs: true,
           outputModality: "audio",
           version: "v3",
           transport: { type: "webrtc", sdp: "offer" },
@@ -1137,28 +1090,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       frame: { method: "thread/realtime/closed", params: { threadId, reason: "stopped" } },
     },
   ];
-  const speechFinalEntries = (
+  const finalAnswerEntries = (
     threadId: string,
     turnId: string,
-    status: "completed" | "failed" | "interrupted" = "completed",
   ): Array<CodexReplay.CodexAppServerReplayEntry> => [
-    {
-      type: "emit_inbound",
-      frame: {
-        method: "item/completed",
-        params: {
-          threadId,
-          turnId,
-          item: {
-            type: "agentMessage",
-            id: `${turnId}-comment`,
-            text: "Private progress",
-            phase: "commentary",
-            memoryCitation: null,
-          },
-        },
-      },
-    },
     {
       type: "emit_inbound",
       frame: {
@@ -1179,661 +1114,18 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     {
       type: "emit_inbound",
       frame: {
-        method: "item/completed",
-        params: {
-          threadId,
-          turnId,
-          item: {
-            type: "agentMessage",
-            id: `${turnId}-duplicate`,
-            text: "Selected final",
-            phase: "final_answer",
-            memoryCitation: null,
-          },
-        },
-      },
-    },
-    {
-      type: "emit_inbound",
-      frame: {
         method: "turn/completed",
-        params: { threadId, turn: makeCodexReplayTurn({ id: turnId, status }) },
-      },
-    },
-    {
-      type: "emit_inbound",
-      frame: {
-        method: "turn/completed",
-        params: { threadId, turn: makeCodexReplayTurn({ id: turnId, status }) },
+        params: { threadId, turn: makeCodexReplayTurn({ id: turnId, status: "completed" }) },
       },
     },
   ];
-
-  it.effect.each([
-    "web",
-    "mobile",
-    "mcp",
-    "callback",
-    "scheduled",
-    "provider",
-    "failed",
-    "interrupted",
-    "agent-steer",
-    "human-steer",
-    "partial-only",
-    "human-steer-terminal-first",
-    "rejected-human-steer",
-  ] as const)(
-    "routes successful direct-request speech for %s while preserving written inference",
-    (kind) =>
-      Effect.gen(function* () {
-        const threadId = `speech-${kind}`;
-        const turnId = "direct-turn";
-        const audible = ![
-          "callback",
-          "scheduled",
-          "provider",
-          "failed",
-          "interrupted",
-          "partial-only",
-          "rejected-human-steer",
-          "human-steer-terminal-first",
-        ].includes(kind);
-        const steer =
-          kind === "agent-steer" ||
-          kind === "human-steer" ||
-          kind === "human-steer-terminal-first" ||
-          kind === "rejected-human-steer";
-        const appended = yield* Deferred.make<void>();
-        const finalAllowed = yield* Deferred.make<void>();
-        const preamble = codexReplayPreamble({
-          nativeThreadId: threadId,
-          nativeTurnId: turnId,
-          prompt: "Request",
-        });
-        const nextId = steer ? 6 : 5;
-        const harness = yield* makeCodexReplayHarness(
-          makeCodexReplayTranscript({
-            scenario: threadId,
-            entries: [
-              ...preamble.slice(0, 5),
-              ...voiceStartEntries(threadId, 3),
-              ...preamble
-                .slice(5)
-                .map((entry, index) => (index < 2 ? withReplayRequestId(entry, 4) : entry)),
-              ...(steer
-                ? [
-                    {
-                      type: "expect_outbound" as const,
-                      frame: {
-                        id: 5,
-                        method: "turn/steer",
-                        params: {
-                          threadId,
-                          expectedTurnId: turnId,
-                          input: [{ type: "text", text: "Steer" }],
-                        },
-                      },
-                    },
-                    ...(kind === "human-steer-terminal-first"
-                      ? []
-                      : [
-                          {
-                            type: "emit_inbound" as const,
-                            frame:
-                              kind === "rejected-human-steer"
-                                ? { id: 5, error: { code: -32602, message: "Rejected steer" } }
-                                : { id: 5, result: { turnId } },
-                          },
-                        ]),
-                  ]
-                : []),
-              ...(kind === "partial-only"
-                ? [
-                    {
-                      type: "emit_inbound" as const,
-                      frame: {
-                        method: "item/started",
-                        params: {
-                          threadId,
-                          turnId,
-                          item: {
-                            type: "agentMessage",
-                            id: "partial-final",
-                            text: "",
-                            phase: "final_answer",
-                            memoryCitation: null,
-                          },
-                        },
-                      },
-                    },
-                    {
-                      type: "emit_inbound" as const,
-                      frame: {
-                        method: "item/agentMessage/delta",
-                        params: {
-                          threadId,
-                          turnId,
-                          itemId: "partial-final",
-                          delta: "Selected final",
-                        },
-                      },
-                    },
-                    {
-                      type: "emit_inbound" as const,
-                      frame: {
-                        method: "turn/completed",
-                        params: {
-                          threadId,
-                          turn: makeCodexReplayTurn({ id: turnId, status: "completed" }),
-                        },
-                      },
-                    },
-                  ]
-                : speechFinalEntries(
-                    threadId,
-                    turnId,
-                    kind === "failed"
-                      ? "failed"
-                      : kind === "interrupted"
-                        ? "interrupted"
-                        : "completed",
-                  )
-              ).map((entry, index) => (index === 0 ? { ...entry, label: "allow-final" } : entry)),
-              ...(kind === "human-steer-terminal-first"
-                ? [{ type: "emit_inbound" as const, frame: { id: 5, result: { turnId } } }]
-                : []),
-              ...(audible
-                ? [
-                    {
-                      type: "expect_outbound" as const,
-                      frame: {
-                        id: nextId,
-                        method: "thread/realtime/appendSpeech",
-                        params: { threadId, text: "Selected final" },
-                      },
-                    },
-                    { type: "emit_inbound" as const, frame: { id: nextId, result: {} } },
-                  ]
-                : []),
-              ...voiceStopEntries(threadId, nextId + (audible ? 1 : 0)),
-            ],
-          }),
-          undefined,
-          undefined,
-          undefined,
-          (entry) => (entry.label === "allow-final" ? Deferred.await(finalAllowed) : Effect.void),
-          (method) =>
-            method === "thread/realtime/appendSpeech"
-              ? Deferred.succeed(appended, undefined).pipe(Effect.asVoid)
-              : Effect.void,
-        );
-        yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-        });
-        const input = makeCodexTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make(threadId),
-          text: "Request",
-        });
-        const message: ProviderAdapter.ProviderAdapterV2TurnMessage = {
-          ...input.message,
-          ...(kind === "callback"
-            ? { createdBy: "agent", creationSource: "mcp", senderThreadId: ThreadId.make("sender") }
-            : {}),
-          ...(kind === "scheduled"
-            ? { scheduledTaskId: ScheduledTaskId.make("scheduled-task") }
-            : {}),
-          ...(kind === "provider" ? { createdBy: "agent", creationSource: "provider" } : {}),
-          ...(kind === "human-steer" ||
-          kind === "human-steer-terminal-first" ||
-          kind === "rejected-human-steer"
-            ? { createdBy: "agent", creationSource: "mcp" }
-            : {}),
-          ...(kind === "mobile" || kind === "mcp" ? { creationSource: kind } : {}),
-        };
-        yield* harness.runtime.startTurn({ ...input, message });
-        if (steer) {
-          yield* harness.until(() =>
-            harness.events.some(
-              (event) =>
-                event.type === "provider_turn.updated" && event.providerTurn.status === "running",
-            ),
-          );
-          const started = harness.events.find(
-            (event) =>
-              event.type === "provider_turn.updated" && event.providerTurn.status === "running",
-          );
-          assert.isDefined(started);
-          if (started?.type !== "provider_turn.updated")
-            return yield* Effect.die("Missing started turn");
-          if (kind === "human-steer-terminal-first")
-            yield* Deferred.succeed(finalAllowed, undefined);
-          const steered = yield* harness.runtime
-            .steerTurn({
-              ...input,
-              providerTurnId: started.providerTurn.id,
-              message: {
-                ...input.message,
-                text: "Steer",
-                ...(kind === "agent-steer"
-                  ? {
-                      createdBy: "agent",
-                      creationSource: "mcp",
-                      senderThreadId: ThreadId.make("sender"),
-                    }
-                  : {}),
-              },
-            })
-            .pipe(Effect.result);
-          assert.equal(steered._tag, kind === "rejected-human-steer" ? "Failure" : "Success");
-        }
-        yield* Deferred.succeed(finalAllowed, undefined);
-        yield* harness.firstTerminal;
-        if (audible) yield* Deferred.await(appended);
-        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
-        assert.isTrue(
-          harness.events.some(
-            (event) =>
-              event.type === "turn_item.updated" &&
-              event.turnItem.type === "assistant_message" &&
-              event.turnItem.text === "Selected final",
-          ),
-        );
-        const replay = yield* Ref.get(harness.replayDriver.state);
-        assert.isNull(replay.failure);
-        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-  );
-
-  it.effect.each(["native-voice", "human-race", "callback-race"] as const)(
-    "requires exact voice provenance when adopting %s",
-    (kind) =>
-      Effect.gen(function* () {
-        const threadId = `speech-adoption-${kind}`;
-        const turnId = "held-speech";
-        const typed = kind !== "native-voice";
-        const audible = kind === "human-race";
-        const appended = yield* Deferred.make<void>();
-        const preamble = codexReplayPreamble({
-          nativeThreadId: threadId,
-          nativeTurnId: turnId,
-          prompt: "Request",
-        });
-        const nextId = typed ? 5 : 4;
-        const harness = yield* makeCodexReplayHarness(
-          makeCodexReplayTranscript({
-            scenario: threadId,
-            entries: [
-              ...preamble.slice(0, 5),
-              ...voiceStartEntries(threadId, 3),
-              {
-                type: "emit_inbound",
-                frame: {
-                  method: "turn/started",
-                  params: {
-                    threadId,
-                    turn: {
-                      ...makeCodexReplayTurn({ id: turnId, status: "inProgress" }),
-                      items: [
-                        {
-                          type: "userMessage",
-                          id: "spoken-request",
-                          content: [
-                            {
-                              type: "text",
-                              text: "<realtime_delegation><input>Request</input></realtime_delegation>",
-                              text_elements: [],
-                            },
-                          ],
-                        },
-                      ],
-                    },
-                  },
-                },
-              },
-              ...(typed
-                ? [withReplayRequestId(preamble[5]!, 4), withReplayRequestId(preamble[6]!, 4)]
-                : []),
-              ...speechFinalEntries(threadId, turnId),
-              ...(audible
-                ? [
-                    {
-                      type: "expect_outbound" as const,
-                      frame: {
-                        id: nextId,
-                        method: "thread/realtime/appendSpeech",
-                        params: { threadId, text: "Selected final" },
-                      },
-                    },
-                    { type: "emit_inbound" as const, frame: { id: nextId, result: {} } },
-                  ]
-                : []),
-              ...voiceStopEntries(threadId, nextId + (audible ? 1 : 0)),
-            ],
-          }),
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          (method) =>
-            method === "thread/realtime/appendSpeech"
-              ? Deferred.succeed(appended, undefined).pipe(Effect.asVoid)
-              : Effect.void,
-        );
-        yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-        });
-        yield* harness.until(() => harness.continuationRequests.length === 1);
-        const offer = harness.continuationRequests[0]!;
-        const input = makeCodexTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make(threadId),
-          text: "Request",
-        });
-        yield* harness.runtime.startTurn({
-          ...input,
-          message: {
-            ...input.message,
-            ...(kind === "native-voice"
-              ? { messageId: offer.messageId!, creationSource: "provider" }
-              : {}),
-            ...(kind === "callback-race"
-              ? {
-                  createdBy: "agent",
-                  creationSource: "mcp",
-                  senderThreadId: ThreadId.make("sender"),
-                }
-              : {}),
-          },
-        });
-        yield* harness.firstTerminal;
-        if (audible) yield* Deferred.await(appended);
-        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
-        assert.isTrue(
-          harness.events.some(
-            (event) =>
-              event.type === "turn_item.updated" &&
-              event.turnItem.type === "assistant_message" &&
-              event.turnItem.text === "Selected final",
-          ),
-        );
-        const replay = yield* Ref.get(harness.replayDriver.state);
-        assert.isNull(replay.failure);
-        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-  );
-
-  it.effect(
-    "serializes an in-flight append before stop and replacement, rejecting late results despite native session ID reuse",
-    () =>
-      Effect.gen(function* () {
-        const threadId = "speech-interleaving";
-        const firstTurn = "first-speech";
-        const secondTurn = "second-speech";
-        const appendEntered = yield* Deferred.make<void>();
-        const appendReleased = yield* Deferred.make<void>();
-        const secondAppend = yield* Deferred.make<void>();
-        const requests: string[] = [];
-        const first = codexReplayPreamble({
-          nativeThreadId: threadId,
-          nativeTurnId: firstTurn,
-          prompt: "Request",
-        });
-        const second = codexReplayPreamble({
-          nativeThreadId: threadId,
-          nativeTurnId: secondTurn,
-          prompt: "Request",
-        });
-        const harness = yield* makeCodexReplayHarness(
-          makeCodexReplayTranscript({
-            scenario: threadId,
-            entries: [
-              ...first.slice(0, 5),
-              ...voiceStartEntries(threadId, 3),
-              ...first
-                .slice(5)
-                .map((entry, index) => (index < 2 ? withReplayRequestId(entry, 4) : entry)),
-              ...speechFinalEntries(threadId, firstTurn),
-              {
-                type: "expect_outbound",
-                frame: {
-                  id: 5,
-                  method: "thread/realtime/appendSpeech",
-                  params: { threadId, text: "Selected final" },
-                },
-              },
-              { type: "emit_inbound", label: "blocked-append", frame: { id: 5, result: {} } },
-              ...voiceStopEntries(threadId, 6),
-              ...voiceStartEntries(threadId, 7),
-              ...speechFinalEntries(threadId, firstTurn),
-              ...second
-                .slice(5)
-                .map((entry, index) => (index < 2 ? withReplayRequestId(entry, 8) : entry)),
-              ...speechFinalEntries(threadId, secondTurn),
-              {
-                type: "expect_outbound",
-                frame: {
-                  id: 9,
-                  method: "thread/realtime/appendSpeech",
-                  params: { threadId, text: "Selected final" },
-                },
-              },
-              { type: "emit_inbound", frame: { id: 9, result: {} } },
-              ...voiceStopEntries(threadId, 10),
-            ],
-          }),
-          undefined,
-          (method) =>
-            Effect.gen(function* () {
-              requests.push(method);
-              if (
-                method === "thread/realtime/appendSpeech" &&
-                requests.filter((value) => value === method).length === 1
-              )
-                yield* Deferred.succeed(appendEntered, undefined);
-            }),
-          undefined,
-          (entry) =>
-            entry.label === "blocked-append" ? Deferred.await(appendReleased) : Effect.void,
-          (method) =>
-            method === "thread/realtime/appendSpeech" &&
-            requests.filter((value) => value === method).length === 2
-              ? Deferred.succeed(secondAppend, undefined).pipe(Effect.asVoid)
-              : Effect.void,
-        );
-        const input = makeCodexTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make("speech-first"),
-          text: "Request",
-        });
-        const firstSession = yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-          operationId: "speech-first-owner",
-        });
-        assert.equal(firstSession.nativeRealtimeSessionId, threadId);
-        const firstToken = firstSession.voiceSessionToken;
-        if (typeof firstToken !== "string") return yield* Effect.die("Missing first owner token");
-        yield* harness.runtime.startTurn(input);
-        yield* Deferred.await(appendEntered);
-        const stopping = yield* harness.runtime.stopRealtimeVoice!({
-          providerThread: harness.providerThread,
-          operationId: "speech-first-owner",
-          voiceSessionToken: firstToken,
-        }).pipe(Effect.forkChild({ startImmediately: true }));
-        const replacing = yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-          operationId: "speech-second-owner",
-        }).pipe(Effect.forkChild({ startImmediately: true }));
-        assert.equal(requests.filter((method) => method === "thread/realtime/stop").length, 0);
-        assert.equal(requests.filter((method) => method === "thread/realtime/start").length, 1);
-        yield* Deferred.succeed(appendReleased, undefined);
-        yield* Fiber.join(stopping);
-        const secondSession = yield* Fiber.join(replacing);
-        assert.equal(secondSession.nativeRealtimeSessionId, firstSession.nativeRealtimeSessionId);
-        const secondToken = secondSession.voiceSessionToken;
-        if (typeof secondToken !== "string") return yield* Effect.die("Missing second owner token");
-        assert.notEqual(secondToken, firstToken);
-        yield* harness.runtime.startTurn({
-          ...input,
-          attemptId: RunAttemptId.make("speech-second"),
-          message: { ...input.message, messageId: MessageId.make("speech-second-message") },
-        });
-        yield* Deferred.await(secondAppend);
-        yield* harness.runtime.stopRealtimeVoice!({
-          providerThread: harness.providerThread,
-          operationId: "speech-second-owner",
-          voiceSessionToken: secondToken,
-        });
-        assert.equal(
-          requests.filter((method) => method === "thread/realtime/appendSpeech").length,
-          2,
-        );
-        const replay = yield* Ref.get(harness.replayDriver.state);
-        assert.isNull(replay.failure);
-        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-  );
-
-  it.effect.each(["ambiguous", "method-not-found"] as const)(
-    "never retries %s append failure and preserves safe restart semantics",
-    (mode) =>
-      Effect.gen(function* () {
-        const threadId = `speech-append-${mode}`;
-        const turnId = "uncertain-turn";
-        const stopReplied = yield* Deferred.make<void>();
-        const closedPersisted = yield* Deferred.make<void>();
-        const preamble = codexReplayPreamble({
-          nativeThreadId: threadId,
-          nativeTurnId: turnId,
-          prompt: "Request",
-        });
-        const harness = yield* makeCodexReplayHarness(
-          makeCodexReplayTranscript({
-            scenario: threadId,
-            entries: [
-              ...preamble.slice(0, 5),
-              ...voiceStartEntries(threadId, 3),
-              ...preamble
-                .slice(5)
-                .map((entry, index) => (index < 2 ? withReplayRequestId(entry, 4) : entry)),
-              ...speechFinalEntries(threadId, turnId),
-              {
-                type: "expect_outbound",
-                frame: {
-                  id: 5,
-                  method: "thread/realtime/appendSpeech",
-                  params: { threadId, text: "Selected final" },
-                },
-              },
-              {
-                type: "emit_inbound",
-                frame: {
-                  id: 5,
-                  error: {
-                    code: mode === "ambiguous" ? -32603 : -32601,
-                    message: "Rejected append",
-                  },
-                },
-              },
-              ...voiceStopEntries(threadId, 6),
-              {
-                type: "emit_inbound",
-                frame: {
-                  method: "thread/realtime/item/completed",
-                  params: {
-                    threadId,
-                    item: {
-                      id: "append-closed",
-                      realtimeSessionId: threadId,
-                      type: "realtimeSessionClosed",
-                      outcome: "ended",
-                    },
-                  },
-                },
-              },
-              ...speechFinalEntries(threadId, turnId),
-              ...(mode === "method-not-found"
-                ? [...voiceStartEntries(threadId, 7), ...voiceStopEntries(threadId, 8)]
-                : []),
-            ],
-          }),
-          (event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.type === "realtime_voice" &&
-            event.turnItem.nativeRealtimeItemId === "append-closed"
-              ? Deferred.succeed(closedPersisted, undefined).pipe(Effect.asVoid)
-              : Effect.void,
-          undefined,
-          undefined,
-          undefined,
-          (method) =>
-            method === "thread/realtime/stop"
-              ? Deferred.succeed(stopReplied, undefined).pipe(Effect.asVoid)
-              : Effect.void,
-        );
-        yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-        });
-        yield* harness.runtime.startTurn(
-          makeCodexTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make(threadId),
-            text: "Request",
-          }),
-        );
-        yield* Deferred.await(stopReplied);
-        yield* Deferred.await(closedPersisted);
-        const replacement = yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-        }).pipe(Effect.result);
-        assert.equal(replacement._tag, mode === "ambiguous" ? "Failure" : "Success");
-        if (mode === "method-not-found")
-          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
-        const replay = yield* Ref.get(harness.replayDriver.state);
-        assert.isNull(replay.failure);
-        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-  );
 
   it.effect(
     "ignores final items and terminal notifications attributed to an unrelated native thread",
     () =>
       Effect.gen(function* () {
-        const threadId = "speech-binding";
+        const threadId = "voice-native-binding";
         const turnId = "bound-turn";
-        const attempt = yield* Deferred.make<unknown>();
-        const appended = yield* Deferred.make<void>();
         const preamble = codexReplayPreamble({
           nativeThreadId: threadId,
           nativeTurnId: turnId,
@@ -1875,30 +1167,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   },
                 },
               },
-              ...speechFinalEntries(threadId, turnId),
-              {
-                type: "expect_outbound",
-                frame: {
-                  id: 5,
-                  method: "thread/realtime/appendSpeech",
-                  params: { threadId, text: "Selected final" },
-                },
-              },
-              { type: "emit_inbound", frame: { id: 5, result: {} } },
-              ...voiceStopEntries(threadId, 6),
+              ...finalAnswerEntries(threadId, turnId),
+              ...voiceStopEntries(threadId, 5),
             ],
           }),
-          undefined,
-          (method, params) =>
-            method === "thread/realtime/appendSpeech"
-              ? Deferred.succeed(attempt, params).pipe(Effect.asVoid)
-              : Effect.void,
-          undefined,
-          undefined,
-          (method) =>
-            method === "thread/realtime/appendSpeech"
-              ? Deferred.succeed(appended, undefined).pipe(Effect.asVoid)
-              : Effect.void,
         );
         yield* harness.runtime.startRealtimeVoice!({
           providerThread: harness.providerThread,
@@ -1913,140 +1185,18 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             text: "Request",
           }),
         );
-        assert.deepEqual(yield* Deferred.await(attempt), { threadId, text: "Selected final" });
-        yield* Deferred.await(appended);
-        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
-        const replay = yield* Ref.get(harness.replayDriver.state);
-        assert.isNull(replay.failure);
-        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-  );
-
-  it.effect.each(["stop", "restart", "native-close", "native-error"] as const)(
-    "does not forward a still-running turn's final after %s",
-    (mode) =>
-      Effect.gen(function* () {
-        const threadId = `speech-stale-${mode}`;
-        const turnId = "old-active-turn";
-        const finalAllowed = yield* Deferred.make<void>();
-        const closedObserved = yield* Deferred.make<void>();
-        const preamble = codexReplayPreamble({
-          nativeThreadId: threadId,
-          nativeTurnId: turnId,
-          prompt: "Request",
-        });
-        const finals = speechFinalEntries(threadId, turnId).map((entry, index) =>
-          index === 0 ? { ...entry, label: "allow-stale-final" } : entry,
-        );
-        const harness = yield* makeCodexReplayHarness(
-          makeCodexReplayTranscript({
-            scenario: threadId,
-            entries: [
-              ...preamble.slice(0, 5),
-              ...voiceStartEntries(threadId, 3),
-              ...preamble
-                .slice(5)
-                .map((entry, index) => (index < 2 ? withReplayRequestId(entry, 4) : entry)),
-              ...(mode === "native-close" || mode === "native-error"
-                ? [
-                    {
-                      type: "emit_inbound" as const,
-                      frame: {
-                        method:
-                          mode === "native-close"
-                            ? "thread/realtime/closed"
-                            : "thread/realtime/error",
-                        params:
-                          mode === "native-close"
-                            ? { threadId, reason: "disconnected" }
-                            : { threadId, message: "native error" },
-                      },
-                    },
-                    ...(mode === "native-error" ? voiceStopEntries(threadId, 5) : []),
-                    {
-                      type: "emit_inbound" as const,
-                      label: "closed-barrier",
-                      frame: {
-                        method: "thread/realtime/item/completed",
-                        params: {
-                          threadId,
-                          item: {
-                            id: "closed-observed",
-                            realtimeSessionId: threadId,
-                            type: "realtimeSessionClosed",
-                            outcome: "ended",
-                          },
-                        },
-                      },
-                    },
-                  ]
-                : [
-                    ...voiceStopEntries(threadId, 5),
-                    {
-                      type: "emit_inbound" as const,
-                      label: "closed-barrier",
-                      frame: {
-                        method: "thread/realtime/item/completed",
-                        params: {
-                          threadId,
-                          item: {
-                            id: "closed-observed",
-                            realtimeSessionId: threadId,
-                            type: "realtimeSessionClosed",
-                            outcome: "ended",
-                          },
-                        },
-                      },
-                    },
-                  ]),
-              ...(mode === "restart" ? voiceStartEntries(threadId, 6) : []),
-              ...finals,
-              ...(mode === "restart" ? voiceStopEntries(threadId, 7) : []),
-            ],
-          }),
-          (event) =>
-            event.type === "turn_item.updated" &&
-            event.turnItem.type === "realtime_voice" &&
-            event.turnItem.nativeRealtimeItemId === "closed-observed"
-              ? Deferred.succeed(closedObserved, undefined).pipe(Effect.asVoid)
-              : Effect.void,
-          undefined,
-          undefined,
-          (entry) =>
-            entry.label === "allow-stale-final" ? Deferred.await(finalAllowed) : Effect.void,
-        );
-        yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-        });
-        yield* harness.runtime.startTurn(
-          makeCodexTestTurnInput({
-            threadId: harness.threadId,
-            providerThread: harness.providerThread,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make(threadId),
-            text: "Request",
-          }),
-        );
-        if (mode === "native-close" || mode === "native-error")
-          yield* Deferred.await(closedObserved);
-        else {
-          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
-          yield* Deferred.await(closedObserved);
-        }
-        if (mode === "restart")
-          yield* harness.runtime.startRealtimeVoice!({
-            providerThread: harness.providerThread,
-            sdp: "offer",
-          });
-        yield* Deferred.succeed(finalAllowed, undefined);
         yield* harness.firstTerminal;
-        if (mode === "restart")
-          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const answers = new Set(
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+              ? [event.turnItem.text]
+              : [],
+          ),
+        );
+        assert.isFalse(answers.has("Foreign final"));
+        assert.isTrue(answers.has("Selected final"));
+        assert.equal(harness.terminalEvents().length, 1);
         const replay = yield* Ref.get(harness.replayDriver.state);
         assert.isNull(replay.failure);
         assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
@@ -2262,149 +1412,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect.each(["pre-ack-final", "rejected-then-accepted"] as const)(
-    "speaks only an accepted human steer result after %s",
-    (mode) =>
-      Effect.gen(function* () {
-        const threadId = `speech-steer-boundary-${mode}`;
-        const turnId = "quiet-turn";
-        const finalsAllowed = yield* Deferred.make<void>();
-        const attempt = yield* Deferred.make<unknown>();
-        const appended = yield* Deferred.make<void>();
-        const preamble = codexReplayPreamble({
-          nativeThreadId: threadId,
-          nativeTurnId: turnId,
-          prompt: "Request",
-        });
-        const nextId = mode === "pre-ack-final" ? 6 : 7;
-        const steerRequest = (id: number): CodexReplay.CodexAppServerReplayEntry => ({
-          type: "expect_outbound",
-          frame: {
-            id,
-            method: "turn/steer",
-            params: { threadId, expectedTurnId: turnId, input: [{ type: "text", text: "Steer" }] },
-          },
-        });
-        const harness = yield* makeCodexReplayHarness(
-          makeCodexReplayTranscript({
-            scenario: threadId,
-            entries: [
-              ...preamble.slice(0, 5),
-              ...voiceStartEntries(threadId, 3),
-              ...preamble
-                .slice(5)
-                .map((entry, index) => (index < 2 ? withReplayRequestId(entry, 4) : entry)),
-              steerRequest(5),
-              ...(mode === "pre-ack-final"
-                ? [
-                    {
-                      type: "emit_inbound" as const,
-                      frame: {
-                        method: "item/completed",
-                        params: {
-                          threadId,
-                          turnId,
-                          item: {
-                            type: "agentMessage",
-                            id: "old-background-final",
-                            text: "Background final",
-                            phase: "final_answer",
-                            memoryCitation: null,
-                          },
-                        },
-                      },
-                    },
-                    { type: "emit_inbound" as const, frame: { id: 5, result: { turnId } } },
-                  ]
-                : [
-                    {
-                      type: "emit_inbound" as const,
-                      frame: { id: 5, error: { code: -32602, message: "Rejected first steer" } },
-                    },
-                    steerRequest(6),
-                    { type: "emit_inbound" as const, frame: { id: 6, result: { turnId } } },
-                  ]),
-              ...speechFinalEntries(threadId, turnId).map((entry, index) =>
-                index === 0 ? { ...entry, label: "post-acceptance-final" } : entry,
-              ),
-              {
-                type: "expect_outbound",
-                frame: {
-                  id: nextId,
-                  method: "thread/realtime/appendSpeech",
-                  params: { threadId, text: "Selected final" },
-                },
-              },
-              { type: "emit_inbound", frame: { id: nextId, result: {} } },
-              ...voiceStopEntries(threadId, nextId + 1),
-            ],
-          }),
-          undefined,
-          (method, params) =>
-            method === "thread/realtime/appendSpeech"
-              ? Deferred.succeed(attempt, params).pipe(Effect.asVoid)
-              : Effect.void,
-          undefined,
-          (entry) =>
-            entry.label === "post-acceptance-final" ? Deferred.await(finalsAllowed) : Effect.void,
-          (method) =>
-            method === "thread/realtime/appendSpeech"
-              ? Deferred.succeed(appended, undefined).pipe(Effect.asVoid)
-              : Effect.void,
-        );
-        yield* harness.runtime.startRealtimeVoice!({
-          providerThread: harness.providerThread,
-          sdp: "offer",
-        });
-        const input = makeCodexTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make(threadId),
-          text: "Request",
-        });
-        yield* harness.runtime.startTurn({
-          ...input,
-          message: { ...input.message, createdBy: "agent", creationSource: "mcp" },
-        });
-        yield* harness.until(() =>
-          harness.events.some(
-            (event) =>
-              event.type === "provider_turn.updated" && event.providerTurn.status === "running",
-          ),
-        );
-        const started = harness.events.find(
-          (event) =>
-            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
-        );
-        if (started?.type !== "provider_turn.updated")
-          return yield* Effect.die("Missing running turn");
-        const steer = {
-          ...input,
-          providerTurnId: started.providerTurn.id,
-          message: { ...input.message, text: "Steer" },
-        };
-        const first = yield* harness.runtime.steerTurn(steer).pipe(Effect.result);
-        assert.equal(first._tag, mode === "pre-ack-final" ? "Success" : "Failure");
-        if (mode === "rejected-then-accepted") yield* harness.runtime.steerTurn(steer);
-        yield* Deferred.succeed(finalsAllowed, undefined);
-        yield* harness.firstTerminal;
-        if (mode === "rejected-then-accepted")
-          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
-        assert.deepEqual(yield* Deferred.await(attempt), { threadId, text: "Selected final" });
-        yield* Deferred.await(appended);
-        if (mode === "pre-ack-final")
-          yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
-        const replay = yield* Ref.get(harness.replayDriver.state);
-        assert.isNull(replay.failure);
-        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
-        ),
-      ),
-  );
-
   it.effect("starts realtime voice with the matching SDP notification and stops it", () =>
     Effect.gen(function* () {
       const nativeThreadId = "voice-sdp-thread";
@@ -2423,7 +1430,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               method: "thread/realtime/start",
               params: {
                 threadId: nativeThreadId,
-                clientManagedHandoffs: true,
                 outputModality: "audio",
                 version: "v3",
                 transport: { type: "webrtc", sdp: "offer" },
@@ -2488,7 +1494,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 method: "thread/realtime/start",
                 params: {
                   threadId: nativeThreadId,
-                  clientManagedHandoffs: true,
                   outputModality: "audio",
                   version: "v3",
                   transport: { type: "webrtc", sdp: "offer" },
@@ -2647,158 +1652,164 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
-  it.effect("rejects legacy and stale owner stops without touching the active modern call", () =>
-    Effect.gen(function* () {
-      const nativeThreadId = "modern-voice-owner";
-      const start = (id: number) => ({
-        type: "expect_outbound" as const,
-        frame: {
-          id,
-          method: "thread/realtime/start",
-          params: {
-            threadId: nativeThreadId,
-            clientManagedHandoffs: true,
-            outputModality: "audio",
-            version: "v3",
-            transport: { type: "webrtc", sdp: "offer" },
-          },
-        },
-      });
-      const answer = (id: number) => [
-        {
-          type: "emit_inbound" as const,
-          frame: {
-            method: "thread/realtime/started",
-            params: { threadId: nativeThreadId, version: "v3", realtimeSessionId: "" },
-          },
-        },
-        { type: "emit_inbound" as const, frame: { id, result: {} } },
-        {
-          type: "emit_inbound" as const,
-          frame: {
-            method: "thread/realtime/sdp",
-            params: { threadId: nativeThreadId, sdp: "answer" },
-          },
-        },
-      ];
-      const stop = (id: number) => [
-        {
+  it.effect.each(["", "reused-native-session"] as const)(
+    "rejects legacy and stale owner stops with native session identity %s",
+    (nativeSessionId) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "modern-voice-owner";
+        const start = (id: number) => ({
           type: "expect_outbound" as const,
-          frame: { id, method: "thread/realtime/stop", params: { threadId: nativeThreadId } },
-        },
-        { type: "emit_inbound" as const, frame: { id, result: {} } },
-        {
-          type: "emit_inbound" as const,
           frame: {
-            method: "thread/realtime/closed",
-            params: { threadId: nativeThreadId, reason: "stopped" },
+            id,
+            method: "thread/realtime/start",
+            params: {
+              threadId: nativeThreadId,
+              outputModality: "audio",
+              version: "v3",
+              transport: { type: "webrtc", sdp: "offer" },
+            },
           },
-        },
-      ];
-      const harness = yield* makeCodexReplayHarness(
-        makeCodexReplayTranscript({
-          scenario: "modern-voice-owner",
-          entries: [
-            ...codexReplayPreamble({
-              nativeThreadId,
-              nativeTurnId: "unused",
-              prompt: "unused",
-            }).slice(0, 5),
-            start(3),
-            ...answer(3),
-            ...stop(4),
-            start(5),
-            ...answer(5),
-            ...stop(6),
-          ],
-        }),
-      );
-      const first = yield* harness.runtime.startRealtimeVoice!({
-        providerThread: harness.providerThread,
-        sdp: "offer",
-        operationId: "owner-a",
-      });
-      const legacyStop = yield* harness.runtime.stopRealtimeVoice!({
-        providerThread: harness.providerThread,
-      }).pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(legacyStop));
-      if (first.voiceSessionToken === undefined)
-        return yield* Effect.die("Modern voice must return an ownership token.");
-      assert.equal(first.operationId, "owner-a");
-      assert.isUndefined(first.nativeRealtimeSessionId);
-      assert.equal(first.providerSessionId, harness.runtime.providerSessionId);
-      assert.equal(first.providerThreadId, harness.providerThread.id);
-      assert.isTrue(yield* harness.runtime.hasActiveRealtimeVoice!());
-      assert.isFalse(
-        yield* harness.runtime.hasActiveRealtimeVoice!({
-          ...harness.providerThread,
-          nativeThreadRef: {
-            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
-            nativeId: "another-thread",
-            strength: "strong",
+        });
+        const answer = (id: number) => [
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "thread/realtime/started",
+              params: {
+                threadId: nativeThreadId,
+                version: "v3",
+                realtimeSessionId: nativeSessionId,
+              },
+            },
           },
-        }),
-      );
-      const duplicate = yield* harness.runtime.startRealtimeVoice!({
-        providerThread: harness.providerThread,
-        sdp: "offer",
-        operationId: "owner-b",
-      }).pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(duplicate));
-      const wrongToken = yield* harness.runtime.stopRealtimeVoice!({
-        providerThread: harness.providerThread,
-        operationId: "owner-a",
-        voiceSessionToken: "wrong-token",
-      }).pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(wrongToken));
-      yield* harness.runtime.stopRealtimeVoice!({
-        providerThread: harness.providerThread,
-        operationId: "owner-a",
-        voiceSessionToken: first.voiceSessionToken,
-      });
-      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
-      const reusedOperation = yield* harness.runtime.startRealtimeVoice!({
-        providerThread: harness.providerThread,
-        sdp: "offer",
-        operationId: "owner-a",
-      }).pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(reusedOperation));
-      const second = yield* harness.runtime.startRealtimeVoice!({
-        providerThread: harness.providerThread,
-        sdp: "offer",
-        operationId: "owner-b",
-      });
-      if (second.voiceSessionToken === undefined)
-        return yield* Effect.die("Modern voice must return an ownership token.");
-      assert.notEqual(second.voiceSessionToken, first.voiceSessionToken);
-      const stale = yield* harness.runtime.stopRealtimeVoice!({
-        providerThread: harness.providerThread,
-        operationId: "owner-a",
-        voiceSessionToken: first.voiceSessionToken,
-      }).pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(stale));
-      const wrongOwner = yield* harness.runtime.stopRealtimeVoice!({
-        providerThread: harness.providerThread,
-        operationId: "other-device",
-        voiceSessionToken: second.voiceSessionToken,
-      }).pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(wrongOwner));
-      assert.isTrue(yield* harness.runtime.hasActiveRealtimeVoice!());
-      yield* harness.runtime.stopRealtimeVoice!({
-        providerThread: harness.providerThread,
-        operationId: "owner-b",
-        voiceSessionToken: second.voiceSessionToken,
-      });
-      yield* harness.runtime.stopRealtimeVoice!({
-        providerThread: harness.providerThread,
-        operationId: "owner-b",
-        voiceSessionToken: second.voiceSessionToken,
-      });
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          { type: "emit_inbound" as const, frame: { id, result: {} } },
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "thread/realtime/sdp",
+              params: { threadId: nativeThreadId, sdp: "answer" },
+            },
+          },
+        ];
+        const stop = (id: number) => [
+          {
+            type: "expect_outbound" as const,
+            frame: { id, method: "thread/realtime/stop", params: { threadId: nativeThreadId } },
+          },
+          { type: "emit_inbound" as const, frame: { id, result: {} } },
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "thread/realtime/closed",
+              params: { threadId: nativeThreadId, reason: "stopped" },
+            },
+          },
+        ];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "modern-voice-owner",
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              start(3),
+              ...answer(3),
+              ...stop(4),
+              start(5),
+              ...answer(5),
+              ...stop(6),
+            ],
+          }),
+        );
+        const first = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "owner-a",
+        });
+        const legacyStop = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(legacyStop));
+        if (first.voiceSessionToken === undefined)
+          return yield* Effect.die("Modern voice must return an ownership token.");
+        assert.equal(first.operationId, "owner-a");
+        assert.equal(first.nativeRealtimeSessionId, nativeSessionId || undefined);
+        assert.equal(first.providerSessionId, harness.runtime.providerSessionId);
+        assert.equal(first.providerThreadId, harness.providerThread.id);
+        assert.isTrue(yield* harness.runtime.hasActiveRealtimeVoice!());
+        assert.isFalse(
+          yield* harness.runtime.hasActiveRealtimeVoice!({
+            ...harness.providerThread,
+            nativeThreadRef: {
+              driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+              nativeId: "another-thread",
+              strength: "strong",
+            },
+          }),
+        );
+        const duplicate = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "owner-b",
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(duplicate));
+        const wrongToken = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-a",
+          voiceSessionToken: "wrong-token",
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(wrongToken));
+        yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-a",
+          voiceSessionToken: first.voiceSessionToken,
+        });
+        assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+        const reusedOperation = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "owner-a",
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(reusedOperation));
+        const second = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "owner-b",
+        });
+        if (second.voiceSessionToken === undefined)
+          return yield* Effect.die("Modern voice must return an ownership token.");
+        assert.notEqual(second.voiceSessionToken, first.voiceSessionToken);
+        assert.equal(second.nativeRealtimeSessionId, first.nativeRealtimeSessionId);
+        const stale = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-a",
+          voiceSessionToken: first.voiceSessionToken,
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(stale));
+        const wrongOwner = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "other-device",
+          voiceSessionToken: second.voiceSessionToken,
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(wrongOwner));
+        assert.isTrue(yield* harness.runtime.hasActiveRealtimeVoice!());
+        yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-b",
+          voiceSessionToken: second.voiceSessionToken,
+        });
+        yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-b",
+          voiceSessionToken: second.voiceSessionToken,
+        });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
       ),
-    ),
   );
 
   it.effect(
@@ -2823,7 +1834,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   method: "thread/realtime/start",
                   params: {
                     threadId: nativeThreadId,
-                    clientManagedHandoffs: true,
                     outputModality: "audio",
                     version: "v3",
                     transport: { type: "webrtc", sdp: "offer" },
@@ -2903,7 +1913,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         method: "thread/realtime/start",
         params: {
           threadId: nativeThreadId,
-          clientManagedHandoffs: true,
           outputModality: "audio",
           version: "v3",
           transport: { type: "webrtc", sdp: "offer" },
@@ -3050,7 +2059,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           method: "thread/realtime/start",
           params: {
             threadId: nativeThreadId,
-            clientManagedHandoffs: true,
             outputModality: "audio",
             version: "v3",
             transport: { type: "webrtc", sdp: "offer" },
@@ -3616,7 +2624,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   method: "thread/realtime/start",
                   params: {
                     threadId: nativeThreadId,
-                    clientManagedHandoffs: true,
                     outputModality: "audio",
                     version: "v3",
                     transport: { type: "webrtc", sdp: "offer" },
@@ -3953,7 +2960,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 method: "thread/realtime/start",
                 params: {
                   threadId: nativeThreadId,
-                  clientManagedHandoffs: true,
                   outputModality: "audio",
                   version: "v3",
                   transport: { type: "webrtc", sdp: "offer" },
@@ -4006,7 +3012,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           method: "thread/realtime/start",
           params: {
             threadId: nativeThreadId,
-            clientManagedHandoffs: true,
             outputModality: "audio",
             version: "v3",
             transport: { type: "webrtc", sdp: "offer" },
@@ -4132,7 +3137,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   method: "thread/realtime/start",
                   params: {
                     threadId: nativeThreadId,
-                    clientManagedHandoffs: true,
                     outputModality: "audio",
                     version: "v3",
                     transport: { type: "webrtc", sdp: "offer" },
