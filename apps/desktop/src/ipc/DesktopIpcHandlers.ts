@@ -1,5 +1,8 @@
 import * as Effect from "effect/Effect";
 
+import * as ElectronPowerMonitor from "../electron/ElectronPowerMonitor.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as IpcChannels from "./channels.ts";
 import { receiveProviderAuthCallback, cancelProviderAuthCallback } from "./methods/providerAuth.ts";
 import * as DesktopIpc from "./DesktopIpc.ts";
 import { installNotificationBadge } from "./methods/notificationBadge.ts";
@@ -84,10 +87,25 @@ import {
   uninstallCliCommand,
 } from "./methods/cliCommand.ts";
 
+// Voice keeps running while the window is hidden, so lock and sleep must reach the renderer directly.
+const installVoicePrivacyPauseForwarding = Effect.fn("desktop.ipc.installVoicePrivacyPause")(
+  function* () {
+    const powerMonitor = yield* ElectronPowerMonitor.ElectronPowerMonitor;
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const runFork = Effect.runForkWith(yield* Effect.context<never>());
+    const pause = () => {
+      runFork(electronWindow.sendAll(IpcChannels.VOICE_PRIVACY_PAUSE_CHANNEL));
+    };
+    yield* powerMonitor.onSimpleEvent("lock-screen", pause);
+    yield* powerMonitor.onSimpleEvent("suspend", pause);
+  },
+);
+
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
   const ipc = yield* DesktopIpc.DesktopIpc;
   yield* installNotificationBadge();
   yield* PreviewIpc.installPreviewEventForwarding();
+  yield* installVoicePrivacyPauseForwarding();
 
   yield* ipc.handle(AppActivationIpc.setReady);
   yield* ipc.handle(AppActivationIpc.complete);

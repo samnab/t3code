@@ -17,9 +17,11 @@ import { createBrowserVoiceTransport } from "../../voice/browserVoiceTransport";
 import { randomUUID } from "../../lib/utils";
 import {
   createRealtimeVoiceController,
+  type RealtimeVoiceController,
   type VoiceOwner,
   type VoiceSnapshot,
 } from "@t3tools/client-runtime/realtime-voice";
+import { realtimeVoiceShortcutAction } from "../../keybindings";
 import {
   readVoiceOwner,
   validateVoiceOwner,
@@ -37,11 +39,33 @@ function requireSuccess<A, E>(result: AtomCommandResult<A, E>): A {
   if (AsyncResult.isFailure(result)) throw Cause.squash(result.cause);
   return result.value;
 }
+function reportUnavailable(error: unknown) {
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Voice unavailable",
+      description: describeError(error),
+    }),
+  );
+}
+// Re-reads the paused conversation so Resume uses its current provider binding and grants.
+function resumeVoice(controller: RealtimeVoiceController) {
+  const snapshot = controller.getSnapshot();
+  if (snapshot.mode !== "paused") return;
+  try {
+    const owner = readVoiceOwner(snapshot.owner.environmentId, snapshot.owner.threadId);
+    void controller.resume(owner).catch(reportUnavailable);
+  } catch (error) {
+    reportUnavailable(error);
+  }
+}
 
 interface VoiceContext {
   readonly snapshot: VoiceSnapshot;
   readonly start: (environmentId: EnvironmentId, threadId: ThreadId) => void;
   readonly move: (environmentId: EnvironmentId, threadId: ThreadId) => void;
+  readonly pause: () => void;
+  readonly resume: () => void;
   readonly end: () => void;
   readonly returnToOwner: (owner: VoiceOwner) => void;
 }
@@ -116,38 +140,48 @@ export function RealtimeVoiceProvider({
   }, [controller]);
   useEffect(() => {
     const end = () => controller.end("Voice ended because the app is closing or suspended.");
+    // Desktop voice outlives a hidden window; screen lock and sleep pause it instead.
+    // Window blur never pauses: talking while using another app is the point.
     const hidden = () => {
       if (!window.desktopBridge && document.visibilityState === "hidden") {
-        controller.end("Microphone off because this browser tab was hidden.");
+        controller.pause("Paused because this browser tab was hidden.");
       }
     };
     const offline = () => controller.end("Voice ended because the network became unavailable.");
+    const stopDesktopPause = window.desktopBridge?.onVoicePrivacyPause?.(() =>
+      controller.pause("Paused because this computer locked or went to sleep."),
+    );
+    const shortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || controller.getSnapshot().mode === "off") return;
+      const action = realtimeVoiceShortcutAction(event);
+      if (action === null) return;
+      event.preventDefault();
+      if (event.repeat) return;
+      if (action === "micOff") controller.end();
+      else if (controller.getSnapshot().mode === "paused") resumeVoice(controller);
+      else controller.pause();
+    };
     window.addEventListener("pagehide", end);
     window.addEventListener("offline", offline);
+    window.addEventListener("keydown", shortcut);
     document.addEventListener("freeze", end);
     document.addEventListener("visibilitychange", hidden);
     return () => {
       end();
+      stopDesktopPause?.();
       window.removeEventListener("pagehide", end);
       window.removeEventListener("offline", offline);
+      window.removeEventListener("keydown", shortcut);
       document.removeEventListener("freeze", end);
       document.removeEventListener("visibilitychange", hidden);
     };
   }, [controller]);
   const invoke = (environmentId: EnvironmentId, threadId: ThreadId, moving: boolean) => {
-    const failed = (error: unknown) =>
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Voice unavailable",
-          description: describeError(error),
-        }),
-      );
     try {
       const owner = readVoiceOwner(environmentId, threadId);
-      void (moving ? controller.move(owner) : controller.start(owner)).catch(failed);
+      void (moving ? controller.move(owner) : controller.start(owner)).catch(reportUnavailable);
     } catch (error) {
-      failed(error);
+      reportUnavailable(error);
     }
   };
   return (
@@ -156,6 +190,8 @@ export function RealtimeVoiceProvider({
         snapshot,
         start: (environmentId, threadId) => invoke(environmentId, threadId, false),
         move: (environmentId, threadId) => invoke(environmentId, threadId, true),
+        pause: () => controller.pause(),
+        resume: () => resumeVoice(controller),
         end: () => controller.end(),
         returnToOwner,
       }}

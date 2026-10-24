@@ -1,5 +1,5 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { AudioLinesIcon, MicIcon } from "lucide-react";
+import { AudioLinesIcon, MicIcon, MicOffIcon } from "lucide-react";
 import { VOICE_REPLACEMENT_GATE } from "@t3tools/client-runtime/realtime-voice";
 import { useRealtimeVoice } from "../voice/RealtimeVoiceProvider";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -15,21 +15,26 @@ export function RealtimeVoiceControl({
   threadId: ThreadId;
   size: ComposerControlSize;
 }) {
-  const { snapshot, start, move, end, returnToOwner } = useRealtimeVoice();
+  const { snapshot, start, move, resume, end, returnToOwner } = useRealtimeVoice();
   const owner = snapshot.owner;
   const isOwner = owner?.environmentId === environmentId && owner.threadId === threadId;
+  const paused = snapshot.mode === "paused" || snapshot.mode === "pausing";
+  const settling = snapshot.mode === "ending" || snapshot.mode === "pausing";
   const tooltip =
     owner !== null
       ? isOwner
-        ? "End voice in this conversation"
-        : `Voice in ${owner.threadTitle} · Return to conversation`
+        ? paused
+          ? "Voice paused · nothing is sent. Resume voice in this conversation"
+          : "End voice in this conversation"
+        : `${paused ? "Voice paused" : "Voice"} in ${owner.threadTitle} · Return to conversation`
       : snapshot.replacementBlocked
         ? [snapshot.reason, VOICE_REPLACEMENT_GATE].filter(Boolean).join(" ")
         : (snapshot.reason ?? "Talk with Codex by voice");
   const activate = () => {
     if (owner !== null) {
-      if (isOwner) end();
-      else returnToOwner(owner);
+      if (!isOwner) returnToOwner(owner);
+      else if (paused) resume();
+      else end();
     } else start(environmentId, threadId);
   };
   return (
@@ -40,10 +45,10 @@ export function RealtimeVoiceControl({
             <ComposerControl
               size={size}
               className="shrink-0 whitespace-nowrap"
-              aria-pressed={isOwner && snapshot.mode !== "ending"}
+              aria-pressed={isOwner && !settling && !paused}
               type="button"
               disabled={
-                (isOwner && snapshot.mode === "ending") ||
+                (isOwner && (settling || (paused && snapshot.replacementBlocked))) ||
                 (owner === null && snapshot.replacementBlocked)
               }
               onClick={activate}
@@ -52,7 +57,7 @@ export function RealtimeVoiceControl({
           }
         >
           <ComposerControlIcon
-            icon={owner !== null ? AudioLinesIcon : MicIcon}
+            icon={paused ? MicOffIcon : owner !== null ? AudioLinesIcon : MicIcon}
             size={size}
             opticalSize={size === "xs" ? "default" : "large"}
           />
@@ -61,7 +66,9 @@ export function RealtimeVoiceControl({
               ? "Voice elsewhere"
               : snapshot.mode === "connecting"
                 ? "Cancel voice"
-                : "Voice"}
+                : paused
+                  ? "Resume voice"
+                  : "Voice"}
           </span>
         </TooltipTrigger>
         <TooltipPopup side="top">{tooltip}</TooltipPopup>
@@ -73,7 +80,7 @@ export function RealtimeVoiceControl({
               <ComposerControl
                 size={size}
                 type="button"
-                disabled={snapshot.mode === "ending" || snapshot.replacementBlocked}
+                disabled={settling || snapshot.replacementBlocked}
                 onClick={() => move(environmentId, threadId)}
                 aria-label={`End voice in ${owner.threadTitle} and talk in this conversation`}
               />

@@ -1044,6 +1044,8 @@ export interface DesktopBridge {
   setNotificationBadge?: (badge: { count: number; image: string | null }) => Promise<void>;
   onNotificationBadgeClear?: (listener: () => void) => () => void;
   onTrackpadScrollEnd?: (listener: () => void) => () => void;
+  /** Screen lock and system suspend. Carries no payload and can only pause voice, never resume it. */
+  onVoicePrivacyPause?: (listener: () => void) => () => void;
   /**
    * Renderer `window.focus()` cannot raise an Electron window, and on Wayland
    * only the main process can spend a notification click's activation token.
