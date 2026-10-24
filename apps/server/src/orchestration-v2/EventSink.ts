@@ -1,4 +1,5 @@
 import {
+  TurnItemId,
   CommandId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
@@ -345,19 +346,34 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
+      // Check durable state inside the write transaction, including duplicates in one batch.
+      const seenVoiceItems = new Set<TurnItemId>();
       return Effect.forEach(
         events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
+        (event): Effect.Effect<ReadonlyArray<OrchestrationV2DomainEvent>, unknown> =>
+          Effect.gen(function* () {
+            if (event.type !== "turn-item.updated") return [event];
+            if (event.payload.type === "realtime_voice") {
+              if (seenVoiceItems.has(event.payload.id)) return [];
+              seenVoiceItems.add(event.payload.id);
+              const existing = yield* projectionStore.getTurnItem({
+                threadId: event.threadId,
+                itemId: event.payload.id,
+              });
+              if (
+                existing?.type === "realtime_voice" &&
+                existing.captureState === "canonical_completed"
+              )
+                return [];
+            }
+            const payload = yield* turnItemPositions.normalize(
+              event.payload,
+              event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
+            );
+            return [{ ...event, payload }];
+          }),
         { concurrency: 1 },
-      );
+      ).pipe(Effect.map((batches) => batches.flat()));
     };
 
     const applyStoredEvents =

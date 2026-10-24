@@ -1100,6 +1100,184 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect(
+    "captures canonical voice completions without adopting transcript history as work",
+    () =>
+      Effect.gen(function* () {
+        const nativeThreadId = "voice-sdp-thread";
+        const transcript = makeCodexReplayTranscript({
+          scenario: "voice-sdp",
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "thread/realtime/start",
+                params: {
+                  threadId: nativeThreadId,
+                  outputModality: "audio",
+                  version: "v3",
+                  transport: { type: "webrtc", sdp: "offer" },
+                },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 3, result: {} } },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/sdp",
+                params: { threadId: "unrelated", sdp: "wrong-answer" },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/item/started",
+                params: {
+                  threadId: nativeThreadId,
+                  item: {
+                    id: "user",
+                    realtimeSessionId: "old",
+                    type: "transcriptSegment",
+                    role: "user",
+                    text: "provisional",
+                  },
+                },
+              },
+            },
+            ...[
+              {
+                threadId: nativeThreadId,
+                item: { id: "opened", realtimeSessionId: "old", type: "realtimeSessionStarted" },
+              },
+              {
+                threadId: "unbound",
+                item: {
+                  id: "unknown",
+                  realtimeSessionId: "old",
+                  type: "transcriptSegment",
+                  role: "user",
+                  text: "wrong thread",
+                },
+              },
+              ...["user", "assistant"].map((role) => ({
+                threadId: nativeThreadId,
+                item: {
+                  id: role,
+                  realtimeSessionId: "old",
+                  type: "transcriptSegment",
+                  role,
+                  text: "yes",
+                },
+              })),
+              {
+                threadId: nativeThreadId,
+                item: {
+                  id: "user",
+                  realtimeSessionId: "new",
+                  type: "transcriptSegment",
+                  role: "user",
+                  text: "yes",
+                },
+              },
+              {
+                threadId: nativeThreadId,
+                item: {
+                  id: "promotion",
+                  realtimeSessionId: "old",
+                  type: "bemItemPromoted",
+                  item_id: "coding-item",
+                  turn_id: "coding-turn",
+                  presentation: { type: "wholeItem" },
+                },
+              },
+              {
+                threadId: nativeThreadId,
+                item: {
+                  id: "closed",
+                  realtimeSessionId: "old",
+                  type: "realtimeSessionClosed",
+                  outcome: "ended",
+                },
+              },
+            ].map((params) => ({
+              type: "emit_inbound" as const,
+              frame: { method: "thread/realtime/item/completed", params },
+            })),
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/item/transcript/delta",
+                params: { threadId: nativeThreadId, itemId: "user", delta: "late must not append" },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/transcript/done",
+                params: { threadId: nativeThreadId, role: "user", text: "flat must not duplicate" },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/sdp",
+                params: { threadId: nativeThreadId, sdp: "answer" },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/realtime/stop",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        assert.deepEqual(
+          yield* harness.runtime.startRealtimeVoice!({
+            providerThread: harness.providerThread,
+            sdp: "offer",
+          }),
+          { sdp: "answer" },
+        );
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const voiceItems = () =>
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "realtime_voice"
+              ? [event.turnItem]
+              : [],
+          );
+        yield* harness.until(() => voiceItems().length === 6);
+        const items = voiceItems();
+        assert.equal(new Set(items.map((item) => item.id)).size, 6);
+        assert.deepEqual(
+          items
+            .slice(1, 4)
+            .map((item) => (item.content.type === "transcriptSegment" ? item.content.text : null)),
+          ["yes", "yes", "yes"],
+        );
+        assert.deepEqual(
+          items.slice(1, 4).map((item) => item.realtimeSessionId),
+          ["old", "old", "new"],
+        );
+        assert.isTrue(items.every((item) => item.runId === null && item.nodeId === null));
+        assert.lengthOf(harness.continuationRequests, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
   const heldVoiceEntries = (
     nativeThreadId: string,
     nativeTurnId: string,

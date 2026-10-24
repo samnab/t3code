@@ -22,6 +22,7 @@ export interface TurnItemPositionStoreV2Shape {
     readonly turnItemId: TurnItemId;
     readonly runId: RunId | null;
     readonly runOrdinal?: number;
+    readonly appendAfterLatest?: boolean;
   }) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
     item: OrchestrationV2TurnItem,
@@ -42,7 +43,13 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
     const allocate: TurnItemPositionStoreV2Shape["allocate"] =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(
-        function* ({ threadId, turnItemId, runId, runOrdinal: suppliedRunOrdinal }) {
+        function* ({
+          threadId,
+          turnItemId,
+          runId,
+          runOrdinal: suppliedRunOrdinal,
+          appendAfterLatest,
+        }) {
           const existing = yield* sql<{ readonly ordinal: number }>`
           SELECT ordinal
           FROM orchestration_v2_turn_item_positions
@@ -62,7 +69,11 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
               `;
           const runOrdinal = suppliedRunOrdinal ?? runRows[0]?.ordinal ?? null;
           const lowerBound = runOrdinal === null ? 0 : runOrdinal * 1_000_000;
-          const upperBound = runOrdinal === null ? 999_999 : lowerBound + 999_999;
+          const upperBound = appendAfterLatest
+            ? Number.MAX_SAFE_INTEGER
+            : runOrdinal === null
+              ? 999_999
+              : lowerBound + 999_999;
           yield* sql`
           INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
           SELECT
@@ -108,6 +119,8 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           threadId: item.threadId,
           turnItemId: item.id,
           runId: item.runId,
+          // Live voice has no run bucket. Native ordering is reconciled separately.
+          ...(item.type === "realtime_voice" ? { appendAfterLatest: true } : {}),
           ...(runOrdinal === undefined ? {} : { runOrdinal }),
         }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal }))),
     });

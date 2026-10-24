@@ -17,12 +17,13 @@ import {
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderThreadId,
+  ProviderThreadId,
   ProviderTurnId,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
   TurnItemId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -2186,3 +2187,131 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 });
+
+it.effect(
+  "persists canonical voice once without a run and never routes it to coding subscribers",
+  () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const now = yield* DateTime.now;
+      const created = yield* threadCreatedEvent(now);
+      yield* eventSink.write({ events: [created] });
+      const threadId = created.threadId;
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const source = {
+        providerInstanceId: modelSelection.instanceId,
+        nativeThreadId: "native:voice",
+        realtimeSessionId: "session:one",
+        nativeItemId: "item:one",
+      };
+      const item = {
+        id: ids.derive.realtimeVoiceTurnItem(source),
+        threadId,
+        type: "realtime_voice",
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: now,
+        updatedAt: now,
+        providerInstanceId: source.providerInstanceId,
+        nativeThreadId: source.nativeThreadId,
+        realtimeSessionId: source.realtimeSessionId,
+        nativeRealtimeItemId: source.nativeItemId,
+        content: { type: "transcriptSegment", role: "user", text: "yes" },
+        captureState: "canonical_completed",
+        historyCoverage: "live_only",
+        sourceOrder: "unreconciled",
+        timestampProvenance: "observed",
+      } satisfies OrchestrationV2TurnItem;
+      const event = { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: item } as const;
+      const input = {
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+        event,
+      };
+      const normalized = yield* ingestor.normalize(input);
+      assert.lengthOf(yield* eventSink.write({ events: [...normalized, ...normalized] }), 1);
+      assert.lengthOf(yield* ingestor.ingestNormalized(input), 0);
+      const replay = {
+        ...input,
+        event: {
+          ...event,
+          turnItem: {
+            ...item,
+            content: { ...item.content, text: "must not replace committed speech" },
+            updatedAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) + 1000),
+          },
+        },
+      };
+      const duplicates = yield* Effect.all(
+        [ingestor.ingestNormalized(replay), ingestor.ingestNormalized(replay)],
+        { concurrency: "unbounded" },
+      );
+      assert.deepEqual(
+        duplicates.map((events) => events.length),
+        [0, 0],
+      );
+      const saved = yield* projections.getTurnItem({ threadId, itemId: item.id });
+      assert.equal(saved?.type, "realtime_voice");
+      if (saved?.type === "realtime_voice" && saved.content.type === "transcriptSegment") {
+        assert.equal(saved.content.text, "yes");
+        assert.deepEqual(saved.updatedAt, now);
+      }
+      const otherSession = { ...source, realtimeSessionId: "session:two" };
+      const otherInstance = {
+        ...source,
+        providerInstanceId: ProviderInstanceId.make("other-codex"),
+      };
+      assert.notEqual(ids.derive.realtimeVoiceTurnItem(otherSession), item.id);
+      assert.notEqual(ids.derive.realtimeVoiceTurnItem(otherInstance), item.id);
+      assert.notEqual(
+        ids.derive.realtimeVoiceTurnItem({ ...source, nativeThreadId: "other:thread" }),
+        item.id,
+      );
+      assert.notEqual(
+        ids.derive.realtimeVoiceTurnItem({ ...source, nativeItemId: "item:two" }),
+        item.id,
+      );
+      assert.lengthOf(
+        yield* ingestor.ingestNormalized({
+          ...input,
+          event: {
+            ...event,
+            turnItem: {
+              ...item,
+              id: ids.derive.realtimeVoiceTurnItem(otherSession),
+              realtimeSessionId: otherSession.realtimeSessionId,
+            },
+          },
+        }),
+        1,
+      );
+      const identity: ProviderEventRouteIdentity = {
+        threadId: ThreadId.make("root"),
+        runId: RunId.make("run:root"),
+        attemptId: RunAttemptId.make("attempt:root"),
+        providerThreadId: ProviderThreadId.make("provider:root"),
+      };
+      const routing = makeProviderEventRoutingState({ identity, providerTurnId: null });
+      assert.isFalse(
+        routeProviderEvent(event, identity, {
+          ...routing,
+          ownedThreadIds: new Set([threadId]),
+        })[0],
+      );
+      assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
+    }).pipe(Effect.provide(layerTest)),
+);

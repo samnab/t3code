@@ -10,6 +10,7 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
   type Project,
   ProjectId,
   ProviderDriverKind,
@@ -3500,5 +3501,106 @@ it.effect(
         projectExists: false,
       });
       assert.isFalse(denied?.capabilities?.has("device"));
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 persists bound canonical voice without any run subscriber",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("voice-owner");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              type: "provider-thread.updated",
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const item = {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "old-session",
+            nativeItemId: "speech",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "old-session",
+          nativeRealtimeItemId: "speech",
+          content: { type: "transcriptSegment", role: "assistant", text: "durable speech" },
+          captureState: "canonical_completed",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        } satisfies OrchestrationV2TurnItem;
+        const afterSequence = yield* sink.latestSequence({ threadId });
+        const persisted = yield* sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter((stored) => stored.event.type === "turn-item.updated"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(events);
+        yield* Queue.offerAll(events!, [
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...item, providerInstanceId: ProviderInstanceId.make("wrong-provider") },
+          },
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...item, nativeThreadId: "wrong-native-thread" },
+          },
+          { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: item },
+        ]);
+        const committed = Array.from(yield* Fiber.join(persisted));
+        assert.lengthOf(committed, 1);
+        const stored = yield* projections.getTurnItem({ threadId, itemId: item.id });
+        assert.equal(stored?.type, "realtime_voice");
+        if (stored?.type === "realtime_voice") {
+          assert.equal(stored.nativeThreadId, "native-thread");
+          assert.equal(stored.providerInstanceId, modelSelection.instanceId);
+          assert.equal(stored.realtimeSessionId, "old-session");
+        }
+        assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
     }),
 );

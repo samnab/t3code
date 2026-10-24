@@ -485,6 +485,8 @@ export function routeProviderEvent(
     case "message.updated":
       return [ownsRun(event.message.runId) || ownsChildThread(event.message.threadId), state];
     case "turn_item.updated": {
+      // Voice history belongs to the session pump, including records on child threads.
+      if (event.turnItem.type === "realtime_voice") return [false, state];
       if (ownsRun(event.turnItem.runId) || ownsChildThread(event.turnItem.threadId)) {
         return [true, state];
       }

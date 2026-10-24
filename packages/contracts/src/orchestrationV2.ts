@@ -1402,7 +1402,44 @@ const OrchestrationV2SecretRequestFields = {
   secretStatus: OrchestrationV2SecretRequestStatus,
 } as const;
 
+// Canonical provider history is descriptive. Promoted items reference work owned by the run path.
+const RealtimeVoiceContent = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("realtimeSessionStarted") }),
+  Schema.Struct({
+    type: Schema.Literal("transcriptSegment"),
+    role: Schema.Literals(["user", "assistant"]),
+    text: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("bemItemPromoted"),
+    item_id: TrimmedNonEmptyString,
+    turn_id: TrimmedNonEmptyString,
+    presentation: Schema.Union([
+      Schema.Struct({ type: Schema.Literal("wholeItem") }),
+      Schema.Struct({ type: Schema.Literal("inlineMarkdown") }),
+      Schema.Struct({ type: Schema.Literal("inlineVisualization"), index: NonNegativeInt }),
+    ]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("realtimeSessionClosed"),
+    outcome: Schema.Literals(["ended", "failed"]),
+  }),
+]);
+
 export const OrchestrationV2TurnItem = Schema.Union([
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    type: Schema.Literal("realtime_voice"),
+    providerInstanceId: ProviderInstanceId,
+    nativeThreadId: TrimmedNonEmptyString,
+    realtimeSessionId: TrimmedNonEmptyString,
+    nativeRealtimeItemId: TrimmedNonEmptyString,
+    content: RealtimeVoiceContent,
+    captureState: Schema.Literal("canonical_completed"),
+    historyCoverage: Schema.Literal("live_only"),
+    sourceOrder: Schema.Literal("unreconciled"),
+    timestampProvenance: Schema.Literal("observed"),
+  }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("notification"),
@@ -2209,6 +2246,19 @@ const OrchestrationV2TurnItemJsonBaseFields = {
 } as const;
 
 export const OrchestrationV2TurnItemJson = Schema.Union([
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    type: Schema.Literal("realtime_voice"),
+    providerInstanceId: ProviderInstanceId,
+    nativeThreadId: TrimmedNonEmptyString,
+    realtimeSessionId: TrimmedNonEmptyString,
+    nativeRealtimeItemId: TrimmedNonEmptyString,
+    content: RealtimeVoiceContent,
+    captureState: Schema.Literal("canonical_completed"),
+    historyCoverage: Schema.Literal("live_only"),
+    sourceOrder: Schema.Literal("unreconciled"),
+    timestampProvenance: Schema.Literal("observed"),
+  }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("notification"),

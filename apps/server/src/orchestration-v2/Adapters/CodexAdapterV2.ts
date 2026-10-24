@@ -5013,6 +5013,53 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           updateSubagentSelection(payload.threadId, payload.toModel),
         );
 
+        yield* client.handleServerNotification("thread/realtime/item/completed", (payload) =>
+          Effect.gen(function* () {
+            const providerThread = rootProviderThreads.get(payload.threadId);
+            if (providerThread?.appThreadId == null) return;
+            const now = yield* DateTime.now;
+            yield* emitProviderEvent({
+              type: "turn_item.updated",
+              driver: CODEX_PROVIDER,
+              turnItem: {
+                id: idAllocator.derive.realtimeVoiceTurnItem({
+                  providerInstanceId: adapterOptions.instanceId,
+                  nativeThreadId: payload.threadId,
+                  realtimeSessionId: payload.item.realtimeSessionId,
+                  nativeItemId: payload.item.id,
+                }),
+                threadId: providerThread.appThreadId,
+                runId: null,
+                nodeId: null,
+                providerThreadId: providerThread.id,
+                providerTurnId: null,
+                nativeItemRef: {
+                  driver: CODEX_PROVIDER,
+                  nativeId: payload.item.id,
+                  strength: "strong",
+                },
+                parentItemId: null,
+                ordinal: 0,
+                status: "completed",
+                title: null,
+                startedAt: null,
+                completedAt: now,
+                updatedAt: now,
+                type: "realtime_voice",
+                providerInstanceId: adapterOptions.instanceId,
+                nativeThreadId: payload.threadId,
+                realtimeSessionId: payload.item.realtimeSessionId,
+                nativeRealtimeItemId: payload.item.id,
+                content: payload.item,
+                captureState: "canonical_completed",
+                historyCoverage: "live_only",
+                sourceOrder: "unreconciled",
+                timestampProvenance: "observed",
+              },
+            });
+          }),
+        );
+
         yield* client.handleServerNotification("thread/realtime/sdp", (payload) =>
           Effect.gen(function* () {
             const answer = realtimeAnswers.get(payload.threadId);

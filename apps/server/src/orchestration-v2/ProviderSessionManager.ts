@@ -2023,6 +2023,62 @@ export const layerWithOptions = (
                       });
                     });
                   }
+                  // Canonical speech is session history even when no coding run is subscribed.
+                  if (
+                    event.type === "turn_item.updated" &&
+                    event.turnItem.type === "realtime_voice"
+                  ) {
+                    const item = event.turnItem;
+                    yield* Effect.gen(function* () {
+                      const current = (yield* Ref.get(sessions)).get(
+                        sessionKey(entry.runtime.providerSessionId),
+                      );
+                      if (
+                        current?.runtime !== entry.runtime ||
+                        !current.attachedThreadIds.has(item.threadId) ||
+                        item.providerInstanceId !== entry.runtime.instanceId ||
+                        item.providerThreadId === null
+                      )
+                        return;
+                      const thread = yield* projectionStore.getThread(item.threadId);
+                      if (
+                        thread?.activeProviderThreadId !== item.providerThreadId ||
+                        thread.providerInstanceId !== item.providerInstanceId ||
+                        thread.deletedAt !== null
+                      )
+                        return;
+                      const { providerThreads } = yield* projectionStore.getThreadRecords(
+                        item.threadId,
+                        ["providerThreads"],
+                      );
+                      const providerThread = providerThreads.find(
+                        (candidate) => candidate.id === item.providerThreadId,
+                      );
+                      if (
+                        providerThread?.appThreadId !== item.threadId ||
+                        providerThread.providerSessionId !== entry.runtime.providerSessionId ||
+                        providerThread.nativeThreadRef?.nativeId !== item.nativeThreadId
+                      )
+                        return;
+                      yield* providerEventIngestor.ingestNormalized({
+                        providerSessionId: entry.runtime.providerSessionId,
+                        providerInstanceId: entry.runtime.instanceId,
+                        threadId: item.threadId,
+                        event,
+                      });
+                    }).pipe(
+                      entry.requestEventPermit.withPermits(1),
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapter.ProviderAdapterEventStreamError({
+                            driver: entry.runtime.driver,
+                            providerSessionId: entry.runtime.providerSessionId,
+                            cause,
+                          }),
+                      ),
+                    );
+                    return;
+                  }
                   // Some providers can block before a run subscriber exists
                   // (project trust, login, or session-switch hooks). Persist
                   // their runless request artifacts directly so the normal T3

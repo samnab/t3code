@@ -56,3 +56,32 @@ it.effect("reuses an item's position without attempting another allocation inser
     );
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("appends live voice after existing coding items instead of the runless bucket", () =>
+  Effect.gen(function* () {
+    const positions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+    const threadId = ThreadId.make("thread:voice-order");
+    const coding = yield* positions.allocate({
+      threadId,
+      turnItemId: TurnItemId.make("coding"),
+      runId: RunId.make("run:voice-order"),
+      runOrdinal: 2,
+    });
+    const voice = yield* positions.allocate({
+      threadId,
+      turnItemId: TurnItemId.make("voice"),
+      runId: null,
+      appendAfterLatest: true,
+    });
+    assert.equal(voice, coding + 1);
+    assert.equal(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("voice"),
+        runId: null,
+        appendAfterLatest: true,
+      }),
+      voice,
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
