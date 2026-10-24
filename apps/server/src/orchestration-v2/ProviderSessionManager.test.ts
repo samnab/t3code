@@ -476,6 +476,11 @@ function layerTest(input: {
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
   readonly failVoiceWrites?: boolean;
+  /** Fails voice marker writes while positive, signalling each attempt. */
+  readonly failVoiceMarkers?: {
+    readonly remaining: Ref.Ref<number>;
+    readonly attempted: Queue.Queue<void>;
+  };
   readonly pauseVoiceMarkerWrite?: {
     readonly paused: Deferred.Deferred<void>;
     readonly resume: Deferred.Deferred<void>;
@@ -543,17 +548,46 @@ function layerTest(input: {
       });
     }),
   ).pipe(Layer.provide(layerTestEventSink));
+  const failVoiceMarkers = input.failVoiceMarkers;
+  const layerMarkerFailingSink = Layer.effect(
+    EventSink.EventSinkV2,
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      return EventSink.EventSinkV2.of({
+        ...sink,
+        write: (input) =>
+          Effect.gen(function* () {
+            const marker = input.events.some(
+              (event) =>
+                event.type === "turn-item.updated" &&
+                event.payload.type === "error" &&
+                event.payload.failure.code === "voice_history_incomplete",
+            );
+            if (marker && failVoiceMarkers !== undefined) {
+              yield* Queue.offer(failVoiceMarkers.attempted, undefined);
+              if ((yield* Ref.getAndUpdate(failVoiceMarkers.remaining, (n) => n - 1)) > 0)
+                return yield* new EventSink.EventSinkWriteError({
+                  eventCount: input.events.length,
+                });
+            }
+            return yield* sink.write(input);
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(layerTestEventSink));
   const layerConfiguredEventSink = input.failVoiceWrites
     ? layerVoiceFailingSink
-    : input.flakyReleaseWrites !== undefined
-      ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
-      : input.pauseAttachWrite !== undefined
-        ? layerPausingAttachEventSink(input.pauseAttachWrite)
-        : input.beforeUnchangedWrite !== undefined
-          ? layerBeforeUnchangedWriteEventSink(input.beforeUnchangedWrite)
-          : input.failReleaseEventWrites
-            ? layerFailingReleaseEventSink
-            : layerTestEventSink;
+    : failVoiceMarkers !== undefined
+      ? layerMarkerFailingSink
+      : input.flakyReleaseWrites !== undefined
+        ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
+        : input.pauseAttachWrite !== undefined
+          ? layerPausingAttachEventSink(input.pauseAttachWrite)
+          : input.beforeUnchangedWrite !== undefined
+            ? layerBeforeUnchangedWriteEventSink(input.beforeUnchangedWrite)
+            : input.failReleaseEventWrites
+              ? layerFailingReleaseEventSink
+              : layerTestEventSink;
   const layerRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
@@ -4116,7 +4150,7 @@ it.effect.each([
   }),
 );
 
-it.effect("ProviderSessionManagerV2 keeps a capped history read and marks the rest missing", () =>
+it.effect("ProviderSessionManagerV2 keeps capped history passes and marks the rest missing", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
     // Every page points at another one, so the read stops at its page bound.
@@ -4185,9 +4219,314 @@ it.effect("ProviderSessionManagerV2 keeps a capped history read and marks the re
       const recovered = (yield* projections.getThreadProjection(threadId)).turnItems.filter(
         (item) => item.type === "realtime_voice" && item.historyCoverage === "provider_history",
       );
-      assert.lengthOf(recovered, 40);
+      // Five 40-page passes per trigger; each later pass re-reads the page the last one ended on.
+      assert.lengthOf(recovered, 40 + 39 * 4);
     }).pipe(
       Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, readRealtimeHistoryPage: endless })),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 recovers recent speech past the first history pass", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    // 45 pages of older coding history, then speech: past one 40-page pass.
+    const pageCount = 45;
+    const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+      new Map<string | null, HistoryPage>(
+        Array.from({ length: pageCount }, (_, page): [string | null, HistoryPage] => [
+          page === 0 ? null : String(page),
+          {
+            entries:
+              page === pageCount - 1
+                ? [historySpeech(page + 1, "recent")]
+                : [{ type: "turnStarted", position: page + 1, nativeTurnId: `old-${page}` }],
+            nextCursor: page === pageCount - 1 ? null : String(page + 1),
+          },
+        ]),
+      ),
+    );
+    const requested = yield* Queue.unbounded<string | null>();
+    const reader = makeHistoryReader(pages);
+    const recording: NonNullable<
+      ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"]
+    > = (request) =>
+      Queue.offer(requested, request.cursor ?? null).pipe(Effect.andThen(reader(request)));
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-long-history");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const firstOutcome = (afterSequence: number) =>
+        sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" &&
+              (stored.event.payload.type === "error" ||
+                stored.event.payload.type === "realtime_voice"),
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+      const outcome = yield* firstOutcome(yield* sink.latestSequence({ threadId }));
+      yield* runtime.resumeThread({ threadId, providerThread });
+      const [stored] = Array.from(yield* Fiber.join(outcome));
+      assert.isTrue(
+        stored?.event.type === "turn-item.updated" &&
+          stored.event.payload.type === "realtime_voice" &&
+          stored.event.payload.nativeRealtimeItemId === "recent",
+      );
+
+      // A later close resumes at the last page read instead of the start of history.
+      yield* Queue.clear(requested);
+      const close = yield* seededVoiceEvent({
+        ids,
+        threadId,
+        providerThread,
+        now,
+        nativeItemId: "close",
+      });
+      const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      yield* Queue.offer(events!, {
+        type: "turn_item.updated",
+        driver: CODEX_DRIVER,
+        turnItem: {
+          ...close.payload,
+          content: { type: "realtimeSessionClosed", outcome: "ended" },
+        },
+      });
+      assert.equal(yield* Queue.take(requested), String(pageCount - 1));
+    }).pipe(
+      Effect.provide(
+        layerTest({ state, idleTimeoutMs: 60_000, readRealtimeHistoryPage: recording }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 rereads all history when a stored cursor moved", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    // The stored cursor now starts at different history, as after a native rollback.
+    const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+      new Map<string | null, HistoryPage>([
+        [null, { entries: [historySpeech(1, "kept")], nextCursor: null }],
+        ["moved", { entries: [historySpeech(7, "other")], nextCursor: null }],
+      ]),
+    );
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-moved-cursor");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const key = {
+        threadId,
+        providerInstanceId: modelSelection.instanceId,
+        nativeThreadId: "native-thread",
+      };
+      yield* projections.setRealtimeVoiceHistoryResume(key, {
+        cursor: "moved",
+        firstIdentity: "stale",
+        firstPosition: 7,
+        anchorOrdinal: null,
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const recovered = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "turn-item.updated" &&
+            stored.event.payload.type === "realtime_voice",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      const [stored] = Array.from(yield* Fiber.join(recovered));
+      assert.equal(
+        stored?.event.type === "turn-item.updated" && stored.event.payload.type === "realtime_voice"
+          ? stored.event.payload.nativeRealtimeItemId
+          : null,
+        "kept",
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          readRealtimeHistoryPage: makeHistoryReader(pages),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 reconciles again after a failed read and a failed marker", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const reads = yield* Ref.make(0);
+    const failVoiceMarkers = {
+      remaining: yield* Ref.make(1),
+      attempted: yield* Queue.unbounded<void>(),
+    };
+    const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+      new Map<string | null, HistoryPage>([
+        [null, { entries: [historySpeech(1, "missed")], nextCursor: null }],
+      ]),
+    );
+    const reader = makeHistoryReader(pages);
+    // The first read fails, so the first pass writes a marker, and that write fails too.
+    const flaky: NonNullable<
+      ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"]
+    > = (request) =>
+      Ref.getAndUpdate(reads, (count) => count + 1).pipe(
+        Effect.flatMap((count) =>
+          count === 0
+            ? Effect.fail(
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_DRIVER,
+                  detail: "history unavailable",
+                }),
+              )
+            : reader(request),
+        ),
+      );
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-double-failure");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* runtime.resumeThread({ threadId, providerThread });
+      yield* Queue.take(failVoiceMarkers.attempted);
+
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const recovered = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "turn-item.updated" &&
+            stored.event.payload.type === "realtime_voice" &&
+            stored.event.payload.nativeRealtimeItemId === "missed",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      // A later close must still reach provider history.
+      const close = yield* seededVoiceEvent({
+        ids,
+        threadId,
+        providerThread,
+        now,
+        nativeItemId: "close",
+      });
+      const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      yield* Queue.offer(events!, {
+        type: "turn_item.updated",
+        driver: CODEX_DRIVER,
+        turnItem: {
+          ...close.payload,
+          content: { type: "realtimeSessionClosed", outcome: "ended" },
+        },
+      });
+      assert.lengthOf(Array.from(yield* Fiber.join(recovered)), 1);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          readRealtimeHistoryPage: flaky,
+          failVoiceMarkers,
+        }),
+      ),
     );
   }),
 );

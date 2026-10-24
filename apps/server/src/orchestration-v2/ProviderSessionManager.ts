@@ -57,6 +57,8 @@ import * as RealtimeVoiceHistoryReconciler from "./RealtimeVoiceHistoryReconcile
 
 const isValidVoiceHistoryItem = Schema.is(OrchestrationV2TurnItem);
 
+// 5 passes of 40 pages: 15,000 history entries per trigger before the rest is marked missing.
+const MAX_VOICE_RECONCILE_PASSES = 5;
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
 const RELEASE_SCOPE_CLOSE_TIMEOUT_MS = 30 * 1000;
@@ -392,8 +394,11 @@ export const layerWithOptions = (
           }),
       );
       const sessions = yield* Ref.make(new Map<string, LiveSessionEntry>());
-      // Key -> whether another reconciliation was requested while this one ran.
-      const voiceReconciliations = yield* Ref.make(new Map<string, boolean>());
+      // Per live runtime: provider thread -> whether another pass was requested while one ran.
+      const voiceReconciliations = new WeakMap<
+        ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        Map<ProviderThreadId, boolean>
+      >();
       // One retry per released entry, so a later release with the same id
       // cannot drop cleanup for threads only the earlier session served.
       const releaseRecordRetries = yield* FiberSet.make();
@@ -2192,60 +2197,80 @@ export const layerWithOptions = (
         const readRealtimeHistoryPage = entry.runtime.readRealtimeHistoryPage;
         const threadId = providerThread.appThreadId;
         if (readRealtimeHistoryPage === undefined || threadId === null) return;
-        const key = `${entry.runtime.providerSessionId}\u0000${providerThread.id}`;
-        const claimed = yield* Ref.modify(voiceReconciliations, (running) =>
-          running.has(key)
-            ? ([false, new Map(running).set(key, true)] as const)
-            : ([true, new Map(running).set(key, false)] as const),
-        );
+        // Claims belong to one live runtime, so a reopened session never inherits a stuck claim.
+        const claims =
+          voiceReconciliations.get(entry.runtime) ??
+          voiceReconciliations.set(entry.runtime, new Map()).get(entry.runtime)!;
+        const key = providerThread.id;
+        const claimed = yield* Effect.sync(() => {
+          if (claims.has(key)) {
+            claims.set(key, true);
+            return false;
+          }
+          claims.set(key, false);
+          return true;
+        });
         if (!claimed) return;
+        // One pass; failures become the visible marker, so the drain below always continues.
         const reconcileOnce = RealtimeVoiceHistoryReconciler.reconcileRealtimeVoiceHistory({
           providerThread,
           readRealtimeHistoryPage,
         }).pipe(
           Effect.provideService(ProjectionStore.ProjectionStoreV2, projectionStore),
           Effect.provideService(IdAllocator.IdAllocatorV2, idAllocator),
-          Effect.flatMap(({ items, complete }) =>
+          Effect.tap(({ items, resume }) =>
             Effect.forEach(
               items,
               (item) => persistVoiceItem(entry, item).pipe(entry.requestEventPermit.withPermits(1)),
               { discard: true },
             ).pipe(
               Effect.andThen(
-                complete
+                resume === null
                   ? Effect.void
-                  : markVoiceHistoryIncomplete(entry, threadId, "reconciliation").pipe(
-                      entry.requestEventPermit.withPermits(1),
-                    ),
+                  : projectionStore.setRealtimeVoiceHistoryResume(resume.key, resume.resume),
               ),
             ),
           ),
+          Effect.map(({ complete }) => complete),
           Effect.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause)
               ? Effect.interrupt
               : markVoiceHistoryIncomplete(entry, threadId, "reconciliation").pipe(
                   entry.requestEventPermit.withPermits(1),
+                  Effect.as(true),
                 ),
           ),
         );
-        const drain: Effect.Effect<void> = reconcileOnce.pipe(
+        // A long history continues from its stored resume point; past the per-trigger bound the
+        // rest is disclosed as missing and the next trigger carries on.
+        const passes = (pass: number): Effect.Effect<void> =>
+          reconcileOnce.pipe(
+            Effect.flatMap((complete) =>
+              complete
+                ? Effect.void
+                : pass + 1 < MAX_VOICE_RECONCILE_PASSES
+                  ? Effect.suspend(() => passes(pass + 1))
+                  : markVoiceHistoryIncomplete(entry, threadId, "reconciliation").pipe(
+                      entry.requestEventPermit.withPermits(1),
+                    ),
+            ),
+          );
+        const drain: Effect.Effect<void> = passes(0).pipe(
           Effect.andThen(
-            Ref.modify(voiceReconciliations, (running) => {
-              if (running.get(key) === true) return [true, new Map(running).set(key, false)];
-              const next = new Map(running);
-              next.delete(key);
-              return [false, next];
+            Effect.sync(() => {
+              if (claims.get(key) === true) {
+                claims.set(key, false);
+                return true;
+              }
+              claims.delete(key);
+              return false;
             }),
           ),
           Effect.flatMap((again) => (again ? Effect.suspend(() => drain) : Effect.void)),
         );
         yield* drain.pipe(
-          Effect.onInterrupt(() =>
-            Ref.update(voiceReconciliations, (running) => {
-              const next = new Map(running);
-              next.delete(key);
-              return next;
-            }),
+          Effect.onExit((exit) =>
+            Exit.isSuccess(exit) ? Effect.void : Effect.sync(() => claims.delete(key)),
           ),
           Effect.forkIn(entry.scope),
         );
@@ -2257,21 +2282,19 @@ export const layerWithOptions = (
         entry: LiveSessionEntry,
         providerThread: OrchestrationV2ProviderThread,
       ) =>
-        providerThread.appThreadId === null || entry.runtime.readRealtimeHistoryPage === undefined
+        providerThread.appThreadId === null ||
+        providerThread.nativeThreadRef?.nativeId == null ||
+        entry.runtime.readRealtimeHistoryPage === undefined
           ? Effect.void
           : projectionStore
-              .getThreadRecords(providerThread.appThreadId, ["turnItems"], {
-                turnItemTypes: ["realtime_voice"],
+              .hasRealtimeVoice({
+                threadId: providerThread.appThreadId,
+                providerInstanceId: providerThread.providerInstanceId,
+                nativeThreadId: providerThread.nativeThreadRef.nativeId,
               })
               .pipe(
-                Effect.flatMap(({ turnItems }) =>
-                  turnItems.some(
-                    (item) =>
-                      item.type === "realtime_voice" &&
-                      item.nativeThreadId === providerThread.nativeThreadRef?.nativeId,
-                  )
-                    ? scheduleVoiceReconciliation(entry, providerThread)
-                    : Effect.void,
+                Effect.flatMap((present) =>
+                  present ? scheduleVoiceReconciliation(entry, providerThread) : Effect.void,
                 ),
                 Effect.catchCause((cause) =>
                   Cause.hasInterruptsOnly(cause)

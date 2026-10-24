@@ -367,6 +367,42 @@ export type ProjectionRecords<K extends ProjectionRecordField> = Pick<
   "thread" | K
 >;
 
+/** One binding's realtime voice history: the app thread plus the provider's native thread. */
+export interface RealtimeVoiceHistoryKey {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly nativeThreadId: string;
+}
+
+/**
+ * Where the next provider history read starts: the request cursor of the last page read and that
+ * page's first entry, which must come back unchanged for the cursor to still mean the same place.
+ */
+export interface RealtimeVoiceHistoryResume {
+  readonly cursor: string | null;
+  readonly firstIdentity: string | null;
+  readonly firstPosition: number | null;
+  /** Ordinal of the last recorded coding turn before the resume page; seeds the stitch. */
+  readonly anchorOrdinal: number | null;
+}
+
+/** Lean rows for stitching recovered voice, read without decoding item payloads. */
+export interface RealtimeVoiceStitchRow {
+  readonly ordinal: number;
+  readonly runId: RunId | null;
+  /** Native turn of the item's provider turn on the requested provider thread. */
+  readonly nativeTurnId: string | null;
+  readonly voice: {
+    readonly providerInstanceId: string;
+    readonly nativeThreadId: string;
+    readonly realtimeSessionId: string;
+    readonly nativeRealtimeItemId: string;
+    readonly captureState: string;
+    readonly sourceOrder: string;
+    readonly timestampProvenance: string;
+  } | null;
+}
+
 export interface ProjectionTimelinePageOptions {
   readonly afterPosition?: number;
   readonly itemId?: TurnItemId;
@@ -413,6 +449,20 @@ export interface ProjectionStoreV2Shape {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
   }) => Effect.Effect<OrchestrationV2TurnItem | null, ProjectionStoreV2Error>;
+  readonly hasRealtimeVoice: (
+    key: RealtimeVoiceHistoryKey,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  readonly getRealtimeVoiceStitchIndex: (input: {
+    readonly threadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId;
+  }) => Effect.Effect<ReadonlyArray<RealtimeVoiceStitchRow>, ProjectionStoreV2Error>;
+  readonly getRealtimeVoiceHistoryResume: (
+    key: RealtimeVoiceHistoryKey,
+  ) => Effect.Effect<RealtimeVoiceHistoryResume | null, ProjectionStoreV2Error>;
+  readonly setRealtimeVoiceHistoryResume: (
+    key: RealtimeVoiceHistoryKey,
+    resume: RealtimeVoiceHistoryResume,
+  ) => Effect.Effect<void, ProjectionStoreV2Error>;
   readonly getThreadRecords: <K extends ProjectionRecordField>(
     threadId: ThreadId,
     fields: ReadonlyArray<K>,
@@ -1934,6 +1984,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   ProjectionStoreV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    // A read position, not domain state: losing a row only costs one full history read.
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS orchestration_v2_realtime_voice_history_resume (
+        thread_id TEXT NOT NULL,
+        provider_instance_id TEXT NOT NULL,
+        native_thread_id TEXT NOT NULL,
+        cursor TEXT,
+        first_identity TEXT,
+        first_position INTEGER,
+        anchor_ordinal INTEGER,
+        PRIMARY KEY (thread_id, provider_instance_id, native_thread_id)
+      )
+    `.pipe(Effect.orDie);
 
     // For run upserts: a snapshot without `path` keeps the value another event recorded there.
     const keepRecordedRunField = (payload: Statement.Fragment, path: string) => sql`
@@ -5254,6 +5317,111 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows[0]?.count ?? 0),
         Effect.mapError(controlReadError(threadId)),
       );
+    const hasRealtimeVoice: ProjectionStoreV2Shape["hasRealtimeVoice"] = (key) =>
+      sql<{ present: number }>`SELECT EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_turn_items
+          WHERE thread_id = ${key.threadId} AND type = 'realtime_voice'
+            AND json_extract(payload_json, '$.providerInstanceId') = ${key.providerInstanceId}
+            AND json_extract(payload_json, '$.nativeThreadId') = ${key.nativeThreadId}
+        ) AS present`.pipe(
+        Effect.map((rows) => rows[0]?.present === 1),
+        Effect.mapError(controlReadError(key.threadId)),
+      );
+    const getRealtimeVoiceStitchIndex: ProjectionStoreV2Shape["getRealtimeVoiceStitchIndex"] = ({
+      threadId,
+      providerThreadId,
+    }) =>
+      sql<{
+        ordinal: number;
+        type: string;
+        run_id: string | null;
+        native_turn_id: string | null;
+        voice_instance: string | null;
+        voice_native_thread: string | null;
+        voice_session: string | null;
+        voice_item: string | null;
+        voice_capture: string | null;
+        voice_order: string | null;
+        voice_time: string | null;
+      }>`SELECT item.ordinal, item.type, item.run_id,
+          json_extract(turn.payload_json, '$.nativeTurnRef.nativeId') AS native_turn_id,
+          CASE WHEN item.type = 'realtime_voice' THEN json_extract(item.payload_json, '$.providerInstanceId') END AS voice_instance,
+          CASE WHEN item.type = 'realtime_voice' THEN json_extract(item.payload_json, '$.nativeThreadId') END AS voice_native_thread,
+          CASE WHEN item.type = 'realtime_voice' THEN json_extract(item.payload_json, '$.realtimeSessionId') END AS voice_session,
+          CASE WHEN item.type = 'realtime_voice' THEN json_extract(item.payload_json, '$.nativeRealtimeItemId') END AS voice_item,
+          CASE WHEN item.type = 'realtime_voice' THEN json_extract(item.payload_json, '$.captureState') END AS voice_capture,
+          CASE WHEN item.type = 'realtime_voice' THEN json_extract(item.payload_json, '$.sourceOrder') END AS voice_order,
+          CASE WHEN item.type = 'realtime_voice' THEN json_extract(item.payload_json, '$.timestampProvenance') END AS voice_time
+        FROM orchestration_v2_projection_turn_items AS item
+        LEFT JOIN orchestration_v2_projection_provider_turns AS turn
+          ON turn.provider_turn_id = item.provider_turn_id
+          AND turn.provider_thread_id = ${providerThreadId}
+        WHERE item.thread_id = ${threadId}`.pipe(
+        Effect.map((rows) =>
+          rows.map((row): RealtimeVoiceStitchRow => ({
+            ordinal: row.ordinal,
+            runId: row.run_id === null ? null : RunId.make(row.run_id),
+            nativeTurnId: row.native_turn_id,
+            voice:
+              row.type !== "realtime_voice"
+                ? null
+                : {
+                    providerInstanceId: row.voice_instance ?? "",
+                    nativeThreadId: row.voice_native_thread ?? "",
+                    realtimeSessionId: row.voice_session ?? "",
+                    nativeRealtimeItemId: row.voice_item ?? "",
+                    captureState: row.voice_capture ?? "",
+                    sourceOrder: row.voice_order ?? "",
+                    timestampProvenance: row.voice_time ?? "",
+                  },
+          })),
+        ),
+        Effect.mapError(controlReadError(threadId)),
+      );
+    const getRealtimeVoiceHistoryResume: ProjectionStoreV2Shape["getRealtimeVoiceHistoryResume"] = (
+      key,
+    ) =>
+      sql<{
+        cursor: string | null;
+        first_identity: string | null;
+        first_position: number | null;
+        anchor_ordinal: number | null;
+      }>`SELECT cursor, first_identity, first_position, anchor_ordinal
+        FROM orchestration_v2_realtime_voice_history_resume
+        WHERE thread_id = ${key.threadId}
+          AND provider_instance_id = ${key.providerInstanceId}
+          AND native_thread_id = ${key.nativeThreadId}`.pipe(
+        Effect.map(([row]) =>
+          row === undefined
+            ? null
+            : {
+                cursor: row.cursor,
+                firstIdentity: row.first_identity,
+                firstPosition: row.first_position,
+                anchorOrdinal: row.anchor_ordinal,
+              },
+        ),
+        Effect.mapError(controlReadError(key.threadId)),
+      );
+    const setRealtimeVoiceHistoryResume: ProjectionStoreV2Shape["setRealtimeVoiceHistoryResume"] = (
+      key,
+      resume,
+    ) =>
+      sql`INSERT INTO orchestration_v2_realtime_voice_history_resume (
+          thread_id, provider_instance_id, native_thread_id,
+          cursor, first_identity, first_position, anchor_ordinal
+        ) VALUES (
+          ${key.threadId}, ${key.providerInstanceId}, ${key.nativeThreadId},
+          ${resume.cursor}, ${resume.firstIdentity}, ${resume.firstPosition}, ${resume.anchorOrdinal}
+        )
+        ON CONFLICT (thread_id, provider_instance_id, native_thread_id) DO UPDATE SET
+          cursor = excluded.cursor,
+          first_identity = excluded.first_identity,
+          first_position = excluded.first_position,
+          anchor_ordinal = excluded.anchor_ordinal`.pipe(
+        Effect.asVoid,
+        Effect.mapError(controlReadError(key.threadId)),
+      );
     const getNextTurnItemOrdinal: ProjectionStoreV2Shape["getNextTurnItemOrdinal"] = (threadId) =>
       sql<{ ordinal: number | null }>`SELECT MAX(ordinal) AS ordinal
         FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}`.pipe(
@@ -6632,6 +6800,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getMessageCount: readOnReader(getMessageCount),
       getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),
       getTurnItem: readOnReader(getTurnItem),
+      hasRealtimeVoice: readOnReader(hasRealtimeVoice),
+      getRealtimeVoiceStitchIndex: readOnReader(getRealtimeVoiceStitchIndex),
+      getRealtimeVoiceHistoryResume: readOnReader(getRealtimeVoiceHistoryResume),
+      setRealtimeVoiceHistoryResume,
       getThreadRecords: (threadId, fields, filter) =>
         getThreadRecords(threadId, fields, filter).pipe(NodeSqliteClient.readOnly),
       getRuntimeRequest: readOnReader(getRuntimeRequest),
@@ -6656,6 +6828,9 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
   Effect.gen(function* () {
     const replayState = yield* Ref.make(makeProjectionReplayState());
     const sequence = yield* Ref.make(0);
+    const voiceHistoryResumes = new Map<string, RealtimeVoiceHistoryResume>();
+    const voiceHistoryKey = (key: RealtimeVoiceHistoryKey) =>
+      JSON.stringify([key.threadId, key.providerInstanceId, key.nativeThreadId]);
 
     const service: ProjectionStoreV2Shape = {
       apply:
@@ -6947,6 +7122,48 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               state.projections.get(threadId)?.turnItems.find((item) => item.id === itemId) ?? null,
           ),
         ),
+      hasRealtimeVoice: (key) =>
+        Ref.get(replayState).pipe(
+          Effect.map(
+            (state) =>
+              state.projections
+                .get(key.threadId)
+                ?.turnItems.some(
+                  (item) =>
+                    item.type === "realtime_voice" &&
+                    item.providerInstanceId === key.providerInstanceId &&
+                    item.nativeThreadId === key.nativeThreadId,
+                ) ?? false,
+          ),
+        ),
+      getRealtimeVoiceStitchIndex: ({ threadId, providerThreadId }) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const projection = state.projections.get(threadId);
+            const nativeTurns = new Map(
+              (projection?.providerTurns ?? []).flatMap((turn) =>
+                turn.providerThreadId === providerThreadId && turn.nativeTurnRef?.nativeId != null
+                  ? [[turn.id, turn.nativeTurnRef.nativeId] as const]
+                  : [],
+              ),
+            );
+            return (projection?.turnItems ?? []).map((item): RealtimeVoiceStitchRow => ({
+              ordinal: item.ordinal,
+              runId: item.runId,
+              nativeTurnId:
+                item.providerTurnId === null
+                  ? null
+                  : (nativeTurns.get(item.providerTurnId) ?? null),
+              voice: item.type === "realtime_voice" ? item : null,
+            }));
+          }),
+        ),
+      getRealtimeVoiceHistoryResume: (key) =>
+        Effect.sync(() => voiceHistoryResumes.get(voiceHistoryKey(key)) ?? null),
+      setRealtimeVoiceHistoryResume: (key, resume) =>
+        Effect.sync(() => {
+          voiceHistoryResumes.set(voiceHistoryKey(key), resume);
+        }),
       getThreadAttachmentIds: (threadId) =>
         service.getThreadProjection(threadId).pipe(
           Effect.map((projection) => [

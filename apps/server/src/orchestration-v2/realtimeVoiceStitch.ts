@@ -2,6 +2,8 @@ import type { ProviderAdapterV2RealtimeHistoryEntry } from "@t3tools/provider-co
 
 /** Room left after each live voice receipt so recovered speech can land between received items. */
 // ponytail: fixed gap, recovered runs longer than 63 items between two live receipts stay unreconciled.
+// Runless voice shares the 1,000,000-wide run buckets, so ~15,600 live voice items with no coding
+// run between them spill into the next run's bucket; a later run then sorts before that speech.
 export const REALTIME_VOICE_ORDINAL_STEP = 64;
 
 /** Native identity of one canonical realtime item. Session IDs are reusable, so both parts count. */
@@ -19,6 +21,23 @@ interface RealtimeVoiceStitchInput {
   readonly existingVoice: ReadonlyMap<string, number>;
   /** Every ordinal the thread already uses; ordinals are unique per thread. */
   readonly occupiedOrdinals: ReadonlySet<number>;
+  /** Anchor carried over from history read before `entries`, when the read resumed mid-thread. */
+  readonly initialAnchor?: number | undefined;
+}
+
+/** The ordinal speech after `entries` anchors to: the last recorded coding turn among them. */
+export function realtimeVoiceAnchor(
+  entries: ReadonlyArray<ProviderAdapterV2RealtimeHistoryEntry>,
+  turnSpans: RealtimeVoiceStitchInput["turnSpans"],
+  initial: number | undefined,
+): number | undefined {
+  let anchor = initial;
+  for (const entry of entries) {
+    if (entry.type === "realtime") continue;
+    const span = turnSpans.get(entry.nativeTurnId);
+    if (span !== undefined) anchor = Math.max(anchor ?? -1, span.last);
+  }
+  return anchor;
 }
 
 /**
@@ -43,7 +62,7 @@ export function stitchRealtimeVoiceHistory(
     else gap.push(...keys);
   };
   const placements = new Map<string, number | null>();
-  let anchor: number | undefined;
+  let anchor = input.initialAnchor;
   let opening: Array<string> = [];
   for (const entry of input.entries) {
     if (entry.type === "realtime") {

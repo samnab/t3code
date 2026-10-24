@@ -1,23 +1,18 @@
 import { assert, it } from "@effect/vitest";
 import {
   type OrchestrationV2ProviderThread,
-  type OrchestrationV2ProviderTurn,
-  type OrchestrationV2TurnItem,
-  MessageId,
-  NodeId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
-  ProviderTurnId,
   RunId,
   ThreadId,
-  TurnItemId,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 
+import type { RealtimeVoiceStitchRow } from "./ProjectionStore.ts";
 import { planRealtimeVoiceRecovery } from "./RealtimeVoiceHistoryReconciler.ts";
 
 const driver = ProviderDriverKind.make("codex");
@@ -42,53 +37,19 @@ const providerThread: OrchestrationV2ProviderThread = {
   updatedAt: now,
 };
 
-const providerTurn = (run: number): OrchestrationV2ProviderTurn => ({
-  id: ProviderTurnId.make(`provider-turn:${run}`),
-  providerThreadId: providerThread.id,
-  nodeId: NodeId.make(`node:${run}`),
-  runAttemptId: null,
-  nativeTurnRef: { driver, nativeId: `t${run}`, strength: "strong" },
-  ordinal: run,
-  status: "completed",
-  startedAt: now,
-  completedAt: now,
-});
-
-const base = (id: string, run: number, ordinal: number, providerTurnId: ProviderTurnId | null) => ({
-  id: TurnItemId.make(id),
-  threadId,
-  runId: RunId.make(`run:${run}`),
-  nodeId: null,
-  providerThreadId: providerThread.id,
-  providerTurnId,
-  nativeItemRef: null,
-  parentItemId: null,
-  ordinal,
-  status: "completed" as const,
-  title: null,
-  startedAt: now,
-  completedAt: now,
-  updatedAt: now,
-});
-
 // Each run: an opening user message without a provider turn, then the provider's answer.
-const codingItems = [1, 2].flatMap((run): Array<OrchestrationV2TurnItem> => [
+const codingRows = [1, 2].flatMap((run): Array<RealtimeVoiceStitchRow> => [
   {
-    ...base(`user:${run}`, run, run * 1_000_000 + 1, null),
-    type: "user_message",
-    messageId: MessageId.make(`message:user:${run}`),
-    createdBy: "user",
-    creationSource: "web",
-    inputIntent: "turn_start",
-    text: "work",
-    attachments: [],
+    ordinal: run * 1_000_000 + 1,
+    runId: RunId.make(`run:${run}`),
+    nativeTurnId: null,
+    voice: null,
   },
   {
-    ...base(`answer:${run}`, run, run * 1_000_000 + 2, ProviderTurnId.make(`provider-turn:${run}`)),
-    type: "assistant_message",
-    messageId: MessageId.make(`message:answer:${run}`),
-    text: "done",
-    streaming: false,
+    ordinal: run * 1_000_000 + 2,
+    runId: RunId.make(`run:${run}`),
+    nativeTurnId: `t${run}`,
+    voice: null,
   },
 ]);
 
@@ -131,16 +92,18 @@ const history: ReadonlyArray<ProviderAdapter.ProviderAdapterV2RealtimeHistoryEnt
 ];
 
 it("stitches recovered speech between coding turns", () => {
-  const items = planRealtimeVoiceRecovery({
+  const { items, resumeAnchor } = planRealtimeVoiceRecovery({
     providerThread,
     threadId,
     nativeThreadId: "native-thread",
     entries: history,
-    turnItems: codingItems,
-    providerTurns: [providerTurn(1), providerTurn(2)],
+    index: codingRows,
+    // The next pass re-reads from the closing speech, so it resumes after run 2.
+    resumeBefore: 8,
     deriveId: IdAllocator.derive.realtimeVoiceTurnItem,
     now,
   });
+  assert.equal(resumeAnchor, 2_000_002);
   const ordinal = (id: string) => items.find((item) => item.nativeRealtimeItemId === id)!.ordinal;
   assert.deepEqual(
     items.map((item) => item.nativeRealtimeItemId),
