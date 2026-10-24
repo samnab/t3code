@@ -2583,3 +2583,48 @@ describe("mobile composer drafts", () => {
     expect(composerAttachmentCleanupMocks.remove).not.toHaveBeenCalled();
   });
 });
+
+it.each([
+  [{ completionAudio: "sound", voiceNotifications: true }, "sound"],
+  [{ voiceNotifications: true }, "voice"],
+  [{ voiceNotifications: false }, "off"],
+  [{ completionAudio: "invalid", voiceNotifications: false }, "off"],
+  [{}, undefined],
+] as const)(
+  "preserves stored completion choice %j through draft hydration and reset",
+  (choice, expected) => {
+    const key = "environment-1:thread-audio";
+    const decoded = decodePersistedComposerState({
+      schemaVersion: 1,
+      drafts: { [key]: { text: "Keep", attachments: [], ...choice } },
+    });
+    const draft = decoded.drafts[key]!;
+    expect(draft.completionAudio).toBe(expected);
+    expect(draft).not.toHaveProperty("voiceNotifications");
+    const restored = restoreComposerDraftSnapshotState({}, key, draft);
+    expect(restored[key]?.completionAudio).toBe(expected);
+    expect(clearComposerDraftContentState(restored, key)[key]?.completionAudio).toBeUndefined();
+  },
+);
+
+it("normalizes a legacy snapshot before restoring and clears both preference fields on reset", () => {
+  const key = "environment-1:legacy-audio";
+  const legacy: ComposerDraft = { text: "Keep", attachments: [], voiceNotifications: false };
+  const restored = restoreComposerDraftSnapshotState({}, key, legacy);
+  expect(restored[key]).toMatchObject({ completionAudio: "off" });
+  expect(restored[key]).not.toHaveProperty("voiceNotifications");
+  const cleared = clearComposerDraftContentState(restored, key);
+  expect(cleared[key]).toBeUndefined();
+});
+
+it.each([false, true])(
+  "retains an empty draft with an explicit legacy voice bit %s",
+  (voiceNotifications) => {
+    const key = "environment-1:explicit-audio";
+    const decoded = decodePersistedComposerState({
+      schemaVersion: 1,
+      drafts: { [key]: { text: "", attachments: [], voiceNotifications } },
+    });
+    expect(decoded.drafts[key]?.completionAudio).toBe(voiceNotifications ? "voice" : "off");
+  },
+);

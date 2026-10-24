@@ -1329,3 +1329,26 @@ describe("thread outbox", () => {
     ).toBe("restore");
   });
 });
+
+it.each([
+  [{ completionAudio: "sound", voiceNotifications: true }, "sound"],
+  [{ voiceNotifications: false }, "off"],
+  [{ voiceNotifications: true }, "voice"],
+  [{ completionAudio: "invalid", voiceNotifications: false }, "off"],
+  [{}, undefined],
+] as const)(
+  "retains queued completion choice %j across decode and canonical re-encode",
+  (choice, mode) => {
+    const raw = {
+      schemaVersion: 3,
+      ...queuedMessage({ messageId: "audio", createdAt: "2026-10-24T00:00:00Z" }),
+      ...choice,
+    };
+    const message = decodeQueuedThreadMessage(raw);
+    expect(message.completionAudio).toBe(mode);
+    if (mode !== undefined) expect(message.voiceNotifications).toBe(mode === "voice");
+    expect(decodeQueuedThreadMessage(encodeQueuedThreadMessage(message)).completionAudio).toBe(
+      mode,
+    );
+  },
+);

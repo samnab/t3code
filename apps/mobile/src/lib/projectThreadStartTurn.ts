@@ -1,4 +1,9 @@
 import {
+  type CompletionAudioMode,
+  readStoredCompletionAudio,
+  completionAudioCreationFields,
+} from "@t3tools/contracts";
+import {
   CommandId,
   MessageId,
   ThreadId,
@@ -30,6 +35,7 @@ export interface ProjectThreadStartTurnSpec {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly completionAudio?: CompletionAudioMode;
   readonly voiceNotifications?: boolean;
   readonly workspaceMode: "local" | "worktree";
   readonly branch: string | null;
@@ -66,7 +72,7 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
         modelSelection: spec.modelSelection,
         runtimeMode: spec.runtimeMode,
         interactionMode: spec.interactionMode,
-        voiceNotifications: spec.voiceNotifications ?? false,
+        ...completionAudioCreationFields(readStoredCompletionAudio(spec)),
         branch: spec.branch,
         worktreePath: isWorktree ? null : spec.worktreePath,
         createdAt: spec.createdAt,

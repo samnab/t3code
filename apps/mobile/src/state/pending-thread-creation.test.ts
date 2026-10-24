@@ -6,10 +6,22 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+vi.mock("./server", async () => {
+  const { Atom } = await import("effect/reactivity");
+  return {
+    serverEnvironment: {
+      configValueAtom: Atom.family(() =>
+        Atom.make({ settings: { completionAudio: { defaultMode: "sound" } } }),
+      ),
+    },
+  };
+});
 
 import {
   resolvePendingThreadCreation,
+  pendingThreadCreationShell,
   type PendingThreadCreation,
 } from "./pending-thread-creation";
 import type { QueuedThreadMessage } from "./thread-outbox-model";
@@ -138,4 +150,23 @@ describe("resolvePendingThreadCreation", () => {
       }),
     ).toBeNull();
   });
+});
+
+it("keeps optimistic creation mode consistent with explicit choices and destination defaults", () => {
+  const { voiceNotifications: _old, ...untouched } = creation;
+  expect(pendingThreadCreationShell(untouched)).toMatchObject({
+    completionAudio: "sound",
+    voiceNotifications: false,
+  });
+  expect(pendingThreadCreationShell(creation)).toMatchObject({
+    completionAudio: "off",
+    voiceNotifications: false,
+  });
+  expect(pendingThreadCreationShell({ ...creation, voiceNotifications: true })).toMatchObject({
+    completionAudio: "voice",
+    voiceNotifications: true,
+  });
+  expect(
+    pendingThreadCreationShell({ ...creation, completionAudio: "sound", voiceNotifications: true }),
+  ).toMatchObject({ completionAudio: "sound", voiceNotifications: false });
 });

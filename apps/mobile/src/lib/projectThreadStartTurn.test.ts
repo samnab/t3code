@@ -72,3 +72,57 @@ describe("project thread title", () => {
     expect(relaunched.message.attachments).toEqual(uploadedAttachments);
   });
 });
+
+it("leaves untouched completion audio omitted for the destination default", () => {
+  const input = buildProjectThreadStartTurnInput({
+    projectId: ProjectId.make("project"),
+    projectCwd: "/workspace",
+    threadId: "thread",
+    commandId: "command",
+    messageId: "message",
+    createdAt: "2026-10-24T00:00:00Z",
+    text: "Start",
+    uploadedAttachments: [],
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    workspaceMode: "local",
+    branch: null,
+    worktreePath: null,
+    startFromOrigin: false,
+    worktreeBranchName: "unused",
+  });
+  expect(input.bootstrap.createThread).not.toHaveProperty("voiceNotifications");
+  expect(input.bootstrap.createThread).not.toHaveProperty("completionAudio");
+});
+
+it.each([
+  [{ completionAudio: "off", voiceNotifications: true }, "off"],
+  [{ completionAudio: "sound", voiceNotifications: true }, "sound"],
+  [{ voiceNotifications: false }, "off"],
+  [{ voiceNotifications: true }, "voice"],
+] as const)("preserves explicit mobile creation choice %j", (choice, mode) => {
+  const input = buildProjectThreadStartTurnInput({
+    projectId: ProjectId.make("project"),
+    projectCwd: "/workspace",
+    threadId: "thread",
+    commandId: "command",
+    messageId: "message",
+    createdAt: "2026-10-24T00:00:00Z",
+    text: "Start",
+    uploadedAttachments: [],
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    workspaceMode: "local",
+    branch: null,
+    worktreePath: null,
+    startFromOrigin: false,
+    worktreeBranchName: "unused",
+    ...choice,
+  });
+  expect(input.bootstrap.createThread).toMatchObject({
+    completionAudio: mode,
+    voiceNotifications: mode === "voice",
+  });
+});

@@ -1,3 +1,4 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import { useSidebarWorkspaceTabs } from "../workspace/useSystemWorkspaceTabBar";
 import {
   isAtomCommandInterrupted,
@@ -252,8 +253,10 @@ export interface ThreadDetailScreenProps {
   readonly onSaveGoal: () => void;
   readonly onClearGoal: () => void;
   readonly onGoalLoopAction: (action: ThreadGoalLoopAction) => void;
-  readonly voiceNotifications: boolean;
-  readonly onUpdateVoiceNotifications: (enabled: boolean) => void;
+  readonly completionAudio: CompletionAudioMode;
+  readonly supportsCompletionSound: boolean;
+  readonly canUpdateCompletionAudio: boolean;
+  readonly onUpdateCompletionAudio: (mode: CompletionAudioMode) => void;
   readonly backgroundWork: ReadonlyArray<ThreadBackgroundTask>;
   readonly onStopBackgroundTask: (taskId: string) => void;
   readonly outputThroughputByProviderTurnId: Readonly<Record<string, TurnOutputThroughput>>;
@@ -1745,8 +1748,10 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         onSaveGoal={props.onSaveGoal}
                         onClearGoal={props.onClearGoal}
                         onGoalLoopAction={props.onGoalLoopAction}
-                        voiceNotifications={props.voiceNotifications}
-                        onUpdateVoiceNotifications={props.onUpdateVoiceNotifications}
+                        completionAudio={props.completionAudio}
+                        supportsCompletionSound={props.supportsCompletionSound}
+                        canUpdateCompletionAudio={props.canUpdateCompletionAudio}
+                        onUpdateCompletionAudio={props.onUpdateCompletionAudio}
                         hidden={composerSlotHidden}
                         queuedEdit={
                           props.queuedRunEdit === null

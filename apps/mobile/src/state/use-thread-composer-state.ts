@@ -1,7 +1,8 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import { useComposerAttachmentActions } from "./use-composer-attachment-actions";
 import * as Dialog from "../components/ui/Dialog";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
-import { readEnvironmentScope } from "./session";
+import { readEnvironmentScope, useEnvironmentScope } from "./session";
 import { useAtomValue } from "@effect/atom-react";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import { deriveThreadBackgroundWork } from "@t3tools/client-runtime/state/thread-background-work";
@@ -13,7 +14,6 @@ import {
   deleteThreadGoalWork,
   nextThreadGoalEditorEpoch,
   readThreadGoalState,
-  readThreadVoiceNotifications,
   resolveComposerThreadGoalCommand,
   runThreadGoalMutation,
   threadGoalEditorReducer,
@@ -226,6 +226,10 @@ export function useThreadComposerState() {
     label: "control thread goal loop",
     reportFailure: false,
   });
+  const setThreadCompletionAudio = useAtomCommand(threadEnvironment.setCompletionAudio, {
+    label: "set thread completion audio",
+    reportFailure: false,
+  });
   const setThreadVoiceNotifications = useAtomCommand(threadEnvironment.setVoiceNotifications, {
     label: "set thread voice notifications",
     reportFailure: false,
@@ -347,7 +351,18 @@ export function useThreadComposerState() {
   const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
   const selectedThread = selectedThreadShell;
   const selectedThreadGoalState = readThreadGoalState(selectedThread ?? {});
-  const voiceNotifications = readThreadVoiceNotifications(selectedThread ?? {});
+  const supportsCompletionSound =
+    selectedEnvironmentRuntime?.serverConfig?.environment.capabilities.completionNotifications ===
+    true;
+  const completionAudio = supportsCompletionSound
+    ? (selectedThread?.completionAudio ?? "off")
+    : selectedThread?.voiceNotifications === true
+      ? "voice"
+      : "off";
+  const canUpdateCompletionAudio = useEnvironmentScope(
+    selectedThreadShell?.environmentId ?? null,
+    AuthOrchestrationOperateScope,
+  );
   const backgroundWork = selectedThreadProjection
     ? deriveThreadBackgroundWork(selectedThreadProjection.projection)
     : [];
@@ -623,15 +638,23 @@ export function useThreadComposerState() {
     });
   };
 
-  const onUpdateVoiceNotifications = async (enabled: boolean) => {
-    if (!selectedThreadShell) return;
-    const result = await setThreadVoiceNotifications({
-      environmentId: selectedThreadShell.environmentId,
-      input: { threadId: selectedThreadShell.id, voiceNotifications: enabled },
-    });
-    if (AsyncResult.isFailure(result)) {
-      Alert.alert("Could not update voice notifications", String(Cause.squash(result.cause)));
-    }
+  const onUpdateCompletionAudio = async (mode: CompletionAudioMode) => {
+    if (
+      !selectedThreadShell ||
+      !readEnvironmentScope(selectedThreadShell.environmentId, AuthOrchestrationOperateScope)
+    )
+      return;
+    const result = supportsCompletionSound
+      ? await setThreadCompletionAudio({
+          environmentId: selectedThreadShell.environmentId,
+          input: { threadId: selectedThreadShell.id, mode },
+        })
+      : await setThreadVoiceNotifications({
+          environmentId: selectedThreadShell.environmentId,
+          input: { threadId: selectedThreadShell.id, voiceNotifications: mode === "voice" },
+        });
+    if (AsyncResult.isFailure(result))
+      Alert.alert("Could not update completion audio", String(Cause.squash(result.cause)));
   };
 
   const onStopBackgroundTask = async (taskId: string) => {
@@ -1178,8 +1201,10 @@ export function useThreadComposerState() {
     onSaveGoal,
     onClearGoal,
     onGoalLoopAction: runGoalLoopAction,
-    voiceNotifications,
-    onUpdateVoiceNotifications,
+    completionAudio,
+    supportsCompletionSound,
+    canUpdateCompletionAudio,
+    onUpdateCompletionAudio,
     backgroundWork,
     onStopBackgroundTask,
     outputThroughputByProviderTurnId,

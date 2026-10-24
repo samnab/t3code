@@ -1,3 +1,4 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import type { RuntimeMode } from "@t3tools/contracts";
 
 export const RUNTIME_MODE_CHOICES: ReadonlyArray<{
@@ -45,3 +46,13 @@ export function compatibleRuntimeModeForChoices(
 }
 
 export { selectableProviderOptionChoices as selectableChoices } from "@t3tools/client-runtime/model-traits";
+
+export const COMPLETION_AUDIO_CHOICES: ReadonlyArray<{
+  readonly mode: CompletionAudioMode;
+  readonly label: string;
+  readonly description: string;
+}> = [
+  { mode: "off", label: "Off", description: "No completion audio." },
+  { mode: "voice", label: "Voice", description: "Use configured provider-owned completion hooks." },
+  { mode: "sound", label: "Sound", description: "Sound plays on web and desktop." },
+];

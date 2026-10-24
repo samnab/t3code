@@ -1,3 +1,4 @@
+import { readStoredCompletionAudio } from "@t3tools/contracts";
 import * as Dialog from "../components/ui/Dialog";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -1033,7 +1034,7 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
-          voiceNotifications: queuedMessage.voiceNotifications ?? false,
+          completionAudio: readStoredCompletionAudio(queuedMessage) ?? undefined,
           workspaceMode: workspace.workspaceMode,
           branch: workspace.branch,
           worktreePath: workspace.worktreePath,
