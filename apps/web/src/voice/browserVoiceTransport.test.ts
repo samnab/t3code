@@ -28,6 +28,31 @@ function fixture() {
     addTrack = addTrack;
     close = closePeer;
   }
+  // Frames flow from the microphone source only along live connections, as in Web Audio.
+  const outputTrack = new Track();
+  const sent: string[] = [];
+  const output = {
+    stream: { getAudioTracks: () => [outputTrack], getTracks: () => [outputTrack] },
+    receive: (frame: string) => sent.push(frame),
+  };
+  const source = {
+    target: null as typeof output | null,
+    connect: vi.fn((target: typeof output) => {
+      source.target = target;
+    }),
+    disconnect: vi.fn(() => {
+      source.target = null;
+    }),
+  };
+  const captureFrame = (frame: string) => source.target?.receive(frame);
+  const closeContext = vi.fn(async () => {});
+  class FakeAudioContext extends EventTarget {
+    state = "running";
+    createMediaStreamSource = () => source;
+    createMediaStreamDestination = () => output;
+    resume = async () => {};
+    close = closeContext;
+  }
   const audio = Object.assign(new EventTarget(), {
     autoplay: false,
     srcObject: null,
@@ -36,13 +61,30 @@ function fixture() {
   });
   const devices = Object.assign(new EventTarget(), { getUserMedia: vi.fn(() => permission) });
   vi.stubGlobal("RTCPeerConnection", Peer);
+  vi.stubGlobal("AudioContext", FakeAudioContext);
   vi.stubGlobal("document", { createElement: () => audio });
   vi.stubGlobal("navigator", { mediaDevices: devices });
   const failed = vi.fn();
   const transport = createBrowserVoiceTransport({ connected: vi.fn(), failed });
   const track = new Track();
   const stream = { getTracks: () => [track] };
-  return { transport, track, stream, grant, addTrack, closePeer, channel, audio, devices, failed };
+  return {
+    transport,
+    track,
+    stream,
+    grant,
+    addTrack,
+    closePeer,
+    channel,
+    audio,
+    devices,
+    failed,
+    outputTrack,
+    source,
+    sent,
+    captureFrame,
+    closeContext,
+  };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -78,8 +120,29 @@ describe("browser voice resource ownership", () => {
     expect(f.audio.pause).toHaveBeenCalledOnce();
     expect(f.audio.srcObject).toBeNull();
     expect(f.audio.remove).toHaveBeenCalledOnce();
+    expect(f.closeContext).toHaveBeenCalledOnce();
     f.track.dispatchEvent(new Event("ended"));
     f.devices.dispatchEvent(new Event("devicechange"));
     expect(f.failed).not.toHaveBeenCalled();
+  });
+
+  it("gives the sender only gated output and forwards no frame after close", async () => {
+    const f = fixture();
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    expect(f.addTrack).toHaveBeenCalledExactlyOnceWith(f.outputTrack, expect.anything());
+    f.captureFrame("before-approval");
+    f.transport.enableMicrophone();
+    f.captureFrame("approved");
+    f.transport.close();
+    f.captureFrame("after-pause");
+    f.transport.enableMicrophone();
+    f.captureFrame("after-reopen-attempt");
+    expect(f.sent).toEqual(["approved"]);
+    expect(f.source.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+      f.closePeer.mock.invocationCallOrder[0]!,
+    );
+    expect(f.outputTrack.stop).toHaveBeenCalledOnce();
   });
 });

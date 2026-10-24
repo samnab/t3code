@@ -1,6 +1,10 @@
 import type { VoiceTransport } from "@t3tools/client-runtime/realtime-voice";
 
-/** A single peer and sink; closing also releases a microphone granted after cancellation. */
+/**
+ * A single peer and sink; closing also releases a microphone granted after cancellation.
+ * The peer sends a Web Audio destination track. The microphone reaches it only while the gate
+ * (the source → destination connection) is open, so the sender never holds the raw track.
+ */
 export function createBrowserVoiceTransport(events: {
   connected(): void;
   failed(reason: string): void;
@@ -10,6 +14,11 @@ export function createBrowserVoiceTransport(events: {
   audio.autoplay = true;
   const channel = peer.createDataChannel("oai-events");
   let microphone: MediaStream | null = null;
+  let graph: {
+    readonly context: AudioContext;
+    readonly source: MediaStreamAudioSourceNode;
+    readonly output: MediaStreamAudioDestinationNode;
+  } | null = null;
   let closed = false;
   let cancelIce: (() => void) | undefined;
   const cleanups: Array<() => void> = [];
@@ -73,8 +82,22 @@ export function createBrowserVoiceTransport(events: {
           track.removeEventListener("ended", fail);
           track.removeEventListener("mute", fail);
         });
-        peer.addTrack(track, stream);
       }
+      const context = new AudioContext();
+      graph = {
+        context,
+        source: context.createMediaStreamSource(stream),
+        output: context.createMediaStreamDestination(),
+      };
+      for (const track of graph.output.stream.getAudioTracks()) {
+        peer.addTrack(track, graph.output.stream);
+      }
+      // A context the platform suspends or closes stops carrying audio; end rather than mislabel.
+      const onContextState = () => {
+        if (context.state !== "running") fail();
+      };
+      context.addEventListener("statechange", onContextState);
+      cleanups.push(() => context.removeEventListener("statechange", onContextState));
       navigator.mediaDevices.addEventListener("devicechange", fail);
       cleanups.push(() => navigator.mediaDevices.removeEventListener("devicechange", fail));
     },
@@ -114,17 +137,25 @@ export function createBrowserVoiceTransport(events: {
     setRemoteDescription: (sdp) => peer.setRemoteDescription({ type: "answer", sdp }),
     isConnected: () => peer.connectionState === "connected" && channel.readyState === "open",
     enableMicrophone() {
-      if (!closed) for (const track of microphone?.getTracks() ?? []) track.enabled = true;
+      if (closed || graph === null) return;
+      for (const track of microphone?.getTracks() ?? []) track.enabled = true;
+      graph.source.connect(graph.output);
+      void graph.context.resume().catch(fail);
     },
     close() {
       if (closed) return;
       closed = true;
+      // Shut the gate before anything else so no later microphone frame reaches the sender.
+      graph?.source.disconnect();
       for (const cleanup of cleanups) cleanup();
       for (const track of microphone?.getTracks() ?? []) {
         track.enabled = false;
         track.stop();
       }
       microphone = null;
+      for (const track of graph?.output.stream.getTracks() ?? []) track.stop();
+      void graph?.context.close().catch(() => {});
+      graph = null;
       cancelIce?.();
       channel.close();
       peer.close();

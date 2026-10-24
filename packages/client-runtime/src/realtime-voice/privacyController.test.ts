@@ -39,6 +39,8 @@ function fixture(holdAt?: Stage, requireMountedOwner = false) {
       closed: boolean;
       sending: boolean;
       ready: boolean;
+      sent: string[];
+      capture(frame: string): void;
     }
   > = [];
   const step = async (stage: Stage, index: number) => {
@@ -118,6 +120,10 @@ function fixture(holdAt?: Stage, requireMountedOwner = false) {
         closed: false,
         sending: false,
         ready: true,
+        sent: [] as string[],
+        capture: (frame: string) => {
+          if (transport.sending) transport.sent.push(frame);
+        },
         acquireMicrophone: () => step("microphone", index),
         async createOffer() {
           await step("offer", index);
@@ -163,17 +169,22 @@ function fixture(holdAt?: Stage, requireMountedOwner = false) {
   };
 }
 
-function whenOff(controller: RealtimeVoiceController): Promise<void> {
-  if (controller.getSnapshot().mode === "off") return Promise.resolve();
+function whenMode(
+  controller: RealtimeVoiceController,
+  mode: ReturnType<RealtimeVoiceController["getSnapshot"]>["mode"],
+): Promise<void> {
+  if (controller.getSnapshot().mode === mode) return Promise.resolve();
   return new Promise((resolve) => {
     const unsubscribe = controller.subscribe(() => {
-      if (controller.getSnapshot().mode === "off") {
+      if (controller.getSnapshot().mode === mode) {
         unsubscribe();
         resolve();
       }
     });
   });
 }
+
+const whenOff = (controller: RealtimeVoiceController) => whenMode(controller, "off");
 
 describe("app-owned realtime voice", () => {
   it("creates a frozen operation before permission and sends matching ownership on stop", async () => {
@@ -728,5 +739,140 @@ describe("app-owned realtime voice", () => {
       reason: expect.stringContaining("host unavailable"),
     });
     expect(f.releaseOwner).toHaveBeenCalledOnce();
+  });
+});
+
+describe("local privacy pause", () => {
+  it("revokes locally before the provider stop and resumes on a fresh peer and operation", async () => {
+    const f = fixture();
+    const closed = deferred();
+    f.stopProvider.mockImplementationOnce(async () => {
+      f.operations.push("stop");
+      await closed.promise;
+    });
+    await f.controller.start(f.owner);
+    const first = f.transports[0]!;
+    first.capture("A");
+    f.controller.pause("Paused by test");
+    // Nothing awaited: the gate is shut while the provider stop is still in flight.
+    expect(first.closed).toBe(true);
+    expect(first.sending).toBe(false);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "pausing", owner: f.owner });
+    first.capture("B");
+    first.events.connected();
+    first.capture("B2");
+    expect(first.sent).toEqual(["A"]);
+    expect(f.operations.indexOf("close")).toBeLessThan(f.operations.indexOf("stop"));
+    closed.resolve();
+    await whenMode(f.controller, "paused");
+    expect(f.controller.getSnapshot()).toMatchObject({
+      mode: "paused",
+      owner: { ...f.owner, operationId: "operation-1" },
+      reason: "Paused by test",
+      replacementBlocked: false,
+    });
+    expect(f.releaseOwner).toHaveBeenCalledOnce();
+    await f.controller.resume(f.owner);
+    const second = f.transports[1]!;
+    second.capture("C");
+    expect(f.controller.getSnapshot()).toMatchObject({
+      mode: "transmitting",
+      owner: { ...f.owner, operationId: "operation-2" },
+    });
+    expect(second).not.toBe(first);
+    expect(first.sent).toEqual(["A"]);
+    expect(second.sent).toEqual(["C"]);
+    expect(f.stopProvider).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ operationId: "operation-1" }),
+      expect.objectContaining({ voiceSessionToken: "token-operation-1" }),
+    );
+    expect(f.startProvider.mock.calls.map(([owner]) => owner.operationId)).toEqual([
+      "operation-1",
+      "operation-2",
+    ]);
+  });
+
+  it.each<Stage>(["microphone", "offer", "local", "ice", "provider", "remote"])(
+    "ends paused when pause races startup at %s",
+    async (stage) => {
+      const f = fixture(stage);
+      const pending = f.controller.start(f.owner);
+      await f.entered.promise;
+      f.controller.pause();
+      expect(f.transports[0]?.closed).toBe(true);
+      const paused = whenMode(f.controller, "paused");
+      f.gate.resolve();
+      await pending;
+      await paused;
+      f.transports[0]!.events.connected();
+      f.transports[0]!.capture("late");
+      expect(f.transports[0]?.sent).toEqual([]);
+      expect(f.controller.getSnapshot()).toMatchObject({
+        mode: "paused",
+        owner: f.owner,
+        replacementBlocked: false,
+      });
+      expect(f.stopProvider).toHaveBeenCalledTimes(
+        stage === "provider" || stage === "remote" ? 1 : 0,
+      );
+      await f.controller.resume(f.owner);
+      expect(f.transports).toHaveLength(2);
+      expect(f.controller.getSnapshot().mode).toBe("transmitting");
+    },
+  );
+
+  it("stays denied when pause cleanup or a resume check fails", async () => {
+    const f = fixture();
+    await f.controller.start(f.owner);
+    f.validateOwner.mockImplementationOnce(() => {
+      throw new Error("Conversation unavailable");
+    });
+    f.controller.pause();
+    await whenMode(f.controller, "paused");
+    await expect(f.controller.resume(f.owner)).rejects.toThrow("Conversation unavailable");
+    expect(f.transports).toHaveLength(1);
+    expect(f.controller.getSnapshot().mode).toBe("paused");
+    await f.controller.resume(f.other);
+    expect(f.transports).toHaveLength(1);
+
+    const g = fixture();
+    g.stopProvider.mockRejectedValue(new Error("Native closure unconfirmed"));
+    await g.controller.start(g.owner);
+    g.controller.pause();
+    await whenMode(g.controller, "paused");
+    expect(g.controller.getSnapshot()).toMatchObject({
+      mode: "paused",
+      replacementBlocked: true,
+      reason: expect.stringContaining("Native closure unconfirmed"),
+    });
+    await g.controller.resume(g.owner);
+    await g.controller.start(g.owner);
+    expect(g.transports).toHaveLength(1);
+    g.controller.end();
+    expect(g.controller.getSnapshot()).toMatchObject({ mode: "off", replacementBlocked: true });
+  });
+
+  it("lets Mic off override a pending pause and forget a paused conversation", async () => {
+    const f = fixture();
+    const closed = deferred();
+    f.stopProvider.mockImplementationOnce(async () => {
+      await closed.promise;
+    });
+    await f.controller.start(f.owner);
+    f.controller.pause();
+    f.controller.end();
+    expect(f.controller.getSnapshot().mode).toBe("ending");
+    closed.resolve();
+    await whenOff(f.controller);
+    await f.controller.resume(f.owner);
+    expect(f.transports).toHaveLength(1);
+
+    await f.controller.start(f.owner);
+    f.controller.pause();
+    await whenMode(f.controller, "paused");
+    f.controller.end();
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", owner: null, reason: null });
+    await f.controller.resume(f.owner);
+    expect(f.transports).toHaveLength(2);
   });
 });

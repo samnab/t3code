@@ -32,6 +32,9 @@ export interface VoiceSessionOwnership {
   readonly expiresAt: string;
 }
 
+/** One peer per operation. The sender starts gated shut and carries only gated output, never the
+ * raw microphone track. `enableMicrophone` opens the gate; `close` shuts it synchronously before
+ * releasing capture, peer and playback, and is never reopened. */
 export interface VoiceTransport {
   acquireMicrophone(): Promise<void>;
   createOffer(): Promise<string>;
@@ -60,11 +63,16 @@ type VoiceState = {
   readonly replacementBlocked: boolean;
   readonly expiresAt: string | null;
 };
+/**
+ * Pause and Mic off revoke the microphone the same way: locally first, then the provider stop.
+ * Pause ("pausing" → "paused") keeps the conversation so Resume can start a fresh call in it.
+ * Mic off ("ending" → "off") forgets the conversation; nothing can resume it.
+ */
 export type VoiceSnapshot = VoiceState &
   (
     | { readonly mode: "off"; readonly owner: null }
     | {
-        readonly mode: "connecting" | "transmitting" | "ending";
+        readonly mode: "connecting" | "transmitting" | "pausing" | "paused" | "ending";
         readonly owner: VoiceOperationOwner;
       }
   );
@@ -82,6 +90,7 @@ interface Attempt {
   descriptionReady: boolean;
   stopRequested: boolean;
   capturePending: boolean;
+  pause: boolean;
   reason: string | null;
   releaseOwner: (() => void) | null;
   cancelExpiry: (() => void) | null;
@@ -114,7 +123,8 @@ function readOwnership(
 }
 
 /** The shared mode/generation/owner authority. Platform transports enforce local teardown.
- * Local-only listening modes require a sample gate and are deliberately unavailable here. */
+ * Pause releases the microphone as well: local-only listening needs an on-device detector and is
+ * deliberately unavailable here. No remote input can call `resume`. */
 export function createRealtimeVoiceController(deps: {
   readonly createTransport: (events: {
     connected(): void;
@@ -163,13 +173,12 @@ export function createRealtimeVoiceController(deps: {
     value.cancelExpiry = null;
     releaseOwner(value);
     attempt = null;
-    publish({
-      mode: "off",
-      owner: null,
-      reason: value.reason,
-      replacementBlocked: !safe,
-      expiresAt: null,
-    });
+    const state = { reason: value.reason, replacementBlocked: !safe, expiresAt: null };
+    publish(
+      value.pause
+        ? { ...state, mode: "paused", owner: value.owner }
+        : { ...state, mode: "off", owner: null },
+    );
     value.resolveFinished(safe);
   };
   const stopRemote = async (value: Attempt) => {
@@ -186,10 +195,11 @@ export function createRealtimeVoiceController(deps: {
       finish(value, false);
     }
   };
-  const cancelAttempt = (reason: string | null = null) => {
+  const cancelAttempt = (reason: string | null = null, pause = false) => {
     const value = attempt;
     if (value === null || value.cancelled) return;
     value.cancelled = true;
+    value.pause = pause;
     value.reason = reason;
     generation += 1;
     // Local capture and playback stop before entering the serialized RPC queue.
@@ -197,7 +207,7 @@ export function createRealtimeVoiceController(deps: {
     value.cancelExpiry?.();
     value.cancelExpiry = null;
     publish({
-      mode: "ending",
+      mode: pause ? "pausing" : "ending",
       owner: value.owner,
       reason,
       replacementBlocked: value.remoteRequested,
@@ -206,13 +216,43 @@ export function createRealtimeVoiceController(deps: {
     if (!value.remoteRequested && !value.capturePending) finish(value, true);
     else if (value.ownership !== null) void stopRemote(value);
   };
+  /** Mic off. Overrides a pending pause and forgets a paused conversation. */
   const end = (reason: string | null = null) => {
     moveIntent = null;
-    if (attempt?.cancelled && reason !== null && attempt.reason === null) {
-      attempt.reason = reason;
-      publish({ ...snapshot, reason });
+    const value = attempt;
+    if (value === null) {
+      if (snapshot.mode === "paused") {
+        publish({
+          mode: "off",
+          owner: null,
+          // A blocked replacement keeps explaining why new calls stay blocked.
+          reason: reason ?? (snapshot.replacementBlocked ? snapshot.reason : null),
+          replacementBlocked: snapshot.replacementBlocked,
+          expiresAt: null,
+        });
+      }
+      return;
     }
-    cancelAttempt(reason);
+    if (!value.cancelled) {
+      cancelAttempt(reason);
+      return;
+    }
+    const nextReason = value.reason ?? reason;
+    if (!value.pause && nextReason === value.reason) return;
+    value.pause = false;
+    value.reason = nextReason;
+    publish({
+      mode: "ending",
+      owner: value.owner,
+      reason: nextReason,
+      replacementBlocked: snapshot.replacementBlocked,
+      expiresAt: snapshot.expiresAt,
+    });
+  };
+  /** Privacy pause. Revokes like Mic off, then lands in "paused" once the provider stop settles. */
+  const pause = (reason: string | null = null) => {
+    moveIntent = null;
+    cancelAttempt(reason, true);
   };
   const markConnected = (value: Attempt) => {
     if (!current(value) || !value.descriptionReady || !value.transport?.isConnected()) return;
@@ -250,6 +290,7 @@ export function createRealtimeVoiceController(deps: {
       descriptionReady: false,
       stopRequested: false,
       capturePending: false,
+      pause: false,
       reason: null,
       releaseOwner: null,
       cancelExpiry: null,
@@ -355,7 +396,13 @@ export function createRealtimeVoiceController(deps: {
   };
   const move = async (owner: VoiceOwner) => {
     deps.validateOwner(owner);
-    if (snapshot.replacementBlocked || moveIntent !== null || snapshot.mode === "ending") return;
+    if (
+      snapshot.replacementBlocked ||
+      moveIntent !== null ||
+      snapshot.mode === "ending" ||
+      snapshot.mode === "pausing"
+    )
+      return;
     const source = attempt;
     if (source === null) {
       await start(owner);
@@ -378,10 +425,26 @@ export function createRealtimeVoiceController(deps: {
     deps.validateOwner(destination);
     await start(destination);
   };
+  /**
+   * The only way out of pause, and only from a local user action: a new operation, peer and
+   * microphone grant for the paused conversation. Nothing captured before or during the pause
+   * survives into it. Pass a freshly read owner; a failed check leaves voice paused.
+   */
+  const resume = async (owner: VoiceOwner) => {
+    if (
+      snapshot.mode !== "paused" ||
+      snapshot.owner.environmentId !== owner.environmentId ||
+      snapshot.owner.threadId !== owner.threadId
+    )
+      return;
+    await start(owner);
+  };
   return {
     start,
     move,
     end,
+    pause,
+    resume,
     getSnapshot: () => snapshot,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
