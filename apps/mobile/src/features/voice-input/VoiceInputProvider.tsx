@@ -29,6 +29,7 @@ import {
   preferredMicrophoneInput,
   rememberMicrophones,
 } from "../../lib/microphonePriority";
+import { realtimeVoiceOwnsAudio } from "../../native/realtimeVoiceAudio";
 import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { getNativeShowcaseScene } from "../showcase/nativeShowcaseScene";
@@ -57,6 +58,9 @@ const VOICE_RECORDING_OPTIONS = {
 };
 
 async function releaseVoiceRecordingAudio(): Promise<void> {
+  // expo-audio's mode setter stops every recorder and replaces the category, which
+  // would cut and deactivate an active realtime voice session.
+  if (realtimeVoiceOwnsAudio()) return;
   try {
     await setAudioModeAsync({ allowsRecording: false });
   } finally {
@@ -67,6 +71,7 @@ async function releaseVoiceRecordingAudio(): Promise<void> {
 }
 
 async function configureVoiceRecordingAudio(): Promise<void> {
+  if (realtimeVoiceOwnsAudio()) throw new Error("The microphone is in use by voice conversation.");
   try {
     await setAudioModeAsync({
       allowsRecording: true,

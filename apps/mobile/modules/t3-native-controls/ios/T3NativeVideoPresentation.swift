@@ -61,11 +61,15 @@ final class T3NativeVideoPresentation: NSObject, AVPlayerViewControllerDelegate,
 
   func present(from presenter: UIViewController, sources: T3PresentationSources, sourceIdentifier: String) {
     let audioSession = AVAudioSession.sharedInstance()
-    previousAudioSession = AudioSessionConfiguration(audioSession)
-    do {
-      try audioSession.setCategory(.playback, mode: .moviePlayback)
-    } catch {
-      NSLog("T3 video audio session: %@", error.localizedDescription)
+    // Realtime voice owns the session: switching to playback would cut its microphone,
+    // and finish() would deactivate it. The video plays inside the voice session instead.
+    if !T3RealtimeVoiceSession.shared.ownsAudioSession {
+      previousAudioSession = AudioSessionConfiguration(audioSession)
+      do {
+        try audioSession.setCategory(.playback, mode: .moviePlayback)
+      } catch {
+        NSLog("T3 video audio session: %@", error.localizedDescription)
+      }
     }
     // AVKit exposes programmatic inline-to-full-screen entry through this selector.
     // This is the same guarded entry point used by expo-video's enterFullscreen().

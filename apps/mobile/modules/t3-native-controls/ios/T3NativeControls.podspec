@@ -12,9 +12,13 @@ Pod::Spec.new do |s|
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
+  # Realtime voice audio device: typed WebRTCModuleOptions injection and RTCAudioDevice.
+  s.dependency 'react-native-webrtc', '155.0.1'
+  s.dependency 'JitsiWebRTC', '~> 155.0.0'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
   }
   s.resource_bundles = { 'T3NativeControlIcons' => ['Resources/Icons/pull-request*.png'] }
   s.source_files = '**/*.{h,m,mm,swift,hpp,cpp}'
+  s.exclude_files = 'Tests/**'
 end
