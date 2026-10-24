@@ -1,4 +1,9 @@
-import type { OrchestrationV2ProviderThread, OrchestrationV2TurnItem } from "@t3tools/contracts";
+import type {
+  OrchestrationV2ProviderThread,
+  OrchestrationV2ProviderTurn,
+  OrchestrationV2TurnItem,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
@@ -102,118 +107,138 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
       "turnItems",
       "providerTurns",
     ]);
-    const nativeTurnByProviderTurn = new Map(
-      providerTurns.flatMap((turn) =>
-        turn.providerThreadId === providerThread.id && turn.nativeTurnRef?.nativeId != null
-          ? [[turn.id, turn.nativeTurnRef.nativeId] as const]
-          : [],
-      ),
-    );
-    const runsByNativeTurn = new Map<string, Set<string>>();
-    for (const item of turnItems) {
-      const nativeTurnId =
-        item.providerTurnId === null
-          ? undefined
-          : nativeTurnByProviderTurn.get(item.providerTurnId);
-      if (nativeTurnId === undefined || item.runId === null) continue;
-      const runs = runsByNativeTurn.get(nativeTurnId) ?? new Set();
-      runsByNativeTurn.set(nativeTurnId, runs.add(item.runId));
-    }
-    const turnSpans = new Map<string, { first: number; last: number }>();
-    const codingOrdinals: Array<number> = [];
-    const existing = new Map<string, RealtimeVoiceItem>();
-    for (const item of turnItems) {
-      if (item.type === "realtime_voice") {
-        if (
-          item.providerInstanceId === providerThread.providerInstanceId &&
-          item.nativeThreadId === nativeThreadId
-        )
-          existing.set(realtimeVoiceKey(item.realtimeSessionId, item.nativeRealtimeItemId), item);
-        continue;
-      }
-      codingOrdinals.push(item.ordinal);
-      const nativeTurnId =
-        item.providerTurnId === null
-          ? undefined
-          : nativeTurnByProviderTurn.get(item.providerTurnId);
-      if (nativeTurnId !== undefined) {
-        const span = turnSpans.get(nativeTurnId);
-        turnSpans.set(nativeTurnId, {
-          first: Math.min(span?.first ?? item.ordinal, item.ordinal),
-          last: Math.max(span?.last ?? item.ordinal, item.ordinal),
-        });
-      }
-    }
-    // A run's opening user message carries no provider turn; it still starts that turn.
-    for (const item of turnItems) {
-      if (item.type === "realtime_voice" || item.runId === null) continue;
-      for (const [nativeTurnId, runs] of runsByNativeTurn) {
-        const span = turnSpans.get(nativeTurnId);
-        if (span !== undefined && runs.has(item.runId) && item.ordinal < span.first)
-          turnSpans.set(nativeTurnId, { ...span, first: item.ordinal });
-      }
-    }
-
-    const missing = entries.filter(
-      (entry): entry is Extract<HistoryEntry, { readonly type: "realtime" }> =>
-        entry.type === "realtime" &&
-        existing.get(realtimeVoiceKey(entry.item.realtimeSessionId, entry.item.id))
-          ?.captureState !== "canonical_completed",
-    );
-    if (missing.length === 0) return [];
-    const placements = stitchRealtimeVoiceHistory({
+    return planRealtimeVoiceRecovery({
+      providerThread,
+      threadId,
+      nativeThreadId,
       entries,
-      turnSpans,
-      codingOrdinals,
-      existingVoice: new Map(
-        [...existing].flatMap(([key, item]) =>
-          // Only committed neighbors bound a gap; a tail about to be upgraded keeps its own slot.
-          item.captureState === "canonical_completed" ? [[key, item.ordinal] as const] : [],
-        ),
-      ),
-    });
-    const now = yield* DateTime.now;
-    return missing.map((entry): RealtimeVoiceItem => {
-      const { id: nativeItemId, realtimeSessionId, ...content } = entry.item;
-      const key = realtimeVoiceKey(realtimeSessionId, nativeItemId);
-      // A stored tail upgraded by its commit keeps the slot and time it was observed at.
-      const tail = existing.get(key);
-      const ordinal = tail?.ordinal ?? placements.get(key) ?? null;
-      return {
-        id: idAllocator.derive.realtimeVoiceTurnItem({
-          providerInstanceId: providerThread.providerInstanceId,
-          nativeThreadId,
-          realtimeSessionId,
-          nativeItemId,
-        }),
-        threadId,
-        runId: null,
-        nodeId: null,
-        providerThreadId: providerThread.id,
-        providerTurnId: null,
-        nativeItemRef: {
-          driver: providerThread.driver,
-          nativeId: nativeItemId,
-          strength: "strong",
-        },
-        parentItemId: null,
-        ordinal: ordinal ?? 0,
-        status: "completed",
-        title: null,
-        startedAt: null,
-        completedAt: now,
-        updatedAt: now,
-        type: "realtime_voice",
-        providerInstanceId: providerThread.providerInstanceId,
-        nativeThreadId,
-        realtimeSessionId,
-        nativeRealtimeItemId: nativeItemId,
-        content,
-        captureState: "canonical_completed",
-        historyCoverage: "provider_history",
-        sourceOrder: tail?.sourceOrder ?? (ordinal === null ? "unreconciled" : "provider_anchored"),
-        timestampProvenance: tail?.timestampProvenance ?? "recovered",
-      };
+      turnItems,
+      providerTurns,
+      deriveId: idAllocator.derive.realtimeVoiceTurnItem,
+      now: yield* DateTime.now,
     });
   },
 );
+
+/** Turns merged native history and projection records into the voice items still missing. */
+export function planRealtimeVoiceRecovery(input: {
+  readonly providerThread: OrchestrationV2ProviderThread;
+  readonly threadId: ThreadId;
+  readonly nativeThreadId: string;
+  readonly entries: ReadonlyArray<HistoryEntry>;
+  readonly turnItems: ReadonlyArray<OrchestrationV2TurnItem>;
+  readonly providerTurns: ReadonlyArray<OrchestrationV2ProviderTurn>;
+  readonly deriveId: IdAllocator.IdAllocatorV2["Service"]["derive"]["realtimeVoiceTurnItem"];
+  readonly now: DateTime.Utc;
+}): ReadonlyArray<RealtimeVoiceItem> {
+  const { providerThread, threadId, nativeThreadId, entries, turnItems, providerTurns, now } =
+    input;
+  const nativeTurnByProviderTurn = new Map(
+    providerTurns.flatMap((turn) =>
+      turn.providerThreadId === providerThread.id && turn.nativeTurnRef?.nativeId != null
+        ? [[turn.id, turn.nativeTurnRef.nativeId] as const]
+        : [],
+    ),
+  );
+  const runsByNativeTurn = new Map<string, Set<string>>();
+  for (const item of turnItems) {
+    const nativeTurnId =
+      item.providerTurnId === null ? undefined : nativeTurnByProviderTurn.get(item.providerTurnId);
+    if (nativeTurnId === undefined || item.runId === null) continue;
+    const runs = runsByNativeTurn.get(nativeTurnId) ?? new Set();
+    runsByNativeTurn.set(nativeTurnId, runs.add(item.runId));
+  }
+  const turnSpans = new Map<string, { first: number; last: number }>();
+  const codingOrdinals: Array<number> = [];
+  const existing = new Map<string, RealtimeVoiceItem>();
+  for (const item of turnItems) {
+    if (item.type === "realtime_voice") {
+      if (
+        item.providerInstanceId === providerThread.providerInstanceId &&
+        item.nativeThreadId === nativeThreadId
+      )
+        existing.set(realtimeVoiceKey(item.realtimeSessionId, item.nativeRealtimeItemId), item);
+      continue;
+    }
+    codingOrdinals.push(item.ordinal);
+    const nativeTurnId =
+      item.providerTurnId === null ? undefined : nativeTurnByProviderTurn.get(item.providerTurnId);
+    if (nativeTurnId !== undefined) {
+      const span = turnSpans.get(nativeTurnId);
+      turnSpans.set(nativeTurnId, {
+        first: Math.min(span?.first ?? item.ordinal, item.ordinal),
+        last: Math.max(span?.last ?? item.ordinal, item.ordinal),
+      });
+    }
+  }
+  // A run's opening user message carries no provider turn; it still starts that turn.
+  for (const item of turnItems) {
+    if (item.type === "realtime_voice" || item.runId === null) continue;
+    for (const [nativeTurnId, runs] of runsByNativeTurn) {
+      const span = turnSpans.get(nativeTurnId);
+      if (span !== undefined && runs.has(item.runId) && item.ordinal < span.first)
+        turnSpans.set(nativeTurnId, { ...span, first: item.ordinal });
+    }
+  }
+
+  const missing = entries.filter(
+    (entry): entry is Extract<HistoryEntry, { readonly type: "realtime" }> =>
+      entry.type === "realtime" &&
+      existing.get(realtimeVoiceKey(entry.item.realtimeSessionId, entry.item.id))?.captureState !==
+        "canonical_completed",
+  );
+  if (missing.length === 0) return [];
+  const placements = stitchRealtimeVoiceHistory({
+    entries,
+    turnSpans,
+    codingOrdinals,
+    existingVoice: new Map(
+      [...existing].flatMap(([key, item]) =>
+        // Only committed neighbors bound a gap; a tail about to be upgraded keeps its own slot.
+        item.captureState === "canonical_completed" ? [[key, item.ordinal] as const] : [],
+      ),
+    ),
+  });
+  return missing.map((entry): RealtimeVoiceItem => {
+    const { id: nativeItemId, realtimeSessionId, ...content } = entry.item;
+    const key = realtimeVoiceKey(realtimeSessionId, nativeItemId);
+    // A stored tail upgraded by its commit keeps the slot and time it was observed at.
+    const tail = existing.get(key);
+    const ordinal = tail?.ordinal ?? placements.get(key) ?? null;
+    return {
+      id: input.deriveId({
+        providerInstanceId: providerThread.providerInstanceId,
+        nativeThreadId,
+        realtimeSessionId,
+        nativeItemId,
+      }),
+      threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: providerThread.id,
+      providerTurnId: null,
+      nativeItemRef: {
+        driver: providerThread.driver,
+        nativeId: nativeItemId,
+        strength: "strong",
+      },
+      parentItemId: null,
+      ordinal: ordinal ?? 0,
+      status: "completed",
+      title: null,
+      startedAt: null,
+      completedAt: now,
+      updatedAt: now,
+      type: "realtime_voice",
+      providerInstanceId: providerThread.providerInstanceId,
+      nativeThreadId,
+      realtimeSessionId,
+      nativeRealtimeItemId: nativeItemId,
+      content,
+      captureState: "canonical_completed",
+      historyCoverage: "provider_history",
+      sourceOrder: tail?.sourceOrder ?? (ordinal === null ? "unreconciled" : "provider_anchored"),
+      timestampProvenance: tail?.timestampProvenance ?? "recovered",
+    };
+  });
+}

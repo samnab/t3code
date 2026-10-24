@@ -3968,13 +3968,23 @@ it.effect(
     }),
 );
 
-it.effect("ProviderSessionManagerV2 rejects unsafe native history positions visibly", () =>
+it.effect.each([
+  {
+    name: "an unsafe native position",
+    pages: [[null, { entries: [historySpeech(2 ** 53, "unsafe")], nextCursor: null }]] as const,
+  },
+  {
+    name: "an entry that moved between pages",
+    pages: [
+      [null, { entries: [historySpeech(1, "moved")], nextCursor: "next" }],
+      ["next", { entries: [historySpeech(2, "moved")], nextCursor: null }],
+    ] as const,
+  },
+])("ProviderSessionManagerV2 rejects history with $name visibly", ({ pages: history }) =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
     const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
-      new Map<string | null, HistoryPage>([
-        [null, { entries: [historySpeech(2 ** 53, "unsafe")], nextCursor: null }],
-      ]),
+      new Map<string | null, HistoryPage>(history),
     );
     yield* Effect.gen(function* () {
       const sink = yield* EventSink.EventSinkV2;
