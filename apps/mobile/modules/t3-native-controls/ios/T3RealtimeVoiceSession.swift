@@ -43,6 +43,26 @@ final class T3RealtimeVoiceSession {
 
   private typealias Listener = (_ reason: String, _ owner: Owner) -> Void
 
+  /// One successful prepare. A fault watch acts only while its stamp is still current, so a
+  /// delayed tick from an ended owner or an earlier prepare cannot touch its replacement.
+  struct Incarnation: Equatable {
+    let owner: Owner
+    let number: UInt64
+    let faults: UInt64
+  }
+
+  /// Starts `tick` repeating on a control queue and returns its cancel. The IO thread only
+  /// bumps an atomic; this is what turns that into cleanup and an event without JS.
+  /// Host tests replace it with a manual scheduler.
+  var startFaultWatch: (@escaping () -> Void) -> () -> Void = { tick in
+    let timer = DispatchSource.makeTimerSource(queue: T3RealtimeVoiceSession.faultQueue)
+    timer.schedule(deadline: .now() + .milliseconds(100), repeating: .milliseconds(100), leeway: .milliseconds(50))
+    timer.setEventHandler(handler: tick)
+    timer.resume()
+    return { timer.cancel() }
+  }
+  private static let faultQueue = DispatchQueue(label: "T3RealtimeVoiceSession.faults")
+
   private let device = T3RealtimeVoiceAudioDevice.shared()
   // `lock` serializes prepare/end and is held across AVAudioSession calls, which may post
   // notifications synchronously. Observers only take `stateLock`, which never is.
@@ -51,6 +71,9 @@ final class T3RealtimeVoiceSession {
   private var nextGeneration: UInt64 = 1
   private var observers: [NSObjectProtocol] = []
   private var previous: (AVAudioSession.Category, AVAudioSession.Mode, AVAudioSession.CategoryOptions)?
+  private var incarnation: Incarnation?
+  private var incarnations: UInt64 = 0
+  private var cancelFaultWatch: (() -> Void)?
   // Observers capture the owner they were installed for and act only while it is still
   // `observed`, checking and revoking under `stateLock`. A callback already running for an
   // ended owner therefore cannot revoke, or speak for, its replacement.
@@ -81,6 +104,8 @@ final class T3RealtimeVoiceSession {
       // observers, IO faults and WebRTC stops. The success path below makes exactly one
       // deliberate revoke, hence +1: adding another would make every prepare fail closed.
       let revocations = device.revocationCount &+ 1
+      // Faults before this read are the previous lifetime's; later ones fail this attempt.
+      let faults = device.faultCount
       guard T3RealtimeVoiceAudioDevice.installedInWebRTCModuleOptions else {
         throw T3RealtimeVoiceSessionError.unavailable
       }
@@ -97,6 +122,7 @@ final class T3RealtimeVoiceSession {
       if owner == nil, session.category == .playAndRecord, session.mode != .voiceChat {
         throw T3RealtimeVoiceSessionError.busy
       }
+      stopFaultWatch()
       let candidate = owner ?? Owner(token: token, generation: nextGeneration, module: moduleId)
       if owner == nil { nextGeneration += 1 }
       stateLock.withLock {
@@ -131,8 +157,24 @@ final class T3RealtimeVoiceSession {
       }
       if owner == nil { previous = restore }
       owner = candidate
+      incarnations += 1
+      let current = Incarnation(owner: candidate, number: incarnations, faults: faults)
+      incarnation = current
+      cancelFaultWatch = startFaultWatch { [weak self] in self?.drainFault(current) }
       return candidate
     }
+  }
+
+  /// Control queue. Ends the incarnation that faulted and reports it once. The gate is
+  /// already closed by the IO thread; this releases the owner and audio session natively,
+  /// whether or not JS is running. It never prepares or reopens anything.
+  func drainFault(_ stamp: Incarnation) {
+    let faulted = lock.withLock { () -> Bool in
+      guard incarnation == stamp, device.faultCount != stamp.faults else { return false }
+      endLocked()
+      return true
+    }
+    if faulted { notify("audioFault", stamp.owner) }
   }
 
   func openGate(owner token: String, module: AnyObject, leaseSeconds: Double) throws -> UInt64 {
@@ -157,16 +199,29 @@ final class T3RealtimeVoiceSession {
     lock.withLock {
       guard let owner, owner.module == ObjectIdentifier(module), token == nil || owner.token == token
       else { return false }
-      stateLock.withLock {
-        observed = nil
-        authorizedRoute = nil
-      }
-      device.revokeCapture()
-      self.owner = nil
-      release(previous)
-      previous = nil
+      endLocked()
       return true
     }
+  }
+
+  /// Caller holds `lock`.
+  private func endLocked() {
+    stopFaultWatch()
+    stateLock.withLock {
+      observed = nil
+      authorizedRoute = nil
+    }
+    device.revokeCapture()
+    owner = nil
+    release(previous)
+    previous = nil
+  }
+
+  /// Caller holds `lock`. A tick already queued finds its stamp stale and does nothing.
+  private func stopFaultWatch() {
+    cancelFaultWatch?()
+    cancelFaultWatch = nil
+    incarnation = nil
   }
 
   func snapshot() -> [String: Any] {

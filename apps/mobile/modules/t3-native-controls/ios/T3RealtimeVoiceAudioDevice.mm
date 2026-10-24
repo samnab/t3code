@@ -106,6 +106,7 @@ uint64_t SecondsToHostTicks(double seconds) {
 - (BOOL)captureArmed { return _gate.armed(); }
 - (uint64_t)openEpoch { return _gate.epoch(); }
 - (uint64_t)revocationCount { return _gate.revocations(); }
+- (uint64_t)faultCount { return _gate.faults(); }
 
 - (BOOL)armCaptureSince:(uint64_t)revocationCount { return _gate.arm(revocationCount); }
 

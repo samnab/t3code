@@ -181,6 +181,20 @@ int main() {
     gate.fault();
     check(attempt(gate, false, false), "fault before lock entry does not block a fresh prepare");
   }
+  {
+    // F7: only IO faults move the fault count, and once it has moved the gate is closed.
+    SendGate gate;
+    gate.arm(gate.revocations());
+    gate.open(0, 0, 10 * kSecond);
+    uint64_t before = gate.faults();
+    gate.revoke();
+    check(gate.faults() == before, "a deliberate revoke is not a fault");
+    gate.arm(gate.revocations());
+    gate.open(0, 0, 10 * kSecond);
+    gate.fault();
+    check(gate.faults() == before + 1, "an IO fault moves the fault count");
+    check(!gate.armed() && gate.epoch() == SendGate::kClosed, "a moved fault count implies a closed gate");
+  }
   if (failures == 0) std::puts("T3RealtimeVoiceSendGateTest: all checks passed");
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

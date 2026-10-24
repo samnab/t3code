@@ -10,6 +10,7 @@ final class T3RealtimeVoiceAudioDevice {
   var captureArmed = false
   var openEpoch: UInt64 = 0
   var revocationCount: UInt64 = 0
+  var faultCount: UInt64 = 0
   var afterRevoke: (() -> Void)?
   var parameterChanges = 0
   func armCapture(since: UInt64) -> Bool {
@@ -24,6 +25,7 @@ final class T3RealtimeVoiceAudioDevice {
     revocationCount += 1
     captureArmed = false
     openEpoch = 0
+    faultCount += 1
   }
   func revokeCapture() {
     revocationCount += 1
@@ -47,6 +49,31 @@ final class T3RealtimeVoiceAudioDevice {
 
 final class FakeModule {}
 
+/// Stands in for the session's control-queue timer: ticks run only when the test drains them.
+final class ManualFaultWatches {
+  struct Watch {
+    let tick: () -> Void
+    var cancelled = false
+  }
+  var watches: [Watch] = []
+  func start(_ tick: @escaping () -> Void) -> () -> Void {
+    let index = watches.count
+    watches.append(Watch(tick: tick))
+    return { [self] in watches[index].cancelled = true }
+  }
+  /// Runs one watch's tick even if cancelled, as a tick queued before the cancel would.
+  func tick(_ index: Int) {
+    if watches.indices.contains(index) { watches[index].tick() }
+  }
+  func cancelled(_ index: Int) -> Bool {
+    watches.indices.contains(index) && watches[index].cancelled
+  }
+  /// Runs every live watch once, as one timer period would.
+  func drainLive() {
+    for watch in watches where !watch.cancelled { watch.tick() }
+  }
+}
+
 var failures = 0
 func check(_ ok: Bool, _ what: String) {
   if !ok { print("FAIL: \(what)"); failures += 1 }
@@ -55,6 +82,8 @@ func check(_ ok: Bool, _ what: String) {
 @main struct SessionHarness {
   static func main() throws {
     let session = T3RealtimeVoiceSession.shared
+    let faultWatches = ManualFaultWatches()
+    session.startFaultWatch = faultWatches.start
     let audio = AVAudioSession.sharedInstance()
     let device = T3RealtimeVoiceAudioDevice.shared()
     let center = NotificationCenter.default
@@ -224,6 +253,75 @@ func check(_ ok: Bool, _ what: String) {
     device.fault()
     _ = try session.prepare(owner: "a", module: a)
     check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 != 0, "old fault does not block a new prepare")
+    _ = session.end(module: a)
+
+    // F7: a fault in the current incarnation is cleaned up natively and reported once.
+    var faultEvents: [(String, T3RealtimeVoiceSession.Owner)] = []
+    session.setRevokedListener(module: a) { faultEvents.append(($0, $1)) }
+    let faulted = try session.prepare(owner: "a", module: a)
+    let faultedEpoch = try session.openGate(owner: "a", module: a, leaseSeconds: 30)
+    check(faultedEpoch != 0, "fault case opens first")
+    device.fault()
+    check(!device.captureArmed && !device.renewLease(forEpoch: faultedEpoch, leaseSeconds: 30),
+      "IO fault closes before any control work")
+    check(session.ownsAudioSession && faultEvents.isEmpty, "nothing is published before the control drain")
+    let faultedWatch = faultWatches.watches.count - 1
+    faultWatches.drainLive()
+    check(!session.ownsAudioSession, "control drain ends the faulted owner")
+    check(audio.category == .playback, "control drain restores the previous audio session")
+    check(faultEvents.count == 1 && faultEvents.first?.0 == "audioFault" && faultEvents.first?.1 == faulted,
+      "one audioFault event with the faulted owner and generation")
+    check(faultWatches.cancelled(faultedWatch), "control drain stops its own watch")
+    faultWatches.tick(faultedWatch)  // a tick already queued before the cancel
+    faultWatches.drainLive()
+    check(faultEvents.count == 1, "the fault is reported once")
+    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == nil, "faulted owner cannot open")
+
+    // No fault: ticks do nothing.
+    _ = try session.prepare(owner: "a", module: a)
+    faultWatches.drainLive()
+    check(session.ownsAudioSession && device.captureArmed && faultEvents.count == 1, "ticks without a fault are inert")
+
+    // Explicit retry after an undrained old fault: the same owner prepares again, and the old
+    // incarnation's delayed tick neither ends it nor reports.
+    let oldWatch = faultWatches.watches.count - 1
+    device.fault()
+    let retried = try session.prepare(owner: "a", module: a)
+    check(faultWatches.cancelled(oldWatch), "re-prepare stops the old watch")
+    faultWatches.tick(oldWatch)
+    faultWatches.drainLive()
+    check(session.ownsAudioSession && device.captureArmed, "old fault tick does not end the retried owner")
+    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 != 0, "retried owner opens")
+    check(faultEvents.count == 1, "old fault tick does not report")
+    _ = retried
+
+    // Replacement: A's tick, delayed past A's end and B's prepare, must not revoke B or report
+    // under B's generation, and B's own watch ignores the old fault.
+    let watchA = faultWatches.watches.count - 1
+    device.fault()
+    check(session.end(module: a), "JS ends A after its fault")
+    var eventsB: [(String, T3RealtimeVoiceSession.Owner)] = []
+    _ = try session.prepare(owner: "b", module: b)
+    session.setRevokedListener(module: b) { eventsB.append(($0, $1)) }
+    let epochB = try session.openGate(owner: "b", module: b, leaseSeconds: 30)
+    faultWatches.tick(watchA)
+    faultWatches.drainLive()
+    check(device.captureArmed && device.openEpoch == epochB, "stale fault tick leaves the replacement open")
+    check(eventsB.isEmpty && faultEvents.count == 1, "stale fault tick emits nothing")
+
+    // Destroy: module end stops the watch; a later fault and tick do nothing for that owner.
+    let watchB = faultWatches.watches.count - 1
+    check(session.end(module: b), "module destroy ends B")
+    check(faultWatches.cancelled(watchB), "module end stops the fault watch")
+    device.fault()
+    faultWatches.tick(watchB)
+    check(eventsB.isEmpty && !session.ownsAudioSession, "fault after destroy emits nothing")
+
+    // A fault inside prepare still fails that attempt and leaves no watch running for it.
+    _ = try session.prepare(owner: "a", module: a)
+    device.afterRevoke = { device.fault() }
+    check((try? session.prepare(owner: "a", module: a)) == nil, "fault inside prepare still fails it")
+    check(faultWatches.watches.allSatisfy(\.cancelled), "failed prepare starts no fault watch")
     _ = session.end(module: a)
 
     if failures == 0 { print("T3RealtimeVoiceSession harness: all checks passed") }

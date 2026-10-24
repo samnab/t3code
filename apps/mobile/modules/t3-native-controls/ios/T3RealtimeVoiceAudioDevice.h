@@ -49,12 +49,17 @@ class SendGate {
     epoch_.store(kClosed);
   }
 
-  /// IO thread. Latches an audio fault without locking: same effect as `revoke`.
+  /// IO thread. Latches an audio fault without locking: same effect as `revoke`. The fault
+  /// count moves last, so a control thread that sees it also sees the gate disarmed.
   void fault() {
     revocations_.fetch_add(1);
     armed_.store(false);
     epoch_.store(kClosed);
+    faults_.fetch_add(1);
   }
+
+  /// Read by the control-side fault watch; never written outside `fault`.
+  uint64_t faults() const { return faults_.load(); }
 
   /// Starts a fresh epoch. Blocks captured before `cutoffTicks` are never admitted.
   /// Returns kClosed when disarmed or the lease is empty.
@@ -126,6 +131,7 @@ class SendGate {
 
   std::mutex control_;
   std::atomic<uint64_t> revocations_{0};
+  std::atomic<uint64_t> faults_{0};
   std::atomic<bool> armed_{false};
   std::atomic<uint64_t> epoch_{kClosed};
   std::atomic<uint64_t> cutoffTicks_{UINT64_MAX};
@@ -174,6 +180,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) uint64_t openEpoch;
 /// Read before preparing; any revocation after this read makes `armCaptureSince:` fail.
 @property(nonatomic, readonly) uint64_t revocationCount;
+/// IO faults latched since launch. A change means the gate was already closed by the fault.
+@property(nonatomic, readonly) uint64_t faultCount;
 
 /// Called by the voice session after it activated its own AVAudioSession. Returns NO,
 /// leaving capture disarmed, if anything revoked since `revocationCount` was read.
