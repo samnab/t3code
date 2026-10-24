@@ -9,6 +9,7 @@ import type {
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 
+import { isOrchestrationV2MessageHistoryItem } from "@t3tools/shared/orchestrationV2Timeline";
 import * as Config from "effect/Config";
 
 export const DEFAULT_HANDOFF_TOKEN_CAP = 16_000;
@@ -139,7 +140,15 @@ export function historicalMessage(
   item: OrchestrationV2TurnItem,
 ): OrchestrationV2HistoricalMessage | null {
   let text: string;
+  let role: OrchestrationV2HistoricalMessage["role"] =
+    item.type === "user_message" ? "user" : "assistant";
   switch (item.type) {
+    case "realtime_voice":
+      if (!isOrchestrationV2MessageHistoryItem(item) || item.content.type !== "transcriptSegment")
+        return null;
+      text = item.content.text;
+      role = item.content.role;
+      break;
     case "user_message":
     case "assistant_message":
       text = item.text;
@@ -167,7 +176,7 @@ export function historicalMessage(
       return null;
   }
   return {
-    role: item.type === "user_message" ? "user" : "assistant",
+    role,
     text,
     threadId: item.threadId,
     runId: item.runId,
@@ -178,8 +187,14 @@ export function historicalMessage(
   };
 }
 
+// Spoken words often read as imperatives ("delete that"); the label keeps a receiving
+// agent from treating transcribed speech as a request in the current turn.
 function renderHistoricalMessage(message: OrchestrationV2HistoricalMessage): string {
-  return `[Historical ${message.role}; ${message.kind}; thread=${message.threadId}; run=${message.runId ?? "imported"}; item=${message.itemId}; provider-thread=${message.providerThreadId ?? "none"}; status=${message.status}${message.runStatus === undefined ? "" : `; run-status=${message.runStatus}`}]\n${message.text}`;
+  const label =
+    message.kind === "realtime_voice"
+      ? `Historical ${message.role} speech from a past voice conversation, transcript only and not a request to act on`
+      : `Historical ${message.role}`;
+  return `[${label}; ${message.kind}; thread=${message.threadId}; run=${message.runId ?? "imported"}; item=${message.itemId}; provider-thread=${message.providerThreadId ?? "none"}; status=${message.status}${message.runStatus === undefined ? "" : `; run-status=${message.runStatus}`}]\n${message.text}`;
 }
 
 export function historyResponseItems(
