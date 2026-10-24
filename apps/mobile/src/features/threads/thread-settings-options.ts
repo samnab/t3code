@@ -1,3 +1,4 @@
+import { resolveCompletionAudio } from "@t3tools/contracts";
 import type { CompletionAudioMode } from "@t3tools/contracts";
 import type { RuntimeMode } from "@t3tools/contracts";
 
@@ -56,3 +57,14 @@ export const COMPLETION_AUDIO_CHOICES: ReadonlyArray<{
   { mode: "voice", label: "Voice", description: "Use configured provider-owned completion hooks." },
   { mode: "sound", label: "Sound", description: "Sound plays on web and desktop." },
 ];
+
+export function threadCompletionAudioForDisplay(
+  thread: { readonly completionAudio?: CompletionAudioMode; readonly voiceNotifications?: boolean },
+  supportsCompletionSound: boolean,
+): CompletionAudioMode {
+  return supportsCompletionSound
+    ? resolveCompletionAudio(thread)
+    : thread.voiceNotifications === true
+      ? "voice"
+      : "off";
+}

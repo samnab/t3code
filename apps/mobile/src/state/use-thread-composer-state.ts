@@ -1,3 +1,4 @@
+import { threadCompletionAudioForDisplay } from "../features/threads/thread-settings-options";
 import type { CompletionAudioMode } from "@t3tools/contracts";
 import { useComposerAttachmentActions } from "./use-composer-attachment-actions";
 import * as Dialog from "../components/ui/Dialog";
@@ -354,11 +355,10 @@ export function useThreadComposerState() {
   const supportsCompletionSound =
     selectedEnvironmentRuntime?.serverConfig?.environment.capabilities.completionNotifications ===
     true;
-  const completionAudio = supportsCompletionSound
-    ? (selectedThread?.completionAudio ?? "off")
-    : selectedThread?.voiceNotifications === true
-      ? "voice"
-      : "off";
+  const completionAudio = threadCompletionAudioForDisplay(
+    selectedThread ?? {},
+    supportsCompletionSound,
+  );
   const canUpdateCompletionAudio = useEnvironmentScope(
     selectedThreadShell?.environmentId ?? null,
     AuthOrchestrationOperateScope,

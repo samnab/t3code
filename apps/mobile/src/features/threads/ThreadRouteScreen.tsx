@@ -834,6 +834,7 @@ function ThreadRouteContent(
         runtimeMode: selectedThread.runtimeMode,
         interactionMode: selectedThread.interactionMode,
         completionAudio: selectedThread.completionAudio,
+        voiceNotifications: selectedThread.voiceNotifications,
         workspaceMode: "local",
         branch: null,
         worktreePath: null,

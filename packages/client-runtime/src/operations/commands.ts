@@ -309,6 +309,18 @@ const supportsServerResolvedCommandContext = Effect.fn(
   return config.environment.capabilities.serverResolvedCommandContext === true;
 });
 
+const completionAudioForCreation = Effect.fn("EnvironmentCommands.completionAudioForCreation")(
+  function* (input: Pick<CreateThreadInput, "completionAudio" | "voiceNotifications">) {
+    const mode = readStoredCompletionAudio(input);
+    if (mode !== null) return completionAudioCreationFields(mode);
+    const config = yield* getInitialServerConfig();
+    // Older servers can default an omitted voice bit to true.
+    return completionAudioCreationFields(
+      config.environment.capabilities.completionNotifications === true ? null : "off",
+    );
+  },
+);
+
 const persistAttachments = Effect.fn("EnvironmentCommands.persistAttachments")(function* (
   threadId: ThreadId,
   messageId: MessageId,
@@ -435,7 +447,7 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
     ...(input.goal === undefined ? {} : { goal: input.goal }),
-    ...completionAudioCreationFields(input.completionAudio ?? readStoredCompletionAudio(input)),
+    ...(yield* completionAudioForCreation(input)),
     branch: input.branch,
     worktreePath: input.worktreePath,
   });
@@ -767,9 +779,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       ...(bootstrap?.goal === undefined ? {} : { goal: bootstrap.goal }),
-      ...completionAudioCreationFields(
-        bootstrap?.completionAudio ?? readStoredCompletionAudio(bootstrap ?? {}),
-      ),
+      ...(bootstrap === undefined ? {} : yield* completionAudioForCreation(bootstrap)),
       workspaceStrategy,
       initialMessage: {
         messageId: input.message.messageId,

@@ -422,13 +422,15 @@ function CompletionAudioSettingsRows() {
         onPress={() => patch({ tone: "input" })}
       />
       <View className="flex-row items-center justify-between gap-4 px-4 py-4 android:min-h-14 android:py-3">
-        <Text className="flex-1 text-lg text-foreground android:text-base">Volume</Text>
+        <Text className="flex-1 text-lg text-foreground android:text-base">
+          Volume{volume === null ? " (mixed)" : ""}
+        </Text>
         <NumberField
           label="Completion sound volume"
           min={0}
           max={100}
           value={Math.round((volume ?? audio.volume) * 100)}
-          formatValue={(value) => (volume === null ? "Mixed" : `${value}%`)}
+          formatValue={(value) => `${value}%`}
           disabled={disabled}
           onValueChange={(value) => patch({ volume: value / 100 })}
         />

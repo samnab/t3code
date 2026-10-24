@@ -76,6 +76,7 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly advertiseServerResolvedCommandContext?: boolean;
   readonly rejectDispatch?: boolean;
   readonly advertiseThreadStop?: boolean;
+  readonly advertiseCompletionNotifications?: boolean;
 }) {
   const client = {
     [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) => {
@@ -139,6 +140,9 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
       environment: {
         capabilities: {
           repositoryIdentity: true,
+          ...(input.advertiseCompletionNotifications === true
+            ? { completionNotifications: true }
+            : {}),
           ...(input.advertiseThreadStop === true ? { threadStop: true } : {}),
           ...(input.advertiseServerResolvedCommandContext === false
             ? {}
@@ -268,17 +272,84 @@ describe("V2 environment commands", () => {
   );
 
   it.effect.each([
-    { completionAudio: "sound", voiceNotifications: true, expected: "sound" },
-    { completionAudio: undefined, voiceNotifications: false, expected: "off" },
-    { completionAudio: undefined, voiceNotifications: true, expected: "voice" },
-    { completionAudio: undefined, voiceNotifications: undefined, expected: undefined },
+    {
+      advertiseCompletionNotifications: true,
+      completionAudio: "sound",
+      voiceNotifications: true,
+      expected: "sound",
+    },
+    {
+      advertiseCompletionNotifications: true,
+      completionAudio: "voice",
+      voiceNotifications: false,
+      expected: "voice",
+    },
+    {
+      advertiseCompletionNotifications: true,
+      completionAudio: "off",
+      voiceNotifications: true,
+      expected: "off",
+    },
+    {
+      advertiseCompletionNotifications: true,
+      completionAudio: undefined,
+      voiceNotifications: false,
+      expected: "off",
+    },
+    {
+      advertiseCompletionNotifications: true,
+      completionAudio: undefined,
+      voiceNotifications: true,
+      expected: "voice",
+    },
+    {
+      advertiseCompletionNotifications: true,
+      completionAudio: undefined,
+      voiceNotifications: undefined,
+      expected: undefined,
+    },
+    {
+      advertiseCompletionNotifications: false,
+      completionAudio: undefined,
+      voiceNotifications: undefined,
+      expected: "off",
+    },
+    {
+      advertiseCompletionNotifications: false,
+      completionAudio: "voice",
+      voiceNotifications: false,
+      expected: "voice",
+    },
+    {
+      advertiseCompletionNotifications: false,
+      completionAudio: "off",
+      voiceNotifications: true,
+      expected: "off",
+    },
+    {
+      advertiseCompletionNotifications: false,
+      completionAudio: undefined,
+      voiceNotifications: false,
+      expected: "off",
+    },
+    {
+      advertiseCompletionNotifications: false,
+      completionAudio: undefined,
+      voiceNotifications: true,
+      expected: "voice",
+    },
   ] as const)(
-    "preserves completion creation precedence $expected through direct and bootstrap paths",
-    ({ completionAudio, voiceNotifications, expected }) =>
+    "preserves completion creation precedence $expected with capability $advertiseCompletionNotifications through direct and bootstrap paths",
+    ({ advertiseCompletionNotifications, completionAudio, voiceNotifications, expected }) =>
       Effect.gen(function* () {
         const commands: OrchestrationV2Command[] = [];
         const launches: OrchestrationV2ThreadLaunchInput[] = [];
-        const supervisor = yield* makeSupervisor({ commands, projects: [], launches });
+        const supervisor = yield* makeSupervisor({
+          commands,
+          projects: [],
+          launches,
+          advertiseCompletionNotifications,
+        });
         const choice = {
           ...(completionAudio === undefined ? {} : { completionAudio }),
           ...(voiceNotifications === undefined ? {} : { voiceNotifications }),
