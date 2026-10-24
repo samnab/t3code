@@ -1,9 +1,11 @@
+import * as DateTime from "effect/DateTime";
 import {
   EnvironmentId,
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
   ThreadId,
+  type ProviderRealtimeVoiceStartResult,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
@@ -11,6 +13,8 @@ import {
   type RealtimeVoiceController,
   type VoiceOwner,
   type VoiceTransport,
+  type VoiceOperationOwner,
+  type VoiceSessionOwnership,
 } from "./privacyController.ts";
 
 type Stage = "microphone" | "offer" | "local" | "ice" | "provider" | "remote";
@@ -52,6 +56,7 @@ function fixture(holdAt?: Stage, requireMountedOwner = false) {
     providerSessionId: ProviderSessionId.make("session-a"),
     threadTitle: "Conversation A",
     environmentLabel: "Machine A",
+    accountId: null,
   };
   const other: VoiceOwner = {
     ...owner,
@@ -63,15 +68,41 @@ function fixture(holdAt?: Stage, requireMountedOwner = false) {
   const releaseOwner = vi.fn(() => {
     ownerMounted = false;
   });
-  const stopProvider = vi.fn(async () => {
-    if (requireMountedOwner && !ownerMounted) throw new Error("Owner detail was dropped");
-    operations.push("stop");
-  });
-  const startProvider = vi.fn(async () => {
-    await step("provider", 0);
-    return "answer";
-  });
+  const initialNow = Date.parse("2026-10-23T20:00:00.000Z");
+  let now = initialNow;
+  let sequence = 0;
+  const createOperationId = vi.fn(() => `operation-${++sequence}`);
+  const validateOwner = vi.fn<(_owner: VoiceOwner) => void>(() => {});
+  const expiries: Array<{ at: number; expire: () => void; cancel: ReturnType<typeof vi.fn> }> = [];
+  const stopProvider = vi.fn(
+    async (_owner: VoiceOperationOwner, _ownership: VoiceSessionOwnership) => {
+      if (requireMountedOwner && !ownerMounted) throw new Error("Owner detail was dropped");
+      operations.push("stop");
+    },
+  );
+  const startProvider = vi.fn(
+    async (owner: VoiceOperationOwner, _sdp: string): Promise<ProviderRealtimeVoiceStartResult> => {
+      await step("provider", 0);
+      return {
+        sdp: "answer",
+        operationId: owner.operationId,
+        voiceSessionToken: `token-${owner.operationId}`,
+        providerInstanceId: owner.providerInstanceId,
+        providerThreadId: owner.providerThreadId,
+        providerSessionId: owner.providerSessionId,
+        expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + 4 * 60 * 60 * 1000)),
+      };
+    },
+  );
   const controller = createRealtimeVoiceController({
+    createOperationId,
+    validateOwner,
+    now: () => now,
+    scheduleExpiry: (at, expire) => {
+      const cancel = vi.fn();
+      expiries.push({ at, expire, cancel });
+      return cancel;
+    },
     describeError: (error) => (error instanceof Error ? error.message : String(error)),
     watchOwner: (_owner, lost) => {
       ownerLost = lost;
@@ -112,6 +143,13 @@ function fixture(holdAt?: Stage, requireMountedOwner = false) {
   });
   return {
     controller,
+    createOperationId,
+    validateOwner,
+    expiries,
+    initialNow,
+    setNow: (value: number) => {
+      now = value;
+    },
     owner,
     other,
     entered,
@@ -138,6 +176,267 @@ function whenOff(controller: RealtimeVoiceController): Promise<void> {
 }
 
 describe("app-owned realtime voice", () => {
+  it("creates a frozen operation before permission and sends matching ownership on stop", async () => {
+    const f = fixture("microphone");
+    const pending = f.controller.start(f.owner);
+    await f.entered.promise;
+    expect(f.createOperationId).toHaveBeenCalledOnce();
+    expect(f.controller.getSnapshot().owner).toMatchObject({
+      ...f.owner,
+      operationId: "operation-1",
+    });
+    expect(Object.isFrozen(f.controller.getSnapshot().owner)).toBe(true);
+    f.gate.resolve();
+    await pending;
+    const off = whenOff(f.controller);
+    f.controller.end();
+    await off;
+    expect(f.stopProvider).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ ...f.owner, operationId: "operation-1" }),
+      expect.objectContaining({
+        operationId: "operation-1",
+        voiceSessionToken: "token-operation-1",
+        providerSessionId: f.owner.providerSessionId,
+        providerThreadId: f.owner.providerThreadId,
+      }),
+    );
+    expect(Object.isFrozen(f.stopProvider.mock.calls[0]?.[1])).toBe(true);
+  });
+
+  it("moves explicitly only after the original matching stop confirms closure", async () => {
+    const f = fixture();
+    const closed = deferred();
+    f.stopProvider.mockImplementationOnce(async () => {
+      f.operations.push("stop");
+      await closed.promise;
+    });
+    await f.controller.start(f.owner);
+    const moving = f.controller.move(f.other);
+    expect(f.transports[0]?.closed).toBe(true);
+    expect(f.transports).toHaveLength(1);
+    expect(f.createOperationId).toHaveBeenCalledOnce();
+    expect(f.controller.getSnapshot().mode).toBe("ending");
+    closed.resolve();
+    await moving;
+    expect(f.transports).toHaveLength(2);
+    expect(f.operations.indexOf("close")).toBeLessThan(f.operations.indexOf("stop"));
+    expect(f.controller.getSnapshot()).toMatchObject({
+      mode: "transmitting",
+      owner: { ...f.other, operationId: "operation-2" },
+    });
+    expect(f.startProvider.mock.calls[0]?.[0].environmentId).toBe(f.owner.environmentId);
+    expect(f.startProvider.mock.calls[1]?.[0].environmentId).toBe(f.other.environmentId);
+    f.transports[0]!.events.failed("late A failure");
+    f.transports[0]!.events.connected();
+    expect(f.transports[1]?.closed).toBe(false);
+    expect(f.stopProvider).toHaveBeenCalledOnce();
+  });
+
+  it("validates a move destination before ending the current conversation", async () => {
+    const f = fixture();
+    await f.controller.start(f.owner);
+    f.validateOwner.mockImplementation((owner) => {
+      if (owner.environmentId === f.other.environmentId)
+        throw new Error("Destination permission denied");
+    });
+    await expect(f.controller.move(f.other)).rejects.toThrow("Destination permission denied");
+    expect(f.transports[0]?.closed).toBe(false);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", owner: f.owner });
+    expect(f.stopProvider).not.toHaveBeenCalled();
+  });
+
+  it("revalidates destination permissions after closure before acquiring its microphone", async () => {
+    const f = fixture();
+    const closed = deferred();
+    f.stopProvider.mockImplementationOnce(async () => {
+      await closed.promise;
+    });
+    await f.controller.start(f.owner);
+    const moving = f.controller.move(f.other);
+    f.validateOwner.mockImplementation(() => {
+      throw new Error("Destination was revoked");
+    });
+    closed.resolve();
+    await expect(moving).rejects.toThrow("Destination was revoked");
+    expect(f.transports).toHaveLength(1);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", replacementBlocked: false });
+  });
+
+  it("does not move or restart after a native-close timeout", async () => {
+    const f = fixture();
+    f.stopProvider.mockRejectedValue(
+      new Error("Native closure timed out; reservation quarantined"),
+    );
+    await f.controller.start(f.owner);
+    await f.controller.move(f.other);
+    await f.controller.start(f.owner);
+    expect(f.startProvider).toHaveBeenCalledOnce();
+    expect(f.transports).toHaveLength(1);
+    expect(f.controller.getSnapshot()).toMatchObject({
+      mode: "off",
+      replacementBlocked: true,
+      reason: expect.stringContaining("quarantined"),
+    });
+  });
+
+  it("lets End cancel a pending move without starting its destination later", async () => {
+    const f = fixture("microphone");
+    const starting = f.controller.start(f.owner);
+    await f.entered.promise;
+    const moving = f.controller.move(f.other);
+    f.controller.end();
+    f.gate.resolve();
+    await starting;
+    await moving;
+    expect(f.transports).toHaveLength(1);
+    expect(f.startProvider).not.toHaveBeenCalled();
+    expect(f.controller.getSnapshot().mode).toBe("off");
+  });
+
+  it("does not carry a queued move across owner or account loss during cleanup", async () => {
+    const f = fixture();
+    const closed = deferred();
+    f.stopProvider.mockImplementationOnce(async () => {
+      await closed.promise;
+    });
+    await f.controller.start(f.owner);
+    const moving = f.controller.move(f.other);
+    f.loseOwner("Signed-in account changed");
+    closed.resolve();
+    await moving;
+    expect(f.startProvider).toHaveBeenCalledOnce();
+    expect(f.transports).toHaveLength(1);
+    expect(f.controller.getSnapshot()).toMatchObject({
+      mode: "off",
+      reason: "Signed-in account changed",
+    });
+  });
+
+  it.each(["legacy", "operation", "token", "provider", "expiry"] as const)(
+    "fails closed on a %s ownership response without an unowned stop",
+    async (kind) => {
+      const f = fixture();
+      const result = {
+        sdp: "answer",
+        operationId: "operation-1",
+        voiceSessionToken: "original-token",
+        providerInstanceId: f.owner.providerInstanceId,
+        providerThreadId: f.owner.providerThreadId,
+        providerSessionId: f.owner.providerSessionId,
+        expiresAt: "2026-10-24T00:00:00.000Z",
+      };
+      f.startProvider.mockResolvedValueOnce(
+        kind === "legacy"
+          ? { sdp: "answer" }
+          : {
+              ...result,
+              ...(kind === "operation" ? { operationId: "old-operation" } : {}),
+              ...(kind === "token" ? { voiceSessionToken: "" } : {}),
+              ...(kind === "provider"
+                ? { providerSessionId: ProviderSessionId.make("other-session") }
+                : {}),
+              ...(kind === "expiry" ? { expiresAt: "not-a-time" } : {}),
+            },
+      );
+      await f.controller.start(f.owner);
+      expect(f.stopProvider).not.toHaveBeenCalled();
+      expect(f.operations).not.toContain("remote");
+      expect(f.transports[0]?.sending).toBe(false);
+      expect(f.transports[0]?.closed).toBe(true);
+      expect(f.controller.getSnapshot()).toMatchObject({
+        mode: "off",
+        replacementBlocked: true,
+        reason: expect.stringContaining("Update the T3 host"),
+      });
+      await f.controller.start(f.other);
+      expect(f.transports).toHaveLength(1);
+    },
+  );
+
+  it("stops at the bounded lifetime and ignores expiry callbacks after a new explicit start", async () => {
+    const f = fixture();
+    await f.controller.start(f.owner);
+    const expiry = f.expiries[0]!;
+    expect(expiry.at).toBe(f.initialNow + 4 * 60 * 60 * 1000);
+    f.setNow(expiry.at);
+    const off = whenOff(f.controller);
+    expiry.expire();
+    expect(f.transports[0]?.closed).toBe(true);
+    await off;
+    expect(f.startProvider).toHaveBeenCalledOnce();
+    expect(expiry.cancel).toHaveBeenCalledOnce();
+    await f.controller.start(f.owner);
+    expiry.expire();
+    expect(f.controller.getSnapshot()).toMatchObject({
+      mode: "transmitting",
+      owner: { operationId: "operation-2" },
+    });
+    expect(f.transports[1]?.closed).toBe(false);
+  });
+
+  it("does not enable input when negotiation finishes after the deadline", async () => {
+    const f = fixture("remote");
+    const pending = f.controller.start(f.owner);
+    await f.entered.promise;
+    f.setNow(f.expiries[0]!.at);
+    f.gate.resolve();
+    await pending;
+    await whenOff(f.controller);
+    expect(f.transports[0]?.sending).toBe(false);
+    expect(f.transports[0]?.closed).toBe(true);
+    expect(f.stopProvider).toHaveBeenCalledOnce();
+  });
+
+  it("cleans up an already expired owned response without enabling input", async () => {
+    const f = fixture();
+    f.startProvider.mockResolvedValueOnce({
+      sdp: "answer",
+      operationId: "operation-1",
+      voiceSessionToken: "expired-token",
+      providerInstanceId: f.owner.providerInstanceId,
+      providerThreadId: f.owner.providerThreadId,
+      providerSessionId: f.owner.providerSessionId,
+      expiresAt: "2026-10-23T19:59:00.000Z",
+    });
+    await f.controller.start(f.owner);
+    await whenOff(f.controller);
+    expect(f.transports[0]?.sending).toBe(false);
+    expect(f.operations).not.toContain("remote");
+    expect(f.stopProvider).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ operationId: "operation-1" }),
+      expect.objectContaining({ voiceSessionToken: "expired-token" }),
+    );
+    expect(f.controller.getSnapshot().replacementBlocked).toBe(false);
+  });
+
+  it("never schedules capture beyond four hours even if a host advertises a later deadline", async () => {
+    const f = fixture();
+    f.startProvider.mockResolvedValueOnce({
+      sdp: "answer",
+      operationId: "operation-1",
+      voiceSessionToken: "bounded-token",
+      providerInstanceId: f.owner.providerInstanceId,
+      providerThreadId: f.owner.providerThreadId,
+      providerSessionId: f.owner.providerSessionId,
+      expiresAt: "2026-10-24T04:00:00.000Z",
+    });
+    await f.controller.start(f.owner);
+    expect(f.expiries[0]?.at).toBe(f.initialNow + 4 * 60 * 60 * 1000);
+    expect(f.controller.getSnapshot().expiresAt).toBe("2026-10-24T00:00:00.000Z");
+  });
+
+  it("allows an explicit same-conversation restart after provider cleanup succeeds", async () => {
+    const f = fixture();
+    await f.controller.start(f.owner);
+    const off = whenOff(f.controller);
+    f.controller.end();
+    await off;
+    expect(f.controller.getSnapshot().replacementBlocked).toBe(false);
+    await f.controller.start(f.owner);
+    expect(f.startProvider).toHaveBeenCalledTimes(2);
+    expect(f.transports).toHaveLength(2);
+  });
+
   it("retains the owner detail subscription until cancelled provider startup is cleaned up", async () => {
     const f = fixture("provider", true);
     const pending = f.controller.start(f.owner);
@@ -201,7 +500,10 @@ describe("app-owned realtime voice", () => {
     expect(f.transports).toHaveLength(1);
     f.gate.resolve();
     await pending;
-    expect(f.startProvider).toHaveBeenCalledExactlyOnceWith(f.owner, "offer");
+    expect(f.startProvider).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ ...f.owner, operationId: "operation-1" }),
+      "offer",
+    );
     expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", owner: f.owner });
     expect(Object.isFrozen(f.controller.getSnapshot().owner)).toBe(true);
   });
@@ -225,8 +527,8 @@ describe("app-owned realtime voice", () => {
         expect(f.stopProvider).toHaveBeenCalledOnce();
         expect(f.operations.indexOf("close")).toBeLessThan(f.operations.indexOf("stop"));
         await f.controller.start(f.other);
-        expect(f.transports).toHaveLength(1);
-        expect(f.controller.getSnapshot().replacementBlocked).toBe(true);
+        expect(f.transports).toHaveLength(2);
+        expect(f.controller.getSnapshot().replacementBlocked).toBe(false);
       } else {
         expect(f.startProvider).not.toHaveBeenCalled();
         expect(f.stopProvider).not.toHaveBeenCalled();
@@ -294,10 +596,10 @@ describe("app-owned realtime voice", () => {
       reason: "Owner permission revoked",
     });
     expect(f.startProvider).toHaveBeenCalledOnce();
-    expect(f.stopProvider).not.toHaveBeenCalled();
+    expect(f.stopProvider).toHaveBeenCalledOnce();
   });
 
-  it("does not send a late thread-only stop after owner loss during provider startup", async () => {
+  it("uses matching ownership for late cleanup after owner loss during provider startup", async () => {
     const f = fixture("provider");
     const pending = f.controller.start(f.owner);
     await f.entered.promise;
@@ -306,11 +608,19 @@ describe("app-owned realtime voice", () => {
     f.gate.resolve();
     await pending;
     await off;
-    expect(f.stopProvider).not.toHaveBeenCalled();
+    expect(f.stopProvider).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ ...f.owner, operationId: "operation-1" }),
+      expect.objectContaining({
+        operationId: "operation-1",
+        voiceSessionToken: "token-operation-1",
+        providerSessionId: f.owner.providerSessionId,
+        providerThreadId: f.owner.providerThreadId,
+      }),
+    );
     expect(f.controller.getSnapshot()).toMatchObject({
       mode: "off",
       reason: "Provider replaced",
-      replacementBlocked: true,
+      replacementBlocked: false,
     });
   });
 

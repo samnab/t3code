@@ -15,14 +15,14 @@ export function RealtimeVoiceControl({
   threadId: ThreadId;
   size: ComposerControlSize;
 }) {
-  const { snapshot, start, end, returnToOwner } = useRealtimeVoice();
+  const { snapshot, start, move, end, returnToOwner } = useRealtimeVoice();
   const owner = snapshot.owner;
   const isOwner = owner?.environmentId === environmentId && owner.threadId === threadId;
   const tooltip =
     owner !== null
       ? isOwner
         ? "End voice in this conversation"
-        : `Voice in ${owner.threadTitle} · Return to conversation. Moving calls is unavailable until ownership-safe stop is supported.`
+        : `Voice in ${owner.threadTitle} · Return to conversation`
       : snapshot.replacementBlocked
         ? [snapshot.reason, VOICE_REPLACEMENT_GATE].filter(Boolean).join(" ")
         : (snapshot.reason ?? "Talk with Codex by voice");
@@ -33,34 +33,62 @@ export function RealtimeVoiceControl({
     } else start(environmentId, threadId);
   };
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <ComposerControl
+    <>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <ComposerControl
+              size={size}
+              className="shrink-0 whitespace-nowrap"
+              aria-pressed={isOwner && snapshot.mode !== "ending"}
+              type="button"
+              disabled={
+                (isOwner && snapshot.mode === "ending") ||
+                (owner === null && snapshot.replacementBlocked)
+              }
+              onClick={activate}
+              aria-label={tooltip}
+            />
+          }
+        >
+          <ComposerControlIcon
+            icon={owner !== null ? AudioLinesIcon : MicIcon}
             size={size}
-            className="shrink-0 whitespace-nowrap"
-            aria-pressed={isOwner && snapshot.mode !== "ending"}
-            type="button"
-            disabled={snapshot.mode === "ending" || (owner === null && snapshot.replacementBlocked)}
-            onClick={activate}
-            aria-label={tooltip}
+            opticalSize={size === "xs" ? "default" : "large"}
           />
-        }
-      >
-        <ComposerControlIcon
-          icon={owner !== null ? AudioLinesIcon : MicIcon}
-          size={size}
-          opticalSize={size === "xs" ? "default" : "large"}
-        />
-        <span data-composer-control-label className="sr-only sm:not-sr-only">
-          {owner !== null && !isOwner
-            ? "Voice elsewhere"
-            : snapshot.mode === "connecting"
-              ? "Cancel voice"
-              : "Voice"}
-        </span>
-      </TooltipTrigger>
-      <TooltipPopup side="top">{tooltip}</TooltipPopup>
-    </Tooltip>
+          <span data-composer-control-label className="sr-only sm:not-sr-only">
+            {owner !== null && !isOwner
+              ? "Voice elsewhere"
+              : snapshot.mode === "connecting"
+                ? "Cancel voice"
+                : "Voice"}
+          </span>
+        </TooltipTrigger>
+        <TooltipPopup side="top">{tooltip}</TooltipPopup>
+      </Tooltip>
+      {owner !== null && !isOwner && (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <ComposerControl
+                size={size}
+                type="button"
+                disabled={snapshot.mode === "ending" || snapshot.replacementBlocked}
+                onClick={() => move(environmentId, threadId)}
+                aria-label={`End voice in ${owner.threadTitle} and talk in this conversation`}
+              />
+            }
+          >
+            <ComposerControlIcon
+              icon={MicIcon}
+              size={size}
+              opticalSize={size === "xs" ? "default" : "large"}
+            />
+            <span data-composer-control-label>Talk here instead</span>
+          </TooltipTrigger>
+          <TooltipPopup side="top">End voice in {owner.threadTitle}, then start here</TooltipPopup>
+        </Tooltip>
+      )}
+    </>
   );
 }

@@ -55,6 +55,9 @@ export function readVoiceOwner(environmentId: EnvironmentId, threadId: ThreadId)
       "Voice needs a loaded provider session. Send a message in this conversation first.",
     );
   }
+  if (session.driver !== "codex") {
+    throw new Error("Realtime voice is currently available for loaded Codex conversations.");
+  }
   return {
     environmentId,
     threadId,
@@ -63,12 +66,27 @@ export function readVoiceOwner(environmentId: EnvironmentId, threadId: ThreadId)
     providerSessionId,
     threadTitle: thread.title || "Untitled conversation",
     environmentLabel: environment.entry.target.label,
+    accountId: appAtomRegistry.get(managedRelaySessionAtom)?.accountId ?? null,
   };
+}
+
+export function validateVoiceOwner(owner: VoiceOwner): void {
+  const current = readVoiceOwner(owner.environmentId, owner.threadId);
+  if (
+    current.providerInstanceId !== owner.providerInstanceId ||
+    current.providerThreadId !== owner.providerThreadId ||
+    current.providerSessionId !== owner.providerSessionId ||
+    current.accountId !== owner.accountId
+  ) {
+    throw new Error(
+      "The conversation's provider or account changed. Select it again before starting voice.",
+    );
+  }
 }
 
 /** Keep subscriptions on the originating environment even when its routed view disappears. */
 export function watchVoiceOwner(owner: VoiceOwner, lost: (reason: string) => void): () => void {
-  const accountId = appAtomRegistry.get(managedRelaySessionAtom)?.accountId ?? null;
+  const accountId = owner.accountId;
   const validate = () => {
     try {
       const current = readVoiceOwner(owner.environmentId, owner.threadId);

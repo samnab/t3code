@@ -11,9 +11,7 @@ export function GlobalRealtimeVoiceControl() {
       ? "Microphone audio sent to Codex"
       : snapshot.mode === "connecting"
         ? "Connecting · microphone not sending"
-        : snapshot.mode === "ending"
-          ? "Microphone off · ending call"
-          : "Microphone off";
+        : "Microphone off · ending call";
   return (
     <div
       className="pointer-events-none fixed inset-x-3 top-3 z-100 flex justify-center"
@@ -28,30 +26,26 @@ export function GlobalRealtimeVoiceControl() {
         )}
         <div className="min-w-0 flex-1 text-sm" role="status">
           <p>{status}</p>
-          {owner && (
-            <p className="truncate text-muted-foreground">
-              {owner.threadTitle} · {owner.environmentLabel}
+          <p className="truncate text-muted-foreground">
+            {owner.threadTitle} · {owner.environmentLabel}
+          </p>
+          {snapshot.mode !== "ending" && (
+            <p className="text-xs text-muted-foreground">
+              {snapshot.expiresAt === null
+                ? "Calls last up to 4 hours"
+                : `Ends by ${new Date(snapshot.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`}
             </p>
           )}
           {snapshot.reason && (
             <p className="max-w-md text-xs text-muted-foreground">{snapshot.reason}</p>
           )}
         </div>
-        {owner && (
-          <Button size="sm" variant="ghost" onClick={() => returnToOwner(owner)}>
-            Return
-          </Button>
-        )}
-        {owner && (
-          <Button
-            size="sm"
-            variant="destructive-outline"
-            disabled={snapshot.mode === "ending"}
-            onClick={end}
-          >
-            {snapshot.mode === "connecting" ? "Cancel" : "End"}
-          </Button>
-        )}
+        <Button size="sm" variant="ghost" onClick={() => returnToOwner(owner)}>
+          Return
+        </Button>
+        <Button size="sm" variant="destructive-outline" onClick={end}>
+          {snapshot.mode === "connecting" ? "Cancel" : "End"}
+        </Button>
       </div>
     </div>
   );

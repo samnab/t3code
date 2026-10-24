@@ -14,12 +14,17 @@ import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { createBrowserVoiceTransport } from "../../voice/browserVoiceTransport";
+import { randomUUID } from "../../lib/utils";
 import {
   createRealtimeVoiceController,
   type VoiceOwner,
   type VoiceSnapshot,
 } from "@t3tools/client-runtime/realtime-voice";
-import { readVoiceOwner, watchVoiceOwner } from "../../voice/voiceOwnerLifecycle";
+import {
+  readVoiceOwner,
+  validateVoiceOwner,
+  watchVoiceOwner,
+} from "../../voice/voiceOwnerLifecycle";
 import { toastManager } from "../ui/toast";
 import { stackedThreadToast } from "../ui/toastHelpers";
 
@@ -36,6 +41,7 @@ function requireSuccess<A, E>(result: AtomCommandResult<A, E>): A {
 interface VoiceContext {
   readonly snapshot: VoiceSnapshot;
   readonly start: (environmentId: EnvironmentId, threadId: ThreadId) => void;
+  readonly move: (environmentId: EnvironmentId, threadId: ThreadId) => void;
   readonly end: () => void;
   readonly returnToOwner: (owner: VoiceOwner) => void;
 }
@@ -57,26 +63,31 @@ export function RealtimeVoiceProvider({
   const [controller] = useState(() =>
     createRealtimeVoiceController({
       createTransport: createBrowserVoiceTransport,
+      createOperationId: randomUUID,
+      validateOwner: validateVoiceOwner,
+      now: () => Date.now(),
+      scheduleExpiry: (expiresAt, expired) => {
+        const timeout = window.setTimeout(expired, Math.max(0, expiresAt - Date.now()));
+        return () => window.clearTimeout(timeout);
+      },
       startProvider: async (owner, sdp) =>
         requireSuccess(
           await startProvider({
             environmentId: owner.environmentId,
-            input: { threadId: owner.threadId, sdp },
+            input: { threadId: owner.threadId, operationId: owner.operationId, sdp },
           }),
-        ).sdp,
-      stopProvider: async (owner) => {
-        const current = readVoiceOwner(owner.environmentId, owner.threadId);
-        if (
-          current.providerInstanceId !== owner.providerInstanceId ||
-          current.providerThreadId !== owner.providerThreadId ||
-          current.providerSessionId !== owner.providerSessionId
-        ) {
-          throw new Error("Provider ownership changed; the thread-only stop was withheld.");
-        }
+        ),
+      stopProvider: async (owner, ownership) => {
         requireSuccess(
           await stopProvider({
             environmentId: owner.environmentId,
-            input: { threadId: owner.threadId },
+            input: {
+              threadId: owner.threadId,
+              operationId: ownership.operationId,
+              voiceSessionToken: ownership.voiceSessionToken,
+              providerThreadId: ownership.providerThreadId,
+              providerSessionId: ownership.providerSessionId,
+            },
           }),
         );
       },
@@ -85,6 +96,24 @@ export function RealtimeVoiceProvider({
     }),
   );
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  useEffect(() => {
+    let previous = controller.getSnapshot();
+    return controller.subscribe(() => {
+      const next = controller.getSnapshot();
+      const failedOwner = previous.owner;
+      const ended = previous.mode !== "off" && next.mode === "off";
+      previous = next;
+      if (ended && next.reason !== null) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: failedOwner ? `Voice ended in ${failedOwner.threadTitle}` : "Voice ended",
+            description: next.reason,
+          }),
+        );
+      }
+    });
+  }, [controller]);
   useEffect(() => {
     const end = () => controller.end("Voice ended because the app is closing or suspended.");
     const hidden = () => {
@@ -105,10 +134,8 @@ export function RealtimeVoiceProvider({
       document.removeEventListener("visibilitychange", hidden);
     };
   }, [controller]);
-  const start = (environmentId: EnvironmentId, threadId: ThreadId) => {
-    try {
-      void controller.start(readVoiceOwner(environmentId, threadId));
-    } catch (error) {
+  const invoke = (environmentId: EnvironmentId, threadId: ThreadId, moving: boolean) => {
+    const failed = (error: unknown) =>
       toastManager.add(
         stackedThreadToast({
           type: "error",
@@ -116,10 +143,23 @@ export function RealtimeVoiceProvider({
           description: describeError(error),
         }),
       );
+    try {
+      const owner = readVoiceOwner(environmentId, threadId);
+      void (moving ? controller.move(owner) : controller.start(owner)).catch(failed);
+    } catch (error) {
+      failed(error);
     }
   };
   return (
-    <Context value={{ snapshot, start, end: () => controller.end(), returnToOwner }}>
+    <Context
+      value={{
+        snapshot,
+        start: (environmentId, threadId) => invoke(environmentId, threadId, false),
+        move: (environmentId, threadId) => invoke(environmentId, threadId, true),
+        end: () => controller.end(),
+        returnToOwner,
+      }}
+    >
       {children}
     </Context>
   );
