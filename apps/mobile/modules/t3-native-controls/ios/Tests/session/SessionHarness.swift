@@ -13,9 +13,17 @@ final class T3RealtimeVoiceAudioDevice {
   var afterRevoke: (() -> Void)?
   var parameterChanges = 0
   func armCapture(since: UInt64) -> Bool {
+    AVAudioSession.onPoint?("beforeArm")
+    defer { AVAudioSession.onPoint?("afterArm") }
     guard revocationCount == since else { return false }
     captureArmed = true
     return true
+  }
+  /// Models SendGate::fault(): the IO thread disarms and bumps the counter, no observer runs.
+  func fault() {
+    revocationCount += 1
+    captureArmed = false
+    openEpoch = 0
   }
   func revokeCapture() {
     revocationCount += 1
@@ -24,6 +32,7 @@ final class T3RealtimeVoiceAudioDevice {
     let hook = afterRevoke
     afterRevoke = nil
     hook?()
+    AVAudioSession.onPoint?("afterRevoke")
   }
   func revokeCaptureAndResetUnit() { revokeCapture() }
   func notifyRouteParametersChanged() { parameterChanges += 1 }
@@ -180,6 +189,42 @@ func check(_ ok: Bool, _ what: String) {
     check(device.captureArmed && device.openEpoch == fresh, "stale observer does not revoke the replacement")
     check(replacementEvents.isEmpty && staleEvents.isEmpty, "stale observer emits no event")
     _ = session.end(module: b)
+
+    // Council repair: every point inside prepare, after its native lock entry, must fail the
+    // attempt for both an IO fault (no observer) and an interruption (observer), and a fresh
+    // prepare afterwards must succeed. Each injection fires once, at the named occurrence.
+    let points = [
+      ("sharedInstance", 1), ("afterRevoke", 1), ("setCategory", 1), ("setActive", 1),
+      ("currentRoute", 1), ("beforeArm", 1), ("afterArm", 1), ("currentRoute", 2),
+    ]
+    for (point, occurrence) in points {
+      for kind in ["fault", "interruption"] {
+        let name = "\(kind) at \(point)#\(occurrence)"
+        _ = try session.prepare(owner: "a", module: a)
+        var seen = 0
+        AVAudioSession.onPoint = { hit in
+          guard hit == point else { return }
+          seen += 1
+          guard seen == occurrence else { return }
+          AVAudioSession.onPoint = nil
+          if kind == "fault" { device.fault() } else { interrupt() }
+        }
+        let rejected = (try? session.prepare(owner: "a", module: a)) == nil
+        AVAudioSession.onPoint = nil
+        check(seen >= occurrence, "\(name): injection point reached")
+        check(rejected, "\(name): prepare fails")
+        check(!device.captureArmed, "\(name): stays disarmed")
+        check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) == 0, "\(name): no epoch")
+        _ = try? session.prepare(owner: "a", module: a)
+        check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 != 0, "\(name): fresh retry opens")
+        _ = session.end(module: a)
+      }
+    }
+    // A fault before the attempt's lock entry belongs to the old lifetime.
+    device.fault()
+    _ = try session.prepare(owner: "a", module: a)
+    check((try? session.openGate(owner: "a", module: a, leaseSeconds: 30)) ?? 0 != 0, "old fault does not block a new prepare")
+    _ = session.end(module: a)
 
     if failures == 0 { print("T3RealtimeVoiceSession harness: all checks passed") }
     exit(failures == 0 ? 0 : 1)

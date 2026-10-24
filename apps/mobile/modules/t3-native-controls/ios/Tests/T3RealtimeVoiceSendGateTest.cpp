@@ -163,6 +163,24 @@ int main() {
         true, gate, [] { return true; }, [] {}, [] { return false; });
     check(!gate.armed(), "failed restart revokes");
   }
+  {
+    // Ordering the session's prepare relies on: baseline = revocations() + 1 read at lock
+    // entry, then exactly one deliberate revoke, then arm(baseline). Faults on either side
+    // of that revoke fail the attempt; a fault before the baseline does not.
+    auto attempt = [](SendGate &gate, bool faultBefore, bool faultAfter) {
+      uint64_t baseline = gate.revocations() + 1;
+      if (faultBefore) gate.fault();
+      gate.revoke();
+      if (faultAfter) gate.fault();
+      return gate.arm(baseline);
+    };
+    SendGate gate;
+    check(attempt(gate, false, false), "clean prepare arms");
+    check(!attempt(gate, true, false), "fault before the deliberate revoke fails prepare");
+    check(!attempt(gate, false, true), "fault after the deliberate revoke fails prepare");
+    gate.fault();
+    check(attempt(gate, false, false), "fault before lock entry does not block a fresh prepare");
+  }
   if (failures == 0) std::puts("T3RealtimeVoiceSendGateTest: all checks passed");
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

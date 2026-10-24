@@ -54,16 +54,31 @@ public final class AVAudioSession {
   public static let singleton = AVAudioSession()
   /// Lets a harness pause a specific thread when it reaches the shared session.
   public static var onSharedInstance: (() -> Void)?
-  public static func sharedInstance() -> AVAudioSession { onSharedInstance?(); return singleton }
+  /// Scheduling hook named after the API being entered; not a claim about Apple's timing.
+  public static var onPoint: ((String) -> Void)?
+  public static func sharedInstance() -> AVAudioSession {
+    onSharedInstance?()
+    onPoint?("sharedInstance")
+    return singleton
+  }
   public var category: Category = .playback
   public var mode: Mode = .default
   public var categoryOptions: CategoryOptions = []
-  public var currentRoute = AVAudioSessionRouteDescription(inputs: ["headset-mic"], outputs: ["headset"])
+  private var route = AVAudioSessionRouteDescription(inputs: ["headset-mic"], outputs: ["headset"])
+  public var currentRoute: AVAudioSessionRouteDescription {
+    get {
+      AVAudioSession.onPoint?("currentRoute")
+      return route
+    }
+    set { route = newValue }
+  }
   public var onActivate: (() -> Void)?
   public func setCategory(_ category: Category, mode: Mode, options: CategoryOptions) throws {
+    AVAudioSession.onPoint?("setCategory")
     self.category = category; self.mode = mode; self.categoryOptions = options
   }
   public func setActive(_ active: Bool, options: SetActiveOptions = []) throws {
+    if active { AVAudioSession.onPoint?("setActive") }
     if active { onActivate?() }
   }
 }

@@ -56,9 +56,6 @@ final class T3RealtimeVoiceSession {
   // ended owner therefore cannot revoke, or speak for, its replacement.
   private let stateLock = NSLock()
   private var observed: Owner?
-  // External revocations (interruption, route, reset). Prepare compares it across the whole
-  // attempt, so its own deliberate revoke is not mistaken for one.
-  private var invalidations: UInt64 = 0
   private var authorizedRoute: Route?
   private var listener: (module: ObjectIdentifier, notify: Listener)?
 
@@ -79,6 +76,11 @@ final class T3RealtimeVoiceSession {
   /// Starts a fresh capture lifetime: any open epoch closes, and the caller opens a new one.
   func prepare(owner token: String, module: AnyObject) throws -> Owner {
     try lock.withLock {
+      // The attempt starts here, at native lock entry, not at the JS tap; anything revoked
+      // before this read belongs to the previous lifetime. The device counter covers
+      // observers, IO faults and WebRTC stops. The success path below makes exactly one
+      // deliberate revoke, hence +1: adding another would make every prepare fail closed.
+      let revocations = device.revocationCount &+ 1
       guard T3RealtimeVoiceAudioDevice.installedInWebRTCModuleOptions else {
         throw T3RealtimeVoiceSessionError.unavailable
       }
@@ -97,16 +99,14 @@ final class T3RealtimeVoiceSession {
       }
       let candidate = owner ?? Owner(token: token, generation: nextGeneration, module: moduleId)
       if owner == nil { nextGeneration += 1 }
-      let attempt = stateLock.withLock { () -> UInt64 in
+      stateLock.withLock {
         observed = candidate
         authorizedRoute = nil
-        return invalidations
       }
       // A fresh capture lifetime: any open epoch closes, and the caller opens a new one.
       device.revokeCapture()
       let restore = owner == nil ? (session.category, session.mode, session.categoryOptions) : previous
       if owner == nil { observe(candidate) }
-      let revocations = device.revocationCount
       let failed = { [self] (error: Error) -> Error in
         device.revokeCapture()
         if owner == nil { release(restore) } else { stateLock.withLock { authorizedRoute = nil } }
@@ -123,11 +123,10 @@ final class T3RealtimeVoiceSession {
         throw failed(T3RealtimeVoiceSessionError.invalidRoute)
       }
       stateLock.withLock { authorizedRoute = route }
-      // Observers bump `invalidations` before revoking, under the same lock this check takes,
-      // so an external event either fails this check or disarms after it.
-      let armed = device.armCapture(since: revocations)
-      let unchanged = stateLock.withLock { invalidations == attempt }
-      guard armed, unchanged, Self.isVoice(session), Route(session.currentRoute) == route else {
+      // A revocation after arming disarms the gate; re-reading the counter last reports it.
+      guard device.armCapture(since: revocations), Self.isVoice(session),
+        Route(session.currentRoute) == route, device.revocationCount == revocations
+      else {
         throw failed(T3RealtimeVoiceSessionError.interrupted)
       }
       if owner == nil { previous = restore }
@@ -257,7 +256,6 @@ final class T3RealtimeVoiceSession {
 
   /// Caller holds `stateLock`. The device only takes its own locks and posts to the ADM thread.
   private func revokeLocked(resetUnit: Bool) {
-    invalidations += 1
     authorizedRoute = nil
     if resetUnit { device.revokeCaptureAndResetUnit() } else { device.revokeCapture() }
   }
