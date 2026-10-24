@@ -5,6 +5,8 @@ import {
   EventId,
   IsoDateTime,
   ProviderItemId,
+  ProviderSessionId,
+  ProviderThreadId,
   ThreadId,
   TurnId,
 } from "./baseSchemas.ts";
@@ -138,14 +140,26 @@ export class ProviderUploadFeedbackError extends Schema.TaggedError<ProviderUplo
   }
 }
 
+const RealtimeVoiceOwnerId = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
+
 export const ProviderRealtimeVoiceStartInput = Schema.Struct({
   threadId: ThreadId,
+  /** Created by the capturing client before microphone/negotiation awaits; absent for legacy callers. */
+  operationId: Schema.optional(RealtimeVoiceOwnerId),
   /** The browser's WebRTC SDP offer, verbatim: SDP needs its trailing CRLF, so never trim it. */
   sdp: Schema.String.check(Schema.isMinLength(1)),
 });
 export type ProviderRealtimeVoiceStartInput = typeof ProviderRealtimeVoiceStartInput.Type;
 
 export const ProviderRealtimeVoiceStartResult = Schema.Struct({
+  operationId: Schema.optional(RealtimeVoiceOwnerId),
+  /** T3 ownership token, distinct from the provider's native realtime session ID. */
+  voiceSessionToken: Schema.optional(RealtimeVoiceOwnerId),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  providerSessionId: Schema.optional(ProviderSessionId),
+  providerThreadId: Schema.optional(ProviderThreadId),
+  expiresAt: Schema.optional(IsoDateTime),
+  nativeRealtimeSessionId: Schema.optional(TrimmedNonEmptyString),
   /** The provider's SDP answer to set as the remote description. */
   sdp: Schema.String,
 });
@@ -153,6 +167,10 @@ export type ProviderRealtimeVoiceStartResult = typeof ProviderRealtimeVoiceStart
 
 export const ProviderRealtimeVoiceStopInput = Schema.Struct({
   threadId: ThreadId,
+  operationId: Schema.optional(RealtimeVoiceOwnerId),
+  voiceSessionToken: Schema.optional(RealtimeVoiceOwnerId),
+  providerSessionId: Schema.optional(ProviderSessionId),
+  providerThreadId: Schema.optional(ProviderThreadId),
 });
 export type ProviderRealtimeVoiceStopInput = typeof ProviderRealtimeVoiceStopInput.Type;
 

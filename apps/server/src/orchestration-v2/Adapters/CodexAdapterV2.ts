@@ -1,3 +1,4 @@
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -1978,10 +1979,20 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
         );
-        const realtimeThreads = new Map<
-          string,
-          Deferred.Deferred<string, CodexErrors.CodexAppServerError>
-        >();
+        const realtimeVoiceLock = yield* KeyedLock.make<string>();
+        type RealtimeVoiceSession = {
+          readonly answer: Deferred.Deferred<string, CodexErrors.CodexAppServerError>;
+          readonly closed: Deferred.Deferred<void>;
+          readonly operationId?: string;
+          readonly token?: string;
+          readonly expiresAt: DateTime.Utc;
+          nativeSessionId?: string;
+          stopping: boolean;
+          stopAcknowledged: boolean;
+          expired: boolean;
+        };
+        const realtimeThreads = new Map<string, RealtimeVoiceSession>();
+        const usedRealtimeOperations = new Set<string>();
         const realtimeAnswers = new Map<
           string,
           Deferred.Deferred<string, CodexErrors.CodexAppServerError>
@@ -5066,31 +5077,73 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (answer !== undefined) yield* Deferred.succeed(answer, payload.sdp);
           }),
         );
-        const closeRealtime = (
+        const releaseRealtimeOffers = Effect.fn("CodexAdapterV2.releaseRealtimeOffers")(function* (
+          threadId: string,
+        ) {
+          yield* Effect.forEach(
+            Array.from(realtimeTurns.entries()).filter(
+              ([, held]) => held.nativeThreadId === threadId && !held.offered,
+            ),
+            ([nativeTurnId]) => releaseRealtimeTurn(nativeTurnId),
+            { discard: true },
+          );
+        });
+        const closeRealtime = Effect.fn("CodexAdapterV2.closeRealtime")(function* (
           threadId: string,
           message: string,
           session = realtimeThreads.get(threadId),
-        ) =>
-          Effect.gen(function* () {
-            if (realtimeThreads.get(threadId) !== session) return;
-            const answer = realtimeAnswers.get(threadId);
-            realtimeThreads.delete(threadId);
-            realtimeAnswers.delete(threadId);
-            yield* Effect.forEach(
-              Array.from(realtimeTurns.entries()).filter(
-                ([, held]) => held.nativeThreadId === threadId && !held.offered,
-              ),
-              ([nativeTurnId]) => releaseRealtimeTurn(nativeTurnId),
-              { discard: true },
+        ) {
+          if (realtimeThreads.get(threadId) !== session) return;
+          const answer = realtimeAnswers.get(threadId);
+          realtimeThreads.delete(threadId);
+          realtimeAnswers.delete(threadId);
+          yield* releaseRealtimeOffers(threadId);
+          if (answer !== undefined)
+            yield* Deferred.fail(
+              answer,
+              CodexErrors.CodexAppServerRequestError.invalidParams(message),
             );
-            if (answer !== undefined)
-              yield* Deferred.fail(
-                answer,
-                CodexErrors.CodexAppServerRequestError.invalidParams(message),
-              );
-          });
+          if (session !== undefined) yield* Deferred.succeed(session.closed, undefined);
+        });
+        const requestRealtimeStop = Effect.fn("CodexAdapterV2.requestRealtimeStop")(function* (
+          threadId: string,
+          session: RealtimeVoiceSession,
+        ) {
+          if (realtimeThreads.get(threadId) !== session || session.stopping) return;
+          session.stopping = true;
+          yield* client.raw.request("thread/realtime/stop", { threadId }).pipe(
+            Effect.timeout("5 seconds"),
+            Effect.ensuring(releaseRealtimeOffers(threadId)),
+            Effect.tap(() =>
+              Effect.sync(() => {
+                session.stopAcknowledged = true;
+              }),
+            ),
+          );
+        });
+        yield* client.handleServerNotification("thread/realtime/started", (payload) =>
+          Effect.sync(() => {
+            const session = realtimeThreads.get(payload.threadId);
+            if (session !== undefined && payload.realtimeSessionId != null)
+              session.nativeSessionId = payload.realtimeSessionId;
+          }),
+        );
         yield* client.handleServerNotification("thread/realtime/error", (payload) =>
-          closeRealtime(payload.threadId, payload.message),
+          Effect.gen(function* () {
+            const session = realtimeThreads.get(payload.threadId);
+            if (session === undefined) return;
+            yield* Deferred.fail(
+              session.answer,
+              CodexErrors.CodexAppServerRequestError.invalidParams(
+                "Codex realtime session failed.",
+              ),
+            );
+            // Error is not proof of transport closure. Quarantine until the actual closed signal.
+            yield* requestRealtimeStop(payload.threadId, session).pipe(
+              Effect.catch(() => Effect.void),
+              Effect.forkIn(scope),
+            );
+          }),
         );
         yield* client.handleServerNotification("thread/realtime/closed", (payload) =>
           closeRealtime(payload.threadId, "Codex realtime session closed before SDP was received."),
@@ -5121,7 +5174,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }
             const realtimeProviderThread = rootProviderThreads.get(payload.threadId);
             if (
-              realtimeThreads.has(payload.threadId) &&
+              realtimeThreads.get(payload.threadId)?.stopping === false &&
               realtimeProviderThread?.appThreadId != null &&
               !goalHolds.has(payload.threadId) &&
               !goalStops.has(payload.threadId) &&
@@ -8114,84 +8167,153 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
               ),
           ),
-          startRealtimeVoice: (voiceInput) =>
-            Effect.gen(function* () {
+          hasActiveRealtimeVoice: (providerThread) =>
+            Effect.sync(() => {
+              const nativeThreadId = providerThread?.nativeThreadRef?.nativeId;
+              const sessions =
+                nativeThreadId == null
+                  ? realtimeThreads.values()
+                  : [realtimeThreads.get(nativeThreadId)];
+              return Array.from(sessions).some(
+                (session) => session !== undefined && !session.expired && !session.stopAcknowledged,
+              );
+            }),
+          startRealtimeVoice: Effect.fn("CodexAdapterV2.startRealtimeVoice")(
+            function* (voiceInput) {
               const threadId = yield* getNativeThreadId(voiceInput.providerThread);
-              if (realtimeThreads.has(threadId))
-                return yield* toProtocolError(
-                  "Codex realtime voice is already active on this thread.",
-                );
-              const answer = yield* Deferred.make<string, CodexErrors.CodexAppServerError>();
-              realtimeAnswers.set(threadId, answer);
-              realtimeThreads.set(threadId, answer);
-              yield* rememberRootProviderThread(voiceInput.providerThread);
-              return yield* ensureInitialized.pipe(
-                Effect.andThen(
-                  client.raw.request("thread/realtime/start", {
-                    threadId,
-                    outputModality: "audio",
-                    version: "v3",
-                    transport: { type: "webrtc", sdp: voiceInput.sdp },
-                  }),
-                ),
-                Effect.andThen(Deferred.await(answer)),
-                Effect.timeout("20 seconds"),
-                Effect.map((sdp) => ({ sdp })),
-                Effect.onError(() =>
-                  Effect.gen(function* () {
-                    if (realtimeThreads.get(threadId) !== answer) return;
-                    // A timed-out or cancelled WebRTC negotiation may already
-                    // have started Codex's session. Stop it before allowing retry.
-                    yield* client.raw.request("thread/realtime/stop", { threadId }).pipe(
-                      Effect.timeout("5 seconds"),
-                      Effect.catch((cause) =>
-                        Effect.logWarning(
-                          "Failed to stop Codex realtime voice after startup failure.",
-                          { cause },
-                        ),
-                      ),
-                      Effect.ensuring(
-                        closeRealtime(threadId, "Codex realtime voice startup failed.", answer),
-                      ),
+              return yield* realtimeVoiceLock.withLock(
+                threadId,
+                Effect.gen(function* () {
+                  const operationKey =
+                    voiceInput.operationId === undefined
+                      ? undefined
+                      : `${encodeURIComponent(threadId)}:${encodeURIComponent(voiceInput.operationId)}`;
+                  if (operationKey !== undefined && usedRealtimeOperations.has(operationKey))
+                    return yield* toProtocolError(
+                      "Codex realtime voice operation was already used.",
                     );
-                  }),
-                ),
-                Effect.ensuring(
-                  Effect.sync(() => {
-                    if (realtimeAnswers.get(threadId) === answer) realtimeAnswers.delete(threadId);
-                  }),
-                ),
+                  if (realtimeThreads.has(threadId))
+                    return yield* toProtocolError(
+                      "Codex realtime voice is already active or awaiting native closure on this thread.",
+                    );
+                  const answer = yield* Deferred.make<string, CodexErrors.CodexAppServerError>();
+                  const now = yield* DateTime.now;
+                  const session: RealtimeVoiceSession = {
+                    answer,
+                    closed: yield* Deferred.make<void>(),
+                    ...(voiceInput.operationId === undefined
+                      ? {}
+                      : {
+                          operationId: voiceInput.operationId,
+                          token: yield* crypto.randomUUIDv4(),
+                        }),
+                    // The native protocol has no owner-disconnect lease. Bound an abandoned call without a heartbeat.
+                    expiresAt: DateTime.makeUnsafe(
+                      DateTime.toEpochMillis(now) + 4 * 60 * 60 * 1000,
+                    ),
+                    stopping: false,
+                    stopAcknowledged: false,
+                    expired: false,
+                  };
+                  realtimeThreads.set(threadId, session);
+                  if (operationKey !== undefined) usedRealtimeOperations.add(operationKey);
+                  realtimeAnswers.set(threadId, answer);
+                  yield* Deferred.await(session.closed).pipe(
+                    Effect.timeout("4 hours"),
+                    Effect.catch(() =>
+                      Effect.gen(function* () {
+                        if (realtimeThreads.get(threadId) !== session) return;
+                        yield* requestRealtimeStop(threadId, session).pipe(
+                          Effect.catch(() => Effect.void),
+                        );
+                        session.expired = true;
+                      }),
+                    ),
+                    Effect.forkIn(scope),
+                  );
+                  yield* rememberRootProviderThread(voiceInput.providerThread);
+                  return yield* ensureInitialized.pipe(
+                    Effect.andThen(
+                      client.raw.request("thread/realtime/start", {
+                        threadId,
+                        outputModality: "audio",
+                        version: "v3",
+                        transport: { type: "webrtc", sdp: voiceInput.sdp },
+                      }),
+                    ),
+                    Effect.andThen(Deferred.await(answer)),
+                    Effect.timeout("20 seconds"),
+                    Effect.map((sdp) =>
+                      voiceInput.operationId === undefined
+                        ? { sdp }
+                        : {
+                            sdp,
+                            operationId: voiceInput.operationId,
+                            voiceSessionToken: session.token,
+                            providerInstanceId: adapterOptions.instanceId,
+                            providerSessionId: input.providerSessionId,
+                            providerThreadId: voiceInput.providerThread.id,
+                            expiresAt: DateTime.formatIso(session.expiresAt),
+                            ...(session.nativeSessionId === undefined
+                              ? {}
+                              : { nativeRealtimeSessionId: session.nativeSessionId }),
+                          },
+                    ),
+                    Effect.onError(() =>
+                      requestRealtimeStop(threadId, session).pipe(
+                        Effect.andThen(Deferred.await(session.closed)),
+                        Effect.timeout("5 seconds"),
+                        Effect.catch(() => Effect.void),
+                      ),
+                    ),
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        if (realtimeAnswers.get(threadId) === answer)
+                          realtimeAnswers.delete(threadId);
+                      }),
+                    ),
+                  );
+                }),
               );
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: CODEX_PROVIDER,
-                    detail: "Failed to start Codex realtime voice.",
-                    cause,
-                  }),
-              ),
+            },
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Failed to start Codex realtime voice.",
+                  cause,
+                }),
             ),
-          stopRealtimeVoice: (voiceInput) =>
-            Effect.gen(function* () {
+          ),
+          stopRealtimeVoice: Effect.fn("CodexAdapterV2.stopRealtimeVoice")(
+            function* (voiceInput) {
               const threadId = yield* getNativeThreadId(voiceInput.providerThread);
-              const session = realtimeThreads.get(threadId);
-              yield* ensureInitialized.pipe(
-                Effect.andThen(client.raw.request("thread/realtime/stop", { threadId })),
-                Effect.ensuring(
-                  closeRealtime(threadId, "Codex realtime voice was stopped.", session),
-                ),
+              return yield* realtimeVoiceLock.withLock(
+                threadId,
+                Effect.gen(function* () {
+                  const session = realtimeThreads.get(threadId);
+                  if (session === undefined) return;
+                  if (
+                    session.operationId !== voiceInput.operationId ||
+                    session.token !== voiceInput.voiceSessionToken
+                  )
+                    return yield* toProtocolError("Codex realtime voice ownership does not match.");
+                  yield* requestRealtimeStop(threadId, session);
+                  // Native closed/error events have no session ID. Do not admit a replacement before closure.
+                  if (session.token !== undefined)
+                    yield* Deferred.await(session.closed).pipe(Effect.timeout("5 seconds"));
+                }),
               );
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: CODEX_PROVIDER,
-                    detail: "Failed to stop Codex realtime voice.",
-                    cause,
-                  }),
-              ),
+            },
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Failed to stop Codex realtime voice.",
+                  cause,
+                }),
             ),
+          ),
           uploadFeedback: Effect.fn("CodexAdapterV2.uploadFeedback")(
             function* (feedbackInput) {
               const threadId = yield* getNativeThreadId(feedbackInput.providerThread);

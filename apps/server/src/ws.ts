@@ -1867,15 +1867,37 @@ export const layerWsRpc = (
       // provider operation (feedback upload, realtime voice) targets, failing
       // with the user-facing reason when either is missing.
       const resolveActiveProviderSession = Effect.fn("ws.providers.resolveActiveSession")(
-        function* (threadId: ThreadId) {
+        function* (
+          threadId: ThreadId,
+          source?: {
+            readonly providerThreadId?: string | undefined;
+            readonly providerSessionId?: string | undefined;
+          },
+        ) {
           const projection = yield* threadManagement.getThreadRecords(threadId, [
             "providerThreads",
           ]);
           const providerThread =
-            projection.providerThreads.find(
-              (candidate) => candidate.id === projection.thread.activeProviderThreadId,
-            ) ?? projection.providerThreads.at(-1);
+            source?.providerThreadId === undefined
+              ? (projection.providerThreads.find(
+                  (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+                ) ?? projection.providerThreads.at(-1))
+              : projection.providerThreads.find(
+                  (candidate) => candidate.id === source.providerThreadId,
+                );
           const providerSessionId = providerThread?.providerSessionId ?? null;
+          if (
+            source?.providerThreadId === undefined &&
+            (providerThread?.id !== projection.thread.activeProviderThreadId ||
+              providerThread?.providerInstanceId !== projection.thread.providerInstanceId)
+          )
+            return yield* Effect.fail("No active matching provider thread is available for voice.");
+          if (
+            providerThread?.appThreadId !== threadId ||
+            (source?.providerSessionId !== undefined &&
+              source.providerSessionId !== providerSessionId)
+          )
+            return yield* Effect.fail("Voice provider ownership no longer matches.");
           if (providerThread === undefined || providerSessionId === null) {
             return yield* Effect.fail("No provider session has run in this thread yet.");
           }
@@ -2426,6 +2448,7 @@ export const layerWsRpc = (
             return yield* runtime.startRealtimeVoice({
               providerThread,
               sdp: input.sdp,
+              ...(input.operationId === undefined ? {} : { operationId: input.operationId }),
             });
           }).pipe(
             Effect.mapError((cause) =>
@@ -2439,8 +2462,21 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.providerRealtimeVoiceStop]: (input) =>
           Effect.gen(function* () {
+            if (
+              (input.operationId !== undefined || input.voiceSessionToken !== undefined) &&
+              (input.operationId === undefined ||
+                input.voiceSessionToken === undefined ||
+                input.providerSessionId === undefined ||
+                input.providerThreadId === undefined)
+            )
+              return yield* new ProviderRealtimeVoiceError({
+                threadId: input.threadId,
+                cause:
+                  "Owned voice stop requires its original operation, token and provider identity.",
+              });
             const { providerThread, runtime } = yield* resolveActiveProviderSession(
               input.threadId,
+              input,
             ).pipe(
               Effect.mapError(
                 (cause) =>
@@ -2458,7 +2494,13 @@ export const layerWsRpc = (
                 }),
               );
             }
-            return yield* runtime.stopRealtimeVoice({ providerThread });
+            return yield* runtime.stopRealtimeVoice({
+              providerThread,
+              ...(input.operationId === undefined ? {} : { operationId: input.operationId }),
+              ...(input.voiceSessionToken === undefined
+                ? {}
+                : { voiceSessionToken: input.voiceSessionToken }),
+            });
           }).pipe(
             Effect.mapError((cause) =>
               isProviderRealtimeVoiceError(cause)

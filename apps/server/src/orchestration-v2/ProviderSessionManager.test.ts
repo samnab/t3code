@@ -329,6 +329,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
       readonly providerSessionId: ProviderSessionId;
       readonly initialProviderItemIdentityVersion?: 2;
     }) => Effect.Effect<void>;
+    readonly hasActiveRealtimeVoice?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly backgroundTasksEndWithProcess?: boolean;
@@ -415,6 +416,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
           ...(options.backgroundTasksEndWithProcess === false
             ? {}
             : { backgroundTasksEndWithProcess: true as const }),
+          ...(options.hasActiveRealtimeVoice === undefined
+            ? {}
+            : { hasActiveRealtimeVoice: () => options.hasActiveRealtimeVoice! }),
           ...(options.hasPendingBackgroundWork === undefined
             ? {}
             : { hasPendingBackgroundWork: options.hasPendingBackgroundWork }),
@@ -478,6 +482,7 @@ function layerTest(input: {
     readonly armed: Ref.Ref<boolean>;
     readonly paused: Deferred.Deferred<void>;
   };
+  readonly hasActiveRealtimeVoice?: Effect.Effect<boolean>;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
@@ -505,6 +510,9 @@ function layerTest(input: {
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
       ...(input.beforeOpen === undefined ? {} : { beforeOpen: input.beforeOpen }),
+      ...(input.hasActiveRealtimeVoice === undefined
+        ? {}
+        : { hasActiveRealtimeVoice: input.hasActiveRealtimeVoice }),
       ...(input.hasPendingBackgroundWork === undefined
         ? {}
         : { hasPendingBackgroundWork: input.hasPendingBackgroundWork }),
@@ -3603,4 +3611,40 @@ it.effect(
         assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
     }),
+);
+
+it.effect("ProviderSessionManagerV2 preserves quiet voice beyond the background pin budget", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const reserved = yield* Ref.make(true);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("quiet-voice");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* TestClock.adjust("5 seconds");
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
+      yield* Ref.set(reserved, false);
+      yield* TestClock.adjust("1 second");
+      assert.isFalse(yield* manager.isLive(providerSessionId));
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 1000,
+          maxIdlePinMs: 1000,
+          hasActiveRealtimeVoice: Ref.get(reserved),
+        }),
+      ),
+    );
+  }),
 );

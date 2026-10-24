@@ -1124,6 +1124,14 @@ export const layerWithOptions = (
           // Capture runtime identity before yielding: a replacement session
           // can reuse the same providerSessionId while this fiber is parked.
           const probedRuntime = entry.runtime;
+          if (
+            probedRuntime.hasActiveRealtimeVoice !== undefined &&
+            (yield* probedRuntime.hasActiveRealtimeVoice())
+          ) {
+            // Voice owns a bounded adapter reservation, independent of the background-work pin budget.
+            yield* Effect.sleep(Duration.millis(idleTimeoutMs));
+            return yield* releaseIfStillIdle(input);
+          }
           const hasPendingWork =
             probedRuntime.hasPendingBackgroundWork === undefined
               ? false
@@ -1605,6 +1613,11 @@ export const layerWithOptions = (
               ) {
                 return "skipped" as const;
               }
+              if (
+                entry.runtime.hasActiveRealtimeVoice !== undefined &&
+                (yield* entry.runtime.hasActiveRealtimeVoice(pending.providerThread))
+              )
+                return "deferred" as const;
               // Unloading stops the native thread's background terminals, so a
               // thread still running background work stays loaded.
               const hasPendingWork =
@@ -1873,6 +1886,62 @@ export const layerWithOptions = (
                 ),
               ),
             ),
+          ...(runtime.startRealtimeVoice === undefined
+            ? {}
+            : {
+                startRealtimeVoice: Effect.fn("ProviderSessionManager.startRealtimeVoice")(
+                  function* (
+                    voiceInput: Parameters<
+                      NonNullable<
+                        ProviderAdapter.ProviderAdapterV2SessionRuntime["startRealtimeVoice"]
+                      >
+                    >[0],
+                  ) {
+                    const threadId = voiceInput.providerThread.appThreadId;
+                    if (threadId === null)
+                      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: runtime.driver,
+                        detail: "Voice requires an app-owned provider thread.",
+                      });
+                    yield* observeActivity(providerSessionId, touchActivity(providerSessionId));
+                    yield* holdThreadLoaded({
+                      providerSessionId,
+                      threadId,
+                      providerThread: voiceInput.providerThread,
+                    });
+                    const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+                    if (
+                      entry?.runtime !== runtime ||
+                      !entry.loadedProviderThreadKeyByThread.has(threadId)
+                    )
+                      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: runtime.driver,
+                        detail: "Voice requires a loaded provider thread. Send a message first.",
+                      });
+                    const providerThread = voiceInput.providerThread;
+                    return yield* runtime.startRealtimeVoice!({
+                      ...voiceInput,
+                      providerThread,
+                    }).pipe(
+                      Effect.ensuring(scheduleThreadUnload(providerSessionId, providerThread.id)),
+                    );
+                  },
+                ),
+              }),
+          ...(runtime.stopRealtimeVoice === undefined
+            ? {}
+            : {
+                stopRealtimeVoice: Effect.fn("ProviderSessionManager.stopRealtimeVoice")(function* (
+                  voiceInput: Parameters<
+                    NonNullable<
+                      ProviderAdapter.ProviderAdapterV2SessionRuntime["stopRealtimeVoice"]
+                    >
+                  >[0],
+                ) {
+                  yield* observeActivity(providerSessionId, touchActivity(providerSessionId));
+                  return yield* runtime.stopRealtimeVoice!(voiceInput);
+                }),
+              }),
           steerTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(runtime.steerTurn(input).pipe(turnMetrics("steer"))),

@@ -2,7 +2,13 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import { ThreadId } from "./baseSchemas.ts";
-import { ProviderSendTurnInput, ProviderUploadFeedbackError } from "./provider.ts";
+import {
+  ProviderRealtimeVoiceStartInput,
+  ProviderRealtimeVoiceStartResult,
+  ProviderRealtimeVoiceStopInput,
+  ProviderSendTurnInput,
+  ProviderUploadFeedbackError,
+} from "./provider.ts";
 
 const decodeProviderSendTurnInput = Schema.decodeUnknownSync(ProviderSendTurnInput);
 
@@ -53,4 +59,36 @@ describe("provider feedback", () => {
     expect(error.message).toBe("Failed to upload feedback for thread thread-1.");
     expect(error.message).not.toContain("provider request secret");
   });
+});
+
+const decodeVoiceStart = Schema.decodeUnknownSync(ProviderRealtimeVoiceStartInput);
+const decodeVoiceResult = Schema.decodeUnknownSync(ProviderRealtimeVoiceStartResult);
+const decodeVoiceStop = Schema.decodeUnknownSync(ProviderRealtimeVoiceStopInput);
+
+it("preserves explicit voice ownership alongside legacy payloads and verbatim SDP", () => {
+  const sdp = "offer\r\n";
+  expect(decodeVoiceStart({ threadId: "thread", sdp })).toEqual({ threadId: "thread", sdp });
+  expect(decodeVoiceStart({ threadId: "thread", sdp, operationId: "owner-a" }).operationId).toBe(
+    "owner-a",
+  );
+  expect(() => decodeVoiceStart({ threadId: "thread", sdp, operationId: " " })).toThrow();
+  expect(decodeVoiceStop({ threadId: "thread" })).toEqual({ threadId: "thread" });
+  const ownership = {
+    operationId: "owner-a",
+    voiceSessionToken: "token-a",
+    providerSessionId: "session-a",
+    providerThreadId: "provider-thread-a",
+  };
+  expect(decodeVoiceStop({ threadId: "thread", ...ownership })).toEqual({
+    threadId: "thread",
+    ...ownership,
+  });
+  expect(
+    decodeVoiceResult({
+      sdp,
+      ...ownership,
+      providerInstanceId: "codex",
+      expiresAt: "2026-10-24T05:00:00.000Z",
+    }).voiceSessionToken,
+  ).toBe("token-a");
 });

@@ -1,3 +1,4 @@
+import type { ProviderRealtimeVoiceStartResult } from "@t3tools/contracts";
 import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
 import {
   ChatAttachment,
@@ -656,9 +657,16 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly startRealtimeVoice?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly sdp: string;
-  }) => Effect.Effect<{ readonly sdp: string }, ProviderAdapterV2Error>;
+    readonly operationId?: string;
+  }) => Effect.Effect<ProviderRealtimeVoiceStartResult, ProviderAdapterV2Error>;
+  /** A voice reservation is independent of coding busy state and background-task pin budgets. */
+  readonly hasActiveRealtimeVoice?: (
+    providerThread?: OrchestrationV2ProviderThread,
+  ) => Effect.Effect<boolean>;
   readonly stopRealtimeVoice?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
+    readonly operationId?: string;
+    readonly voiceSessionToken?: string;
   }) => Effect.Effect<void, ProviderAdapterV2Error>;
   /**
    * MCP Apps host operations through the provider's own MCP client, for
