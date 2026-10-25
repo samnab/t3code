@@ -237,3 +237,31 @@ it.effect.each(["resume_queue", "start_queued"] as const)(
       expect((yield* readThread).runs.find((run) => run.id === queued.id)?.queueHeld).toBe(false);
     }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("lowers a thread's modes and refuses to raise them, recording nothing", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    expect(
+      yield* last(toolkit.handle("t3_thread_lower_modes", { threadId, runtimeMode: "auto" })),
+    ).toHaveProperty("sequence");
+    expect(
+      yield* last(toolkit.handle("t3_thread_lower_modes", { threadId, interactionMode: "plan" })),
+    ).toHaveProperty("sequence");
+    const lowered = (yield* readThread).thread;
+    expect(lowered).toMatchObject({ runtimeMode: "auto", interactionMode: "plan" });
+
+    const message = "Agents can only lower a thread's modes; raise them in the app.";
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_lower_modes", { threadId, runtimeMode: "full-access" }),
+      ),
+    ).toMatchObject({ code: "runtime_mode_escalation_denied", message });
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_lower_modes", { threadId, interactionMode: "default" }),
+      ),
+    ).toMatchObject({ code: "interaction_mode_escalation_denied", message });
+    expect((yield* readThread).thread).toEqual(lowered);
+  }).pipe(Effect.provide(layerTest)),
+);

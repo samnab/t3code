@@ -211,6 +211,17 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
   }),
 }).annotate(Tool.Destructive, true);
 
+const ThreadLowerModesTool = Tool.make("t3_thread_lower_modes", {
+  ...commandTool,
+  description:
+    "Lower a thread's runtime mode (full-access > auto > auto-accept-edits > approval-required) or interaction mode (default > plan). Omit threadId for this thread. Agents can never raise a mode; the user raises it in the app. Lowering the runtime mode of a thread whose provider cannot switch in-session (Claude) detaches its session, interrupting a running turn, this thread's own included; Codex switches live.",
+  parameters: Schema.Struct({
+    threadId: Schema.optional(ThreadId),
+    runtimeMode: Schema.optional(RuntimeMode),
+    interactionMode: Schema.optional(ProviderInteractionMode),
+  }),
+}).annotate(Tool.Destructive, true);
+
 const ThreadGoalTool = Tool.make("t3_thread_goal", {
   ...commandTool,
   description:
@@ -338,6 +349,7 @@ export const ThreadToolkit = Toolkit.make(
   ThreadTransfersTool,
   ThreadConfigurationTool,
   ThreadConfigureTool,
+  ThreadLowerModesTool,
   ThreadGoalTool,
   ThreadGoalLoopTool,
   RunStartTool,

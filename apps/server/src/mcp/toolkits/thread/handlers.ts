@@ -13,6 +13,7 @@ import { formatThreadLink } from "@t3tools/shared/threadLinks";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  assertTargetWithinLimits,
   dispatchFailure,
   newCommandId,
   readCaller,
@@ -226,6 +227,50 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         })
         .pipe(Effect.mapError(dispatchFailure));
       return { sequence: result.sequence };
+    }),
+  ),
+  // The orchestrator re-checks the direction under the thread lock; this
+  // pre-check only gives the refusal its message.
+  t3_thread_lower_modes: writesThread((input) =>
+    Effect.gen(function* () {
+      const {
+        threads,
+        projection: { thread },
+      } = yield* readThread(input.threadId);
+      const runtimeMode = input.runtimeMode ?? thread.runtimeMode;
+      const interactionMode = input.interactionMode ?? thread.interactionMode;
+      yield* assertTargetWithinLimits(thread, { runtimeMode, interactionMode }).pipe(
+        Effect.mapError(
+          (error) =>
+            new OrchestratorMcpFailure({
+              code: error.code,
+              message: "Agents can only lower a thread's modes; raise them in the app.",
+            }),
+        ),
+      );
+      const commands: Array<OrchestrationV2Command> = [];
+      if (runtimeMode !== thread.runtimeMode)
+        commands.push({
+          type: "thread.runtime-mode.set",
+          commandId: yield* newCommandId(),
+          threadId: thread.id,
+          runtimeMode,
+        });
+      if (interactionMode !== thread.interactionMode)
+        commands.push({
+          type: "thread.interaction-mode.set",
+          commandId: yield* newCommandId(),
+          threadId: thread.id,
+          interactionMode,
+        });
+      if (commands.length === 0)
+        return yield* refuse(`The thread already runs in ${runtimeMode}/${interactionMode} mode.`);
+      let sequence = 0;
+      for (const command of commands) {
+        sequence = (yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure)))
+          .sequence;
+      }
+      return { sequence };
     }),
   ),
   // An idle loop is driven by GoalLoopService, so a goal set here seeds its loop paused.
