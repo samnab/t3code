@@ -19,6 +19,8 @@ export function preferences(settings: ServerSettings) {
     sidebarAutoSettleAfterDays,
     sidebarAutoSettleOnMerge,
     sidebarAutoSettleKeepPullRequests,
+    favorites,
+    providerModelPreferences,
   } = settings;
   const characters = Array.from(sourceControlWritingStyle.customInstructions);
   return {
@@ -35,6 +37,8 @@ export function preferences(settings: ServerSettings) {
     sidebarAutoSettleAfterDays,
     sidebarAutoSettleOnMerge,
     sidebarAutoSettleKeepPullRequests,
+    favorites,
+    providerModelPreferences,
   };
 }
 const access = Effect.gen(function* () {

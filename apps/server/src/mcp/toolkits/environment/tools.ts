@@ -29,6 +29,8 @@ const PreferenceFields = {
   sidebarAutoSettleAfterDays: ServerSettings.fields.sidebarAutoSettleAfterDays,
   sidebarAutoSettleOnMerge: ServerSettings.fields.sidebarAutoSettleOnMerge,
   sidebarAutoSettleKeepPullRequests: ServerSettings.fields.sidebarAutoSettleKeepPullRequests,
+  favorites: ServerSettings.fields.favorites,
+  providerModelPreferences: ServerSettings.fields.providerModelPreferences,
 };
 const shared = {
   failure: OrchestratorMcpFailure,
@@ -44,7 +46,7 @@ const shared = {
 const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
-    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client.",
+    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. favorites and providerModelPreferences (hidden models, order, default model/options per provider instance id) are the stored model preferences.",
   success: Schema.Struct({
     environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
     label: Schema.String,
@@ -58,7 +60,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
 const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update", {
   ...shared,
   description:
-    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads.",
+    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental: setModelFavorites and setModelsHidden toggle listed entries, setProviderModelOrder replaces one provider's order, setProviderModelDefault merges that provider's defaults (defaultModel null clears). Provider instance ids come from orchestrator_capabilities and are not validated.",
   parameters: Schema.Struct({
     completionAudio: ServerSettingsPatch.fields.completionAudio,
     defaultThreadEnvMode: ServerSettingsPatch.fields.defaultThreadEnvMode,
@@ -69,6 +71,10 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
     sidebarAutoSettleAfterDays: ServerSettingsPatch.fields.sidebarAutoSettleAfterDays,
     sidebarAutoSettleOnMerge: ServerSettingsPatch.fields.sidebarAutoSettleOnMerge,
     sidebarAutoSettleKeepPullRequests: ServerSettingsPatch.fields.sidebarAutoSettleKeepPullRequests,
+    setModelFavorites: ServerSettingsPatch.fields.setModelFavorites,
+    setModelsHidden: ServerSettingsPatch.fields.setModelsHidden,
+    setProviderModelOrder: ServerSettingsPatch.fields.setProviderModelOrder,
+    setProviderModelDefault: ServerSettingsPatch.fields.setProviderModelDefault,
   }),
   success: Schema.Struct(PreferenceFields),
 }).annotate(Tool.Destructive, true);

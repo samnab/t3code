@@ -330,3 +330,108 @@ it.effect.each([
     expect(yield* Ref.get(updates)).toBe(0);
   }),
 );
+
+it.layer(
+  Layer.mergeAll(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3code-environment-models-test-" }),
+    SqlitePersistence.layerMemory,
+  ).pipe(Layer.provideMerge(NodeServices.layer)),
+)("model preferences", (it) => {
+  it.effect("applies each incremental op and persists it across restarts", () =>
+    Effect.gen(function* () {
+      const scope = threadScope();
+      const caller = liveThreadShell(threadId);
+      const provider = ProviderInstanceId.make("codex_work");
+      const read = Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        return (yield* finalResult(toolkit.handle("t3_environment_read", {})))?.encodedResult;
+      }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+
+      yield* Effect.flatMap(Settings.ServerSettingsService, (service) =>
+        service.updateSettings({
+          favorites: [{ provider, model: "luna" }],
+          providerModelPreferences: { [provider]: { hiddenModels: ["astra"], modelOrder: [] } },
+        }),
+      ).pipe(Effect.provide(restartedSettings()));
+      expect(yield* read).toMatchObject({
+        preferences: {
+          favorites: [{ provider, model: "luna" }],
+          providerModelPreferences: {
+            [provider]: {
+              hiddenModels: ["astra"],
+              modelOrder: [],
+              defaultModel: null,
+              defaultOptions: [],
+            },
+          },
+        },
+      });
+
+      const omitted = yield* Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        const update = "t3_environment_preferences_update";
+        yield* finalResult(
+          toolkit.handle(update, {
+            setModelFavorites: [
+              { provider, model: "sol", favorite: true },
+              { provider, model: "luna", favorite: false },
+            ],
+          }),
+        );
+        yield* finalResult(
+          toolkit.handle(update, { setModelsHidden: [{ provider, model: "nova", hidden: true }] }),
+        );
+        yield* finalResult(
+          toolkit.handle(update, {
+            setProviderModelOrder: { provider, modelOrder: ["sol", "luna"] },
+          }),
+        );
+        yield* finalResult(
+          toolkit.handle(update, {
+            setProviderModelDefault: {
+              provider,
+              defaultModel: "sol",
+              defaultOptions: [{ id: "reasoningEffort", value: "high" }],
+            },
+          }),
+        );
+        return yield* finalResult(toolkit.handle(update, { defaultThreadEnvMode: "worktree" }));
+      }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+      const expected = {
+        favorites: [{ provider, model: "sol" }],
+        providerModelPreferences: {
+          [provider]: {
+            hiddenModels: ["astra", "nova"],
+            modelOrder: ["sol", "luna"],
+            defaultModel: "sol",
+            defaultOptions: [{ id: "reasoningEffort", value: "high" }],
+          },
+        },
+      };
+      expect(omitted?.encodedResult).toMatchObject(expected);
+      expect(yield* reloadSettings.pipe(Effect.provide(restartedSettings()))).toMatchObject(
+        expected,
+      );
+      expect(yield* read).toMatchObject({ preferences: expected });
+
+      yield* Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        yield* finalResult(
+          toolkit.handle("t3_environment_preferences_update", {
+            setProviderModelDefault: { provider, defaultModel: null },
+          }),
+        );
+      }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+      expect(yield* read).toMatchObject({
+        preferences: {
+          providerModelPreferences: {
+            [provider]: {
+              defaultModel: null,
+              defaultOptions: [{ id: "reasoningEffort", value: "high" }],
+            },
+          },
+        },
+      });
+    }),
+  );
+});
