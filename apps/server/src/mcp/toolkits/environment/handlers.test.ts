@@ -3,6 +3,7 @@ import { expect, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  type KeybindingCommand,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2ThreadShell,
@@ -18,10 +19,13 @@ import * as Stream from "effect/Stream";
 import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
+import * as Keybindings from "../../../keybindings.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as DatabaseStorage from "../../../persistence/DatabaseStorage.ts";
 import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as Settings from "../../../serverSettings.ts";
+import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
@@ -117,10 +121,10 @@ const threadScope = (
   ...overrides,
 });
 
-const environmentLayer = <E, R>(
+const environmentLayer = <A, E, R>(
   scope: McpInvocationContext.McpInvocationScope,
   caller: OrchestrationV2ThreadShell,
-  settings: Layer.Layer<Settings.ServerSettingsService, E, R>,
+  settings: Layer.Layer<A, E, R>,
 ) =>
   McpToolAccess.HandlersLayer.layer(EnvironmentHandlers.layer).pipe(
     Layer.provideMerge(
@@ -497,3 +501,158 @@ it.layer(
     }),
   );
 });
+
+const staticSettings = Layer.mock(Settings.ServerSettingsService)({
+  getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+});
+
+it.layer(
+  ServerConfig.layerTest(process.cwd(), { prefix: "t3code-environment-keybindings-test-" }).pipe(
+    Layer.provideMerge(NodeServices.layer),
+  ),
+)("keybindings", (it) => {
+  // A fresh service per call rereads keybindings.json, so each call is a server restart.
+  const provide = <A, E, R>(
+    program: Effect.Effect<A, E, R>,
+    scope: McpInvocationContext.McpInvocationScope = threadScope(),
+  ) =>
+    program.pipe(
+      Effect.provide(
+        environmentLayer(
+          scope,
+          liveThreadShell(threadId),
+          Layer.merge(staticSettings, Layer.fresh(Keybindings.layer)),
+        ),
+      ),
+    );
+  const list = provide(
+    Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+      finalResult(toolkit.handle("t3_keybindings_list", {})),
+    ),
+  );
+  const upsert = (
+    params: { readonly key: string; readonly command: KeybindingCommand },
+    scope?: McpInvocationContext.McpInvocationScope,
+  ) =>
+    provide(
+      Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+        finalResult(toolkit.handle("t3_keybinding_upsert", params)),
+      ),
+      scope,
+    );
+  const custom = {
+    command: "chat.new",
+    shortcut: expect.objectContaining({ key: "9", modKey: true, shiftKey: true }),
+  };
+  const withCustom = { keybindings: expect.arrayContaining([custom]) };
+
+  it.effect("lists, upserts, and removes custom rules across restarts", () =>
+    Effect.gen(function* () {
+      const before = yield* list;
+      expect(before?.isFailure).toBe(false);
+      expect(before?.encodedResult).toMatchObject({ issues: [] });
+      expect(before?.encodedResult).not.toMatchObject(withCustom);
+
+      const upserted = yield* upsert({ key: "mod+shift+9", command: "chat.new" });
+      expect(upserted?.encodedResult).toMatchObject(withCustom);
+      expect((yield* list)?.encodedResult).toMatchObject(withCustom);
+
+      const removed = yield* provide(
+        Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+          finalResult(
+            toolkit.handle("t3_keybinding_remove", { key: "mod+shift+9", command: "chat.new" }),
+          ),
+        ),
+      );
+      expect(removed?.encodedResult).not.toMatchObject(withCustom);
+      expect((yield* list)?.encodedResult).not.toMatchObject(withCustom);
+    }),
+  );
+
+  it.effect("rejects a command the keybindings contract does not accept before writing", () =>
+    Effect.gen(function* () {
+      const before = (yield* list)?.encodedResult;
+      const result = yield* upsert({ key: "mod+shift+8", command: "script.Not Valid.run" });
+      expect(result).toMatchObject({ isFailure: true, failureOrigin: "parameters" });
+      expect((yield* list)?.encodedResult).toEqual(before);
+    }),
+  );
+
+  it.effect("denies keybinding writes from a read-only client", () =>
+    Effect.gen(function* () {
+      const result = yield* upsert(
+        { key: "mod+shift+7", command: "chat.new" },
+        threadScope({
+          thread: undefined,
+          client: { sessionId: "client:keybindings", label: "Client", access: "read-only" },
+        }),
+      );
+      expect(result?.result).toMatchObject({ code: "capability_denied" });
+    }),
+  );
+});
+
+it.effect("reports storage totals without paths, titles, or commands", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+      finalResult(toolkit.handle("t3_environment_storage_report", {})),
+    ).pipe(
+      Effect.provide(
+        environmentLayer(
+          threadScope(),
+          liveThreadShell(threadId),
+          Layer.mergeAll(
+            staticSettings,
+            Layer.mock(StorageCleanup.StorageCleanup)({
+              latestReport: Effect.succeed({
+                trigger: "automatic",
+                startedAt: "2026-10-25T00:00:00.000Z",
+                finishedAt: "2026-10-25T00:00:01.000Z",
+                entries: [
+                  {
+                    kind: "worktree",
+                    outcome: "removed",
+                    reason: "merged",
+                    path: "/secret/worktree",
+                    projectPath: "/secret/project",
+                    threadId,
+                    threadTitle: "Private title",
+                    bytes: 10,
+                    files: 1,
+                  },
+                ],
+                counts: { removed: 1, kept: 0, failed: 0 },
+                omittedCount: 4,
+                bytesFreed: 10,
+              }),
+            }),
+            Layer.mock(DatabaseStorage.DatabaseStorage)({
+              status: Stream.make({
+                databaseBytes: 3 * 1024 ** 3,
+                reclaimableBytes: 2 * 1024 ** 3,
+                incrementalVacuumEnabled: false,
+                compactCommand: "t3 doctor --base-dir /secret/home",
+              }),
+            }),
+          ),
+        ),
+      ),
+    );
+    expect(result?.encodedResult).toEqual({
+      database: {
+        databaseBytes: 3 * 1024 ** 3,
+        reclaimableBytes: 2 * 1024 ** 3,
+        incrementalVacuumEnabled: false,
+        compactionRecommended: true,
+      },
+      lastCleanup: {
+        trigger: "automatic",
+        startedAt: "2026-10-25T00:00:00.000Z",
+        finishedAt: "2026-10-25T00:00:01.000Z",
+        counts: { removed: 1, kept: 0, failed: 0 },
+        bytesFreed: 10,
+        entryCount: 5,
+      },
+    });
+  }),
+);

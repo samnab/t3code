@@ -5,14 +5,21 @@ import {
   IdleCompactionMode,
   OrchestratorMcpFailure,
   ServerSettings,
+  ServerRemoveKeybindingInput,
   ServerSettingsPatch,
+  ServerUpsertKeybindingInput,
+  ServerUpsertKeybindingResult,
+  StorageCleanupReport,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as Keybindings from "../../../keybindings.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as DatabaseStorage from "../../../persistence/DatabaseStorage.ts";
 import * as Settings from "../../../serverSettings.ts";
+import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const PreferenceFields = {
@@ -83,4 +90,67 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
   }),
   success: Schema.Struct(PreferenceFields),
 }).annotate(Tool.Destructive, true);
-export const EnvironmentToolkit = Toolkit.make(EnvironmentReadTool, EnvironmentPreferencesTool);
+const keybindings = {
+  ...shared,
+  dependencies: [...shared.dependencies, Keybindings.Keybindings],
+  success: ServerUpsertKeybindingResult,
+};
+const KeybindingsListTool = Tool.make("t3_keybindings_list", {
+  ...keybindings,
+  description:
+    "List this environment's effective keybindings (defaults merged with the user's custom rules) and any config issues. Shortcuts are returned parsed; t3_keybinding_remove matches the exact key/command/when strings a custom rule was written with.",
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+const KeybindingUpsertTool = Tool.make("t3_keybinding_upsert", {
+  ...keybindings,
+  description:
+    "Add or replace a custom keybinding rule through the normal keybindings config, notifying open clients. Requires a live full-access/default calling thread. key is a shortcut like mod+shift+k; command must be a known keybinding command or script.<id>.run; replace names an existing rule to swap out. Returns the effective keybindings.",
+  parameters: ServerUpsertKeybindingInput,
+}).annotate(Tool.Destructive, true);
+const KeybindingRemoveTool = Tool.make("t3_keybinding_remove", {
+  ...keybindings,
+  description:
+    "Remove the custom keybinding rule with exactly this key, command, and when. Requires a live full-access/default calling thread. Default keybindings cannot be removed. Returns the effective keybindings.",
+  parameters: ServerRemoveKeybindingInput,
+}).annotate(Tool.Destructive, true);
+const StorageReportTool = Tool.make("t3_environment_storage_report", {
+  ...shared,
+  dependencies: [
+    ...shared.dependencies,
+    StorageCleanup.StorageCleanup,
+    DatabaseStorage.DatabaseStorage,
+  ],
+  description:
+    "Summarize this environment's storage: state database size and reclaimable space, and the totals of the latest storage cleanup run. Either is null when not yet measured or not available. Read-only; cleanup and compaction stay with the user.",
+  success: Schema.Struct({
+    database: Schema.NullOr(
+      Schema.Struct({
+        databaseBytes: Schema.Number,
+        reclaimableBytes: Schema.Number,
+        incrementalVacuumEnabled: Schema.Boolean,
+        compactionRecommended: Schema.Boolean,
+      }),
+    ),
+    lastCleanup: Schema.NullOr(
+      Schema.Struct({
+        trigger: StorageCleanupReport.fields.trigger,
+        startedAt: Schema.String,
+        finishedAt: Schema.String,
+        counts: StorageCleanupReport.fields.counts,
+        bytesFreed: Schema.Number,
+        entryCount: Schema.Number,
+      }),
+    ),
+  }),
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+export const EnvironmentToolkit = Toolkit.make(
+  EnvironmentReadTool,
+  EnvironmentPreferencesTool,
+  KeybindingsListTool,
+  KeybindingUpsertTool,
+  KeybindingRemoveTool,
+  StorageReportTool,
+);
