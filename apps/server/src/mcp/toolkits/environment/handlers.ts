@@ -16,6 +16,9 @@ export function preferences(settings: ServerSettings) {
     enableProviderUpdateChecks,
     backgroundActivity,
     sourceControlWritingStyle,
+    sidebarAutoSettleAfterDays,
+    sidebarAutoSettleOnMerge,
+    sidebarAutoSettleKeepPullRequests,
   } = settings;
   const characters = Array.from(sourceControlWritingStyle.customInstructions);
   return {
@@ -29,6 +32,9 @@ export function preferences(settings: ServerSettings) {
       customInstructions: characters.slice(0, 4000).join(""),
       truncated: characters.length > 4000,
     },
+    sidebarAutoSettleAfterDays,
+    sidebarAutoSettleOnMerge,
+    sidebarAutoSettleKeepPullRequests,
   };
 }
 const access = Effect.gen(function* () {

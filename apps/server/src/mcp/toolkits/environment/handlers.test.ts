@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -13,9 +14,12 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
+import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
+import * as ServerConfig from "../../../config.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -93,5 +97,236 @@ it.effect("refuses a preferences update when the caller's turn ends while it wai
         ),
       ),
     );
+  }),
+);
+
+const threadScope = (
+  overrides: Partial<McpInvocationContext.McpInvocationScope> = {},
+): McpInvocationContext.McpInvocationScope => ({
+  environmentId,
+  requestNamespace: "provider:preferences",
+  thread: {
+    threadId,
+    providerSessionId: "provider:preferences",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  client: undefined,
+  capabilities: new Set(["orchestration" as const]),
+  issuedAt: 0,
+  ...overrides,
+});
+
+const environmentLayer = <E, R>(
+  scope: McpInvocationContext.McpInvocationScope,
+  caller: OrchestrationV2ThreadShell,
+  settings: Layer.Layer<Settings.ServerSettingsService, E, R>,
+) =>
+  McpToolAccess.HandlersLayer.layer(EnvironmentHandlers.layer).pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        ThreadCommandExecutor.layer,
+        Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: () => Effect.succeed(caller),
+        }),
+        Layer.mock(Environment.ServerEnvironment)({
+          getDescriptor: Effect.succeed({
+            environmentId,
+            label: "Test",
+            platform: { os: "linux", arch: "x64" },
+            serverVersion: "0.0.0",
+            capabilities: { repositoryIdentity: false },
+          }),
+        }),
+        settings,
+      ),
+    ),
+  );
+
+const finalResult = <A, E1, R1, E2, R2>(handled: Effect.Effect<Stream.Stream<A, E1, R1>, E2, R2>) =>
+  handled.pipe(
+    Stream.unwrap,
+    Stream.runCollect,
+    Effect.map((results) => results.at(-1)),
+  );
+
+const countingSettings = (updates: Ref.Ref<number>) =>
+  Layer.mock(Settings.ServerSettingsService)({
+    getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+    updateSettings: () =>
+      Ref.update(updates, (count) => count + 1).pipe(Effect.as(DEFAULT_SERVER_SETTINGS)),
+  });
+
+// A fresh service per call rereads settings.json, so each build is a server restart.
+const restartedSettings = () =>
+  Layer.fresh(Settings.layer).pipe(
+    Layer.provide(
+      Layer.succeed(
+        ServerSecretStore.ServerSecretStore,
+        ServerSecretStore.ServerSecretStore.of({
+          get: () => Effect.succeedNone,
+          set: () => Effect.void,
+          create: () => Effect.void,
+          getOrCreateRandom: () => Effect.succeed(new Uint8Array()),
+          remove: () => Effect.void,
+        }),
+      ),
+    ),
+  );
+
+const reloadSettings = Effect.flatMap(
+  Settings.ServerSettingsService,
+  (service) => service.getSettings,
+);
+
+it.layer(
+  Layer.mergeAll(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3code-environment-preferences-test-" }),
+    SqlitePersistence.layerMemory,
+  ).pipe(Layer.provideMerge(NodeServices.layer)),
+)("sidebar auto-settle preferences", (it) => {
+  it.effect("reads, writes, and persists them across restarts", () =>
+    Effect.gen(function* () {
+      const scope = threadScope();
+      const caller = liveThreadShell(threadId);
+      yield* Effect.flatMap(Settings.ServerSettingsService, (service) =>
+        service.updateSettings({
+          enableAgentDeviceAccess: true,
+          newWorktreesStartFromOrigin: true,
+        }),
+      ).pipe(Effect.provide(restartedSettings()));
+
+      yield* Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        const read = yield* finalResult(toolkit.handle("t3_environment_read", {}));
+        expect(read?.encodedResult).toMatchObject({
+          preferences: {
+            newWorktreesStartFromOrigin: true,
+            sidebarAutoSettleAfterDays: 3,
+            sidebarAutoSettleOnMerge: true,
+            sidebarAutoSettleKeepPullRequests: false,
+          },
+        });
+        const disabled = yield* finalResult(
+          toolkit.handle("t3_environment_preferences_update", {
+            sidebarAutoSettleAfterDays: null,
+            sidebarAutoSettleOnMerge: false,
+            sidebarAutoSettleKeepPullRequests: true,
+          }),
+        );
+        expect(disabled?.encodedResult).toMatchObject({
+          newWorktreesStartFromOrigin: true,
+          sidebarAutoSettleAfterDays: null,
+          sidebarAutoSettleOnMerge: false,
+          sidebarAutoSettleKeepPullRequests: true,
+        });
+        const omitted = yield* finalResult(
+          toolkit.handle("t3_environment_preferences_update", { defaultThreadEnvMode: "worktree" }),
+        );
+        expect(omitted?.encodedResult).toMatchObject({
+          defaultThreadEnvMode: "worktree",
+          sidebarAutoSettleAfterDays: null,
+          sidebarAutoSettleOnMerge: false,
+          sidebarAutoSettleKeepPullRequests: true,
+        });
+      }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+
+      expect(yield* reloadSettings.pipe(Effect.provide(restartedSettings()))).toMatchObject({
+        enableAgentDeviceAccess: true,
+        newWorktreesStartFromOrigin: true,
+        defaultThreadEnvMode: "worktree",
+        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleOnMerge: false,
+        sidebarAutoSettleKeepPullRequests: true,
+      });
+
+      yield* Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        yield* finalResult(
+          toolkit.handle("t3_environment_preferences_update", {
+            sidebarAutoSettleAfterDays: 7,
+            sidebarAutoSettleOnMerge: true,
+            sidebarAutoSettleKeepPullRequests: false,
+          }),
+        );
+      }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+
+      yield* Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        const read = yield* finalResult(toolkit.handle("t3_environment_read", {}));
+        expect(read?.encodedResult).toMatchObject({
+          preferences: {
+            defaultThreadEnvMode: "worktree",
+            sidebarAutoSettleAfterDays: 7,
+            sidebarAutoSettleOnMerge: true,
+            sidebarAutoSettleKeepPullRequests: false,
+          },
+        });
+      }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+      expect(yield* reloadSettings.pipe(Effect.provide(restartedSettings()))).toMatchObject({
+        enableAgentDeviceAccess: true,
+        newWorktreesStartFromOrigin: true,
+      });
+    }),
+  );
+});
+
+it.effect.each([0, 91])("rejects %s auto-settle days before writing", (days) =>
+  Effect.gen(function* () {
+    const updates = yield* Ref.make(0);
+    const result = yield* Effect.gen(function* () {
+      const toolkit = yield* EnvironmentToolkit;
+      return yield* finalResult(
+        toolkit.handle("t3_environment_preferences_update", { sidebarAutoSettleAfterDays: days }),
+      );
+    }).pipe(
+      Effect.provide(
+        environmentLayer(threadScope(), liveThreadShell(threadId), countingSettings(updates)),
+      ),
+    );
+    expect(result).toMatchObject({ isFailure: true, failureOrigin: "parameters" });
+    expect(yield* Ref.get(updates)).toBe(0);
+  }),
+);
+
+it.effect.each([
+  {
+    label: "a read-only client",
+    scope: threadScope({
+      thread: undefined,
+      client: { sessionId: "client:preferences", label: "Client", access: "read-only" },
+    }),
+    caller: liveThreadShell(threadId),
+  },
+  {
+    label: "an approval-required caller",
+    scope: threadScope(),
+    caller: liveThreadShell(threadId, { runtimeMode: "approval-required" }),
+  },
+  {
+    label: "a plan-mode caller",
+    scope: threadScope(),
+    caller: liveThreadShell(threadId, { interactionMode: "plan" }),
+  },
+  {
+    label: "another environment's credential",
+    scope: threadScope({ environmentId: EnvironmentId.make("environment:other") }),
+    caller: liveThreadShell(threadId),
+  },
+])("denies auto-settle writes from $label", ({ scope, caller }) =>
+  Effect.gen(function* () {
+    const updates = yield* Ref.make(0);
+    const result = yield* Effect.gen(function* () {
+      const toolkit = yield* EnvironmentToolkit;
+      return yield* finalResult(
+        toolkit.handle("t3_environment_preferences_update", {
+          sidebarAutoSettleAfterDays: null,
+          sidebarAutoSettleOnMerge: false,
+          sidebarAutoSettleKeepPullRequests: true,
+        }),
+      );
+    }).pipe(Effect.provide(environmentLayer(scope, caller, countingSettings(updates))));
+    expect(result?.result).toMatchObject({ code: "capability_denied" });
+    expect(yield* Ref.get(updates)).toBe(0);
   }),
 );
