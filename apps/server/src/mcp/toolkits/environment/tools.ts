@@ -1,6 +1,7 @@
 import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
+  EnvironmentConnectReachabilityCause,
   ExecutionEnvironmentDescriptor,
   IdleCompactionMode,
   OrchestratorMcpFailure,
@@ -13,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
+import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as Keybindings from "../../../keybindings.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -55,18 +57,35 @@ const shared = {
     ServerEnvironment.ServerEnvironment,
     Settings.ServerSettingsService,
     ThreadCommandExecutor.ThreadCommandExecutor,
+    CloudLink.CloudLink,
   ],
 };
 const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
-    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. favorites and providerModelPreferences (hidden models, order, default model/options per provider instance id) are the stored model preferences. idleCompaction is the effective environment-wide mode.",
+    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. favorites and providerModelPreferences (hidden models, order, default model/options per provider instance id) are the stored model preferences. idleCompaction is the effective environment-wide mode. connect summarizes T3 Connect: whether this host is linked, the link was revoked, the managed tunnel is active, the sharing preferences, and the latest reachability check the server ran on its own; null when unavailable. Linking, unlinking, and Connect preferences stay in Settings.",
   success: Schema.Struct({
     environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
     label: Schema.String,
     serverVersion: Schema.String,
     platform: ExecutionEnvironmentDescriptor.fields.platform,
     preferences: Schema.Struct(PreferenceFields),
+    connect: Schema.NullOr(
+      Schema.Struct({
+        linked: Schema.Boolean,
+        linkRevoked: Schema.Boolean,
+        managedTunnelActive: Schema.Boolean,
+        publishAgentActivity: Schema.Boolean,
+        holdWebhooksWhileOffline: Schema.Boolean,
+        reachability: Schema.NullOr(
+          Schema.Struct({
+            status: Schema.Literals(["reachable", "unreachable"]),
+            checkedAt: Schema.String,
+            cause: Schema.optionalKey(EnvironmentConnectReachabilityCause),
+          }),
+        ),
+      }),
+    ),
   }),
 })
   .annotate(Tool.Readonly, true)

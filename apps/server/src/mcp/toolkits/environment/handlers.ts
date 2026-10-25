@@ -10,6 +10,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Keybindings from "../../../keybindings.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -68,6 +69,33 @@ export function preferences(settings: ServerSettings) {
 }
 // Literals are declared narrowest first.
 const runtimeModeRank = (mode: RuntimeMode) => RuntimeMode.literals.indexOf(mode);
+// Explicit fields only: the link state also carries the linked account id and
+// relay identifiers, which must not reach a provider transcript.
+const connectSummary = Effect.gen(function* () {
+  const cloud = yield* CloudLink.CloudLink;
+  const state = yield* cloud.linkState();
+  const reachability = state.reachability;
+  return {
+    linked: state.linked,
+    linkRevoked: state.linkRevoked ?? false,
+    managedTunnelActive: state.managedTunnelActive ?? false,
+    publishAgentActivity: state.publishAgentActivity,
+    holdWebhooksWhileOffline: state.holdWebhooksWhileOffline ?? false,
+    reachability:
+      reachability === undefined
+        ? null
+        : reachability.status === "reachable"
+          ? { status: reachability.status, checkedAt: reachability.checkedAt }
+          : {
+              status: reachability.status,
+              checkedAt: reachability.checkedAt,
+              cause: reachability.cause,
+            },
+  };
+}).pipe(
+  // A secret-store read failure leaves Connect status unknown; the rest of the read stands.
+  Effect.orElseSucceed(() => null),
+);
 const access = Effect.gen(function* () {
   const context = yield* readCaller();
   const environment = yield* Environment.ServerEnvironment;
@@ -122,6 +150,7 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
         serverVersion: descriptor.serverVersion,
         platform: descriptor.platform,
         preferences: preferences(current),
+        connect: yield* connectSummary,
       };
     }),
   ),

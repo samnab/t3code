@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   DEFAULT_SERVER_SETTINGS,
+  type EnvironmentCloudLinkStateResult,
   EnvironmentId,
   type KeybindingCommand,
   ProviderInstanceId,
@@ -17,6 +18,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
 import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
+import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Keybindings from "../../../keybindings.ts";
@@ -33,6 +35,15 @@ import * as EnvironmentHandlers from "./handlers.ts";
 import { EnvironmentToolkit } from "./tools.ts";
 
 const environmentId = EnvironmentId.make("environment:preferences");
+const cloudLink = (state: EnvironmentCloudLinkStateResult) =>
+  Layer.mock(CloudLink.CloudLink)({ linkState: () => Effect.succeed(state) });
+const unlinkedCloud = cloudLink({
+  linked: false,
+  cloudUserId: null,
+  relayUrl: null,
+  relayIssuer: null,
+  publishAgentActivity: false,
+});
 const threadId = ThreadId.make("thread:preferences");
 
 it.effect("refuses a preferences update when the caller's turn ends while it waits", () =>
@@ -42,6 +53,7 @@ it.effect("refuses a preferences update when the caller's turn ends while it wai
     const checked = yield* Deferred.make<void>();
     const layerDependencies = Layer.mergeAll(
       ThreadCommandExecutor.layer,
+      unlinkedCloud,
       Layer.succeed(McpInvocationContext.McpInvocationContext, {
         environmentId,
         requestNamespace: "provider:preferences",
@@ -125,11 +137,13 @@ const environmentLayer = <A, E, R>(
   scope: McpInvocationContext.McpInvocationScope,
   caller: OrchestrationV2ThreadShell,
   settings: Layer.Layer<A, E, R>,
+  cloud = unlinkedCloud,
 ) =>
   McpToolAccess.HandlersLayer.layer(EnvironmentHandlers.layer).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         ThreadCommandExecutor.layer,
+        cloud,
         Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
         Layer.mock(ThreadManagement.ThreadManagementService)({
           getThreadShell: () => Effect.succeed(caller),
@@ -647,6 +661,91 @@ it.layer(
     }),
   );
 });
+
+it.effect.each([
+  {
+    label: "unlinked",
+    state: {
+      linked: false,
+      cloudUserId: null,
+      relayUrl: null,
+      relayIssuer: null,
+      publishAgentActivity: false,
+    },
+    connect: {
+      linked: false,
+      linkRevoked: false,
+      managedTunnelActive: false,
+      publishAgentActivity: false,
+      holdWebhooksWhileOffline: false,
+      reachability: null,
+    },
+  },
+  {
+    label: "linked",
+    state: {
+      linked: true,
+      cloudUserId: "user:secret-account",
+      relayUrl: "wss://secret-relay.example",
+      relayIssuer: "secret-issuer",
+      managedTunnelActive: true,
+      publishAgentActivity: true,
+      holdWebhooksWhileOffline: true,
+      linkRevoked: false,
+      reachability: {
+        status: "unreachable",
+        checkedAt: "2026-10-25T00:00:00.000Z",
+        cause: "edge_unreachable",
+        reason: "secret-host.example:7844 refused",
+        hint: null,
+        fix: "Open port 7844.",
+      },
+    },
+    connect: {
+      linked: true,
+      linkRevoked: false,
+      managedTunnelActive: true,
+      publishAgentActivity: true,
+      holdWebhooksWhileOffline: true,
+      reachability: {
+        status: "unreachable",
+        checkedAt: "2026-10-25T00:00:00.000Z",
+        cause: "edge_unreachable",
+      },
+    },
+  },
+] satisfies ReadonlyArray<{
+  label: string;
+  state: EnvironmentCloudLinkStateResult;
+  connect: unknown;
+}>)("reads the $label Connect summary without identifiers", ({ state, connect }) =>
+  Effect.gen(function* () {
+    const result = yield* Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+      finalResult(toolkit.handle("t3_environment_read", {})),
+    ).pipe(
+      Effect.provide(
+        environmentLayer(
+          threadScope(),
+          liveThreadShell(threadId),
+          staticSettings,
+          cloudLink(state),
+        ),
+      ),
+    );
+    expect(result?.encodedResult).toMatchObject({ connect });
+    const output = JSON.stringify(result?.encodedResult);
+    for (const forbidden of [
+      "cloudUserId",
+      "relayUrl",
+      "relayIssuer",
+      "endpointRuntimeStatus",
+      "secret",
+      "7844",
+    ]) {
+      expect(output).not.toContain(forbidden);
+    }
+  }),
+);
 
 it.effect("reports storage totals without paths, titles, or commands", () =>
   Effect.gen(function* () {
