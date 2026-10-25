@@ -68,6 +68,7 @@ import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./time
 import {
   MESSAGE_HEADING_LEVEL,
   MessageAuthorHeading,
+  TimelineMessageMarker,
   TimelineRowTimestamp,
 } from "./TimelineRowParts";
 import { UserMessageContextReferenceChip } from "./UserMessageContextChips";
@@ -117,6 +118,12 @@ function UserVideoAttachment({ file }: { readonly file: ChatFileAttachment }) {
   );
 }
 
+/** Bubble and hover action row shared by typed and spoken user rows. */
+export const USER_MESSAGE_BUBBLE_CLASS_NAME =
+  "relative min-w-0 max-w-[80%] rounded-2xl text-message-foreground";
+export const USER_MESSAGE_ACTIONS_CLASS_NAME =
+  "flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100";
+
 export function UserMessageRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   return ctx.workflowOpening?.messageId === row.message.id ? (
@@ -160,12 +167,7 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       row.message.inputIntent === "promoted_queued_to_steer" ? (
         <UserMessageIntentMarker intent={row.message.inputIntent} />
       ) : null}
-      <div
-        className={cn(
-          "min-w-0 max-w-[80%] rounded-2xl bg-message text-message-foreground",
-          expanded && "w-full",
-        )}
-      >
+      <div className={cn(USER_MESSAGE_BUBBLE_CLASS_NAME, "bg-message", expanded && "w-full")}>
         <FoldedMessageHeader
           icon={CalendarClockIcon}
           label="Automation"
@@ -187,7 +189,7 @@ function AutomationMessageRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       </div>
       <UserMessageProjectedStatus row={row} />
       {expanded ? (
-        <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100">
+        <div className={USER_MESSAGE_ACTIONS_CLASS_NAME}>
           <div className="flex shrink-0 items-center gap-2">
             {scheduledTaskId ? (
               <Link
@@ -442,7 +444,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       ) : null}
       <div
         className={cn(
-          "relative min-w-0 max-w-[80%] rounded-2xl text-message-foreground",
+          USER_MESSAGE_BUBBLE_CLASS_NAME,
           userMessage.attribution === "guest" ? guestBubbleClassName(false) : "bg-message",
           !folded && "p-3",
           folded && expanded && "w-full",
@@ -593,7 +595,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       </div>
       <UserMessageProjectedStatus row={row} />
       {!folded || expanded ? (
-        <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 pointer-coarse:opacity-100 focus-within:opacity-100 group-hover:opacity-100">
+        <div className={USER_MESSAGE_ACTIONS_CLASS_NAME}>
           <div className="flex shrink-0 items-center gap-2">
             {folded && senderThreadId ? (
               <InlineButton onClick={() => ctx.onOpenThread(senderThreadId)} tone="muted">
@@ -647,24 +649,17 @@ function UserMessageIntentMarker({
   readonly intent: "steer" | "promoted_queued_to_steer";
 }) {
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <div
-            className="me-1 flex items-center justify-end gap-1 text-xs leading-none text-muted-foreground"
-            data-user-message-intent={intent}
-          />
-        }
-      >
-        <Redo2Icon aria-hidden="true" className="size-3" />
-        Steer
-      </TooltipTrigger>
-      <TooltipPopup side="top">
-        {intent === "promoted_queued_to_steer"
+    <TimelineMessageMarker
+      icon={Redo2Icon}
+      label="Steer"
+      align="end"
+      dataAttributes={{ "data-user-message-intent": intent }}
+      tooltip={
+        intent === "promoted_queued_to_steer"
           ? "Originally queued, then promoted to steer the active turn"
-          : "Steered the active turn"}
-      </TooltipPopup>
-    </Tooltip>
+          : "Steered the active turn"
+      }
+    />
   );
 }
 

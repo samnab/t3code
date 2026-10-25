@@ -77,6 +77,12 @@ import {
   formatSearchToolLabel,
 } from "@t3tools/shared/toolActivity";
 import { isWindowsAbsolutePath } from "@t3tools/shared/path";
+import {
+  isDisplayedRealtimeVoiceLine,
+  layoutRealtimeVoiceCalls,
+  realtimeVoiceCallsEqual,
+  type RealtimeVoiceCall,
+} from "@t3tools/shared/orchestrationV2Timeline";
 
 function timelineEntryRunId(entry: TimelineEntry): RunId | null {
   if (entry.kind === "message") {
@@ -625,6 +631,8 @@ type MessagesTimelineRowContent =
       resourceSummary?: boolean;
       /** Row of the coding instruction this spoken request was promoted into. */
       voicePromotedToRowId?: string;
+      /** Divider for the realtime voice call this row opens. */
+      voiceCall?: RealtimeVoiceCall;
     }
   | {
       kind: "proposed-plan";
@@ -1353,12 +1361,7 @@ function settleSupersededReasoning(entries: ReadonlyArray<TimelineEntry>) {
 }
 
 function timelineVoiceProjectedItem(entry: TimelineEntry) {
-  const projectedItem =
-    entry.kind === "work"
-      ? entry.entry.projectedItem
-      : entry.kind === "event"
-        ? entry.projectedItem
-        : undefined;
+  const projectedItem = timelineEntryProjectedItem(entry);
   return projectedItem?.item.type === "realtime_voice" ? projectedItem : undefined;
 }
 
@@ -1393,29 +1396,37 @@ function voicePromotionTargets(entries: ReadonlyArray<TimelineEntry>): ReadonlyM
   return targets;
 }
 
+function timelineEntryProjectedItem(entry: TimelineEntry) {
+  return entry.kind === "work"
+    ? entry.entry.projectedItem
+    : entry.kind === "event"
+      ? entry.projectedItem
+      : undefined;
+}
+
 function timelineRowEntries(entries: ReadonlyArray<TimelineEntry>) {
+  const voiceCalls = layoutRealtimeVoiceCalls(
+    entries.flatMap((entry) => timelineEntryProjectedItem(entry) ?? []),
+  );
   const historicalVoiceEntries = entries.flatMap((entry): TimelineEntry[] => {
-    const projectedItem =
-      entry.kind === "work"
-        ? entry.entry.projectedItem
-        : entry.kind === "event"
-          ? entry.projectedItem
-          : undefined;
-    if (projectedItem === undefined || projectedItem.item.type !== "realtime_voice") return [entry];
+    const projectedItem = timelineEntryProjectedItem(entry);
+    if (projectedItem === undefined) return [entry];
+    // Call markers and history warnings render inside the call divider.
+    if (voiceCalls.foldedRows.has(projectedItem)) return [];
+    if (projectedItem.item.type !== "realtime_voice") return [entry];
     const item = projectedItem.item;
     // Uncommitted tails are interrupted items; they render with their capture state.
-    if (
-      (item.status !== "completed" && item.status !== "interrupted") ||
-      item.content.type === "bemItemPromoted" ||
-      (item.content.type === "transcriptSegment" && item.content.text.trim().length === 0)
-    )
+    if (!voiceCalls.callByHostRow.has(projectedItem) && !isDisplayedRealtimeVoiceLine(item))
       return [];
     // Speech remains a typed historical event, outside message rollback and coding-run folds.
     return [
       { kind: "event", id: entry.id, createdAt: DateTime.formatIso(item.updatedAt), projectedItem },
     ];
   });
-  return withoutSubagentDelegationRows(settleSupersededReasoning(historicalVoiceEntries));
+  return {
+    entries: withoutSubagentDelegationRows(settleSupersededReasoning(historicalVoiceEntries)),
+    voiceCalls: voiceCalls.callByHostRow,
+  };
 }
 
 function deriveTimelineTurnFolds(
@@ -1424,7 +1435,7 @@ function deriveTimelineTurnFolds(
     "timelineEntries" | "latestRun" | "isWorking" | "runlessWorkActive" | "runningRunId"
   >,
 ) {
-  const timelineEntries = timelineRowEntries(input.timelineEntries);
+  const timelineEntries = timelineRowEntries(input.timelineEntries).entries;
   const unsettledRunId = deriveUnsettledRunId(input.latestRun ?? null, input.runningRunId ?? null);
   const failedRunIds = failedTimelineRunIds(timelineEntries, input.latestRun ?? null);
   const activeVisualResponseRunIds = deriveActiveVisualResponseRunIds({
@@ -1461,7 +1472,7 @@ export function deriveMessagesTimelineRows(input: {
   liveAgentTaskIds?: ReadonlySet<string> | undefined;
   worktreeSetup?: WorktreeSetupSnapshot | null;
 }): MessagesTimelineRow[] {
-  const timelineEntries = timelineRowEntries(input.timelineEntries);
+  const { entries: timelineEntries, voiceCalls } = timelineRowEntries(input.timelineEntries);
   const voicePromotions = voicePromotionTargets(input.timelineEntries);
   const turnDiffSummaryByAssistantMessageId = new Map<MessageId, TurnDiffSummary>();
   for (const summary of input.turnDiffSummaries) {
@@ -2017,12 +2028,14 @@ export function deriveMessagesTimelineRows(input: {
         continue;
       }
       const voicePromotedToRowId = voicePromotions.get(timelineEntry.id);
+      const voiceCall = voiceCalls.get(timelineEntry.projectedItem);
       nextRows.push({
         kind: "event",
         id: timelineEntry.id,
         createdAt: timelineEntry.createdAt,
         projectedItem: timelineEntry.projectedItem,
         ...(voicePromotedToRowId === undefined ? {} : { voicePromotedToRowId }),
+        ...(voiceCall === undefined ? {} : { voiceCall }),
       });
       continue;
     }
@@ -2470,6 +2483,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
       return (
         a.projectedItem === (b as typeof a).projectedItem &&
         a.resourceSummary === (b as typeof a).resourceSummary &&
+        a.voicePromotedToRowId === (b as typeof a).voicePromotedToRowId &&
+        realtimeVoiceCallsEqual(a.voiceCall, (b as typeof a).voiceCall) &&
         Equal.equals(a.subagents, (b as typeof a).subagents)
       );
 

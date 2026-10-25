@@ -1,4 +1,5 @@
 import { type ReactNode } from "react";
+import type { LucideIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
@@ -8,6 +9,45 @@ export const MESSAGE_HEADING_LEVEL = 3;
 
 export function MessageAuthorHeading({ children }: { children: string }) {
   return <h3 className="sr-only select-none">{children}</h3>;
+}
+
+/** Quiet label above a message bubble, such as "Steer" or "Voice"; the tooltip holds the detail. */
+export function TimelineMessageMarker({
+  icon: Icon,
+  label,
+  tooltip,
+  ariaLabel,
+  align,
+  dataAttributes,
+}: {
+  icon: LucideIcon;
+  label: string;
+  tooltip: ReactNode;
+  /** Replaces the visible label for screen readers. */
+  ariaLabel?: string;
+  align: "start" | "end";
+  dataAttributes?: Record<`data-${string}`, string>;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <div
+            className={cn(
+              "flex items-center gap-1 text-xs leading-none text-muted-foreground",
+              align === "end" ? "me-1 justify-end" : "justify-start",
+            )}
+            {...(ariaLabel === undefined ? {} : { role: "img", "aria-label": ariaLabel })}
+            {...dataAttributes}
+          />
+        }
+      >
+        <Icon aria-hidden="true" className="size-3" />
+        {label}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{tooltip}</TooltipPopup>
+    </Tooltip>
+  );
 }
 
 export function TimelineRowTimestamp({

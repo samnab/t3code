@@ -1230,6 +1230,10 @@ function getItemType(item: MessagesTimelineRow) {
 const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: TimelineRow }) {
   const isExpandedToolGroup = row.kind === "work" && row.isExpandedToolGroup;
   const isSubagentGroup = row.kind === "event" && row.projectedItem.item.type === "subagent";
+  const isVoiceLine =
+    row.kind === "event" &&
+    row.projectedItem.item.type === "realtime_voice" &&
+    row.projectedItem.item.content.type === "transcriptSegment";
   const isWorkLogRow =
     row.kind === "work" ||
     row.kind === "work-live" ||
@@ -1250,7 +1254,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
                   row.message.role === "assistant" &&
                   !row.showAssistantMeta) ||
                 row.kind === "worktree-setup" ||
-                row.kind === "event" ||
+                (row.kind === "event" && !isVoiceLine) ||
                 row.kind === "attempt-fold" ||
                 row.kind === "html-render" ||
                 row.kind === "mcp-app"

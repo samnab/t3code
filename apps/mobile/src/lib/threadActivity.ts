@@ -64,6 +64,13 @@ import {
 } from "@t3tools/shared/toolActivity";
 import { claudeResumeCompactionAge } from "@t3tools/shared/claudeCompaction";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import {
+  isDisplayedRealtimeVoiceLine,
+  layoutRealtimeVoiceCalls,
+  realtimeVoiceCallsEqual,
+  type RealtimeVoiceCall,
+  type RealtimeVoiceCallLayout,
+} from "@t3tools/shared/orchestrationV2Timeline";
 import { truncate } from "@t3tools/shared/String";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import type { McpAppReference } from "@t3tools/shared/mcpApp";
@@ -173,6 +180,8 @@ type RawThreadFeedEntry =
       readonly projectedItem: OrchestrationV2ProjectedTurnItem;
       /** This spoken request was promoted into a coding message in this feed. */
       readonly promotedToCodingRequest: boolean;
+      /** Divider for the realtime voice call this entry opens. */
+      readonly call?: RealtimeVoiceCall;
     }
   | {
       readonly type: "message";
@@ -2050,6 +2059,7 @@ interface ThreadFeedBuild {
   readonly foldedAnswerMessageIds: ReadonlySet<string>;
   readonly delegatedChildrenByRun: ReadonlyMap<RunId, ReadonlySet<string>>;
   readonly promotedVoiceRequests: ReadonlySet<string>;
+  readonly voiceCalls: RealtimeVoiceCallLayout<OrchestrationV2ProjectedTurnItem>;
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
   /** Grouping is empty before `row`: the rows before it produced `feed.slice(0, feedLength)`. */
   readonly restarts: ReadonlyArray<{ readonly row: number; readonly feedLength: number }>;
@@ -2118,6 +2128,18 @@ function firstChangedIndex<T>(previous: ReadonlyArray<T>, next: ReadonlyArray<T>
   return index;
 }
 
+function voiceCallLayoutsEqual(
+  left: RealtimeVoiceCallLayout<OrchestrationV2ProjectedTurnItem>,
+  right: RealtimeVoiceCallLayout<OrchestrationV2ProjectedTurnItem>,
+): boolean {
+  if (!setsEqual(left.foldedRows, right.foldedRows)) return false;
+  if (left.callByHostRow.size !== right.callByHostRow.size) return false;
+  for (const [row, call] of right.callByHostRow) {
+    if (!realtimeVoiceCallsEqual(left.callByHostRow.get(row), call)) return false;
+  }
+  return true;
+}
+
 /**
  * A promotion record names the native coding item a spoken request became. Marks the latest
  * spoken user segment of that realtime session before the record when the coding item is here.
@@ -2181,6 +2203,7 @@ export function buildThreadFeed(
   const foldedAnswerMessageIds = new Set<string>();
   const delegatedChildrenByRun = new Map<RunId, Set<string>>();
   const promotedVoiceRequests = promotedVoiceRequestKeys(visibleTurnItems);
+  const voiceCalls = layoutRealtimeVoiceCalls(visibleTurnItems);
   for (const { item } of visibleTurnItems) {
     if (item.type === "user_input_request" && item.questionAnswer) {
       foldedAnswerMessageIds.add(`async-answer:${item.questionAnswer.requestId}`);
@@ -2202,6 +2225,7 @@ export function buildThreadFeed(
     checkpointSummariesEqual(previous.checkpointSummaries, options?.checkpointSummaries) &&
     setsEqual(previous.foldedAnswerMessageIds, foldedAnswerMessageIds) &&
     setsEqual(previous.promotedVoiceRequests, promotedVoiceRequests) &&
+    voiceCallLayoutsEqual(previous.voiceCalls, voiceCalls) &&
     setMapsEqual(previous.delegatedChildrenByRun, delegatedChildrenByRun)
   ) {
     const firstChanged = firstChangedIndex(previous.rows, visibleTurnItems);
@@ -2225,21 +2249,20 @@ export function buildThreadFeed(
     if (item.type === "run_interrupt_request") {
       continue;
     }
+    // Call markers and history warnings render inside the call divider.
+    if (voiceCalls.foldedRows.has(row)) continue;
     if (item.type === "realtime_voice") {
+      const call = voiceCalls.callByHostRow.get(row);
       // Uncommitted tails are interrupted items; they render with their capture state.
-      if (
-        (item.status !== "completed" && item.status !== "interrupted") ||
-        item.content.type === "bemItemPromoted" ||
-        (item.content.type === "transcriptSegment" && item.content.text.trim().length === 0)
-      )
-        continue;
+      if (call === undefined && !isDisplayedRealtimeVoiceLine(item)) continue;
       const cachedVoice = projectedEntriesCache.get(row)?.entry;
       const promotedToCodingRequest = promotedVoiceRequests.has(
         `${row.sourceThreadId}:${row.sourceItemId}`,
       );
       const entry: RawThreadFeedEntry =
         cachedVoice?.type === "realtime-voice" &&
-        cachedVoice.promotedToCodingRequest === promotedToCodingRequest
+        cachedVoice.promotedToCodingRequest === promotedToCodingRequest &&
+        realtimeVoiceCallsEqual(cachedVoice.call, call)
           ? cachedVoice
           : {
               type: "realtime-voice",
@@ -2249,6 +2272,7 @@ export function buildThreadFeed(
               messageId: null,
               projectedItem: row,
               promotedToCodingRequest,
+              ...(call === undefined ? {} : { call }),
             };
       projectedEntriesCache.set(row, { attemptId: null, entry });
       entries.push(entry);
@@ -2421,6 +2445,7 @@ export function buildThreadFeed(
             foldedAnswerMessageIds,
             delegatedChildrenByRun,
             promotedVoiceRequests,
+            voiceCalls,
             feed,
             restarts,
           };

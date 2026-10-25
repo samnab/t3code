@@ -1471,7 +1471,10 @@ function renderFeedEntry(
       <ThreadVoiceTranscriptRow
         entry={entry}
         timestampLabel={formatMessageTime(entry.createdAt)}
+        callStartedLabel={entry.call ? formatMessageTime(entry.call.startedAt) : null}
         iconColor={iconSubtleColor}
+        userBubbleColor={userBubbleColor}
+        bubbleMaxWidth={props.duoColumns ? "85%" : props.userBubbleMaxWidth}
       />
     );
   }
