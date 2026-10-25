@@ -10,7 +10,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon, GaugeIcon, TargetIcon } from "lucide-react";
+import { ChevronDownIcon, TargetIcon } from "lucide-react";
 import {
   memo,
   useEffect,
@@ -20,6 +20,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { isTrailingDoubleClick } from "../Sidebar.logic";
+import { ChatOptimizersMenu } from "./ChatOptimizersMenu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
@@ -424,7 +425,7 @@ export const ChatHeader = memo(function ChatHeader({
               type="button"
               aria-label={goal === null ? "Set thread goal" : "Edit thread goal"}
               onClick={onOpenGoalEditor}
-              className="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              className="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
             />
           }
         >
@@ -441,26 +442,12 @@ export const ChatHeader = memo(function ChatHeader({
         </TooltipTrigger>
         <TooltipPopup side="bottom">{goal ?? "Set thread goal"}</TooltipPopup>
       </Tooltip>
-      {currentSessionOptimizers.length > 0 ? (
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button
-                type="button"
-                aria-label="Current session optimizers"
-                onClick={onOpenOptimizers}
-                className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-success text-xs transition-colors hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              />
-            }
-          >
-            <GaugeIcon className="size-3.5" />
-            <span>{currentSessionOptimizers.length}</span>
-          </TooltipTrigger>
-          <TooltipPopup side="bottom">
-            Current session optimizers: {currentSessionOptimizers.join(", ")}
-          </TooltipPopup>
-        </Tooltip>
-      ) : null}
+      <ChatOptimizersMenu
+        environmentId={activeThreadEnvironmentId}
+        projectId={activeProject?.id ?? null}
+        sessionOptimizers={currentSessionOptimizers}
+        onManage={onOpenOptimizers}
+      />
     </div>
   );
 });
