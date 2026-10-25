@@ -11,6 +11,31 @@ import { environmentSession, readEnvironmentScope } from "../state/session";
 import { environmentThreadDetails, environmentThreadShells } from "../state/threads";
 import type { VoiceOwner } from "@t3tools/client-runtime/realtime-voice";
 
+const NO_SESSION_MESSAGE =
+  "Voice needs a working provider session. Send a message in this conversation first.";
+
+/**
+ * Why voice cannot start on this provider thread, or null. `session` is thread-scoped and
+ * absent when the thread's session is bound to another thread; the server reopens it then.
+ */
+export function voiceProviderIneligibility(
+  providerThread: { providerSessionId: string | null; status: string; driver: string } | undefined,
+  session: { status: string; driver: string } | undefined,
+): string | null {
+  if (
+    !providerThread?.providerSessionId ||
+    session?.status === "error" ||
+    providerThread.status === "closed" ||
+    providerThread.status === "error"
+  ) {
+    return NO_SESSION_MESSAGE;
+  }
+  if ((session?.driver ?? providerThread.driver) !== "codex") {
+    return "Realtime voice is currently available for Codex conversations.";
+  }
+  return null;
+}
+
 export function readVoiceOwner(environmentId: EnvironmentId, threadId: ThreadId): VoiceOwner {
   const thread = appAtomRegistry.get(
     environmentThreadShells.threadShellAtom({ environmentId, threadId }),
@@ -43,21 +68,9 @@ export function readVoiceOwner(environmentId: EnvironmentId, threadId: ThreadId)
   const session = projection?.providerSessions.find(
     (candidate) => candidate.id === providerSessionId,
   );
-  // Starting voice reloads a stopped session on the server; a failed one needs a new message.
-  if (
-    !providerSessionId ||
-    !session ||
-    session.status === "error" ||
-    providerThread?.status === "closed" ||
-    providerThread?.status === "error"
-  ) {
-    throw new Error(
-      "Voice needs a working provider session. Send a message in this conversation first.",
-    );
-  }
-  if (session.driver !== "codex") {
-    throw new Error("Realtime voice is currently available for Codex conversations.");
-  }
+  const ineligible = voiceProviderIneligibility(providerThread, session);
+  if (ineligible) throw new Error(ineligible);
+  if (!providerSessionId) throw new Error(NO_SESSION_MESSAGE);
   return {
     environmentId,
     threadId,
