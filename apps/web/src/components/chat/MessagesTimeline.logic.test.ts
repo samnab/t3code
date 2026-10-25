@@ -35,9 +35,11 @@ import {
   workEntryDisplayLabel,
 } from "./MessagesTimeline.logic";
 
+type VoiceContent = Extract<OrchestrationV2TurnItem, { type: "realtime_voice" }>["content"];
+
 function voiceProjectedItem(
   id: string,
-  content: Extract<OrchestrationV2TurnItem, { type: "realtime_voice" }>["content"],
+  content: VoiceContent,
   position: number,
 ): OrchestrationV2ProjectedTurnItem {
   const fixture = makeStreamingTimelineFixture();
@@ -72,6 +74,56 @@ function voiceProjectedItem(
       historyCoverage: "live_only",
       sourceOrder: "unreconciled",
       timestampProvenance: "observed",
+    },
+  };
+}
+
+function voiceAt(id: string, session: string, second: number, content: VoiceContent) {
+  const source = voiceProjectedItem(id, content, second);
+  if (source.item.type !== "realtime_voice") throw new Error("Expected a voice item");
+  const time = DateTime.makeUnsafe(makeStreamingTimelineFixture().time(second));
+  return {
+    ...source,
+    item: {
+      ...source.item,
+      realtimeSessionId: session,
+      startedAt: time,
+      completedAt: time,
+      updatedAt: time,
+    },
+  } satisfies OrchestrationV2ProjectedTurnItem;
+}
+
+function voiceHistoryWarning(
+  id: string,
+  near: OrchestrationV2ProjectedTurnItem,
+): OrchestrationV2ProjectedTurnItem {
+  const { item } = near;
+  return {
+    ...near,
+    sourceItemId: TurnItemId.make(id),
+    item: {
+      id: TurnItemId.make(id),
+      threadId: item.threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: item.ordinal,
+      status: "failed",
+      title: "Voice history incomplete",
+      startedAt: null,
+      completedAt: item.updatedAt,
+      updatedAt: item.updatedAt,
+      type: "error",
+      failure: {
+        class: "provider_error",
+        code: "voice_history_incomplete",
+        message: "Some speech may be missing.",
+        retryable: false,
+      },
     },
   };
 }
@@ -155,12 +207,104 @@ describe("historical voice timeline", () => {
       4,
     );
     const result = rows([started, spoken, promoted, coding, closed]);
-    expect(result.map((row) => row.kind)).toEqual(["event", "event", "message", "event"]);
+    expect(result.map((row) => row.kind)).toEqual(["event", "event", "message"]);
     expect(result.filter((row) => row.kind === "event").map((row) => row.id)).toEqual([
       started.item.id,
       spoken.item.id,
-      closed.item.id,
     ]);
+  });
+
+  it("collapses each call into one divider, hides silent calls, and folds history warnings", () => {
+    const started = voiceAt("a-start", "call-a", 0, { type: "realtimeSessionStarted" });
+    const line = voiceAt("a-line", "call-a", 5, {
+      type: "transcriptSegment",
+      role: "user",
+      text: "Hello",
+    });
+    const closed = voiceAt("a-end", "call-a", 40, {
+      type: "realtimeSessionClosed",
+      outcome: "ended",
+    });
+    const warning = voiceHistoryWarning("a-warning", started);
+    const silentStart = voiceAt("b-start", "call-b", 50, { type: "realtimeSessionStarted" });
+    const silentEnd = voiceAt("b-end", "call-b", 55, {
+      type: "realtimeSessionClosed",
+      outcome: "ended",
+    });
+    // Recovered history can lack a started marker; the first line then opens the call.
+    const recovered = voiceAt("c-line", "call-c", 58, {
+      type: "transcriptSegment",
+      role: "assistant",
+      text: "Recovered",
+    });
+
+    const result = rows([started, line, closed, warning, silentStart, silentEnd, recovered]);
+
+    expect(result.map((row) => row.id)).toEqual([started.item.id, line.item.id, recovered.item.id]);
+    expect(result[0]).toMatchObject({
+      voiceCall: {
+        durationMs: 40_000,
+        failed: false,
+        historyWarning: "Some speech may be missing.",
+      },
+    });
+    expect(result[1]).not.toHaveProperty("voiceCall");
+    expect(result[2]).toMatchObject({ voiceCall: { durationMs: null, historyWarning: null } });
+  });
+
+  it("splits calls that share a realtime session id by their start and end markers", () => {
+    // Codex reuses its native thread id as the realtime session id for every call in a thread.
+    const session = "01a16af6";
+    const ended = { type: "realtimeSessionClosed", outcome: "ended" } as const;
+    const start = { type: "realtimeSessionStarted" } as const;
+    const say = (role: "user" | "assistant", text: string) =>
+      ({ type: "transcriptSegment", role, text }) as const;
+    const call1Start = voiceAt("c1-start", session, 17, start);
+    const call1End = voiceAt("c1-end", session, 26, ended);
+    const warning = voiceHistoryWarning("c1-warning", call1End);
+    const call2Start = voiceAt("c2-start", session, 33, start);
+    const call2User = voiceAt("c2-user", session, 38, say("user", "Hey, can you hear me"));
+    const call2Assistant = voiceAt("c2-assistant", session, 39, say("assistant", "Yep."));
+    const call2End = voiceAt("c2-end", session, 54, ended);
+    const call3Start = voiceAt("c3-start", session, 59, start);
+    const call3End = voiceAt("c3-end", session, 61, ended);
+    const call4Start = voiceAt("c4-start", session, 66, start);
+    const call4User = voiceAt("c4-user", session, 72, say("user", "Again"));
+    const call4Assistant = voiceAt("c4-assistant", session, 74, say("assistant", "Still here."));
+    const call4End = voiceAt("c4-end", session, 82, ended);
+
+    const result = rows([
+      call1Start,
+      call1End,
+      warning,
+      call2Start,
+      call2User,
+      call2Assistant,
+      call2End,
+      call3Start,
+      call3End,
+      call4Start,
+      call4User,
+      call4Assistant,
+      call4End,
+    ]);
+
+    // The warning belongs to a silent call, so it stays a standalone row where it fell.
+    expect(result.map((row) => row.id)).toEqual([
+      warning.item.id,
+      call2Start.item.id,
+      call2User.item.id,
+      call2Assistant.item.id,
+      call4Start.item.id,
+      call4User.item.id,
+      call4Assistant.item.id,
+    ]);
+    expect(result[1]).toMatchObject({
+      voiceCall: { startedAt: makeStreamingTimelineFixture().time(33), durationMs: 21_000 },
+    });
+    expect(result[4]).toMatchObject({
+      voiceCall: { startedAt: makeStreamingTimelineFixture().time(66), durationMs: 16_000 },
+    });
   });
 
   it("links a spoken request to the coding message it became and shows uncommitted tails", () => {

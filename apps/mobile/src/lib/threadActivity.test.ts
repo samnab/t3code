@@ -356,8 +356,12 @@ describe("historical voice feed", () => {
     expect(deriveThreadFeedPresentation(feed, null, new Set())).toEqual(feed);
   });
 
-  it("keeps session boundaries in source order and leaves promoted coding work to ordinary rows", () => {
+  it("opens a spoken call with one divider and leaves promoted coding work to ordinary rows", () => {
     const started = projected(voiceItem("voice-started", { type: "realtimeSessionStarted" }), 0);
+    const spoken = projected(
+      voiceItem("voice-spoken", { type: "transcriptSegment", role: "user", text: "Please work" }),
+      1,
+    );
     const promoted = projected(
       voiceItem("voice-promoted", {
         type: "bemItemPromoted",
@@ -365,24 +369,27 @@ describe("historical voice feed", () => {
         turn_id: "coding-turn",
         presentation: { type: "wholeItem" },
       }),
-      1,
+      2,
     );
-    const coding = projected(assistantMessage(), 2);
+    const coding = projected(assistantMessage(), 3);
     const closed = projected(
       voiceItem("voice-closed", { type: "realtimeSessionClosed", outcome: "ended" }),
-      3,
+      4,
     );
-    const feed = buildThreadFeed([started, promoted, coding, closed]);
+    const feed = buildThreadFeed([started, spoken, promoted, coding, closed]);
     expect(feed.map((entry) => entry.type)).toEqual([
       "realtime-voice",
-      "message",
       "realtime-voice",
+      "message",
     ]);
-    expect(feed[0]).toMatchObject({ projectedItem: started });
-    expect(feed[1]).toMatchObject({
+    expect(feed[0]).toMatchObject({ projectedItem: started, call: { failed: false } });
+    expect(feed[1]).toMatchObject({ projectedItem: spoken });
+    expect(feed[1]).not.toHaveProperty("call");
+    expect(feed[2]).toMatchObject({
       message: { id: coding.item.type === "assistant_message" ? coding.item.messageId : null },
     });
-    expect(feed[2]).toMatchObject({ projectedItem: closed });
+    // A call with no speech renders nothing.
+    expect(buildThreadFeed([started, closed])).toEqual([]);
   });
 
   it("marks a spoken request promoted into a coding message and shows uncommitted tails", () => {
