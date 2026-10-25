@@ -16,8 +16,11 @@ import {
   OrchestratorMcpFailure,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
+  ServerSettings as ServerSettingsSchema,
+  ThreadEnvMode,
 } from "@t3tools/contracts";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadLaunchService from "../../../orchestration-v2/ThreadLaunchService.ts";
@@ -85,6 +88,47 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
   description: "Delete one project. Nonempty needs `force: true`. Folder on disk stays.",
   parameters: Schema.Struct({ projectId: ProjectId, force: Schema.optionalKey(Schema.Boolean) }),
 }).annotate(Tool.Destructive, true);
+const setting = <S extends Schema.Top>(value: S) =>
+  Schema.Struct({ value, source: Schema.Literals(["project", "environment", "t3.json"]) });
+const fields = ServerSettingsSchema.fields;
+// Runtime and permission modes, scripts, agent browser/device access, provider
+// enablement, submodules, auto-resume and free-text agent instructions are left out:
+// each widens what agents may run or what reaches their prompts.
+const ProjectSettingsReadTool = Tool.make("t3_project_settings_read", {
+  ...shared,
+  description:
+    'Read a project\'s effective settings with where each value comes from: "project" is this project\'s override, "environment" is the environment default (or built-in), "t3.json" is the project\'s checked-in file. Covers the safe subset of project overrides; scripts are on t3_project_read.',
+  parameters: Schema.Struct({ projectId: ProjectId }),
+  success: Schema.Struct({
+    projectId: ProjectId,
+    settings: Schema.Struct({
+      worktreeCleanup: setting(fields.worktreeCleanup),
+      defaultModelSelection: setting(fields.defaultModelSelection),
+      defaultThreadEnvMode: setting(ThreadEnvMode),
+      newWorktreesStartFromOrigin: setting(fields.newWorktreesStartFromOrigin),
+      defaultAutoPull: setting(fields.defaultAutoPull),
+      textGenerationModelSelection: setting(fields.textGenerationModelSelection),
+      sourceControlWriterModelSelection: setting(fields.sourceControlWriterModelSelection),
+      reviewGuideModelSelection: setting(fields.reviewGuideModelSelection),
+      removeAgentCreditsOnMerge: setting(fields.removeAgentCreditsOnMerge),
+      branchNamingMode: setting(fields.branchNamingMode),
+      branchNamePrefix: setting(fields.branchNamePrefix),
+      pullRequestMergeMethod: setting(fields.pullRequestMergeMethod),
+      sidebarAutoSettleOnMerge: setting(fields.sidebarAutoSettleOnMerge),
+      sidebarAutoSettleAfterDays: setting(fields.sidebarAutoSettleAfterDays),
+      sidebarAutoSettleKeepPullRequests: setting(fields.sidebarAutoSettleKeepPullRequests),
+      responseStreamingMode: setting(fields.responseStreamingMode),
+    }),
+  }),
+  dependencies: [
+    ...shared.dependencies,
+    ServerSettings.ServerSettingsService,
+    FileSystem.FileSystem,
+    Path.Path,
+  ],
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
 const ProjectCloneTool = Tool.make("t3_project_clone", {
   ...shared,
   description:
@@ -153,6 +197,7 @@ export const ProjectToolkit = Toolkit.make(
   ThreadLaunchTool,
   ProjectListTool,
   ProjectReadTool,
+  ProjectSettingsReadTool,
   ProjectCreateTool,
   ProjectUpdateTool,
   ProjectDeleteTool,

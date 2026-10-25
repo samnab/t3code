@@ -7,6 +7,7 @@ import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageInt
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as T3ProjectFileLoader from "../../../project/T3ProjectFileLoader.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
@@ -245,6 +246,56 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           message: "The project was not found.",
         });
       return result.value;
+    }),
+  ),
+  t3_project_settings_read: McpToolAccess.reads(({ projectId }) =>
+    Effect.gen(function* () {
+      const projects = yield* access;
+      const project = yield* projects.getById(projectId).pipe(Effect.mapError(unavailable));
+      if (Option.isNone(project))
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The project was not found.",
+        });
+      const settings = yield* ServerSettings.ServerSettingsService.pipe(
+        Effect.flatMap((service) => service.getSettings),
+        Effect.mapError(unavailable),
+      );
+      // The loader is stateless; building it here keeps t3.json-backed values
+      // resolving the same way the composer resolves them.
+      const loader = yield* T3ProjectFileLoader.make;
+      const projectFile = yield* loader.load(project.value.workspaceRoot);
+      const { settings: effective, sources } = resolveProjectSettings(
+        settings,
+        projectId,
+        project.value,
+        Option.getOrNull(projectFile),
+      );
+      const read = <K extends keyof typeof sources & keyof typeof effective>(key: K) => ({
+        value: effective[key],
+        source: sources[key],
+      });
+      return {
+        projectId,
+        settings: {
+          worktreeCleanup: read("worktreeCleanup"),
+          defaultModelSelection: read("defaultModelSelection"),
+          defaultThreadEnvMode: read("defaultThreadEnvMode"),
+          newWorktreesStartFromOrigin: read("newWorktreesStartFromOrigin"),
+          defaultAutoPull: read("defaultAutoPull"),
+          textGenerationModelSelection: read("textGenerationModelSelection"),
+          sourceControlWriterModelSelection: read("sourceControlWriterModelSelection"),
+          reviewGuideModelSelection: read("reviewGuideModelSelection"),
+          removeAgentCreditsOnMerge: read("removeAgentCreditsOnMerge"),
+          branchNamingMode: read("branchNamingMode"),
+          branchNamePrefix: read("branchNamePrefix"),
+          pullRequestMergeMethod: read("pullRequestMergeMethod"),
+          sidebarAutoSettleOnMerge: read("sidebarAutoSettleOnMerge"),
+          sidebarAutoSettleAfterDays: read("sidebarAutoSettleAfterDays"),
+          sidebarAutoSettleKeepPullRequests: read("sidebarAutoSettleKeepPullRequests"),
+          responseStreamingMode: read("responseStreamingMode"),
+        },
+      };
     }),
   ),
   t3_project_create: McpToolAccess.writesEnvironment(({ workspaceRoot, ...input }) =>

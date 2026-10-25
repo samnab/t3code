@@ -307,3 +307,44 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
     expect(launched).toHaveLength(1);
   }),
 );
+
+it.effect("project settings read reports each effective value with its source", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-settings-" });
+    yield* fileSystem.writeFileString(
+      path.join(workspaceRoot, "t3.json"),
+      JSON.stringify({ defaultThreadEnvMode: "worktree" }),
+    );
+    const overrideModel = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-project" };
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched: [],
+      workspaceRoot,
+      overrideModel,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const read = (id: ProjectId) =>
+      toolkit
+        .handle("t3_project_settings_read", { projectId: id })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    expect((yield* read(projectId)).at(-1)?.result).toMatchObject({
+      projectId,
+      settings: {
+        defaultModelSelection: { value: overrideModel, source: "project" },
+        defaultThreadEnvMode: { value: "worktree", source: "t3.json" },
+        branchNamePrefix: { value: "t3", source: "environment" },
+      },
+    });
+    expect((yield* read(ProjectId.make("project:missing"))).at(-1)?.result).toMatchObject({
+      code: "invalid_request",
+      message: "The project was not found.",
+    });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
