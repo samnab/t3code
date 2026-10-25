@@ -158,6 +158,36 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     ).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect("concurrent read-modify-writes of one project's overrides both land", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const projectId = ProjectId.make("project:concurrent");
+      const setField = (entry: { defaultAutoPull: boolean } | { branchNamePrefix: string }) =>
+        service.modifySettings((current) => ({
+          projectSettingsOverrides: {
+            [projectId]: { ...current.projectSettingsOverrides[projectId], ...entry },
+          },
+        }));
+      yield* Effect.all(
+        [setField({ defaultAutoPull: false }), setField({ branchNamePrefix: "x" })],
+        {
+          concurrency: "unbounded",
+        },
+      );
+      const reloaded = yield* Effect.gen(function* () {
+        const fresh = yield* ServerSettingsModule.ServerSettingsService;
+        return yield* fresh.getSettings;
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(ServerSettingsModule.layer).pipe(Layer.provide(ServerSecretStore.layer)),
+        ),
+      );
+      assert.deepEqual(reloaded.projectSettingsOverrides[projectId], {
+        defaultAutoPull: false,
+        branchNamePrefix: "x",
+      });
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;
