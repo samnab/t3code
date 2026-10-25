@@ -1,3 +1,4 @@
+import * as CompletionNotificationService from "./CompletionNotificationService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as GoalLoop from "../goals/GoalLoopService.ts";
 import * as GoalLoopWorker from "../goals/GoalLoopWorker.ts";
@@ -262,6 +263,9 @@ const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImp
     ),
   ),
 );
+const layerCompletionNotificationsProvided = CompletionNotificationService.layer.pipe(
+  Layer.provide(layerThreadManagementProvided),
+);
 export const layerProjectSetupScriptRunner = ProjectSetupScriptRunner.layer.pipe(
   Layer.provide(layerProjectService),
 );
@@ -378,6 +382,7 @@ export const layer = Layer.mergeAll(
 );
 
 export const layerProduction = Layer.mergeAll(
+  layerCompletionNotificationsProvided,
   layer.pipe(Layer.provide(layerProjectService)),
   layerProjectService,
   layerManagedProjectFoldersProvided,

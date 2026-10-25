@@ -75,6 +75,7 @@ function threadDetailToShell(
     interactionMode: thread.interactionMode,
     goal: thread.goal,
     goalLoop: thread.goalLoop,
+    completionAudio: thread.completionAudio,
     voiceNotifications: thread.voiceNotifications,
     branch: thread.branch,
     worktreePath: thread.worktreePath,

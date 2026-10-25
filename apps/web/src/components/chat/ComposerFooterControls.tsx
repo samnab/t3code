@@ -1,3 +1,4 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import type {
   ModelSelection,
   ProviderInstanceId,
@@ -5,7 +6,7 @@ import type {
   RuntimeMode,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
-import { BellIcon, BellOffIcon, BotIcon, PencilRulerIcon } from "lucide-react";
+import { BellOffIcon, BotIcon, PencilRulerIcon, Volume2Icon, SpeechIcon } from "lucide-react";
 import { type ComponentProps, memo } from "react";
 
 import type { ContextWindowSnapshot } from "../../lib/contextWindow";
@@ -35,12 +36,15 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   runtimeModeOptions: ReadonlyArray<RuntimeModeOption>;
-  voiceNotifications: boolean;
+  completionAudio: CompletionAudioMode;
+  supportsCompletionSound: boolean;
+  completionAudioIsDefault: boolean;
+  canChangeCompletionAudio: boolean;
   size?: "sm" | "xs";
   hidden?: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
-  onVoiceNotificationsChange: (enabled: boolean) => void;
+  onCompletionAudioChange: (mode: CompletionAudioMode) => void;
 }) {
   const size = props.size ?? "sm";
   const composerFloatingLayerProps = useComposerMenuProps();
@@ -148,24 +152,44 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
       <ComposerControlSeparator size={size} />
       <Tooltip>
         <Select
-          value={props.voiceNotifications ? "on" : "off"}
-          onValueChange={(value) => props.onVoiceNotificationsChange(value === "on")}
+          value={props.completionAudioIsDefault ? null : props.completionAudio}
+          disabled={!props.canChangeCompletionAudio}
+          onValueChange={(value) => {
+            if (
+              value === "off" ||
+              value === "voice" ||
+              (value === "sound" && props.supportsCompletionSound)
+            )
+              props.onCompletionAudioChange(value);
+          }}
         >
           <TooltipTrigger
-            render={<ComposerSelectControl size={size} aria-label="Voice notifications" />}
+            render={<ComposerSelectControl size={size} aria-label="Completion audio" />}
           >
             <ComposerControlIcon
-              icon={props.voiceNotifications ? BellIcon : BellOffIcon}
+              icon={
+                props.completionAudio === "sound"
+                  ? Volume2Icon
+                  : props.completionAudio === "voice"
+                    ? SpeechIcon
+                    : BellOffIcon
+              }
               size={size}
             />
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-            <SelectItem value="on">Voice notifications on</SelectItem>
-            <SelectItem value="off">Voice notifications off</SelectItem>
+            <SelectItem value="off">Off</SelectItem>
+            <SelectItem value="voice">Voice</SelectItem>
+            {props.supportsCompletionSound && <SelectItem value="sound">Sound</SelectItem>}
           </SelectPopup>
         </Select>
         <TooltipPopup side="top">
-          Voice notifications {props.voiceNotifications ? "on" : "off"}
+          Completion audio: {props.completionAudioIsDefault ? "Default, " : ""}
+          {props.completionAudio === "voice"
+            ? "Voice"
+            : props.completionAudio === "sound"
+              ? "Sound"
+              : "Off"}
         </TooltipPopup>
       </Tooltip>
 

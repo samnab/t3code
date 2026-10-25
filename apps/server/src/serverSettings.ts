@@ -439,6 +439,7 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
 
 const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
   "backgroundActivity",
+  "completionAudio",
   "automaticGitFetchInterval",
   "providerHealthRefreshInterval",
   "sourceControlWriterModelSelection",

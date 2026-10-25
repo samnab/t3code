@@ -1,3 +1,4 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
@@ -443,7 +444,10 @@ export interface ChatComposerProps {
 
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
-  voiceNotifications: boolean;
+  completionAudio: CompletionAudioMode;
+  supportsCompletionSound: boolean;
+  completionAudioIsDefault: boolean;
+  canChangeCompletionAudio: boolean;
 
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
@@ -533,7 +537,7 @@ export interface ChatComposerProps {
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
-  handleVoiceNotificationsChange: (enabled: boolean) => void;
+  handleCompletionAudioChange: (mode: CompletionAudioMode) => void;
 
   focusComposer: () => void;
   scheduleComposerFocus: () => void;
@@ -591,7 +595,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProposedPlan,
     runtimeMode,
     interactionMode: requestedInteractionMode,
-    voiceNotifications,
+    completionAudio,
+    supportsCompletionSound,
+    completionAudioIsDefault,
+    canChangeCompletionAudio,
     renderRealtimeVoiceControl,
     lockedProvider,
     providerStatuses,
@@ -645,7 +652,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     toggleInteractionMode,
     handleRuntimeModeChange,
     handleInteractionModeChange,
-    handleVoiceNotificationsChange,
+    handleCompletionAudioChange,
     focusComposer,
     scheduleComposerFocus,
     setThreadError,
@@ -2612,8 +2619,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       onModelPickerOpenChange={setIsComposerModelPickerOpen}
       modelPickerIconClassName={composerProviderState.modelPickerIconClassName}
       getModelDisabledReason={getModelDisabledReason}
-      voiceNotifications={voiceNotifications}
-      onVoiceNotificationsChange={handleVoiceNotificationsChange}
+      completionAudio={completionAudio}
+      supportsCompletionSound={supportsCompletionSound}
+      completionAudioIsDefault={completionAudioIsDefault}
+      canChangeCompletionAudio={canChangeCompletionAudio}
+      onCompletionAudioChange={handleCompletionAudioChange}
       renderRealtimeVoiceControl={renderRealtimeVoiceControl}
     />
   );

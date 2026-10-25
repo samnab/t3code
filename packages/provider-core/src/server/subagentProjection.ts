@@ -56,6 +56,7 @@ export function makeSubagentChildThread(input: {
 }): OrchestrationV2AppThread {
   return {
     ...input.parentThread,
+    completionAudio: "off",
     voiceNotifications: false,
     createdBy: input.createdBy,
     creationSource: input.creationSource,

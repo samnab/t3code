@@ -1,3 +1,4 @@
+import { type CompletionAudioMode, resolveCompletionAudio } from "@t3tools/contracts";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
 import type {
@@ -159,6 +160,7 @@ export interface EnvironmentThreadShell {
   readonly hasActionableProposedPlan: boolean;
   readonly goal: OrchestrationV2ThreadShell["goal"];
   readonly goalLoop: OrchestrationV2ThreadShell["goalLoop"];
+  readonly completionAudio: CompletionAudioMode;
   readonly voiceNotifications: OrchestrationV2ThreadShell["voiceNotifications"];
   readonly pendingBackgroundTasks: ReadonlyArray<
     NonNullable<OrchestrationV2ThreadShell["pendingBackgroundTasks"]>[number]
@@ -317,7 +319,8 @@ export function presentThreadShell(
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     goal: thread.goal ?? null,
     goalLoop: thread.goalLoop ?? null,
-    voiceNotifications: thread.voiceNotifications ?? false,
+    completionAudio: resolveCompletionAudio(thread),
+    voiceNotifications: resolveCompletionAudio(thread) === "voice",
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],
     providerInstanceHistory: thread.providerInstanceHistory ?? [],
     providerGoal: thread.providerGoal ?? null,

@@ -1,5 +1,5 @@
 import { SettingsGroup } from "./SettingsGroup";
-import { NotificationSettings } from "./NotificationSettings";
+import { NotificationSettings, CompletionAudioSettings } from "./NotificationSettings";
 import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { CheckIcon, ChevronRightIcon } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -1165,6 +1165,7 @@ export function GeneralSettingsPanel() {
             />
           }
         />
+        <CompletionAudioSettings />
         <SettingsRow
           {...searchableSetting("time-format")}
           description="System default follows your browser or OS clock preference."

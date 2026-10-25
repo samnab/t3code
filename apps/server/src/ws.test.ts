@@ -1,7 +1,12 @@
+import * as CompletionNotificationService from "./orchestration-v2/CompletionNotificationService.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   AuthSessionId,
+  CommandId,
+  ORCHESTRATION_V2_WS_METHODS,
+  ProviderInstanceId,
+  WsRpcGroup,
   EnvironmentId,
   ProjectId,
   ThreadId,
@@ -19,6 +24,8 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { Headers } from "effect/http";
+import * as RpcTest from "effect/rpc/RpcTest";
+import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -296,6 +303,7 @@ it.live.each(["thread", "shell"] as const)(
 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
 const layerUnusedConfigRpcServices = Layer.mergeAll(
+  Layer.mock(CompletionNotificationService.CompletionNotificationService)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),
   Layer.mock(TraceDiagnostics.TraceDiagnostics)({}),
@@ -631,6 +639,92 @@ it.effect("thread resume across compacted history keeps message order and final 
       ProjectionMaintenance.layer.pipe(
         Layer.provide(Layer.merge(EventStore.layer, ProjectionStore.layer)),
         Layer.provideMerge(ReplayTestLayer),
+      ),
+    ),
+  ),
+);
+
+it.effect("forwards explicit completion audio through the launch RPC handler", () =>
+  Effect.gen(function* () {
+    const forwarded = yield* Deferred.make<ThreadLaunchService.ThreadLaunchInput>();
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"],
+          typeof ORCHESTRATION_V2_WS_METHODS.launchThread
+        > => tag !== ORCHESTRATION_V2_WS_METHODS.launchThread,
+      ),
+    );
+    const services = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        scratchRoot: Effect.succeedNone,
+        namedProjectsRoot: process.cwd(),
+      }),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({ enqueueCommand: (effect) => effect }),
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+        launch: (input) =>
+          Deferred.succeed(forwarded, input).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new ThreadLaunchService.ThreadLaunchError({
+                  operation: "resolve-project",
+                  commandId: input.commandId,
+                  projectId: input.projectId,
+                  cause: "fixture",
+                }),
+              ),
+            ),
+          ),
+      }),
+    );
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.merge(
+          RpcAuthorization.layer(["orchestration:operate"]),
+          layerWsRpc(
+            {
+              sessionId: AuthSessionId.make("launch-test"),
+              subject: "launch-test",
+              method: "browser-session-cookie",
+              scopes: [],
+            },
+            {},
+            {},
+            yield* PreviewAutomationBroker.PreviewAutomationBroker,
+            yield* ServerBrowser.ServerBrowser,
+          ).pipe(Layer.provide(services)),
+        ),
+      ),
+    );
+    yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread]({
+      commandId: CommandId.make("launch:completion"),
+      threadId: ThreadId.make("thread:launch:completion"),
+      projectId: ProjectId.make("project:launch:completion"),
+      title: "Completion transport",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      workspaceStrategy: { type: "root" },
+      completionAudio: "sound",
+    }).pipe(Effect.flip);
+    assert.equal((yield* Deferred.await(forwarded)).completionAudio, "sound");
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      Layer.mergeAll(
+        layerConfigSources,
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
   ),

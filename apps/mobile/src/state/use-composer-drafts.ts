@@ -1,3 +1,5 @@
+import * as Effect from "effect/Effect";
+import { CompletionAudioMode, readStoredCompletionAudio } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
   EnvironmentId as EnvironmentIdSchema,
@@ -339,6 +341,7 @@ export interface ComposerDraft {
   readonly modelSelection?: ModelSelection;
   readonly runtimeMode?: RuntimeMode;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly completionAudio?: typeof CompletionAudioMode.Type;
   readonly voiceNotifications?: boolean;
   readonly workspaceSelection?: ComposerDraftWorkspaceSelection;
   readonly project?: ComposerDraftProject;
@@ -370,7 +373,7 @@ export type ComposerDraftSettingsUpdate = Pick<
   | "modelSelection"
   | "runtimeMode"
   | "interactionMode"
-  | "voiceNotifications"
+  | "completionAudio"
   | "workspaceSelection"
   | "project"
 >;
@@ -404,6 +407,11 @@ const ComposerDraftSchema = Schema.Struct({
   modelSelection: Schema.optional(ModelSelectionSchema),
   runtimeMode: Schema.optional(RuntimeModeSchema),
   interactionMode: Schema.optional(ProviderInteractionModeSchema),
+  completionAudio: Schema.optional(
+    Schema.UndefinedOr(CompletionAudioMode).pipe(
+      Schema.catchDecoding(() => Effect.succeedSome(undefined)),
+    ),
+  ),
   voiceNotifications: Schema.optional(Schema.Boolean),
   workspaceSelection: Schema.optional(ComposerDraftWorkspaceSelectionSchema),
   project: Schema.optional(ComposerDraftProjectSchema),
@@ -552,11 +560,8 @@ function normalizeDraft(draft: ComposerDraft | undefined): ComposerDraft {
   if (!draft) {
     return EMPTY_DRAFT;
   }
-  return {
-    ...draft,
-    text: draft.text,
-    attachments: draft.attachments,
-  };
+  const { voiceNotifications: _legacyVoice, ...current } = draft;
+  return { ...current, completionAudio: readStoredCompletionAudio(draft) ?? undefined };
 }
 
 export function getComposerDraftSnapshot(draftKey: string): ComposerDraft {
@@ -574,7 +579,7 @@ function isEmptyDraft(draft: ComposerDraft): boolean {
     draft.modelSelection === undefined &&
     draft.runtimeMode === undefined &&
     draft.interactionMode === undefined &&
-    draft.voiceNotifications === undefined &&
+    readStoredCompletionAudio(draft) === null &&
     draft.workspaceSelection === undefined
   );
 }
@@ -603,7 +608,7 @@ export function migrateLegacyNewTaskDraft(
   draft: ComposerDraft,
   now: string,
 ): readonly [key: string, draft: ComposerDraft] {
-  const restored = restoreMissingComposerFileReferences(draft);
+  const restored = restoreMissingComposerFileReferences(normalizeDraft(draft));
   const legacy = draft.project === undefined ? parseLegacyNewTaskDraftKey(key) : null;
   if (legacy === null) {
     return [key, restored];
@@ -722,7 +727,9 @@ async function writePersistedComposerState(
     const file = await getComposerDraftsFile();
     operation = "encode";
     const nonEmptyDrafts = Object.fromEntries(
-      Object.entries(drafts).filter(([, draft]) => !isEmptyDraft(draft)),
+      Object.entries(drafts)
+        .filter(([, draft]) => !isEmptyDraft(draft))
+        .map(([key, draft]) => [key, normalizeDraft(draft)]),
     );
     const document = {
       schemaVersion: COMPOSER_DRAFTS_SCHEMA_VERSION,
@@ -738,7 +745,12 @@ async function writePersistedComposerState(
               Object.entries(cloudDrafts.signedOut).map(([id, saved]) => [
                 id,
                 {
-                  drafts: saved.drafts,
+                  drafts: Object.fromEntries(
+                    Object.entries(saved.drafts).map(([key, draft]) => [
+                      key,
+                      normalizeDraft(draft),
+                    ]),
+                  ),
                   queuedMessages: saved.queuedMessages.map(encodeQueuedThreadMessage),
                 },
               ]),
@@ -1557,7 +1569,8 @@ export function clearComposerDraftContentState(
     importedShareIds: _importedShareIds,
     context: _context,
     modelSelection,
-    voiceNotifications: _voiceNotifications,
+    completionAudio: _completionAudio,
+    voiceNotifications: _legacyVoice,
     workspaceSelection,
     project: _project,
     ...retained
@@ -1591,7 +1604,7 @@ export function restoreComposerDraftSnapshotState(
   if (isEmptyDraft(snapshot)) {
     delete next[draftKey];
   } else {
-    next[draftKey] = snapshot;
+    next[draftKey] = normalizeDraft(snapshot);
   }
   return next;
 }
@@ -1751,7 +1764,7 @@ export function sameComposerDraftState(a: ComposerDraft, b: ComposerDraft): bool
     a.modelSelection === b.modelSelection &&
     a.runtimeMode === b.runtimeMode &&
     a.interactionMode === b.interactionMode &&
-    a.voiceNotifications === b.voiceNotifications &&
+    a.completionAudio === b.completionAudio &&
     a.workspaceSelection === b.workspaceSelection
   );
 }
@@ -1787,7 +1800,7 @@ export function undoComposerDraftMergeState(
       | "modelSelection"
       | "runtimeMode"
       | "interactionMode"
-      | "voiceNotifications"
+      | "completionAudio"
       | "workspaceSelection",
   >(
     key: K,
@@ -1808,7 +1821,7 @@ export function undoComposerDraftMergeState(
     modelSelection: undoSetting("modelSelection"),
     runtimeMode: undoSetting("runtimeMode"),
     interactionMode: undoSetting("interactionMode"),
-    voiceNotifications: undoSetting("voiceNotifications"),
+    completionAudio: undoSetting("completionAudio"),
     workspaceSelection: undoSetting("workspaceSelection"),
   };
   return withComposerDraft(current, draftKey, draft);

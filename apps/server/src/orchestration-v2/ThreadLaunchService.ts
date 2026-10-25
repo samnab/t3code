@@ -4,6 +4,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
+  type CompletionAudioMode,
   type ChatAttachment,
   type MessageId,
   type ModelSelection,
@@ -86,6 +87,7 @@ export interface ThreadLaunchInput {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly goal?: ThreadGoal | null;
+  readonly completionAudio?: CompletionAudioMode;
   readonly voiceNotifications?: boolean;
   readonly workspaceStrategy: ThreadLaunchWorkspaceStrategy;
   readonly initialMessage?: ThreadLaunchInitialMessage;
@@ -921,6 +923,9 @@ const make = Effect.gen(function* () {
                 runtimeMode: input.runtimeMode,
                 interactionMode: input.interactionMode,
                 ...(input.goal === undefined ? {} : { goal: input.goal }),
+                ...(input.completionAudio === undefined
+                  ? {}
+                  : { completionAudio: input.completionAudio }),
                 ...(input.voiceNotifications === undefined
                   ? {}
                   : { voiceNotifications: input.voiceNotifications }),

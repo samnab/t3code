@@ -51,6 +51,8 @@ import {
   type ThreadCommandInput,
   type ControlThreadGoalLoopInput,
   type SetThreadVoiceNotificationsInput,
+  type SetThreadCompletionAudioInput,
+  setThreadCompletionAudio,
   type UnarchiveThreadInput,
   type UnlinkThreadPullRequestInput,
   type UnpinThreadInput,
@@ -292,6 +294,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     controlGoalLoop: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:control-goal-loop",
       execute: (input: ControlThreadGoalLoopInput) => controlThreadGoalLoop(input),
+      scheduler,
+      concurrency,
+    }),
+    setCompletionAudio: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:set-completion-audio",
+      execute: (input: SetThreadCompletionAudioInput) => setThreadCompletionAudio(input),
       scheduler,
       concurrency,
     }),

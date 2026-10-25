@@ -5,7 +5,13 @@ import {
 import { pendingSubagentRequestsByThread } from "@t3tools/client-runtime/state/threads";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
+import {
+  resolveCompletionAudio,
+  type CompletionAudioSettings,
+  type EnvironmentId,
+  type OrchestrationV2ThreadShell,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import {
   CircleAlertIcon,
@@ -16,11 +22,15 @@ import {
 import { useEffect, useRef } from "react";
 
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
+import { serverEnvironment } from "../state/server";
+import { environmentAtomList, environmentIdsKey } from "../state/environmentAtomList";
+import { Atom } from "effect/reactivity";
 import { useEnvironmentIds } from "../state/environments";
 import { environmentShell } from "../state/shell";
 import {
   hasDesktopNotifications,
   hasNotificationSound,
+  shouldPlayThreadSound,
   playNotificationSound,
   setNotificationBadge,
   threadNotificationTag,
@@ -29,8 +39,21 @@ import {
 import { resolveSidebarThreadStatus } from "./Sidebar.logic";
 import { toastManager } from "./ui/toast";
 
+const completionAudioCapabilities = environmentAtomList(
+  "thread-notification-completion-capabilities",
+  (environmentId) =>
+    Atom.make(
+      (get) =>
+        get(serverEnvironment.configValueAtom(environmentId))?.environment.capabilities
+          .completionNotifications === true,
+    ),
+);
+
 export function ThreadNotificationCoordinator() {
   const environmentIds = useEnvironmentIds();
+  const supportsCompletionAudio = useAtomValue(
+    completionAudioCapabilities(environmentIdsKey(environmentIds)),
+  ).some(Boolean);
   const mode = useClientSettings((settings) => settings.notificationMode);
   const inAppNotificationsEnabled = useClientSettings(
     (settings) => settings.inAppNotificationsEnabled,
@@ -73,16 +96,16 @@ export function ThreadNotificationCoordinator() {
   }, [mode]);
 
   useEffect(() => {
-    if (!hasNotificationSound(mode)) return;
+    if (!hasNotificationSound(mode) && !supportsCompletionAudio) return;
     document.addEventListener("pointerdown", unlockNotificationAudio);
     document.addEventListener("keydown", unlockNotificationAudio);
     return () => {
       document.removeEventListener("pointerdown", unlockNotificationAudio);
       document.removeEventListener("keydown", unlockNotificationAudio);
     };
-  }, [mode]);
+  }, [mode, supportsCompletionAudio]);
 
-  if (mode === "off" && !inAppNotificationsEnabled) return null;
+  if (mode === "off" && !inAppNotificationsEnabled && !supportsCompletionAudio) return null;
 
   return environmentIds.map((environmentId) => (
     <EnvironmentNotifications
@@ -95,6 +118,8 @@ export function ThreadNotificationCoordinator() {
 
 interface NotificationState {
   readonly raw: OrchestrationV2ThreadShell;
+  readonly settings: CompletionAudioSettings | null;
+  readonly supportsCompletionAudio: boolean;
   readonly subagentRequest: PendingSubagentRequest | null;
   readonly attention: string | null;
   readonly completion: number | null;
@@ -108,6 +133,9 @@ function EnvironmentNotifications({
   onNotification: (environmentId: EnvironmentId, notification: Notification) => void;
 }) {
   const shell = useAtomValue(environmentShell.stateValueAtom(environmentId));
+  const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const settings = config?.settings.completionAudio ?? null;
+  const supportsCompletionAudio = config?.environment.capabilities.completionNotifications === true;
   const threads =
     shell.status === "live" && Option.isSome(shell.snapshot) ? shell.snapshot.value.threads : null;
   const mode = useClientSettings((settings) => settings.notificationMode);
@@ -119,6 +147,12 @@ function EnvironmentNotifications({
     strict: false,
   });
   const previous = useRef(new Map<ThreadId, NotificationState>());
+  useEffect(
+    () => () => {
+      previous.current.clear();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (threads === null) {
@@ -128,10 +162,15 @@ function EnvironmentNotifications({
     const next = new Map<ThreadId, NotificationState>();
     const subagentRequests = pendingSubagentRequestsByThread(threads);
     for (const rawThread of threads) {
-      if (rawThread.lineage.relationshipToParent === "subagent") continue;
+      const isChild = rawThread.lineage.relationshipToParent === "subagent";
       const prior = previous.current.get(rawThread.id);
       const subagentRequest = subagentRequests.get(rawThread.id) ?? null;
-      if (prior?.raw === rawThread && prior.subagentRequest === subagentRequest) {
+      if (
+        prior?.raw === rawThread &&
+        prior.subagentRequest === subagentRequest &&
+        prior.settings === settings &&
+        prior.supportsCompletionAudio === supportsCompletionAudio
+      ) {
         next.set(rawThread.id, prior);
         continue;
       }
@@ -149,7 +188,14 @@ function EnvironmentNotifications({
         Number.isFinite(completedAt)
           ? completedAt
           : (prior?.completion ?? null);
-      next.set(thread.id, { raw: rawThread, subagentRequest, attention, completion });
+      next.set(thread.id, {
+        raw: rawThread,
+        subagentRequest,
+        attention,
+        completion,
+        settings,
+        supportsCompletionAudio,
+      });
       if (!prior || thread.archivedAt !== null) continue;
       const kind =
         attention && attention !== prior.attention
@@ -170,11 +216,43 @@ function EnvironmentNotifications({
               : status === "failed"
                 ? "Thread failed"
                 : "Input needed";
-      if (hasNotificationSound(mode)) {
-        void playNotificationSound(kind, () =>
-          hasNotificationSound(getClientSettings().notificationMode),
+      if (
+        shouldPlayThreadSound({
+          kind,
+          mode,
+          completionAudio: resolveCompletionAudio(rawThread),
+          supportsCompletionAudio,
+          isChild,
+        })
+      ) {
+        const options =
+          kind === "completion" && supportsCompletionAudio && settings
+            ? { tone: settings.tone, volume: settings.volume }
+            : undefined;
+        void playNotificationSound(
+          kind,
+          () => {
+            const current = previous.current.get(rawThread.id);
+            return (
+              current !== undefined &&
+              current.raw.archivedAt === null &&
+              (kind !== "completion" || !current.raw.latestRunStopRequested) &&
+              (options === undefined ||
+                (current.settings?.tone === options.tone &&
+                  current.settings.volume === options.volume)) &&
+              shouldPlayThreadSound({
+                kind,
+                mode: getClientSettings().notificationMode,
+                completionAudio: resolveCompletionAudio(current.raw),
+                supportsCompletionAudio: current.supportsCompletionAudio,
+                isChild,
+              })
+            );
+          },
+          options,
         );
       }
+      if (isChild) continue;
       if (
         inAppNotificationsEnabled &&
         document.visibilityState === "visible" &&
@@ -248,6 +326,8 @@ function EnvironmentNotifications({
     navigate,
     onNotification,
     threads,
+    settings,
+    supportsCompletionAudio,
   ]);
 
   return null;

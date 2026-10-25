@@ -1,3 +1,5 @@
+import { CompletionAudioToolkit } from "./toolkits/completionAudio/tools.ts";
+import * as CompletionAudioHandlers from "./toolkits/completionAudio/handlers.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -1016,6 +1018,11 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
+const layerCompletionAudioToolkit = toolkitRegistration(
+  CompletionAudioToolkit,
+  CompletionAudioHandlers.layer,
+);
+
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
@@ -1074,6 +1081,7 @@ export const layerMcpTransport = McpServer.layerHttp({
 }).pipe(Layer.provide(layerMcpAuthMiddleware));
 
 export const layer = Layer.mergeAll(
+  layerCompletionAudioToolkit,
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerAgentMessagingToolkit,

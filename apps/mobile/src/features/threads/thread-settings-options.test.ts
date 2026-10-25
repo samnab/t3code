@@ -5,7 +5,7 @@ import {
 import type { ProviderOptionDescriptor } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { selectableChoices } from "./thread-settings-options";
+import { selectableChoices, threadCompletionAudioForDisplay } from "./thread-settings-options";
 
 const effortDescriptor: Extract<ProviderOptionDescriptor, { type: "select" }> = {
   id: "effort",
@@ -86,4 +86,8 @@ describe("prompt-controlled reasoning", () => {
       ),
     ).toEqual({ prompt: "/review" });
   });
+});
+
+it("shows a saved legacy Voice choice on a capable host", () => {
+  expect(threadCompletionAudioForDisplay({ voiceNotifications: true }, true)).toBe("voice");
 });

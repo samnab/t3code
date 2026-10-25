@@ -1,3 +1,9 @@
+import {
+  CompletionAudioMode,
+  readStoredCompletionAudio,
+  completionAudioCreationFields,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import { isTransportConnectionErrorMessage } from "@t3tools/client-runtime/errors";
 import {
   clampFileAttachmentUploadBytes,
@@ -57,6 +63,11 @@ export const QueuedThreadMessageSchema = Schema.Struct({
   dispatchMode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  completionAudio: Schema.optional(
+    Schema.UndefinedOr(CompletionAudioMode).pipe(
+      Schema.catchDecoding(() => Effect.succeedSome(undefined)),
+    ),
+  ),
   voiceNotifications: Schema.optional(Schema.Boolean),
   // Present when the queued item creates a brand-new thread (pending task)
   // instead of appending a turn to an existing one.
@@ -89,6 +100,7 @@ export interface QueuedThreadMessage {
   readonly modelSelection?: ModelSelectionType;
   readonly runtimeMode?: RuntimeModeType;
   readonly interactionMode?: ProviderInteractionModeType;
+  readonly completionAudio?: typeof CompletionAudioMode.Type;
   readonly voiceNotifications?: boolean;
   /**
    * Captured at enqueue time because the drain can fire long after the tap.
@@ -135,12 +147,13 @@ export function encodeQueuedThreadMessage(message: QueuedThreadMessage): unknown
   return encodeStoredQueuedThreadMessage({
     schemaVersion: THREAD_OUTBOX_SCHEMA_VERSION,
     ...message,
+    ...completionAudioCreationFields(readStoredCompletionAudio(message)),
   });
 }
 
 export function decodeQueuedThreadMessage(value: unknown): QueuedThreadMessage {
   const { schemaVersion: _, ...message } = decodeStoredQueuedThreadMessage(value);
-  return message;
+  return { ...message, ...completionAudioCreationFields(readStoredCompletionAudio(message)) };
 }
 
 export function groupQueuedThreadMessages(

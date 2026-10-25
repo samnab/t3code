@@ -1,3 +1,8 @@
+import {
+  type CompletionAudioMode,
+  completionAudioCreationFields,
+  readStoredCompletionAudio,
+} from "@t3tools/contracts";
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
   type ThreadLinkedPullRequest,
@@ -77,6 +82,7 @@ export interface CreateThreadInput extends CommandMetadata {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly goal?: ThreadGoal | null;
+  readonly completionAudio?: CompletionAudioMode;
   readonly voiceNotifications?: boolean;
   readonly branch: string | null;
   readonly worktreePath: string | null;
@@ -168,6 +174,7 @@ interface StartThreadBootstrap {
     readonly runtimeMode: RuntimeMode;
     readonly interactionMode: ProviderInteractionMode;
     readonly goal?: ThreadGoal | null;
+    readonly completionAudio?: CompletionAudioMode;
     readonly voiceNotifications?: boolean;
     readonly branch: string | null;
     readonly worktreePath: string | null;
@@ -302,6 +309,18 @@ const supportsServerResolvedCommandContext = Effect.fn(
   return config.environment.capabilities.serverResolvedCommandContext === true;
 });
 
+const completionAudioForCreation = Effect.fn("EnvironmentCommands.completionAudioForCreation")(
+  function* (input: Pick<CreateThreadInput, "completionAudio" | "voiceNotifications">) {
+    const mode = readStoredCompletionAudio(input);
+    if (mode !== null) return completionAudioCreationFields(mode);
+    const config = yield* getInitialServerConfig();
+    // Older servers can default an omitted voice bit to true.
+    return completionAudioCreationFields(
+      config.environment.capabilities.completionNotifications === true ? null : "off",
+    );
+  },
+);
+
 const persistAttachments = Effect.fn("EnvironmentCommands.persistAttachments")(function* (
   threadId: ThreadId,
   messageId: MessageId,
@@ -428,9 +447,7 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
     ...(input.goal === undefined ? {} : { goal: input.goal }),
-    ...(input.voiceNotifications === undefined
-      ? {}
-      : { voiceNotifications: input.voiceNotifications }),
+    ...(yield* completionAudioForCreation(input)),
     branch: input.branch,
     worktreePath: input.worktreePath,
   });
@@ -655,6 +672,20 @@ export const controlThreadGoalLoop = Effect.fn("EnvironmentCommands.controlThrea
   },
 );
 
+export interface SetThreadCompletionAudioInput extends ThreadCommandInput {
+  readonly mode: CompletionAudioMode;
+}
+export const setThreadCompletionAudio = Effect.fn("EnvironmentCommands.setThreadCompletionAudio")(
+  function* (input: SetThreadCompletionAudioInput) {
+    return yield* dispatch({
+      type: "thread.completion-audio.set",
+      commandId: yield* allocateCommandId(input),
+      threadId: input.threadId,
+      mode: input.mode,
+    });
+  },
+);
+
 export const setThreadVoiceNotifications = Effect.fn(
   "EnvironmentCommands.setThreadVoiceNotifications",
 )(function* (input: SetThreadVoiceNotificationsInput) {
@@ -748,9 +779,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       ...(bootstrap?.goal === undefined ? {} : { goal: bootstrap.goal }),
-      ...(bootstrap?.voiceNotifications === undefined
-        ? {}
-        : { voiceNotifications: bootstrap.voiceNotifications }),
+      ...(bootstrap === undefined ? {} : yield* completionAudioForCreation(bootstrap)),
       workspaceStrategy,
       initialMessage: {
         messageId: input.message.messageId,

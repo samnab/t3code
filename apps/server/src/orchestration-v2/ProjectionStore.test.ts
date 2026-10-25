@@ -187,6 +187,41 @@ const addRolledBackRecoveryCandidate = Effect.fn("addRolledBackRecoveryCandidate
 it.effect.each([
   ["memory", ProjectionStore.layerMemory],
   ["SQL", layerTest],
+] as const)("%s replays completion audio and legacy events through durable shells", ([, layer]) =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* addRolledBackRecoveryCandidate("completion-audio");
+    const now = yield* DateTime.now;
+    for (const [index, payload] of [
+      { completionAudio: "sound" as const, voiceNotifications: false },
+      { voiceNotifications: true },
+      { voiceNotifications: false },
+    ].entries()) {
+      yield* store.apply({
+        id: EventId.make(`event:completion-audio:${index}`),
+        type: "thread.voice-notifications-set",
+        threadId,
+        occurredAt: now,
+        payload: { threadId, updatedAt: now, ...payload },
+      });
+      const mode = index === 0 ? "sound" : index === 1 ? "voice" : "off";
+      const thread = yield* store.getThread(threadId);
+      const projection = yield* store.getThreadProjection(threadId);
+      const shell = yield* store.getThreadShell(threadId);
+      const listed = (yield* store.getShellSnapshot()).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      for (const state of [thread, projection.thread, shell, listed]) {
+        assert.equal(state?.completionAudio, mode);
+        assert.equal(state?.voiceNotifications, mode === "voice");
+      }
+    }
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  ["memory", ProjectionStore.layerMemory],
+  ["SQL", layerTest],
 ] as const)("%s shells flag only an active turn blocked solely on T3 thread waits", ([, layer]) =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;

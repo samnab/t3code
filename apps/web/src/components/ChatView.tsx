@@ -1,3 +1,4 @@
+import { type CompletionAudioMode, resolveCompletionAudio } from "@t3tools/contracts";
 import { ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
 import { usePasteToFocusComposer } from "./chat/usePasteToFocusComposer";
 import { announcedRun, isDetailBehindShell } from "./chat/threadActivityAnnouncement";
@@ -92,7 +93,6 @@ import { canStopThreadBackgroundTask } from "@t3tools/client-runtime/state/threa
 import {
   nextThreadGoalEditorEpoch,
   readThreadGoalState,
-  readThreadVoiceNotifications,
   threadGoalEditorCanSave,
   threadGoalEditorDraftError,
   threadGoalEditorReducer,
@@ -455,6 +455,9 @@ export default function ChatView(props: ChatViewProps) {
   const setThreadInteractionMode = useOrchestrationCommand(threadEnvironment.setInteractionMode, {
     reportFailure: false,
   });
+  const setThreadCompletionAudio = useOrchestrationCommand(threadEnvironment.setCompletionAudio, {
+    reportFailure: false,
+  });
   const setThreadVoiceNotifications = useOrchestrationCommand(
     threadEnvironment.setVoiceNotifications,
     {
@@ -607,8 +610,8 @@ export default function ChatView(props: ChatViewProps) {
   const composerGoal = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.goal ?? null,
   );
-  const composerVoiceNotifications = useComposerDraftStore(
-    (store) => store.getComposerDraft(composerDraftTarget)?.voiceNotifications ?? null,
+  const composerCompletionAudio = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.completionAudio ?? null,
   );
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
@@ -960,15 +963,24 @@ export default function ChatView(props: ChatViewProps) {
     setGoalEditorRouteKey(routeThreadKey);
     dispatchGoalEditor({ type: "close" });
   }
-  const voiceNotifications = isServerThread
+  const completionEnvironmentConfig = environmentById.get(environmentId)?.serverConfig;
+  const supportsCompletionSound =
+    completionEnvironmentConfig?.environment.capabilities.completionNotifications === true;
+  const completionAudio = isServerThread
     ? activeThreadShell === null
-      ? false
-      : readThreadVoiceNotifications({
-          ...(activeThreadShell.voiceNotifications === undefined
-            ? {}
-            : { voiceNotifications: activeThreadShell.voiceNotifications }),
-        })
-    : (composerVoiceNotifications ?? false);
+      ? "off"
+      : supportsCompletionSound
+        ? resolveCompletionAudio(activeThreadShell)
+        : activeThreadShell.voiceNotifications === true
+          ? "voice"
+          : "off"
+    : supportsCompletionSound
+      ? (composerCompletionAudio ??
+        completionEnvironmentConfig?.settings.completionAudio.defaultMode ??
+        "off")
+      : composerCompletionAudio === "voice"
+        ? "voice"
+        : "off";
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -2942,23 +2954,25 @@ export default function ChatView(props: ChatViewProps) {
     setPendingServerThreadStartFromOriginByThreadId,
     scheduleComposerFocus,
   });
-  const handleVoiceNotificationsChange = useStableCallback(async (enabled: boolean) => {
-    if (enabled === voiceNotifications) return;
+  const handleCompletionAudioChange = useStableCallback(async (mode: CompletionAudioMode) => {
+    if (isServerThread && mode === completionAudio) return;
     if (!isServerThread) {
-      setComposerThreadSettings(composerDraftTarget, { voiceNotifications: enabled });
+      setComposerThreadSettings(composerDraftTarget, { completionAudio: mode });
       scheduleComposerFocus();
       return;
     }
-    if (activeThreadId === null) return;
-    const result = await setThreadVoiceNotifications({
-      environmentId,
-      input: { threadId: activeThreadId, voiceNotifications: enabled },
-    });
+    if (activeThreadId === null || !canOperateThread) return;
+    const result = supportsCompletionSound
+      ? await setThreadCompletionAudio({ environmentId, input: { threadId: activeThreadId, mode } })
+      : await setThreadVoiceNotifications({
+          environmentId,
+          input: { threadId: activeThreadId, voiceNotifications: mode === "voice" },
+        });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
       setThreadError(
         activeThreadId,
-        error instanceof Error ? error.message : "Failed to update voice notifications.",
+        error instanceof Error ? error.message : "Failed to update completion audio.",
       );
     }
     scheduleComposerFocus();
@@ -3836,7 +3850,12 @@ export default function ChatView(props: ChatViewProps) {
                               }
                               runtimeMode={runtimeMode}
                               interactionMode={interactionMode}
-                              voiceNotifications={voiceNotifications}
+                              completionAudio={completionAudio}
+                              supportsCompletionSound={supportsCompletionSound}
+                              completionAudioIsDefault={
+                                !isServerThread && composerCompletionAudio === null
+                              }
+                              canChangeCompletionAudio={!isServerThread || canOperateThread}
                               renderRealtimeVoiceControl={
                                 isServerThread && selectedProvider === "codex"
                                   ? (size) => (
@@ -3917,7 +3936,7 @@ export default function ChatView(props: ChatViewProps) {
                               toggleInteractionMode={toggleInteractionModeStable}
                               handleRuntimeModeChange={handleRuntimeModeChangeStable}
                               handleInteractionModeChange={handleInteractionModeChangeStable}
-                              handleVoiceNotificationsChange={handleVoiceNotificationsChange}
+                              handleCompletionAudioChange={handleCompletionAudioChange}
                               focusComposer={focusComposerStable}
                               scheduleComposerFocus={scheduleComposerFocusStable}
                               setThreadError={setThreadError}

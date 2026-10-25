@@ -1,3 +1,4 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import { useSidebarWorkspaceTabs } from "../workspace/useSystemWorkspaceTabBar";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
@@ -282,8 +283,10 @@ export interface ThreadComposerProps {
   readonly onSaveGoal: () => void;
   readonly onClearGoal: () => void;
   readonly onGoalLoopAction: (action: ThreadGoalLoopAction) => void;
-  readonly voiceNotifications: boolean;
-  readonly onUpdateVoiceNotifications: (enabled: boolean) => void;
+  readonly completionAudio: CompletionAudioMode;
+  readonly supportsCompletionSound: boolean;
+  readonly canUpdateCompletionAudio: boolean;
+  readonly onUpdateCompletionAudio: (mode: CompletionAudioMode) => void;
   readonly hidden: boolean;
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
   readonly onChangeDraftMessage: (value: string) => void;
@@ -822,8 +825,10 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     },
     runtimeMode: currentRuntimeMode,
     onUpdateRuntimeMode: props.onUpdateRuntimeMode,
-    voiceNotifications: props.voiceNotifications,
-    onUpdateVoiceNotifications: props.onUpdateVoiceNotifications,
+    completionAudio: props.completionAudio,
+    supportsCompletionSound: props.supportsCompletionSound,
+    canUpdateCompletionAudio: props.canUpdateCompletionAudio,
+    onUpdateCompletionAudio: props.onUpdateCompletionAudio,
     reloadAgent,
   } satisfies ExistingThreadSettingsRouteSession;
   const openSettings = () => {

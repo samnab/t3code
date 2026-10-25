@@ -377,6 +377,27 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["notification toast popup completion input approval failure"],
   },
   {
+    id: "completion-audio-default",
+    title: "Completion audio for new threads",
+    to: "/settings/general",
+    searchTerms: ["completion voice sound off default new threads provider hooks"],
+    scope: "environment",
+  },
+  {
+    id: "completion-audio-sound",
+    title: "Completion sound",
+    to: "/settings/general",
+    searchTerms: ["completion chime alert tone volume preview"],
+    scope: "environment",
+  },
+  {
+    id: "completion-audio-bulk-off",
+    title: "Turn off existing thread audio",
+    to: "/settings/general",
+    searchTerms: ["completion bulk off archived subagents existing threads"],
+    scope: "environment",
+  },
+  {
     id: "time-format",
     title: "Time format",
     to: "/settings/general",

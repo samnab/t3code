@@ -1274,8 +1274,10 @@ export function NewTaskDraftScreen(props: {
         onSaveGoal={() => {}}
         onClearGoal={() => {}}
         onGoalLoopAction={() => {}}
-        voiceNotifications={flow.voiceNotifications}
-        onUpdateVoiceNotifications={flow.setVoiceNotifications}
+        completionAudio={flow.completionAudio}
+        supportsCompletionSound={flow.supportsCompletionSound}
+        canUpdateCompletionAudio={flow.canUpdateCompletionAudio}
+        onUpdateCompletionAudio={flow.setCompletionAudio}
         backgroundWork={[]}
         onStopBackgroundTask={() => {}}
         outputThroughputByProviderTurnId={{}}

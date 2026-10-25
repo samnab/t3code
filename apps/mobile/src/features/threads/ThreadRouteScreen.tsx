@@ -833,7 +833,8 @@ function ThreadRouteContent(
         modelSelection: selectedThread.modelSelection,
         runtimeMode: selectedThread.runtimeMode,
         interactionMode: selectedThread.interactionMode,
-        voiceNotifications: selectedThread.voiceNotifications ?? false,
+        completionAudio: selectedThread.completionAudio,
+        voiceNotifications: selectedThread.voiceNotifications,
         workspaceMode: "local",
         branch: null,
         worktreePath: null,
@@ -985,8 +986,10 @@ function ThreadRouteContent(
           onSaveGoal={composer.onSaveGoal}
           onClearGoal={composer.onClearGoal}
           onGoalLoopAction={composer.onGoalLoopAction}
-          voiceNotifications={composer.voiceNotifications}
-          onUpdateVoiceNotifications={composer.onUpdateVoiceNotifications}
+          completionAudio={composer.completionAudio}
+          supportsCompletionSound={composer.supportsCompletionSound}
+          canUpdateCompletionAudio={composer.canUpdateCompletionAudio}
+          onUpdateCompletionAudio={composer.onUpdateCompletionAudio}
           backgroundWork={composer.backgroundWork}
           onStopBackgroundTask={composer.onStopBackgroundTask}
           outputThroughputByProviderTurnId={composer.outputThroughputByProviderTurnId}

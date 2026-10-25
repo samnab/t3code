@@ -1,7 +1,9 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import {
   getPromptControlledTraits,
   getTraitSelectChange,
 } from "@t3tools/client-runtime/model-traits";
+import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
 import { SheetHeader } from "../../components/ui/SheetHeader";
 import { Toolbar } from "../../components/ui/Toolbar";
 import * as Dialog from "../../components/ui/Dialog";
@@ -89,6 +91,7 @@ import { useNativeLayoutMetrics } from "../../native/native-layout-metrics";
 import { useNativeMailSearchToolbar } from "../../native/use-native-mail-search-toolbar";
 import { ModelRow, ChoiceRow } from "./ThreadSettingsRows";
 import {
+  COMPLETION_AUDIO_CHOICES,
   compatibleRuntimeModeForChoices,
   runtimeModeChoicesForSupportedModes,
   selectableChoices,
@@ -243,7 +246,8 @@ function SwitchRow(props: {
 
 type ThreadSettingsSubmenuPage =
   | { readonly kind: "descriptor"; readonly id: string }
-  | { readonly kind: "runtime" };
+  | { readonly kind: "runtime" }
+  | { readonly kind: "completionAudio" };
 
 type ThreadSettingsSessionProps = {
   readonly environmentId: EnvironmentId | null;
@@ -261,8 +265,10 @@ type ThreadSettingsSessionProps = {
   readonly onUpdateOptionSelections: (selections: ReadonlyArray<ProviderOptionSelection>) => void;
   readonly runtimeMode: RuntimeMode;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
-  readonly voiceNotifications?: boolean;
-  readonly onUpdateVoiceNotifications?: (enabled: boolean) => void;
+  readonly completionAudio?: CompletionAudioMode;
+  readonly supportsCompletionSound?: boolean;
+  readonly canUpdateCompletionAudio?: boolean;
+  readonly onUpdateCompletionAudio?: (mode: CompletionAudioMode) => void;
   /** Present for an existing thread with a provider runtime; disabled while a turn runs. */
   readonly reloadAgent?: { readonly disabled: boolean; readonly onPress: () => void };
 };
@@ -321,8 +327,10 @@ type ThreadSettingsSessionValue = {
   readonly runtimeMode: RuntimeMode;
   readonly runtimeModeChoices: ReturnType<typeof runtimeModeChoicesForSupportedModes>;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
-  readonly voiceNotifications?: boolean;
-  readonly onUpdateVoiceNotifications?: (enabled: boolean) => void;
+  readonly completionAudio?: CompletionAudioMode;
+  readonly supportsCompletionSound?: boolean;
+  readonly canUpdateCompletionAudio?: boolean;
+  readonly onUpdateCompletionAudio?: (mode: CompletionAudioMode) => void;
   readonly reloadAgent?: { readonly disabled: boolean; readonly onPress: () => void };
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
   readonly promptTraits: ReturnType<typeof getPromptControlledTraits>;
@@ -633,8 +641,10 @@ function ThreadSettingsSessionProvider(
     runtimeMode: compatibleRuntimeMode,
     runtimeModeChoices,
     onUpdateRuntimeMode: props.onUpdateRuntimeMode,
-    voiceNotifications: props.voiceNotifications,
-    onUpdateVoiceNotifications: props.onUpdateVoiceNotifications,
+    completionAudio: props.completionAudio,
+    supportsCompletionSound: props.supportsCompletionSound,
+    canUpdateCompletionAudio: props.canUpdateCompletionAudio,
+    onUpdateCompletionAudio: props.onUpdateCompletionAudio,
     reloadAgent: props.reloadAgent,
     displayedDescriptors,
     promptTraits,
@@ -915,7 +925,7 @@ function ThreadSettingsOptionsItem(props: {
         <Animated.View layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}>
           <DisclosureRow
             isLast={
-              session.onUpdateVoiceNotifications === undefined && session.reloadAgent === undefined
+              session.onUpdateCompletionAudio === undefined && session.reloadAgent === undefined
             }
             label="Runtime"
             value={
@@ -925,13 +935,17 @@ function ThreadSettingsOptionsItem(props: {
             onPress={() => props.onOpenSubmenu({ kind: "runtime" })}
           />
         </Animated.View>
-        {session.onUpdateVoiceNotifications ? (
+        {session.onUpdateCompletionAudio ? (
           <Animated.View layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}>
-            <SwitchRow
+            <DisclosureRow
               isLast={session.reloadAgent === undefined}
-              label="Voice notifications"
-              value={session.voiceNotifications ?? false}
-              onValueChange={session.onUpdateVoiceNotifications}
+              label="Completion audio"
+              value={
+                COMPLETION_AUDIO_CHOICES.find(
+                  (choice) => choice.mode === (session.completionAudio ?? "off"),
+                )?.label
+              }
+              onPress={() => props.onOpenSubmenu({ kind: "completionAudio" })}
             />
           </Animated.View>
         ) : null}
@@ -1190,7 +1204,23 @@ function ThreadSettingsChoiceContent(props: {
               },
             })),
           }
-        : null;
+        : props.submenu.kind === "completionAudio"
+          ? {
+              rows: COMPLETION_AUDIO_CHOICES.filter(
+                (choice) => choice.mode !== "sound" || session.supportsCompletionSound,
+              ).map((choice) => ({
+                id: choice.mode,
+                label: choice.label,
+                description: choice.description,
+                selected: choice.mode === session.completionAudio,
+                onPress: () => {
+                  if (session.canUpdateCompletionAudio === false) return;
+                  session.onUpdateCompletionAudio?.(choice.mode);
+                  props.onSelected();
+                },
+              })),
+            }
+          : null;
 
   if (!submenuContent) {
     return <View className="flex-1 bg-sheet" />;
@@ -1213,17 +1243,35 @@ function ThreadSettingsChoiceContent(props: {
       showsVerticalScrollIndicator={false}
     >
       <View className="overflow-hidden rounded-2xl bg-grouped-card">
-        {submenuContent.rows.map((row, index) => (
-          <ChoiceRow
-            key={row.id}
-            description={row.description}
-            isLast={index === submenuContent.rows.length - 1}
-            label={row.label}
-            selected={row.selected}
-            onPress={row.onPress}
-          />
-        ))}
+        {submenuContent.rows.map((row, index) =>
+          props.submenu.kind === "completionAudio" ? (
+            <ListChoiceRow
+              key={row.id}
+              label={row.label}
+              description={row.description}
+              selected={row.selected}
+              separated={index > 0}
+              onPress={row.onPress}
+              disabled={session.canUpdateCompletionAudio === false}
+            />
+          ) : (
+            <ChoiceRow
+              key={row.id}
+              description={row.description}
+              isLast={index === submenuContent.rows.length - 1}
+              label={row.label}
+              selected={row.selected}
+              onPress={row.onPress}
+            />
+          ),
+        )}
       </View>
+      {props.submenu.kind === "completionAudio" ? (
+        <Text className="px-4 py-3 text-sm text-foreground-muted">
+          Sound plays on web and desktop. Voice uses provider-owned hooks and may not stop speech
+          already started.
+        </Text>
+      ) : null}
     </ScrollView>
   );
 }
@@ -1396,11 +1444,13 @@ function ThreadSettingsModelsScreen() {
         <ThreadSettingsMainContent
           onOpenSubmenu={(submenu) => {
             const title =
-              submenu.kind === "runtime"
-                ? "Runtime"
-                : (session.displayedDescriptors.find(
-                    (descriptor) => descriptor.type === "select" && descriptor.id === submenu.id,
-                  )?.label ?? "Option");
+              submenu.kind === "completionAudio"
+                ? "Completion audio"
+                : submenu.kind === "runtime"
+                  ? "Runtime"
+                  : (session.displayedDescriptors.find(
+                      (descriptor) => descriptor.type === "select" && descriptor.id === submenu.id,
+                    )?.label ?? "Option");
             navigation.navigate("ThreadSettingsChoice", { ...submenu, title });
           }}
         />
@@ -1596,8 +1646,10 @@ export function NewTaskThreadSettingsRouteScreen() {
       onUpdateOptionSelections={flow.setSelectedModelOptions}
       runtimeMode={flow.runtimeMode}
       onUpdateRuntimeMode={flow.setRuntimeMode}
-      voiceNotifications={flow.voiceNotifications}
-      onUpdateVoiceNotifications={flow.setVoiceNotifications}
+      completionAudio={flow.completionAudio}
+      supportsCompletionSound={flow.supportsCompletionSound}
+      canUpdateCompletionAudio={flow.canUpdateCompletionAudio}
+      onUpdateCompletionAudio={flow.setCompletionAudio}
       onClose={() => navigation.goBack()}
     />
   );

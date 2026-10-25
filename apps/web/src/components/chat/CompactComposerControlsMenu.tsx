@@ -1,3 +1,4 @@
+import type { CompletionAudioMode } from "@t3tools/contracts";
 import { ProviderInteractionMode, RuntimeMode } from "@t3tools/contracts";
 import { memo, type ReactNode } from "react";
 import { EllipsisIcon } from "lucide-react";
@@ -16,7 +17,10 @@ import { useComposerMenuState } from "./useComposerMenuState";
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
-  voiceNotifications: boolean;
+  completionAudio: CompletionAudioMode;
+  supportsCompletionSound: boolean;
+  completionAudioIsDefault: boolean;
+  canChangeCompletionAudio: boolean;
   runtimeModeOptions: ReadonlyArray<{
     readonly mode: RuntimeMode;
     readonly label: string;
@@ -32,7 +36,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   hidden?: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
-  onVoiceNotificationsChange: (enabled: boolean) => void;
+  onCompletionAudioChange: (mode: CompletionAudioMode) => void;
 }) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
@@ -92,13 +96,32 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
           ))}
         </MenuRadioGroup>
         <MenuDivider />
-        <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Notifications</div>
+        <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
+          Completion audio
+        </div>
         <MenuRadioGroup
-          value={props.voiceNotifications ? "on" : "off"}
-          onValueChange={(value) => props.onVoiceNotificationsChange(value === "on")}
+          value={props.completionAudioIsDefault ? null : props.completionAudio}
+          onValueChange={(value) => {
+            if (
+              props.canChangeCompletionAudio &&
+              (value === "off" ||
+                value === "voice" ||
+                (value === "sound" && props.supportsCompletionSound))
+            )
+              props.onCompletionAudioChange(value);
+          }}
         >
-          <MenuRadioItem value="on">Voice notifications on</MenuRadioItem>
-          <MenuRadioItem value="off">Voice notifications off</MenuRadioItem>
+          <MenuRadioItem disabled={!props.canChangeCompletionAudio} value="off">
+            Off
+          </MenuRadioItem>
+          <MenuRadioItem disabled={!props.canChangeCompletionAudio} value="voice">
+            Voice
+          </MenuRadioItem>
+          {props.supportsCompletionSound && (
+            <MenuRadioItem disabled={!props.canChangeCompletionAudio} value="sound">
+              Sound
+            </MenuRadioItem>
+          )}
         </MenuRadioGroup>
       </MenuPopup>
     </Menu>

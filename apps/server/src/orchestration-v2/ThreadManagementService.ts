@@ -673,7 +673,21 @@ const make = Effect.gen(function* () {
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+      Effect.andThen(() =>
+        command.type === "thread.create" &&
+        command.completionAudio === undefined &&
+        command.voiceNotifications === undefined
+          ? serverSettings.getSettings.pipe(
+              Effect.orDie,
+              Effect.flatMap((settings) =>
+                orchestrator.dispatch({
+                  ...command,
+                  completionAudio: settings.completionAudio.defaultMode,
+                }),
+              ),
+            )
+          : orchestrator.dispatch(command),
+      ),
     );
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>

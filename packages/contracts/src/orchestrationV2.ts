@@ -1,3 +1,4 @@
+import { CompletionAudioMode } from "./completionAudio.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -467,6 +468,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   goalLoop: Schema.optional(Schema.NullOr(ThreadGoalLoop)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  completionAudio: Schema.optional(CompletionAudioMode),
   voiceNotifications: Schema.optional(Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -1728,6 +1730,7 @@ export type ThreadGoalLoopUpdatedPayload = typeof ThreadGoalLoopUpdatedPayload.T
 
 export const ThreadVoiceNotificationsSetPayload = Schema.Struct({
   threadId: ThreadId,
+  completionAudio: Schema.optional(CompletionAudioMode),
   voiceNotifications: Schema.Boolean,
   updatedAt: Schema.DateTimeUtc,
 });
@@ -2021,6 +2024,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   goalLoop: Schema.optional(Schema.NullOr(ThreadGoalLoop)).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  completionAudio: Schema.optional(CompletionAudioMode),
   voiceNotifications: Schema.optional(Schema.Boolean).pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -2787,6 +2791,14 @@ export const ThreadVoiceNotificationsSetCommand = Schema.Struct({
 });
 export type ThreadVoiceNotificationsSetCommand = typeof ThreadVoiceNotificationsSetCommand.Type;
 
+export const ThreadCompletionAudioSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.completion-audio.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  mode: CompletionAudioMode,
+});
+export type ThreadCompletionAudioSetCommand = typeof ThreadCompletionAudioSetCommand.Type;
+
 export const ThreadGoalLoopSyncCommand = Schema.Struct({
   type: Schema.Literal("thread.goal.loop"),
   commandId: CommandId,
@@ -2823,6 +2835,7 @@ export const OrchestrationV2Command = Schema.Union([
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
     goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+    completionAudio: Schema.optional(CompletionAudioMode),
     voiceNotifications: Schema.optional(Schema.Boolean),
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
@@ -2948,6 +2961,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   ThreadGoalLoopClientCommand,
   ThreadVoiceNotificationsSetCommand,
+  ThreadCompletionAudioSetCommand,
   Schema.Struct({
     type: Schema.Literal("thread.pull-request.link"),
     commandId: CommandId,
@@ -3429,6 +3443,7 @@ export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+  completionAudio: Schema.optional(CompletionAudioMode),
   voiceNotifications: Schema.optional(Schema.Boolean),
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
   initialMessage: Schema.optional(

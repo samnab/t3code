@@ -1,3 +1,5 @@
+import { readStoredCompletionAudio } from "@t3tools/contracts";
+import { serverEnvironment } from "./server";
 import {
   presentThreadShell,
   type EnvironmentThreadShell,
@@ -124,6 +126,11 @@ export function pendingThreadCreationShell(
     return null;
   }
   const timestamp = DateTime.makeUnsafe(message.createdAt);
+  const completionAudio =
+    readStoredCompletionAudio(message) ??
+    appAtomRegistry.get(serverEnvironment.configValueAtom(message.environmentId))?.settings
+      .completionAudio.defaultMode ??
+    "off";
   return presentThreadShell(message.environmentId, {
     id: message.threadId,
     projectId: creation.projectId,
@@ -132,7 +139,8 @@ export function pendingThreadCreationShell(
     modelSelection: message.modelSelection,
     runtimeMode: message.runtimeMode ?? DEFAULT_RUNTIME_MODE,
     interactionMode: message.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
-    voiceNotifications: message.voiceNotifications ?? false,
+    completionAudio,
+    voiceNotifications: completionAudio === "voice",
     branch: creation.branch,
     pullRequests: [],
     worktreePath: creation.workspaceMode === "worktree" ? null : creation.worktreePath,

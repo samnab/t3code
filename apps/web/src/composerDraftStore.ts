@@ -1,3 +1,4 @@
+import { CompletionAudioMode, readStoredCompletionAudio } from "@t3tools/contracts";
 import { stripInlineContextReferences } from "./lib/composerContextReferences";
 import { elementContextToPreviewAnnotation } from "./lib/elementContext";
 import {
@@ -251,6 +252,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
   goal: Schema.optionalKey(Schema.String),
+  completionAudio: Schema.optionalKey(CompletionAudioMode),
   voiceNotifications: Schema.optionalKey(Schema.Boolean),
 });
 type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
@@ -377,7 +379,7 @@ export interface ComposerThreadDraftState {
   interactionMode: ProviderInteractionMode | null;
   /** Thread settings staged before the first turn creates the server thread. */
   goal: string | null;
-  voiceNotifications: boolean | null;
+  completionAudio: CompletionAudioMode | null;
 }
 
 export function composerDraftHasUserContent(
@@ -545,7 +547,7 @@ interface ComposerDraftStoreState {
   ) => void;
   setComposerThreadSettings: (
     threadRef: ComposerThreadTarget,
-    settings: { goal?: string | null; voiceNotifications?: boolean | null },
+    settings: { goal?: string | null; completionAudio?: CompletionAudioMode | null },
   ) => void;
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => boolean;
   addImages: (
@@ -776,7 +778,7 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   runtimeMode: null,
   interactionMode: null,
   goal: null,
-  voiceNotifications: null,
+  completionAudio: null,
 });
 
 function createEmptyThreadDraft(): ComposerThreadDraftState {
@@ -795,7 +797,7 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     runtimeMode: null,
     interactionMode: null,
     goal: null,
-    voiceNotifications: null,
+    completionAudio: null,
   };
 }
 
@@ -892,7 +894,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.runtimeMode === null &&
     draft.interactionMode === null &&
     draft.goal === null &&
-    draft.voiceNotifications === null
+    draft.completionAudio === null
   );
 }
 
@@ -1828,10 +1830,7 @@ function normalizePersistedDraftsByThreadId(
         ? draftCandidate.interactionMode
         : null;
     const goal = typeof draftCandidate.goal === "string" ? draftCandidate.goal : null;
-    const voiceNotifications =
-      typeof draftCandidate.voiceNotifications === "boolean"
-        ? draftCandidate.voiceNotifications
-        : null;
+    const completionAudio = readStoredCompletionAudio(draftCandidate);
     const contextIds = new Map<string, string>();
     for (const [kind, entries] of [
       ["image", attachments],
@@ -1923,7 +1922,7 @@ function normalizePersistedDraftsByThreadId(
       !runtimeMode &&
       !interactionMode &&
       goal === null &&
-      voiceNotifications === null
+      completionAudio === null
     ) {
       continue;
     }
@@ -1957,7 +1956,7 @@ function normalizePersistedDraftsByThreadId(
       ...(runtimeMode ? { runtimeMode } : {}),
       ...(interactionMode ? { interactionMode } : {}),
       ...(goal === null ? {} : { goal }),
-      ...(voiceNotifications === null ? {} : { voiceNotifications }),
+      ...(completionAudio === null ? {} : { completionAudio }),
     };
   }
 
@@ -1999,7 +1998,7 @@ function stripLegacyModelSeedsFromEmptyDraftSessions(
       return retained.runtimeMode ||
         retained.interactionMode ||
         retained.goal !== undefined ||
-        retained.voiceNotifications !== undefined
+        retained.completionAudio !== undefined
         ? [[threadKey, retained]]
         : [];
     }),
@@ -2060,7 +2059,7 @@ export function partializeComposerDraftStoreState(
       draft.runtimeMode === null &&
       draft.interactionMode === null &&
       draft.goal === null &&
-      draft.voiceNotifications === null
+      draft.completionAudio === null
     ) {
       continue;
     }
@@ -2125,9 +2124,7 @@ export function partializeComposerDraftStoreState(
       ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
       ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
       ...(draft.goal === null ? {} : { goal: draft.goal }),
-      ...(draft.voiceNotifications === null
-        ? {}
-        : { voiceNotifications: draft.voiceNotifications }),
+      ...(draft.completionAudio === null ? {} : { completionAudio: draft.completionAudio }),
     };
     persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
@@ -2397,7 +2394,7 @@ function toHydratedThreadDraft(
     runtimeMode: persistedDraft.runtimeMode ?? null,
     interactionMode: persistedDraft.interactionMode ?? null,
     goal: persistedDraft.goal ?? null,
-    voiceNotifications: persistedDraft.voiceNotifications ?? null,
+    completionAudio: readStoredCompletionAudio(persistedDraft),
   };
 }
 
@@ -3231,7 +3228,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextDraft: ComposerThreadDraftState = { ...base, ...settings };
             if (
               nextDraft.goal === base.goal &&
-              nextDraft.voiceNotifications === base.voiceNotifications
+              nextDraft.completionAudio === base.completionAudio
             ) {
               return state;
             }

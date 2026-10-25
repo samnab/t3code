@@ -1,5 +1,6 @@
 import {
   AuthEnvironmentMaintainScope,
+  EnvironmentId,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
   AuthProvidersManageScope,
@@ -375,5 +376,81 @@ it.effect("denies manual cleanup before the handler without settings permission"
       requiredPermission: AuthSettingsWriteScope,
     });
     expect(handled).toBe(false);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("authorizes completion bulk only with operate scope before reaching its handler", () =>
+  Effect.gen(function* () {
+    const method = WS_METHODS.completionNotificationsBulkOff;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+      ),
+    );
+    let handled = 0;
+    const handler = group.toLayerHandler(method, () =>
+      Effect.sync(() => {
+        handled++;
+        return {
+          environmentId: EnvironmentId.make("completion"),
+          total: 0,
+          turnedOff: 0,
+          alreadyOff: 0,
+          failedCount: 0,
+          failed: [],
+          failuresTruncated: false,
+          complete: true,
+        };
+      }),
+    );
+    for (const scope of [AuthOrchestrationReadScope, AuthSettingsWriteScope]) {
+      const denied = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(Layer.merge(handler, RpcAuthorization.layer([scope]))),
+      );
+      expect(yield* denied[method]({ clientRequestId: "denied" }).pipe(Effect.flip)).toMatchObject({
+        requiredPermission: AuthOrchestrationOperateScope,
+      });
+    }
+    expect(handled).toBe(0);
+    const allowed = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(Layer.merge(handler, RpcAuthorization.layer([AuthOrchestrationOperateScope]))),
+    );
+    expect((yield* allowed[method]({ clientRequestId: "allowed" })).complete).toBe(true);
+    expect(handled).toBe(1);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("requires settings-write for completion defaults through the existing settings RPC", () =>
+  Effect.gen(function* () {
+    const method = WS_METHODS.serverUpdateSettings;
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof method> => tag !== method,
+      ),
+    );
+    let handled = false;
+    const handler = group.toLayerHandler(method, () =>
+      Effect.sync(() => {
+        handled = true;
+        return DEFAULT_SERVER_SETTINGS;
+      }),
+    );
+    const request = {
+      patch: {
+        completionAudio: { defaultMode: "off" as const, tone: "completion" as const, volume: 1 },
+      },
+    };
+    const denied = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(Layer.merge(handler, RpcAuthorization.layer([AuthOrchestrationOperateScope]))),
+    );
+    expect(yield* denied[method](request).pipe(Effect.flip)).toMatchObject({
+      requiredPermission: AuthSettingsWriteScope,
+    });
+    expect(handled).toBe(false);
+    const allowed = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(Layer.merge(handler, RpcAuthorization.layer([AuthSettingsWriteScope]))),
+    );
+    yield* allowed[method](request);
+    expect(handled).toBe(true);
   }).pipe(Effect.scoped),
 );

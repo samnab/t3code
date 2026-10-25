@@ -1,3 +1,4 @@
+import { type CompletionAudioMode, readStoredCompletionAudio } from "@t3tools/contracts";
 import { ActiveNewTaskContext } from "../../state/active-new-task";
 import * as Dialog from "../../components/ui/Dialog";
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
@@ -194,7 +195,9 @@ type NewTaskFlowContextValue = {
   readonly currentCheckoutBranchName: string | null;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
-  readonly voiceNotifications: boolean;
+  readonly completionAudio: CompletionAudioMode;
+  readonly supportsCompletionSound: boolean;
+  readonly canUpdateCompletionAudio: boolean;
   readonly planModeEnabled: boolean;
   readonly expandedProvider: string | null;
   readonly environments: ReadonlyArray<{
@@ -251,7 +254,7 @@ type NewTaskFlowContextValue = {
   readonly loadMoreBranches: () => void;
   readonly setRuntimeMode: (value: RuntimeMode) => void;
   readonly setInteractionMode: (value: ProviderInteractionMode) => void;
-  readonly setVoiceNotifications: (value: boolean) => void;
+  readonly setCompletionAudio: (value: CompletionAudioMode) => void;
   readonly setSelectedModelOptions: (
     value: ReadonlyArray<ProviderOptionSelection> | undefined,
   ) => void;
@@ -624,7 +627,16 @@ export function NewTaskFlowProvider(
   const interactionMode = planModeEnabled
     ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
     : DEFAULT_PROVIDER_INTERACTION_MODE;
-  const voiceNotifications = selectedProjectDraft.voiceNotifications ?? false;
+  const supportsCompletionSound =
+    selectedEnvironmentServerConfig?.environment.capabilities.completionNotifications === true;
+  const completionAudio = supportsCompletionSound
+    ? (selectedProjectDraft.completionAudio ??
+      selectedEnvironmentServerConfig?.settings.completionAudio.defaultMode ??
+      "off")
+    : selectedProjectDraft.completionAudio === "voice"
+      ? "voice"
+      : "off";
+  const canUpdateCompletionAudio = true;
   const setSelectedModelKey = (
     key: string | null,
     options?: ReadonlyArray<ProviderOptionSelection>,
@@ -962,9 +974,9 @@ export function NewTaskFlowProvider(
       });
     }
   };
-  const setVoiceNotifications = (value: boolean) => {
+  const setCompletionAudio = (value: CompletionAudioMode) => {
     if (selectedProjectDraftKey) {
-      updateComposerDraftSettings(selectedProjectDraftKey, { voiceNotifications: value });
+      updateComposerDraftSettings(selectedProjectDraftKey, { completionAudio: value });
     }
   };
 
@@ -982,7 +994,7 @@ export function NewTaskFlowProvider(
         modelSelection: message.modelSelection,
         runtimeMode: message.runtimeMode,
         interactionMode: message.interactionMode,
-        voiceNotifications: message.voiceNotifications,
+        completionAudio: readStoredCompletionAudio(message) ?? undefined,
         workspaceSelection: {
           mode: message.creation.workspaceMode,
           branch: message.creation.branch,
@@ -1065,7 +1077,7 @@ export function NewTaskFlowProvider(
           (candidate) => candidate.instanceId === draftModelSelection.instanceId,
         ),
       }),
-      voiceNotifications: draft.voiceNotifications ?? false,
+      completionAudio: readStoredCompletionAudio(draft) ?? undefined,
       creation: {
         projectId: selectedProject.id,
         ...(projectTitle !== undefined ? { projectTitle } : {}),
@@ -1216,7 +1228,9 @@ export function NewTaskFlowProvider(
     currentCheckoutBranchName,
     runtimeMode,
     interactionMode,
-    voiceNotifications,
+    completionAudio,
+    supportsCompletionSound,
+    canUpdateCompletionAudio,
     planModeEnabled,
     expandedProvider,
     environments,
@@ -1253,7 +1267,7 @@ export function NewTaskFlowProvider(
     loadMoreBranches,
     setRuntimeMode,
     setInteractionMode,
-    setVoiceNotifications,
+    setCompletionAudio,
     setSelectedModelOptions,
     setExpandedProvider,
   } satisfies NewTaskFlowContextValue;

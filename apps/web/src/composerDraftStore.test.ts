@@ -18,6 +18,7 @@ import {
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import {
   defaultInstanceIdForDriver,
+  completionAudioCreationFields,
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   EnvironmentId,
@@ -1934,19 +1935,19 @@ describe("composerDraftStore fork thread settings", () => {
     resetComposerDraftStore();
   });
 
-  it.each([false, true])(
+  it.each(["off", "voice", "sound"] as const)(
     "persists a voice choice of %s before the server thread exists",
-    (voiceNotifications) => {
+    (completionAudio) => {
       const store = useComposerDraftStore.getState();
 
       store.setComposerThreadSettings(threadRef, {
         goal: "Ship the port",
-        voiceNotifications,
+        completionAudio,
       });
 
       expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
         goal: "Ship the port",
-        voiceNotifications,
+        completionAudio,
       });
 
       const merge = useComposerDraftStore.persist.getOptions().merge!;
@@ -1956,8 +1957,36 @@ describe("composerDraftStore fork thread settings", () => {
       );
       expect(hydrated.draftsByThreadKey[scopedThreadKey(threadRef)]).toMatchObject({
         goal: "Ship the port",
-        voiceNotifications,
+        completionAudio,
       });
+    },
+  );
+
+  it.each([undefined, "invalid"])(
+    "hydrates legacy false with mode %s as explicit Off",
+    (completionAudio) => {
+      const merge = useComposerDraftStore.persist.getOptions().merge!;
+      const hydrated = merge(
+        {
+          draftsByThreadKey: {
+            [scopedThreadKey(threadRef)]: {
+              ...(completionAudio === undefined ? {} : { completionAudio }),
+              voiceNotifications: false,
+            },
+          },
+        },
+        useComposerDraftStore.getInitialState(),
+      );
+      expect(hydrated.draftsByThreadKey[scopedThreadKey(threadRef)]?.completionAudio).toBe("off");
+      expect(
+        completionAudioCreationFields(
+          hydrated.draftsByThreadKey[scopedThreadKey(threadRef)]?.completionAudio,
+        ),
+      ).toEqual({ completionAudio: "off", voiceNotifications: false });
+      const persisted =
+        partializeComposerDraftStoreState(hydrated).draftsByThreadKey[scopedThreadKey(threadRef)];
+      expect(persisted).toMatchObject({ completionAudio: "off" });
+      expect(persisted).not.toHaveProperty("voiceNotifications");
     },
   );
 
@@ -1968,11 +1997,11 @@ describe("composerDraftStore fork thread settings", () => {
     store.setInteractionMode(threadRef, "plan");
     store.setComposerThreadSettings(threadRef, {
       goal: "Ship the port",
-      voiceNotifications: false,
+      completionAudio: "off",
     });
     store.setRuntimeMode(threadRef, null);
     store.setInteractionMode(threadRef, null);
-    store.setComposerThreadSettings(threadRef, { goal: null, voiceNotifications: null });
+    store.setComposerThreadSettings(threadRef, { goal: null, completionAudio: null });
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });

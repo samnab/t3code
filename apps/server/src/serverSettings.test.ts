@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
   ServerSettings,
+  ServerSettingsPatch,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -33,6 +34,7 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
+const decodeCompletionPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 
 const layerServerSettings = () =>
   ServerSettingsModule.layer.pipe(
@@ -94,6 +96,68 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("persists and publishes environment completion audio through normal settings", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        assert.deepEqual((yield* service.getSettings).completionAudio, {
+          defaultMode: "off",
+          tone: "completion",
+          volume: 1,
+        });
+        const changes = yield* service.subscribeChanges;
+        const completionAudio = { defaultMode: "sound", tone: "input", volume: 0.4 } as const;
+        yield* service.updateSettings({ completionAudio });
+        const received = Option.getOrThrow(yield* Stream.runHead(changes));
+        assert.deepEqual(received.completionAudio, completionAudio);
+        const saved = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepEqual(saved.completionAudio, completionAudio);
+        assert.deepEqual((yield* service.getSettings).completionAudio, completionAudio);
+        yield* service.updateSettings(
+          yield* decodeCompletionPatch({ completionAudio: { volume: 0.25 } }),
+        );
+        assert.deepEqual((yield* service.getSettings).completionAudio, {
+          defaultMode: "sound",
+          tone: "input",
+          volume: 0.25,
+        });
+        const partialSaved = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepEqual(partialSaved.completionAudio, {
+          defaultMode: "sound",
+          tone: "input",
+          volume: 0.25,
+        });
+      }),
+    ).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("saves one completion audio field while the others stay default", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        yield* service.updateSettings(
+          yield* decodeCompletionPatch({ completionAudio: { defaultMode: "sound" } }),
+        );
+        const saved = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepEqual(saved.completionAudio, {
+          defaultMode: "sound",
+          tone: "completion",
+          volume: 1,
+        });
+      }),
+    ).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;

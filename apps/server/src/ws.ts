@@ -1,3 +1,4 @@
+import * as CompletionNotificationService from "./orchestration-v2/CompletionNotificationService.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -1229,6 +1230,8 @@ export const layerWsRpc = (
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+      const completionNotifications =
+        yield* CompletionNotificationService.CompletionNotificationService;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
         | ThreadLaunchService.ThreadLaunchService
@@ -1863,6 +1866,10 @@ export const layerWsRpc = (
       });
 
       const handlers = ServerWsRpcGroup.of({
+        [WS_METHODS.completionNotificationsBulkOff]: (input) =>
+          completionNotifications.bulkOff(input, {
+            requestNamespace: `client:${currentSessionId}`,
+          }),
         [ORCHESTRATION_V2_WS_METHODS.stopBackgroundTask]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(providerBackgroundTasks.stop(input)),
@@ -2021,6 +2028,9 @@ export const layerWsRpc = (
                     runtimeMode: input.runtimeMode,
                     interactionMode: input.interactionMode,
                     ...(input.goal === undefined ? {} : { goal: input.goal }),
+                    ...(input.completionAudio === undefined
+                      ? {}
+                      : { completionAudio: input.completionAudio }),
                     ...(input.voiceNotifications === undefined
                       ? {}
                       : { voiceNotifications: input.voiceNotifications }),
