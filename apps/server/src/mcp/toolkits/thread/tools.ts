@@ -214,7 +214,7 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
 const ThreadLowerModesTool = Tool.make("t3_thread_lower_modes", {
   ...commandTool,
   description:
-    "Lower a thread's runtime mode (full-access > auto > auto-accept-edits > approval-required) or interaction mode (default > plan). Omit threadId for this thread. Agents can never raise a mode; the user raises it in the app. Lowering the runtime mode of a thread whose provider cannot switch in-session (Claude) detaches its session, interrupting a running turn, this thread's own included; Codex switches live.",
+    "Lower a thread's runtime mode (full-access > auto > auto-accept-edits > approval-required) or interaction mode (default > plan). Omit threadId for this thread. Agents can never raise a mode; the user raises it in the app. Runtime and interaction are applied as two separate changes, so one may apply if the other is refused. When the runtime mode is lowered, a provider that cannot switch in-session (for example Claude) detaches its session, interrupting a running turn, this thread's own included; others (for example Codex) switch live.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     runtimeMode: Schema.optional(RuntimeMode),
