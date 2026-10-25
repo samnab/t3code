@@ -214,7 +214,7 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
 const ThreadGoalTool = Tool.make("t3_thread_goal", {
   ...commandTool,
   description:
-    "Set or clear (goal=null) a thread's goal. Omit threadId for this thread. Clearing stops its goal loop. A new goal starts the goal loop, so setting is refused unless the thread's goal loop is paused; it then stays paused until t3_thread_goal_loop resumes it.",
+    "Set or clear (goal=null) a thread's goal. Omit threadId for this thread. This never starts work: a set goal's loop is paused until t3_thread_goal_loop resumes it, and clearing stops the loop.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     goal: Schema.NullOr(ThreadGoal),

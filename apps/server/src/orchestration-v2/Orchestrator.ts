@@ -3970,7 +3970,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.goal !== undefined &&
       command.goal !== thread.goal
     ) {
-      const nextLoop =
+      const reseeded =
         command.goal === null
           ? null
           : thread.goalLoop == null
@@ -3982,6 +3982,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 reason: null,
                 updatedAt: now,
               };
+      const nextLoop =
+        reseeded !== null && command.goalLoopState === "paused"
+          ? { ...reseeded, state: "paused" as const }
+          : reseeded;
       if (nextLoop !== null || thread.goalLoop !== null) {
         yield* emit(
           events,

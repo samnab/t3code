@@ -3120,6 +3120,8 @@ export const OrchestrationV2Command = Schema.Union([
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
     /** Null clears the goal; omission preserves it. */
     goal: Schema.optional(Schema.NullOr(ThreadGoal)),
+    /** Leaves a changed goal's loop paused, so setting the goal starts no work. */
+    goalLoopState: Schema.optional(Schema.Literal("paused")),
   }),
   ThreadGoalLoopClientCommand,
   ThreadVoiceNotificationsSetCommand,

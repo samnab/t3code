@@ -89,7 +89,6 @@ const createThread = Effect.gen(function* () {
     modelSelection: { instanceId, model: "gpt-5" },
     runtimeMode: "full-access",
     interactionMode: "default",
-    goal: "First goal",
     branch: null,
     worktreePath: null,
     createdBy: "user",
@@ -120,35 +119,38 @@ it.effect("turns auto-settle off and on and reads it back", () =>
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("sets and clears a goal without starting work, only once its loop is paused", () =>
+it.effect("sets and clears a goal with its loop paused, starting no work", () =>
   Effect.gen(function* () {
     const toolkit = yield* ThreadToolkit;
     yield* createThread;
+    expect(
+      yield* last(toolkit.handle("t3_thread_goal", { threadId, goal: "First goal" })),
+    ).toHaveProperty("sequence");
     expect(yield* last(toolkit.handle("t3_thread_configuration", { threadId }))).toMatchObject({
       goal: "First goal",
-      goalLoop: { state: "idle", iterations: 0 },
+      goalLoop: { state: "paused", iterations: 0 },
     });
 
-    // An idle loop would be driven as soon as the goal changes.
-    expect(
-      yield* last(toolkit.handle("t3_thread_goal", { threadId, goal: "Second goal" })),
-    ).toMatchObject({
-      code: "invalid_request",
-    });
     expect(
       yield* last(
         toolkit.handle("t3_thread_goal_loop", {
           threadId,
-          action: "pause",
+          action: "resume",
           expectedState: "running",
         }),
       ),
-    ).toMatchObject({ code: "invalid_request", message: "The goal loop is idle, not running." });
-    expect((yield* readThread).thread.goalLoop?.state).toBe("idle");
+    ).toMatchObject({ code: "invalid_request", message: "The goal loop is paused, not running." });
+    expect((yield* readThread).thread.goalLoop?.state).toBe("paused");
 
     yield* last(
-      toolkit.handle("t3_thread_goal_loop", { threadId, action: "pause", expectedState: "idle" }),
+      toolkit.handle("t3_thread_goal_loop", {
+        threadId,
+        action: "resume",
+        expectedState: "paused",
+      }),
     );
+    expect((yield* readThread).thread.goalLoop?.state).toBe("idle");
+    // Changing the goal of a loop that is due to run pauses it again.
     expect(
       yield* last(toolkit.handle("t3_thread_goal", { threadId, goal: "Second goal" })),
     ).toHaveProperty("sequence");

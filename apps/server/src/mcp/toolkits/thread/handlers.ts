@@ -228,29 +228,14 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       return { sequence: result.sequence };
     }),
   ),
+  // An idle loop is driven by GoalLoopService, so a goal set here seeds its loop paused.
   t3_thread_goal: writesThread((input) =>
-    Effect.gen(function* () {
-      const {
-        threads,
-        projection: { thread },
-      } = yield* readThread(input.threadId);
-      // A changed goal resets the loop to idle, which GoalLoopService drives, unless it was
-      // paused. The orchestrator reads "paused" again under the thread lock, so a goal set
-      // here never starts work; only someone else's resume can.
-      if (input.goal !== null && thread.goalLoop?.state !== "paused")
-        return yield* refuse(
-          "Setting a goal would start the goal loop. Pause the loop first, or ask the user to set the goal.",
-        );
-      const result = yield* threads
-        .dispatch({
-          type: "thread.metadata.update",
-          commandId: yield* newCommandId(),
-          threadId: thread.id,
-          goal: input.goal,
-        })
-        .pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
-    }),
+    dispatch(input.threadId, (common) => ({
+      ...common,
+      type: "thread.metadata.update",
+      goal: input.goal,
+      ...(input.goal === null ? {} : { goalLoopState: "paused" as const }),
+    })),
   ),
   // ponytail: expected state is checked before dispatch, not under the thread lock (dispatch
   // takes that lock and it is not reentrant). A guard field on the client loop command would

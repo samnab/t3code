@@ -247,6 +247,50 @@ it.effect("keeps completion modes exclusive through legacy controls and receipt 
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("seeds a set goal's loop paused when asked, on a new or idle loop", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:goal-paused-seed");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("goal-paused:create"),
+      threadId,
+      projectId: ProjectId.make("project:goal-paused-seed"),
+      title: "Paused goal",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    for (const [id, goal] of [
+      ["first", "First goal"],
+      ["second", "Second goal"],
+    ] as const) {
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(`goal-paused:${id}`),
+        threadId,
+        goal,
+        goalLoopState: "paused",
+      });
+      const thread = yield* projections.getThread(threadId);
+      assert.equal(thread.goal, goal);
+      assert.equal(thread.goalLoop?.state, "paused");
+      yield* orchestrator.dispatch({
+        type: "thread.goal.loop",
+        commandId: CommandId.make(`goal-paused:resume-${id}`),
+        threadId,
+        action: "resume",
+      });
+      assert.equal((yield* projections.getThread(threadId)).goalLoop?.state, "idle");
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect(
   "records approval feedback and targets only its runtime request without dispatching a parent turn",
   () =>
