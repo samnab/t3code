@@ -780,12 +780,13 @@ it.layer(
   const provide = <A, E, R>(
     program: Effect.Effect<A, E, R>,
     scope: McpInvocationContext.McpInvocationScope = threadScope(),
+    caller = liveThreadShell(threadId),
   ) =>
     program.pipe(
       Effect.provide(
         environmentLayer(
           scope,
-          liveThreadShell(threadId),
+          caller,
           Layer.merge(staticSettings, Layer.fresh(Keybindings.layer)),
         ),
       ),
@@ -843,16 +844,64 @@ it.layer(
     }),
   );
 
-  it.effect("denies keybinding writes from a read-only client", () =>
+  it.effect.each([
+    {
+      label: "a read-only client",
+      scope: threadScope({
+        thread: undefined,
+        client: { sessionId: "client:keybindings", label: "Client", access: "read-only" },
+      }),
+      caller: liveThreadShell(threadId),
+    },
+    {
+      label: "an approval-required caller",
+      scope: threadScope(),
+      caller: liveThreadShell(threadId, { runtimeMode: "approval-required" }),
+    },
+    {
+      label: "another environment's credential",
+      scope: threadScope({ environmentId: EnvironmentId.make("environment:other") }),
+      caller: liveThreadShell(threadId),
+    },
+    {
+      label: "a caller whose turn ended",
+      scope: threadScope(),
+      caller: liveThreadShell(threadId, { activeRunId: null }),
+      code: "parent_not_active",
+    },
+  ])("denies keybinding writes from $label", ({ scope, caller, code = "capability_denied" }) =>
     Effect.gen(function* () {
-      const result = yield* upsert(
-        { key: "mod+shift+7", command: "chat.new" },
-        threadScope({
-          thread: undefined,
-          client: { sessionId: "client:keybindings", label: "Client", access: "read-only" },
-        }),
+      yield* upsert({ key: "mod+shift+9", command: "chat.new" });
+      const before = (yield* list)?.encodedResult;
+      const handle = (
+        tool: "t3_keybinding_upsert" | "t3_keybinding_remove",
+        params: { readonly key: string; readonly command: KeybindingCommand },
+      ) =>
+        provide(
+          Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+            finalResult(toolkit.handle(tool, params)),
+          ),
+          scope,
+          caller,
+        );
+      const upserted = yield* handle("t3_keybinding_upsert", {
+        key: "mod+shift+7",
+        command: "chat.new",
+      });
+      const removed = yield* handle("t3_keybinding_remove", {
+        key: "mod+shift+9",
+        command: "chat.new",
+      });
+      expect(upserted?.result).toMatchObject({ code });
+      expect(removed?.result).toMatchObject({ code });
+      expect((yield* list)?.encodedResult).toEqual(before);
+      yield* provide(
+        Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+          finalResult(
+            toolkit.handle("t3_keybinding_remove", { key: "mod+shift+9", command: "chat.new" }),
+          ),
+        ),
       );
-      expect(result?.result).toMatchObject({ code: "capability_denied" });
     }),
   );
 });
