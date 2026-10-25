@@ -1,16 +1,20 @@
 import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
+  CustomModelSetting,
   EnvironmentConnectReachabilityCause,
   ExecutionEnvironmentDescriptor,
   IdleCompactionMode,
   OrchestratorMcpFailure,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ServerSettings,
   ServerRemoveKeybindingInput,
   ServerSettingsPatch,
   ServerUpsertKeybindingInput,
   ServerUpsertKeybindingResult,
   StorageCleanupReport,
+  TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
@@ -24,6 +28,13 @@ import * as Settings from "../../../serverSettings.ts";
 import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
+const ProviderInstanceView = Schema.Struct({
+  driver: ProviderDriverKind,
+  displayName: Schema.NullOr(Schema.String),
+  accentColor: Schema.NullOr(Schema.String),
+  enabled: Schema.Boolean,
+  customModels: Schema.Array(CustomModelSetting),
+});
 const PreferenceFields = {
   completionAudio: ServerSettings.fields.completionAudio,
   defaultThreadEnvMode: ServerSettings.fields.defaultThreadEnvMode,
@@ -47,6 +58,7 @@ const PreferenceFields = {
   continueThreadsAfterServerUpdate: ServerSettings.fields.continueThreadsAfterServerUpdate,
   responseStreamingMode: ServerSettings.fields.responseStreamingMode,
   defaultRuntimeMode: ServerSettings.fields.defaultRuntimeMode,
+  providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceView),
 };
 const shared = {
   failure: OrchestratorMcpFailure,
@@ -63,7 +75,7 @@ const shared = {
 const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
-    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. favorites and providerModelPreferences (hidden models, order, default model/options per provider instance id) are the stored model preferences. idleCompaction is the effective environment-wide mode. connect summarizes T3 Connect: whether this host is linked, the link was revoked, the managed tunnel is active, the sharing preferences, and the latest reachability check the server ran on its own; null when unavailable. Linking, unlinking, and Connect preferences stay in Settings.",
+    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. favorites and providerModelPreferences (hidden models, order, default model/options per provider instance id) are the stored model preferences. idleCompaction is the effective environment-wide mode. connect summarizes T3 Connect: whether this host is linked, the link was revoked, the managed tunnel is active, the sharing preferences, and the latest reachability check the server ran on its own; null when unavailable. Linking, unlinking, and Connect preferences stay in Settings. providerInstances lists every configured and built-in default provider instance with its display metadata, whether it is enabled, and its custom models.",
   success: Schema.Struct({
     environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
     label: Schema.String,
@@ -116,6 +128,18 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
     defaultRuntimeMode: ServerSettingsPatch.fields.defaultRuntimeMode,
   }),
   success: Schema.Struct(PreferenceFields),
+}).annotate(Tool.Destructive, true);
+const ProviderInstanceUpdateTool = Tool.make("t3_provider_instance_update", {
+  ...shared,
+  description:
+    "Edit one provider instance's metadata: customModels replaces its custom model list, displayName and accentColor set or (null) clear its label and colour. Requires a live full-access/default calling thread. Instance ids come from t3_environment_read providerInstances. Custom model slugs are passed to the provider CLI as model names. Executables, environment variables, credentials, login, install, enabling, and creating or removing instances stay in Settings. Returns the instance.",
+  parameters: Schema.Struct({
+    instanceId: ProviderInstanceId,
+    customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
+    displayName: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+    accentColor: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  }),
+  success: ProviderInstanceView,
 }).annotate(Tool.Destructive, true);
 const keybindings = {
   ...shared,
@@ -176,6 +200,7 @@ const StorageReportTool = Tool.make("t3_environment_storage_report", {
 export const EnvironmentToolkit = Toolkit.make(
   EnvironmentReadTool,
   EnvironmentPreferencesTool,
+  ProviderInstanceUpdateTool,
   KeybindingsListTool,
   KeybindingUpsertTool,
   KeybindingRemoveTool,

@@ -1,20 +1,30 @@
 import {
+  type CustomModelSetting,
+  CustomModelSetting as CustomModelSettingSchema,
   globalIdleCompaction,
   type KeybindingsConfigError,
   OrchestratorMcpFailure,
+  type ProviderDriverKind,
+  type ProviderInstanceConfig,
+  type ProviderInstanceId,
   type ResolvedKeybindingsConfig,
+  resolveProjectProviderInstanceEnabled,
   RuntimeMode,
   type ServerSettings,
   shouldRecommendDatabaseCompaction,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Record from "effect/Record";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Keybindings from "../../../keybindings.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as DatabaseStorage from "../../../persistence/DatabaseStorage.ts";
+import { BUILT_IN_DRIVERS } from "../../../provider/builtInDrivers.ts";
+import { deriveProviderInstanceConfigMap } from "../../../provider/ProviderInstanceRegistryHydration.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -23,6 +33,69 @@ import { resolveRuntimeMode } from "../../OrchestratorMcpService.ts";
 import { readCaller, unavailable } from "../../threadAccess.ts";
 import { EnvironmentToolkit } from "./tools.ts";
 
+const isCustomModelList = Schema.is(Schema.Array(CustomModelSettingSchema));
+const configRecord = (config: unknown): Record<string, unknown> =>
+  typeof config === "object" && config !== null && !Array.isArray(config) ? { ...config } : {};
+const storedCustomModels = (config: unknown): ReadonlyArray<CustomModelSetting> => {
+  const models = configRecord(config).customModels;
+  return isCustomModelList(models) ? models : [];
+};
+const customModelSlug = (model: CustomModelSetting) =>
+  typeof model === "string" ? model : model.slug;
+
+/** The driver schema's own `customModels` guard; undefined when it has none or is unknown. */
+const customModelsGuard = (driver: ProviderDriverKind) => {
+  const ast = BUILT_IN_DRIVERS.find((candidate) => candidate.driverKind === driver)?.configSchema
+    .ast;
+  const property =
+    ast?._tag === "Objects"
+      ? ast.propertySignatures.find((signature) => signature.name === "customModels")
+      : undefined;
+  return property === undefined ? undefined : Schema.is(Schema.make<Schema.Top>(property.type));
+};
+
+function providerInstanceView(
+  settings: ServerSettings,
+  instanceId: ProviderInstanceId,
+  instance: ProviderInstanceConfig,
+) {
+  return {
+    driver: instance.driver,
+    displayName: instance.displayName ?? null,
+    accentColor: instance.accentColor ?? null,
+    enabled: resolveProjectProviderInstanceEnabled(settings, null, instanceId),
+    customModels: storedCustomModels(instance.config),
+  };
+}
+
+/**
+ * Replaces the custom model list and drops concurrency caps of removed slugs,
+ * as the settings UI does. ponytail: a removed custom slug that shadows a
+ * built-in model also loses that model's cap; check the live model list if
+ * that matters.
+ */
+function withCustomModels(config: unknown, customModels: ReadonlyArray<CustomModelSetting>) {
+  const next = configRecord(config);
+  const caps = next.modelConcurrency;
+  if (typeof caps === "object" && caps !== null && !Array.isArray(caps)) {
+    const kept = new Set(customModels.map(customModelSlug));
+    const pruned = configRecord(caps);
+    for (const slug of storedCustomModels(config).map(customModelSlug)) {
+      if (!kept.has(slug)) delete pruned[slug];
+    }
+    if (Object.keys(pruned).length > 0) next.modelConcurrency = pruned;
+    else delete next.modelConcurrency;
+  }
+  next.customModels = customModels;
+  return next;
+}
+
+/**
+ * Every MCP output lands in a provider transcript, and `getSettings`
+ * materializes secrets (provider API keys, sensitive environment values), so
+ * handlers project fields explicitly and never return settings or a driver
+ * config blob.
+ */
 export function preferences(settings: ServerSettings) {
   const {
     completionAudio,
@@ -65,6 +138,10 @@ export function preferences(settings: ServerSettings) {
     continueThreadsAfterServerUpdate,
     responseStreamingMode,
     defaultRuntimeMode,
+    providerInstances: Record.map(
+      deriveProviderInstanceConfigMap(settings),
+      (instance, instanceId) => providerInstanceView(settings, instanceId, instance),
+    ),
   };
 }
 // Literals are declared narrowest first.
@@ -189,6 +266,63 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
         return preferences(updated);
       }),
     ),
+  ),
+  t3_provider_instance_update: McpToolAccess.writesEnvironment(
+    ({ instanceId, customModels, displayName, accentColor }, check) =>
+      underCallerLock(
+        check,
+        Effect.gen(function* () {
+          const { settings } = yield* access;
+          const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
+          const known = deriveProviderInstanceConfigMap(current)[instanceId];
+          if (known === undefined)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: `Unknown provider instance ${instanceId}.`,
+            });
+          const acceptsCustomModels = customModelsGuard(known.driver);
+          if (
+            customModels !== undefined &&
+            (acceptsCustomModels === undefined || !acceptsCustomModels(customModels))
+          )
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: `Provider instance ${instanceId} does not accept these custom models.`,
+            });
+          const updated = yield* settings
+            .updateProviderInstance((stored) => {
+              // Built from the persisted instance, so its environment and
+              // stored secrets are carried over without being materialized.
+              const base =
+                stored.providerInstances[instanceId] ??
+                deriveProviderInstanceConfigMap(stored)[instanceId];
+              // Removed while this waited for the lock: removing again is a no-op.
+              if (base === undefined) return { operation: "remove", instanceId };
+              return {
+                operation: "upsert",
+                instanceId,
+                instance: {
+                  ...base,
+                  displayName:
+                    displayName === undefined ? base.displayName : (displayName ?? undefined),
+                  accentColor:
+                    accentColor === undefined ? base.accentColor : (accentColor ?? undefined),
+                  ...(customModels === undefined
+                    ? {}
+                    : { config: withCustomModels(base.config, customModels) }),
+                },
+              };
+            })
+            .pipe(Effect.mapError(unavailable));
+          const instance = deriveProviderInstanceConfigMap(updated)[instanceId];
+          if (instance === undefined)
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: `Provider instance ${instanceId} was removed.`,
+            });
+          return providerInstanceView(updated, instanceId, instance);
+        }),
+      ),
   ),
   t3_keybindings_list: McpToolAccess.reads(() =>
     Effect.gen(function* () {

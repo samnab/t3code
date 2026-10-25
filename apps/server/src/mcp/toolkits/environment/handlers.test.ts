@@ -1,10 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  type CustomModelSetting,
   DEFAULT_SERVER_SETTINGS,
   type EnvironmentCloudLinkStateResult,
   EnvironmentId,
   type KeybindingCommand,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2ThreadShell,
@@ -13,6 +15,7 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -173,6 +176,8 @@ const countingSettings = (updates: Ref.Ref<number>) =>
   Layer.mock(Settings.ServerSettingsService)({
     getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
     updateSettings: () =>
+      Ref.update(updates, (count) => count + 1).pipe(Effect.as(DEFAULT_SERVER_SETTINGS)),
+    updateProviderInstance: () =>
       Ref.update(updates, (count) => count + 1).pipe(Effect.as(DEFAULT_SERVER_SETTINGS)),
   });
 
@@ -346,6 +351,15 @@ it.effect.each([
       );
     }).pipe(Effect.provide(environmentLayer(scope, caller, countingSettings(updates))));
     expect(result?.result).toMatchObject({ code: "capability_denied" });
+    const instanceWrite = yield* Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+      finalResult(
+        toolkit.handle("t3_provider_instance_update", {
+          instanceId: ProviderInstanceId.make("codex"),
+          customModels: ["denied-model"],
+        }),
+      ),
+    ).pipe(Effect.provide(environmentLayer(scope, caller, countingSettings(updates))));
+    expect(instanceWrite?.result).toMatchObject({ code: "capability_denied" });
     expect(yield* Ref.get(updates)).toBe(0);
   }),
 );
@@ -568,6 +582,140 @@ it.layer(
 
       yield* update({ defaultRuntimeMode: "approval-required" });
       expect(yield* stored).toMatchObject({ ...expected, defaultRuntimeMode: "approval-required" });
+    }),
+  );
+});
+
+// The real secret store, so stored API keys and sensitive environment values
+// survive a restart the way they do in production.
+const restartedSettingsWithSecrets = () =>
+  Layer.fresh(Settings.layer).pipe(Layer.provide(ServerSecretStore.layer));
+
+it.layer(
+  Layer.mergeAll(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3code-environment-instances-test-" }),
+    SqlitePersistence.layerMemory,
+  ).pipe(Layer.provideMerge(NodeServices.layer)),
+)("provider instance metadata", (it) => {
+  it.effect("edits custom models and labels without exposing or dropping secrets", () =>
+    Effect.gen(function* () {
+      const scope = threadScope();
+      const caller = liveThreadShell(threadId);
+      const work = ProviderInstanceId.make("antigravity_work");
+      const pi = ProviderInstanceId.make("pi_work");
+      const fork = ProviderInstanceId.make("fork_work");
+      const acp = ProviderInstanceId.make("acp_work");
+      const apiKey = "canary-api-key-4f1d";
+      const envSecret = "canary-env-secret-9b2e";
+      yield* Effect.flatMap(Settings.ServerSettingsService, (service) =>
+        service.updateSettings({
+          providerInstances: {
+            [work]: {
+              driver: ProviderDriverKind.make("antigravity"),
+              displayName: "Work",
+              enabled: false,
+              config: { apiKey, customModels: ["old-model"] },
+              environment: [{ name: "SECRET_TOKEN", value: envSecret, sensitive: true }],
+            },
+            [pi]: {
+              driver: ProviderDriverKind.make("pi"),
+              config: { customModels: ["keep", "drop"], modelConcurrency: { keep: 2, drop: 3 } },
+            },
+            [fork]: { driver: ProviderDriverKind.make("forkOnly") },
+            [acp]: { driver: ProviderDriverKind.make("acpRegistry") },
+          },
+        }),
+      ).pipe(Effect.provide(restartedSettingsWithSecrets()));
+      const outputs: Array<unknown> = [];
+      const call = (params: {
+        readonly instanceId: ProviderInstanceId;
+        readonly customModels?: ReadonlyArray<CustomModelSetting>;
+        readonly displayName?: string | null;
+        readonly accentColor?: string | null;
+      }) =>
+        Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+          finalResult(toolkit.handle("t3_provider_instance_update", params)),
+        ).pipe(
+          Effect.tap((result) => Effect.sync(() => outputs.push(result))),
+          Effect.provide(environmentLayer(scope, caller, restartedSettingsWithSecrets())),
+        );
+      const read = Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+        finalResult(toolkit.handle("t3_environment_read", {})),
+      ).pipe(
+        Effect.tap((result) => Effect.sync(() => outputs.push(result))),
+        Effect.provide(environmentLayer(scope, caller, restartedSettingsWithSecrets())),
+      );
+      const stored = reloadSettings.pipe(Effect.provide(restartedSettingsWithSecrets()));
+
+      expect((yield* read)?.encodedResult).toMatchObject({
+        preferences: {
+          providerInstances: {
+            codex: { driver: "codex", enabled: true, customModels: [] },
+            [work]: {
+              driver: "antigravity",
+              displayName: "Work",
+              accentColor: null,
+              enabled: false,
+              customModels: ["old-model"],
+            },
+          },
+        },
+      });
+
+      const edited = yield* call({
+        instanceId: work,
+        customModels: ["new-model", { slug: "named", name: "Named" }],
+        displayName: null,
+        accentColor: "violet",
+      });
+      expect(edited?.encodedResult).toEqual({
+        driver: "antigravity",
+        displayName: null,
+        accentColor: "violet",
+        enabled: false,
+        customModels: ["new-model", { slug: "named", name: "Named" }],
+      });
+      const afterEdit = yield* stored;
+      expect(afterEdit.providerInstances[work]).toMatchObject({
+        enabled: false,
+        accentColor: "violet",
+        config: { apiKey, customModels: ["new-model", { slug: "named", name: "Named" }] },
+        environment: [{ name: "SECRET_TOKEN", value: envSecret, sensitive: true }],
+      });
+      expect(afterEdit.providerInstances[work]?.displayName).toBeUndefined();
+
+      yield* call({ instanceId: pi, customModels: ["keep"] });
+      expect((yield* stored).providerInstances[pi]?.config).toMatchObject({
+        customModels: ["keep"],
+        modelConcurrency: { keep: 2 },
+      });
+
+      // An implicit built-in default instance is stored on first edit.
+      yield* call({ instanceId: ProviderInstanceId.make("codex"), displayName: "Personal" });
+      expect((yield* stored).providerInstances[ProviderInstanceId.make("codex")]).toEqual({
+        driver: "codex",
+        displayName: "Personal",
+      });
+
+      const before = yield* stored;
+      for (const refused of [
+        { instanceId: ProviderInstanceId.make("missing"), displayName: "Nope" },
+        { instanceId: fork, customModels: ["x"] },
+        { instanceId: acp, customModels: [{ slug: "object-entry" }] },
+      ]) {
+        expect((yield* call(refused))?.result).toMatchObject({ code: "invalid_request" });
+      }
+      expect(yield* stored).toEqual(before);
+      yield* read;
+
+      const config = yield* ServerConfig.ServerConfig;
+      const disk = yield* Effect.flatMap(FileSystem.FileSystem, (fs) =>
+        fs.readFileString(config.settingsPath),
+      );
+      for (const canary of [apiKey, envSecret]) {
+        expect(JSON.stringify(outputs)).not.toContain(canary);
+        expect(disk).not.toContain(canary);
+      }
     }),
   );
 });
