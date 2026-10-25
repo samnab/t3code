@@ -195,7 +195,8 @@ export interface RealtimeVoiceCallLayout<Row> {
 }
 
 /**
- * Groups voice items into calls for web and mobile. Calls without spoken lines render nothing.
+ * Groups voice items into calls for web and mobile by their start and end markers in order.
+ * Calls without spoken lines render nothing.
  * A "Voice history incomplete" warning names no realtime session, so it joins the latest call
  * before it; with no such call it stays a standalone row.
  */
@@ -211,7 +212,9 @@ export function layoutRealtimeVoiceCalls<Row extends { readonly item: Orchestrat
     failed: boolean;
     hasLines: boolean;
   }
-  const drafts = new Map<string, Draft>();
+  const calls: Draft[] = [];
+  // Codex reuses one realtime session id for every call in a thread, so markers split calls.
+  const openCallBySession = new Map<string, Draft>();
   let latest: Draft | undefined;
   for (const row of rows) {
     const item = row.item;
@@ -219,10 +222,15 @@ export function layoutRealtimeVoiceCalls<Row extends { readonly item: Orchestrat
       latest?.warnings.push({ row, message: item.failure.message });
       continue;
     }
-    if (item.type !== "realtime_voice") continue;
+    if (item.type !== "realtime_voice" || item.content.type === "bemItemPromoted") continue;
     const key = `${item.nativeThreadId}\u0000${item.realtimeSessionId}`;
-    let draft = drafts.get(key);
-    if (draft === undefined) {
+    let draft = openCallBySession.get(key);
+    // A start always opens a call; after an end, recovered lines without a start open one too.
+    if (
+      draft === undefined ||
+      item.content.type === "realtimeSessionStarted" ||
+      draft.endedAt !== undefined
+    ) {
       draft = {
         host: undefined,
         markers: [],
@@ -232,7 +240,8 @@ export function layoutRealtimeVoiceCalls<Row extends { readonly item: Orchestrat
         failed: false,
         hasLines: false,
       };
-      drafts.set(key, draft);
+      calls.push(draft);
+      openCallBySession.set(key, draft);
     }
     latest = draft;
     const at = item.startedAt ?? item.updatedAt;
@@ -252,7 +261,7 @@ export function layoutRealtimeVoiceCalls<Row extends { readonly item: Orchestrat
   }
   const callByHostRow = new Map<Row, RealtimeVoiceCall>();
   const foldedRows = new Set<Row>();
-  for (const draft of drafts.values()) {
+  for (const draft of calls) {
     for (const marker of draft.markers)
       if (marker !== draft.host || !draft.hasLines) foldedRows.add(marker);
     if (!draft.hasLines || draft.host === undefined || draft.startedAt === undefined) continue;
