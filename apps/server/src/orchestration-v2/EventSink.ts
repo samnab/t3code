@@ -1,4 +1,5 @@
 import {
+  TurnItemId,
   CommandId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
@@ -345,19 +346,47 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
+      // Check durable state inside the write transaction, including duplicates in one batch.
+      const seenVoiceItems = new Set<TurnItemId>();
       return Effect.forEach(
         events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
+        (event): Effect.Effect<ReadonlyArray<OrchestrationV2DomainEvent>, unknown> =>
+          Effect.gen(function* () {
+            if (event.type !== "turn-item.updated") return [event];
+            if (event.payload.type === "realtime_voice") {
+              if (seenVoiceItems.has(event.payload.id)) return [];
+              seenVoiceItems.add(event.payload.id);
+              const existing = yield* sql<{
+                readonly thread_id: string;
+                readonly capture_state: string | null;
+              }>`
+                SELECT thread_id, json_extract(payload_json, '$.captureState') AS capture_state
+                FROM orchestration_v2_projection_turn_items
+                WHERE turn_item_id = ${event.payload.id} LIMIT 1
+              `;
+              if (existing[0] !== undefined) {
+                if (existing[0].thread_id !== event.threadId) {
+                  yield* Effect.logWarning("orchestration-v2.voice-item.owner-mismatch", {
+                    threadId: event.threadId,
+                  });
+                  return [];
+                }
+                // Only a provider commit may replace a stored tail; nothing replaces a commit.
+                if (
+                  existing[0].capture_state === "canonical_completed" ||
+                  event.payload.captureState !== "canonical_completed"
                 )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
+                  return [];
+              }
+            }
+            const payload = yield* turnItemPositions.normalize(
+              event.payload,
+              event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
+            );
+            return [{ ...event, payload }];
+          }),
         { concurrency: 1 },
-      );
+      ).pipe(Effect.map((batches) => batches.flat()));
     };
 
     const applyStoredEvents =

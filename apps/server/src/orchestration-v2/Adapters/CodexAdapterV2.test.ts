@@ -259,6 +259,67 @@ describe("CodexAdapterV2 process spawning", () => {
 });
 
 describe("CodexAdapterV2 native protocol logging", () => {
+  it.effect(
+    "omits timeline requests, transcript replies, and provider error payloads from protocol logs",
+    () =>
+      Effect.gen(function* () {
+        const writes: unknown[] = [];
+        const logger = CodexAdapterV2.makeCodexAppServerProtocolLogger({
+          nativeEventLogger: {
+            filePath: "/tmp/synthetic.log",
+            write: (event) =>
+              Effect.sync(() => {
+                writes.push(event);
+              }),
+            close: () => Effect.void,
+          },
+          threadId: ThreadId.make("history-log"),
+          providerSessionId: ProviderSessionId.make("history-log-session"),
+        });
+        assert.isDefined(logger);
+        if (logger === undefined) return;
+        for (const id of [3, "4"]) {
+          yield* logger({
+            direction: "outgoing",
+            stage: "decoded",
+            payload: {
+              id,
+              method: "thread/timeline/list",
+              params: { threadId: "native", cursor: "private-cursor" },
+            },
+          });
+          yield* logger({ direction: "incoming", stage: "raw", payload: "private-transcript" });
+          yield* logger({
+            direction: "incoming",
+            stage: "decode_failed",
+            payload: { unsafeFixture: "private-transcript" },
+          });
+          yield* logger({
+            direction: "incoming",
+            stage: "decoded",
+            payload:
+              id === 3
+                ? { id, result: { data: [{ text: "private-transcript" }] } }
+                : {
+                    id,
+                    error: {
+                      code: -32000,
+                      message: "private-transcript",
+                      data: "private-transcript",
+                    },
+                  },
+          });
+        }
+        assert.isEmpty(writes);
+        yield* logger({
+          direction: "incoming",
+          stage: "decoded",
+          payload: { id: 5, result: { safeOtherResponse: true } },
+        });
+        assert.lengthOf(writes, 1);
+      }),
+  );
+
   it.effect("logs decoded app-server frames once with credentials redacted", () =>
     Effect.gen(function* () {
       const writes: Array<{
@@ -911,6 +972,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
     onResponse: (method: string) => Effect.Effect<void> = () => Effect.void,
+    onNotification: (method: string) => Effect.Effect<void> = () => Effect.void,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -943,6 +1005,18 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      handleServerNotification: (method, handler) =>
+                        client.handleServerNotification(method, (payload) =>
+                          handler(payload).pipe(Effect.tap(() => onNotification(method))),
+                        ),
+                      raw: {
+                        ...client.raw,
+                        request: (method, params) =>
+                          onRequest(method, params).pipe(
+                            Effect.andThen(client.raw.request(method, params)),
+                            Effect.tap(() => onResponse(method)),
+                          ),
+                      },
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
@@ -1038,6 +1112,808 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
     });
 
+  it.effect(
+    "reads two synthetic timeline pages with opaque cursors and overlap without executing history",
+    () =>
+      Effect.gen(function* () {
+        const nativeId = "history-pages";
+        const realtime = (position: number, role: "user" | "assistant") => ({
+          type: "realtime",
+          position,
+          item: {
+            type: "transcriptSegment",
+            id: `segment-${position}`,
+            realtimeSessionId: "reused-session-id",
+            role,
+            text: "Synthetic history",
+          },
+        });
+        const pages = [
+          {
+            data: [
+              { type: "turnStarted", position: 1, turn_id: "old-turn" },
+              {
+                type: "item",
+                position: 2,
+                turnId: "old-turn",
+                item: {
+                  type: "userMessage",
+                  id: "old-user",
+                  content: [{ type: "text", text: "Historical command" }],
+                },
+              },
+              realtime(3, "user"),
+            ],
+            activeRealtimeSessionAtPageStart: null,
+            nextCursor: "opaque/%?cursor",
+          },
+          {
+            data: [
+              realtime(3, "user"),
+              realtime(4, "assistant"),
+              { type: "turnCompleted", position: 5, turn_id: "old-turn", status: "completed" },
+            ],
+            activeRealtimeSessionAtPageStart: "reused-session-id",
+            nextCursor: null,
+          },
+        ];
+        const requests: string[] = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: nativeId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 3 },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 3, result: pages[0] } },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 3, cursor: "opaque/%?cursor" },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: pages[1] } },
+            ],
+          }),
+          undefined,
+          (method) =>
+            Effect.sync(() => {
+              requests.push(method);
+            }),
+        );
+        const first = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+          limit: 3,
+        });
+        assert.equal(first.type, "page");
+        if (first.type !== "page") return;
+        assert.equal(first.threadId, harness.threadId);
+        assert.equal(first.providerThreadId, harness.providerThread.id);
+        assert.equal(first.nativeThreadId, nativeId);
+        assert.equal(first.providerSessionId, harness.providerThread.providerSessionId);
+        assert.equal(first.providerInstanceId, harness.providerThread.providerInstanceId);
+        assert.deepEqual(first.entries[1], {
+          type: "item",
+          position: 2,
+          nativeTurnId: "old-turn",
+          nativeItemId: "old-user",
+          itemType: "userMessage",
+        });
+        const second = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+          limit: 3,
+          cursor: first.nextCursor,
+        });
+        assert.equal(second.type, "page");
+        if (second.type !== "page") return;
+        assert.deepEqual(second.entries[0], first.entries[2]);
+        assert.isNull(second.nextCursor);
+        assert.equal(second.activeRealtimeSessionAtPageStart, "reused-session-id");
+        assert.deepEqual(requests, [
+          "initialize",
+          "thread/start",
+          "thread/timeline/list",
+          "thread/timeline/list",
+        ]);
+        assert.isEmpty(harness.events);
+        assert.isEmpty(harness.continuationRequests);
+        assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each(["unsupported", "fault", "malformed"])(
+    "handles timeline %s without fallback or payload-bearing errors",
+    (kind) =>
+      Effect.gen(function* () {
+        const nativeId = `history-${kind}`;
+        const requests: string[] = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: nativeId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame:
+                  kind === "malformed"
+                    ? { id: 3, result: { data: [{ type: "secret-invalid-transcript" }] } }
+                    : {
+                        id: 3,
+                        error: {
+                          code: kind === "unsupported" ? -32601 : -32000,
+                          message: "secret-invalid-transcript",
+                          data: "secret-invalid-transcript",
+                        },
+                      },
+              },
+            ],
+          }),
+          undefined,
+          (method) =>
+            Effect.sync(() => {
+              requests.push(method);
+            }),
+        );
+        const result = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.result);
+        if (kind === "unsupported") {
+          assert.equal(result._tag, "Success");
+          if (result._tag === "Success") assert.equal(result.success.type, "unsupported");
+        } else {
+          assert.equal(result._tag, "Failure");
+          assert.notInclude(JSON.stringify(result), "secret-invalid-transcript");
+        }
+        assert.deepEqual(requests, ["initialize", "thread/start", "thread/timeline/list"]);
+        assert.isEmpty(harness.events);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect(
+    "rejects wrong bindings before RPC and an unload/reload ABA while a page is pending",
+    () =>
+      Effect.gen(function* () {
+        const nativeId = "history-binding-race";
+        const responseReceived = yield* Deferred.make<void>();
+        const releaseResponse = yield* Deferred.make<void>();
+        let historyResponses = 0;
+        const preamble = codexReplayPreamble({
+          nativeThreadId: nativeId,
+          nativeTurnId: "unused",
+          prompt: "unused",
+        });
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...preamble.slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 3, result: { data: [] } } },
+              {
+                type: "expect_outbound",
+                frame: { id: 4, method: "thread/unsubscribe", params: { threadId: nativeId } },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: { status: "unsubscribed" } } },
+              ...preamble.slice(3, 5).map((entry) => withReplayRequestId(entry, 5)),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 6,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 6, result: { data: [] } } },
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (method) =>
+            Effect.gen(function* () {
+              if (method !== "thread/timeline/list" || ++historyResponses !== 1) return;
+              yield* Deferred.succeed(responseReceived, undefined);
+              yield* Deferred.await(releaseResponse);
+            }),
+        );
+        for (const providerThread of [
+          { ...harness.providerThread, id: ProviderThreadId.make("unknown-provider-thread") },
+          { ...harness.providerThread, appThreadId: ThreadId.make("foreign-app") },
+          {
+            ...harness.providerThread,
+            providerSessionId: ProviderSessionId.make("foreign-session"),
+          },
+          {
+            ...harness.providerThread,
+            providerInstanceId: ProviderInstanceId.make("foreign-instance"),
+          },
+          {
+            ...harness.providerThread,
+            nativeThreadRef: {
+              driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+              nativeId: "foreign-native",
+              strength: "strong",
+            },
+          } satisfies OrchestrationV2ProviderThread,
+        ]) {
+          yield* harness.runtime.readRealtimeHistoryPage!({ providerThread }).pipe(Effect.flip);
+        }
+        yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+          limit: 76,
+        }).pipe(Effect.flip);
+        const pending = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(responseReceived);
+        yield* harness.runtime.unloadThread!({ providerThread: harness.providerThread });
+        yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.flip);
+        const reloaded = yield* harness.runtime.ensureThread({
+          threadId: harness.threadId,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        });
+        yield* Deferred.succeed(releaseResponse, undefined);
+        assert.equal((yield* Fiber.join(pending))._tag, "Failure");
+        assert.equal(
+          (yield* harness.runtime.readRealtimeHistoryPage!({ providerThread: reloaded })).type,
+          "page",
+        );
+        assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+        assert.isEmpty(harness.events);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each([true, false])(
+    "invalidates only the matching loaded binding on native close: %s",
+    (matching) =>
+      Effect.gen(function* () {
+        const nativeId = `history-close-${matching}`;
+        const closedHandled = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: nativeId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "thread/closed",
+                  params: { threadId: matching ? nativeId : "unrelated-native" },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 3, result: { data: [] } } },
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (method) =>
+            method === "thread/timeline/list" ? Deferred.await(closedHandled) : Effect.void,
+          (method) =>
+            method === "thread/closed"
+              ? Deferred.succeed(closedHandled, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        );
+        const result = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.result);
+        assert.equal(result._tag, matching ? "Failure" : "Success");
+        assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each(["cancel", "timeout"])(
+    "bounds a pending history read and allows later reads after %s",
+    (mode) =>
+      Effect.gen(function* () {
+        const nativeId = `history-${mode}`;
+        const responseBlocked = yield* Deferred.make<void>();
+        const releaseResponse = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: nativeId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: nativeId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "blocked-page",
+                frame: { id: 3, result: { data: [] } },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "thread/timeline/list",
+                  params: { threadId: nativeId, limit: 75 },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: { data: [] } } },
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          (entry) =>
+            entry.label === "blocked-page"
+              ? Deferred.succeed(responseBlocked, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseResponse)),
+                )
+              : Effect.void,
+        );
+        const pending = yield* harness.runtime.readRealtimeHistoryPage!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(responseBlocked);
+        if (mode === "cancel") yield* Fiber.interrupt(pending);
+        else {
+          yield* TestClock.adjust("10 seconds");
+          const result = yield* Fiber.join(pending);
+          assert.equal(result._tag, "Failure");
+          assert.notInclude(JSON.stringify(result), "Synthetic");
+        }
+        yield* Deferred.succeed(releaseResponse, undefined);
+        assert.equal(
+          (yield* harness.runtime.readRealtimeHistoryPage!({
+            providerThread: harness.providerThread,
+          })).type,
+          "page",
+        );
+        assert.isEmpty(harness.events);
+        assert.isNull((yield* Ref.get(harness.replayDriver.state)).failure);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  const voiceStartEntries = (
+    threadId: string,
+    id: number,
+  ): Array<CodexReplay.CodexAppServerReplayEntry> => [
+    {
+      type: "expect_outbound",
+      frame: {
+        id,
+        method: "thread/realtime/start",
+        params: {
+          threadId,
+          outputModality: "audio",
+          version: "v3",
+          transport: { type: "webrtc", sdp: "offer" },
+        },
+      },
+    },
+    { type: "emit_inbound", frame: { id, result: {} } },
+    {
+      type: "emit_inbound",
+      frame: {
+        method: "thread/realtime/started",
+        params: { threadId, realtimeSessionId: threadId, version: "v3" },
+      },
+    },
+    {
+      type: "emit_inbound",
+      frame: { method: "thread/realtime/sdp", params: { threadId, sdp: "answer" } },
+    },
+  ];
+  const voiceStopEntries = (
+    threadId: string,
+    id: number,
+  ): Array<CodexReplay.CodexAppServerReplayEntry> => [
+    {
+      type: "expect_outbound",
+      frame: { id, method: "thread/realtime/stop", params: { threadId } },
+    },
+    { type: "emit_inbound", frame: { id, result: {} } },
+    {
+      type: "emit_inbound",
+      frame: { method: "thread/realtime/closed", params: { threadId, reason: "stopped" } },
+    },
+  ];
+  const finalAnswerEntries = (
+    threadId: string,
+    turnId: string,
+  ): Array<CodexReplay.CodexAppServerReplayEntry> => [
+    {
+      type: "emit_inbound",
+      frame: {
+        method: "item/completed",
+        params: {
+          threadId,
+          turnId,
+          item: {
+            type: "agentMessage",
+            id: `${turnId}-final`,
+            text: "Selected final",
+            phase: "final_answer",
+            memoryCitation: null,
+          },
+        },
+      },
+    },
+    {
+      type: "emit_inbound",
+      frame: {
+        method: "turn/completed",
+        params: { threadId, turn: makeCodexReplayTurn({ id: turnId, status: "completed" }) },
+      },
+    },
+  ];
+
+  it.effect(
+    "ignores final items and terminal notifications attributed to an unrelated native thread",
+    () =>
+      Effect.gen(function* () {
+        const threadId = "voice-native-binding";
+        const turnId = "bound-turn";
+        const preamble = codexReplayPreamble({
+          nativeThreadId: threadId,
+          nativeTurnId: turnId,
+          prompt: "Request",
+        });
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: threadId,
+            entries: [
+              ...preamble.slice(0, 5),
+              ...voiceStartEntries(threadId, 3),
+              ...preamble
+                .slice(5)
+                .map((entry, index) => (index < 2 ? withReplayRequestId(entry, 4) : entry)),
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: "foreign-thread",
+                    turnId,
+                    item: {
+                      type: "agentMessage",
+                      id: "foreign-final",
+                      text: "Foreign final",
+                      phase: "final_answer",
+                      memoryCitation: null,
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: "foreign-thread",
+                    turn: makeCodexReplayTurn({ id: turnId, status: "completed" }),
+                  },
+                },
+              },
+              ...finalAnswerEntries(threadId, turnId),
+              ...voiceStopEntries(threadId, 5),
+            ],
+          }),
+        );
+        yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        });
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(threadId),
+            text: "Request",
+          }),
+        );
+        yield* harness.firstTerminal;
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const answers = new Set(
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+              ? [event.turnItem.text]
+              : [],
+          ),
+        );
+        assert.isFalse(answers.has("Foreign final"));
+        assert.isTrue(answers.has("Selected final"));
+        assert.equal(harness.terminalEvents().length, 1);
+        const replay = yield* Ref.get(harness.replayDriver.state);
+        assert.isNull(replay.failure);
+        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect(
+    "releases a definitively rejected native start without waiting for a nonexistent close",
+    () =>
+      Effect.gen(function* () {
+        const threadId = "voice-rejected-start";
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: threadId,
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId: threadId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              voiceStartEntries(threadId, 3)[0]!,
+              {
+                type: "emit_inbound",
+                frame: { id: 3, error: { code: -32601, message: "Method not found" } },
+              },
+              ...voiceStartEntries(threadId, 4),
+              ...voiceStopEntries(threadId, 5),
+            ],
+          }),
+        );
+        const rejected = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result);
+        const pinnedAfterRejection = yield* harness.runtime.hasActiveRealtimeVoice!();
+        const replacement = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result);
+        assert.deepEqual(
+          { rejection: rejected._tag, pinnedAfterRejection, replacement: replacement._tag },
+          { rejection: "Failure", pinnedAfterRejection: false, replacement: "Success" },
+        );
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const replay = yield* Ref.get(harness.replayDriver.state);
+        assert.isNull(replay.failure);
+        assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each([
+    "internal-error",
+    "invalid-params",
+    "observed-native-start",
+    "observed-sdp",
+  ] as const)("keeps an uncertain %s startup quarantined through orphan expiry", (mode) =>
+    Effect.gen(function* () {
+      const threadId = `voice-start-uncertain-${mode}`;
+      const observed = mode === "observed-native-start" || mode === "observed-sdp";
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: threadId,
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId: threadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            voiceStartEntries(threadId, 3)[0]!,
+            ...(observed
+              ? [
+                  {
+                    type: "emit_inbound" as const,
+                    frame:
+                      mode === "observed-native-start"
+                        ? {
+                            method: "thread/realtime/started",
+                            params: { threadId, realtimeSessionId: threadId, version: "v3" },
+                          }
+                        : {
+                            method: "thread/realtime/sdp",
+                            params: { threadId, sdp: "answer-before-error" },
+                          },
+                  },
+                ]
+              : []),
+            {
+              type: "emit_inbound",
+              frame: {
+                id: 3,
+                error: {
+                  code: observed ? -32601 : mode === "invalid-params" ? -32602 : -32603,
+                  message: "Rejected with uncertain session state",
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: { id: 4, method: "thread/realtime/stop", params: { threadId } },
+            },
+            {
+              type: "emit_inbound",
+              frame: { id: 4, error: { code: -32603, message: "Stop outcome unknown" } },
+            },
+          ],
+        }),
+      );
+      const started = yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      }).pipe(Effect.result);
+      assert.equal(started._tag, "Failure");
+      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      assert.equal(
+        (yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      yield* TestClock.adjust("4 hours");
+      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      assert.equal(
+        (yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("does not free an uncertain timed-out start when no native closure arrives", () =>
+    Effect.gen(function* () {
+      const threadId = "voice-start-timeout-quarantine";
+      const startAcknowledged = yield* Deferred.make<void>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: threadId,
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId: threadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            voiceStartEntries(threadId, 3)[0]!,
+            { type: "emit_inbound", frame: { id: 3, result: {} } },
+            {
+              type: "expect_outbound",
+              frame: { id: 4, method: "thread/realtime/stop", params: { threadId } },
+            },
+            {
+              type: "emit_inbound",
+              frame: { id: 4, error: { code: -32603, message: "Stop outcome unknown" } },
+            },
+          ],
+        }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (method) =>
+          method === "thread/realtime/start"
+            ? Deferred.succeed(startAcknowledged, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      const started = yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      }).pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(startAcknowledged);
+      yield* TestClock.adjust("20 seconds");
+      assert.equal((yield* Fiber.join(started))._tag, "Failure");
+      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      assert.equal(
+        (yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      yield* TestClock.adjust("4 hours");
+      assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      assert.equal(
+        (yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        }).pipe(Effect.result))._tag,
+        "Failure",
+      );
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect("starts realtime voice with the matching SDP notification and stops it", () =>
     Effect.gen(function* () {
       const nativeThreadId = "voice-sdp-thread";
@@ -1098,6 +1974,520 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
+  );
+
+  it.effect(
+    "captures canonical voice completions without adopting transcript history as work",
+    () =>
+      Effect.gen(function* () {
+        const nativeThreadId = "voice-sdp-thread";
+        const transcript = makeCodexReplayTranscript({
+          scenario: "voice-sdp",
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "thread/realtime/start",
+                params: {
+                  threadId: nativeThreadId,
+                  outputModality: "audio",
+                  version: "v3",
+                  transport: { type: "webrtc", sdp: "offer" },
+                },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 3, result: {} } },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/sdp",
+                params: { threadId: "unrelated", sdp: "wrong-answer" },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/item/started",
+                params: {
+                  threadId: nativeThreadId,
+                  item: {
+                    id: "user",
+                    realtimeSessionId: "old",
+                    type: "transcriptSegment",
+                    role: "user",
+                    text: "provisional",
+                  },
+                },
+              },
+            },
+            ...[
+              {
+                threadId: nativeThreadId,
+                item: { id: "opened", realtimeSessionId: "old", type: "realtimeSessionStarted" },
+              },
+              {
+                threadId: "unbound",
+                item: {
+                  id: "unknown",
+                  realtimeSessionId: "old",
+                  type: "transcriptSegment",
+                  role: "user",
+                  text: "wrong thread",
+                },
+              },
+              ...["user", "assistant"].map((role) => ({
+                threadId: nativeThreadId,
+                item: {
+                  id: role,
+                  realtimeSessionId: "old",
+                  type: "transcriptSegment",
+                  role,
+                  text: "yes",
+                },
+              })),
+              {
+                threadId: nativeThreadId,
+                item: {
+                  id: "user",
+                  realtimeSessionId: "new",
+                  type: "transcriptSegment",
+                  role: "user",
+                  text: "yes",
+                },
+              },
+              {
+                threadId: nativeThreadId,
+                item: {
+                  id: "promotion",
+                  realtimeSessionId: "old",
+                  type: "bemItemPromoted",
+                  item_id: "coding-item",
+                  turn_id: "coding-turn",
+                  presentation: { type: "wholeItem" },
+                },
+              },
+              {
+                threadId: nativeThreadId,
+                item: {
+                  id: "closed",
+                  realtimeSessionId: "old",
+                  type: "realtimeSessionClosed",
+                  outcome: "ended",
+                },
+              },
+            ].map((params) => ({
+              type: "emit_inbound" as const,
+              frame: { method: "thread/realtime/item/completed", params },
+            })),
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/item/transcript/delta",
+                params: { threadId: nativeThreadId, itemId: "user", delta: "late must not append" },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/transcript/done",
+                params: { threadId: nativeThreadId, role: "user", text: "flat must not duplicate" },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/sdp",
+                params: { threadId: nativeThreadId, sdp: "answer" },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/realtime/stop",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        assert.deepEqual(
+          yield* harness.runtime.startRealtimeVoice!({
+            providerThread: harness.providerThread,
+            sdp: "offer",
+          }),
+          { sdp: "answer" },
+        );
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const voiceItems = () =>
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "realtime_voice"
+              ? [event.turnItem]
+              : [],
+          );
+        yield* harness.until(() => voiceItems().length === 6);
+        const items = voiceItems();
+        assert.equal(new Set(items.map((item) => item.id)).size, 6);
+        assert.deepEqual(
+          items
+            .slice(1, 4)
+            .map((item) => (item.content.type === "transcriptSegment" ? item.content.text : null)),
+          ["yes", "yes", "yes"],
+        );
+        assert.deepEqual(
+          items.slice(1, 4).map((item) => item.realtimeSessionId),
+          ["old", "old", "new"],
+        );
+        assert.isTrue(items.every((item) => item.runId === null && item.nodeId === null));
+        assert.lengthOf(harness.continuationRequests, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each([false, true] as const)(
+    "keeps uncommitted streamed tails as honest capture states (session error %s)",
+    (failed) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "voice-tail-thread";
+        const emit = (method: string, params: Record<string, unknown>) => ({
+          type: "emit_inbound" as const,
+          frame: { method, params: { threadId: nativeThreadId, ...params } },
+        });
+        const segment = (id: string, role: "user" | "assistant", text: string) => ({
+          item: { id, realtimeSessionId: "session", type: "transcriptSegment", role, text },
+        });
+        const transcript = makeCodexReplayTranscript({
+          scenario: "voice-tail",
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "thread/realtime/start",
+                params: {
+                  threadId: nativeThreadId,
+                  outputModality: "audio",
+                  version: "v3",
+                  transport: { type: "webrtc", sdp: "offer" },
+                },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 3, result: {} } },
+            emit("thread/realtime/item/started", segment("spoken", "user", "hel")),
+            emit("thread/realtime/item/transcript/delta", { itemId: "spoken", delta: "lo" }),
+            emit("thread/realtime/item/transcript/delta", { itemId: "unknown", delta: "stray" }),
+            emit("thread/realtime/item/started", segment("silent", "user", "")),
+            emit("thread/realtime/item/started", segment("reply", "assistant", "")),
+            emit("thread/realtime/item/transcript/delta", { itemId: "reply", delta: "streamed" }),
+            emit("thread/realtime/item/completed", segment("reply", "assistant", "committed")),
+            emit("thread/realtime/sdp", { sdp: "answer" }),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/realtime/stop",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+            ...(failed ? [emit("thread/realtime/error", { message: "transport lost" })] : []),
+            emit("thread/realtime/closed", { reason: "stopped" }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+        });
+        yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+        const voiceItems = () =>
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "realtime_voice"
+              ? [event.turnItem]
+              : [],
+          );
+        yield* harness.until(() => voiceItems().length === 2);
+        const [reply, spoken] = voiceItems();
+        assert.equal(reply?.captureState, "canonical_completed");
+        assert.equal(
+          reply?.content.type === "transcriptSegment" ? reply.content.text : null,
+          "committed",
+        );
+        assert.equal(spoken?.nativeRealtimeItemId, "spoken");
+        assert.equal(spoken?.captureState, failed ? "interrupted" : "incomplete");
+        assert.equal(spoken?.status, "interrupted");
+        assert.equal(
+          spoken?.content.type === "transcriptSegment" ? spoken.content.text : null,
+          "hello",
+        );
+        assert.lengthOf(harness.continuationRequests, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each(["", "reused-native-session"] as const)(
+    "rejects legacy and stale owner stops with native session identity %s",
+    (nativeSessionId) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "modern-voice-owner";
+        const start = (id: number) => ({
+          type: "expect_outbound" as const,
+          frame: {
+            id,
+            method: "thread/realtime/start",
+            params: {
+              threadId: nativeThreadId,
+              outputModality: "audio",
+              version: "v3",
+              transport: { type: "webrtc", sdp: "offer" },
+            },
+          },
+        });
+        const answer = (id: number) => [
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "thread/realtime/started",
+              params: {
+                threadId: nativeThreadId,
+                version: "v3",
+                realtimeSessionId: nativeSessionId,
+              },
+            },
+          },
+          { type: "emit_inbound" as const, frame: { id, result: {} } },
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "thread/realtime/sdp",
+              params: { threadId: nativeThreadId, sdp: "answer" },
+            },
+          },
+        ];
+        const stop = (id: number) => [
+          {
+            type: "expect_outbound" as const,
+            frame: { id, method: "thread/realtime/stop", params: { threadId: nativeThreadId } },
+          },
+          { type: "emit_inbound" as const, frame: { id, result: {} } },
+          {
+            type: "emit_inbound" as const,
+            frame: {
+              method: "thread/realtime/closed",
+              params: { threadId: nativeThreadId, reason: "stopped" },
+            },
+          },
+        ];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "modern-voice-owner",
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              start(3),
+              ...answer(3),
+              ...stop(4),
+              start(5),
+              ...answer(5),
+              ...stop(6),
+            ],
+          }),
+        );
+        const first = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "owner-a",
+        });
+        const legacyStop = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(legacyStop));
+        if (first.voiceSessionToken === undefined)
+          return yield* Effect.die("Modern voice must return an ownership token.");
+        assert.equal(first.operationId, "owner-a");
+        assert.equal(first.nativeRealtimeSessionId, nativeSessionId || undefined);
+        assert.equal(first.providerSessionId, harness.runtime.providerSessionId);
+        assert.equal(first.providerThreadId, harness.providerThread.id);
+        assert.isTrue(yield* harness.runtime.hasActiveRealtimeVoice!());
+        assert.isFalse(
+          yield* harness.runtime.hasActiveRealtimeVoice!({
+            ...harness.providerThread,
+            nativeThreadRef: {
+              driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+              nativeId: "another-thread",
+              strength: "strong",
+            },
+          }),
+        );
+        const duplicate = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "owner-b",
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(duplicate));
+        const wrongToken = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-a",
+          voiceSessionToken: "wrong-token",
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(wrongToken));
+        yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-a",
+          voiceSessionToken: first.voiceSessionToken,
+        });
+        assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+        const reusedOperation = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "owner-a",
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(reusedOperation));
+        const second = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "owner-b",
+        });
+        if (second.voiceSessionToken === undefined)
+          return yield* Effect.die("Modern voice must return an ownership token.");
+        assert.notEqual(second.voiceSessionToken, first.voiceSessionToken);
+        assert.equal(second.nativeRealtimeSessionId, first.nativeRealtimeSessionId);
+        const stale = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-a",
+          voiceSessionToken: first.voiceSessionToken,
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(stale));
+        const wrongOwner = yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "other-device",
+          voiceSessionToken: second.voiceSessionToken,
+        }).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(wrongOwner));
+        assert.isTrue(yield* harness.runtime.hasActiveRealtimeVoice!());
+        yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-b",
+          voiceSessionToken: second.voiceSessionToken,
+        });
+        yield* harness.runtime.stopRealtimeVoice!({
+          providerThread: harness.providerThread,
+          operationId: "owner-b",
+          voiceSessionToken: second.voiceSessionToken,
+        });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect(
+    "bounds orphaned voice without a heartbeat and releases its reservation on native closure",
+    () =>
+      Effect.gen(function* () {
+        const drained = yield* Deferred.make<void>();
+        const nativeThreadId = "bounded-voice";
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "bounded-voice",
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 3,
+                  method: "thread/realtime/start",
+                  params: {
+                    threadId: nativeThreadId,
+                    outputModality: "audio",
+                    version: "v3",
+                    transport: { type: "webrtc", sdp: "offer" },
+                  },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 3, result: {} } },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "thread/realtime/sdp",
+                  params: { threadId: nativeThreadId, sdp: "answer" },
+                },
+              },
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: 4,
+                  method: "thread/realtime/stop",
+                  params: { threadId: nativeThreadId },
+                },
+              },
+              { type: "emit_inbound", frame: { id: 4, result: {} } },
+              {
+                type: "emit_inbound",
+                frame: {
+                  method: "thread/realtime/closed",
+                  params: { threadId: nativeThreadId, reason: "ended" },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "drained",
+                frame: {
+                  method: "thread/realtime/sdp",
+                  params: { threadId: "unrelated", sdp: "unused" },
+                },
+              },
+            ],
+          }),
+          undefined,
+          undefined,
+          undefined,
+          (entry) =>
+            entry.label === "drained"
+              ? Deferred.succeed(drained, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        );
+        const result = yield* harness.runtime.startRealtimeVoice!({
+          providerThread: harness.providerThread,
+          sdp: "offer",
+          operationId: "bounded-owner",
+        });
+        assert.isDefined(result.expiresAt);
+        assert.isTrue(yield* harness.runtime.hasActiveRealtimeVoice!());
+        yield* TestClock.adjust("4 hours");
+        yield* Deferred.await(drained);
+        assert.isFalse(yield* harness.runtime.hasActiveRealtimeVoice!());
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
   );
 
   const heldVoiceEntries = (
@@ -1287,17 +2677,41 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   },
                 },
               },
+              ...(event === "error"
+                ? [
+                    {
+                      type: "expect_outbound" as const,
+                      frame: {
+                        id: 4,
+                        method: "thread/realtime/stop",
+                        params: { threadId: nativeThreadId },
+                      },
+                    },
+                    { type: "emit_inbound" as const, frame: { id: 4, result: {} } },
+                    {
+                      type: "emit_inbound" as const,
+                      frame: {
+                        method: "thread/realtime/closed",
+                        params: { threadId: nativeThreadId, reason: "error" },
+                      },
+                    },
+                  ]
+                : []),
               {
                 type: "expect_outbound",
                 frame: {
-                  id: 4,
+                  id: event === "error" ? 5 : 4,
                   method: "turn/interrupt",
                   params: { threadId: nativeThreadId, turnId: nativeTurnId },
                 },
               },
-              { type: "emit_inbound", label: "interrupt-response", frame: { id: 4, result: {} } },
-              { type: "expect_outbound", frame: startFrame(5) },
-              { type: "emit_inbound", frame: { id: 5, result: {} } },
+              {
+                type: "emit_inbound",
+                label: "interrupt-response",
+                frame: { id: event === "error" ? 5 : 4, result: {} },
+              },
+              { type: "expect_outbound", frame: startFrame(event === "error" ? 6 : 5) },
+              { type: "emit_inbound", frame: { id: event === "error" ? 6 : 5, result: {} } },
               {
                 type: "emit_inbound",
                 frame: {
@@ -1308,12 +2722,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               {
                 type: "expect_outbound",
                 frame: {
-                  id: 6,
+                  id: event === "error" ? 7 : 6,
                   method: "thread/realtime/stop",
                   params: { threadId: nativeThreadId },
                 },
               },
-              { type: "emit_inbound", frame: { id: 6, result: {} } },
+              { type: "emit_inbound", frame: { id: event === "error" ? 7 : 6, result: {} } },
             ],
           }),
           undefined,
@@ -2153,6 +3567,13 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               },
             },
             { type: "emit_inbound", frame: { id: 4, result: {} } },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/closed",
+                params: { threadId: nativeThreadId, reason: "stopped" },
+              },
+            },
           ],
         }),
       );
@@ -2210,8 +3631,28 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   },
                 },
               },
-              { type: "expect_outbound", frame: startFrame(4) },
-              { type: "emit_inbound", frame: { id: 4, result: {} } },
+              ...(event === "error"
+                ? [
+                    {
+                      type: "expect_outbound" as const,
+                      frame: {
+                        id: 4,
+                        method: "thread/realtime/stop",
+                        params: { threadId: nativeThreadId },
+                      },
+                    },
+                    { type: "emit_inbound" as const, frame: { id: 4, result: {} } },
+                    {
+                      type: "emit_inbound" as const,
+                      frame: {
+                        method: "thread/realtime/closed",
+                        params: { threadId: nativeThreadId, reason: "error" },
+                      },
+                    },
+                  ]
+                : []),
+              { type: "expect_outbound", frame: startFrame(event === "error" ? 5 : 4) },
+              { type: "emit_inbound", frame: { id: event === "error" ? 5 : 4, result: {} } },
               {
                 type: "emit_inbound",
                 frame: {
@@ -2222,12 +3663,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               {
                 type: "expect_outbound",
                 frame: {
-                  id: 5,
+                  id: event === "error" ? 6 : 5,
                   method: "thread/realtime/stop",
                   params: { threadId: nativeThreadId },
                 },
               },
-              { type: "emit_inbound", frame: { id: 5, result: {} } },
+              { type: "emit_inbound", frame: { id: event === "error" ? 6 : 5, result: {} } },
             ],
           }),
         );

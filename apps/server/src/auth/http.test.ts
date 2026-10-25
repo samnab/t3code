@@ -61,6 +61,10 @@ const layerRoutes = HttpApiBuilder.layer(AuthTestApi).pipe(
   Layer.provide(NodeServices.layer),
 );
 
+const decodeAccessExpiry = Schema.decodeUnknownSync(Schema.Struct({ expires_in: Schema.Number }));
+const decodePairingCredential = Schema.decodeUnknownSync(
+  Schema.Struct({ credential: Schema.String }),
+);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const postJson = (path: string, body: unknown, headers?: Readonly<Record<string, string>>) =>
   new Request(`http://127.0.0.1${path}`, {
@@ -121,6 +125,35 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
             expect.stringMatching(/^t3_session_[^=]*=;.*Max-Age=0/),
           );
           const devCookieHeader = devCookie?.split(";", 1)[0] ?? "";
+          // Session lifetime overrides belong to the local operator CLI, not remote clients.
+          const lifetimeGrant = await environmentA.handler(
+            postJson(
+              "/api/auth/pairing-token",
+              { desktopSessionTtlDays: 365 },
+              { cookie: devCookieHeader },
+            ),
+            requestContext,
+          );
+          expect(lifetimeGrant.status).toBe(200);
+          const decodedGrant = decodePairingCredential(await lifetimeGrant.json());
+          const lifetimeExchange = await environmentA.handler(
+            new Request("http://127.0.0.1/oauth/token", {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                grant_type: AuthTokenExchangeGrantType,
+                subject_token: decodedGrant.credential,
+                subject_token_type: AuthEnvironmentBootstrapTokenType,
+                requested_token_type: AuthAccessTokenType,
+                client_device_type: "desktop",
+              }),
+            }),
+            requestContext,
+          );
+          expect(lifetimeExchange.status).toBe(200);
+          const expiry = decodeAccessExpiry(await lifetimeExchange.json()).expires_in;
+          expect(expiry).toBeGreaterThan(29 * 24 * 60 * 60);
+          expect(expiry).toBeLessThanOrEqual(30 * 24 * 60 * 60);
           const environmentBSession = await environmentB.handler(
             new Request("http://127.0.0.1/api/auth/session", {
               headers: { cookie: devCookieHeader },

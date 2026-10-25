@@ -1,3 +1,9 @@
+import {
+  decodeRealtimeHistoryPage,
+  isValidRealtimeHistoryRequest,
+  MAX_REALTIME_HISTORY_ITEMS,
+} from "./CodexRealtimeHistory.ts";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -29,6 +35,7 @@ import {
 } from "../../provider/codexUsageLimits.ts";
 import {
   CodexSettings,
+  TrimmedNonEmptyString,
   defaultInstanceIdForDriver,
   isOrchestrationV2WorkActive,
   OrchestrationV2ProviderGoal,
@@ -163,6 +170,8 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const CODEX_PROVIDER = ProviderDriverKind.make("codex");
+const isNativeRealtimeSessionId = Schema.is(TrimmedNonEmptyString);
+
 export const CODEX_DRIVER_KIND = CODEX_PROVIDER;
 export const CODEX_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(CODEX_DRIVER_KIND);
 
@@ -1602,7 +1611,25 @@ export function makeCodexAppServerProtocolLogger(input: {
     return undefined;
   }
 
+  const historyRequests = new Set<string | number>();
   return (event) => {
+    // Timeline pages contain historical transcripts, including error payloads. Keep them out of logs.
+    if (event.stage === "decoded" && Predicate.isObject(event.payload)) {
+      const frame = event.payload;
+      if (event.direction === "outgoing" && frame.method === "thread/timeline/list") {
+        if (typeof frame.id === "string" || typeof frame.id === "number")
+          historyRequests.add(frame.id);
+        return Effect.void;
+      }
+      if (
+        event.direction === "incoming" &&
+        (typeof frame.id === "string" || typeof frame.id === "number") &&
+        historyRequests.delete(frame.id)
+      ) {
+        return Effect.void;
+      }
+    }
+    if (event.stage === "decode_failed" && historyRequests.size > 0) return Effect.void;
     if (!shouldPersistProviderEvent("native", event)) return Effect.void;
     return nativeEventLogger
       .write(
@@ -1978,10 +2005,21 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
         );
-        const realtimeThreads = new Map<
-          string,
-          Deferred.Deferred<string, CodexErrors.CodexAppServerError>
-        >();
+        const realtimeVoiceLock = yield* KeyedLock.make<string>();
+        type RealtimeVoiceSession = {
+          readonly answer: Deferred.Deferred<string, CodexErrors.CodexAppServerError>;
+          readonly closed: Deferred.Deferred<void>;
+          readonly operationId?: string;
+          readonly token?: string;
+          readonly expiresAt: DateTime.Utc;
+          nativeSessionId?: string;
+          nativeStarted: boolean;
+          stopping: boolean;
+          stopAcknowledged: boolean;
+          expired: boolean;
+        };
+        const realtimeThreads = new Map<string, RealtimeVoiceSession>();
+        const usedRealtimeOperations = new Set<string>();
         const realtimeAnswers = new Map<
           string,
           Deferred.Deferred<string, CodexErrors.CodexAppServerError>
@@ -1990,6 +2028,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           string,
           {
             readonly nativeThreadId: string;
+            readonly voiceSession: RealtimeVoiceSession;
             readonly startedAt: DateTime.Utc;
             readonly messageId: ProviderAdapter.ProviderAdapterV2TurnMessage["messageId"];
             readonly ready: Deferred.Deferred<boolean>;
@@ -2237,6 +2276,42 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         const turnTerminalizationPermit = yield* Semaphore.make(1);
         const goalsByNativeThread = new Map<string, OrchestrationV2ProviderGoal | null>();
         const rootProviderThreads = new Map<string, OrchestrationV2ProviderThread>();
+        const historyBindings = new Map<
+          ProviderThreadId,
+          ProviderAdapter.ProviderAdapterV2RealtimeHistoryBinding
+        >();
+        let historyBindingEpoch = 0;
+        let historyRuntimeClosed = false;
+        const forgetHistoryBinding = (nativeThreadId: string) => {
+          historyBindingEpoch += 1;
+          for (const [id, binding] of historyBindings) {
+            if (binding.nativeThreadId === nativeThreadId) historyBindings.delete(id);
+          }
+        };
+        const rememberHistoryBinding = (thread: OrchestrationV2ProviderThread, epoch: number) => {
+          if (
+            historyRuntimeClosed ||
+            epoch !== historyBindingEpoch ||
+            thread.nativeThreadRef?.driver !== CODEX_PROVIDER ||
+            thread.nativeThreadRef.nativeId === null ||
+            thread.nativeThreadRef.nativeId.trim().length === 0 ||
+            thread.appThreadId === null
+          )
+            return;
+          historyBindings.set(thread.id, {
+            threadId: thread.appThreadId,
+            providerInstanceId: adapterOptions.instanceId,
+            providerSessionId: input.providerSessionId,
+            providerThreadId: thread.id,
+            nativeThreadId: thread.nativeThreadRef.nativeId,
+          });
+        };
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            historyRuntimeClosed = true;
+            historyBindings.clear();
+          }),
+        );
         const goalHolds = new Map<string, CodexGoalHold>();
         const goalRuns = new Map<ProviderTurnId, Array<ActiveCodexTurnContext>>();
         const goalActivations = new Map<string, { stopped: boolean }>();
@@ -5013,40 +5088,215 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           updateSubagentSelection(payload.threadId, payload.toModel),
         );
 
+        const emitRealtimeVoiceItem = Effect.fn("CodexAdapterV2.emitRealtimeVoiceItem")(function* (
+          nativeThreadId: string,
+          item: Extract<
+            ProviderAdapter.ProviderAdapterV2RealtimeHistoryEntry,
+            { readonly type: "realtime" }
+          >["item"],
+          captureState: Extract<
+            OrchestrationV2TurnItem,
+            { readonly type: "realtime_voice" }
+          >["captureState"],
+        ) {
+          const providerThread = rootProviderThreads.get(nativeThreadId);
+          if (providerThread?.appThreadId == null) {
+            yield* Effect.logDebug("Codex canonical voice item has no bound app thread.");
+            return;
+          }
+          const now = yield* DateTime.now;
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver: CODEX_PROVIDER,
+            turnItem: {
+              id: idAllocator.derive.realtimeVoiceTurnItem({
+                providerInstanceId: adapterOptions.instanceId,
+                nativeThreadId,
+                realtimeSessionId: item.realtimeSessionId,
+                nativeItemId: item.id,
+              }),
+              threadId: providerThread.appThreadId,
+              runId: null,
+              nodeId: null,
+              providerThreadId: providerThread.id,
+              providerTurnId: null,
+              nativeItemRef: {
+                driver: CODEX_PROVIDER,
+                nativeId: item.id,
+                strength: "strong",
+              },
+              parentItemId: null,
+              ordinal: 0,
+              status: captureState === "canonical_completed" ? "completed" : "interrupted",
+              title: null,
+              startedAt: null,
+              completedAt: now,
+              updatedAt: now,
+              type: "realtime_voice",
+              providerInstanceId: adapterOptions.instanceId,
+              nativeThreadId,
+              realtimeSessionId: item.realtimeSessionId,
+              nativeRealtimeItemId: item.id,
+              content: item,
+              captureState,
+              historyCoverage: "live_only",
+              sourceOrder: "unreconciled",
+              timestampProvenance: "observed",
+            },
+          });
+        });
+        // Started transcript segments the provider has not committed, by native thread and item.
+        // Text is only what streamed; it is never upgraded to heard words.
+        const realtimeTails = new Map<
+          string,
+          Map<
+            string,
+            {
+              readonly realtimeSessionId: string;
+              readonly role: "user" | "assistant";
+              text: string;
+            }
+          >
+        >();
+        const realtimeFailedThreads = new Set<string>();
+        const flushRealtimeTails = Effect.fn("CodexAdapterV2.flushRealtimeTails")(function* (
+          nativeThreadId: string,
+        ) {
+          const tails = realtimeTails.get(nativeThreadId);
+          const captureState = realtimeFailedThreads.has(nativeThreadId)
+            ? "interrupted"
+            : "incomplete";
+          realtimeTails.delete(nativeThreadId);
+          realtimeFailedThreads.delete(nativeThreadId);
+          if (tails === undefined) return;
+          for (const [id, tail] of tails) {
+            // An empty tail carries no transcript; the session divider already shows the end.
+            if (tail.text.trim().length === 0) continue;
+            yield* emitRealtimeVoiceItem(
+              nativeThreadId,
+              {
+                id,
+                realtimeSessionId: tail.realtimeSessionId,
+                type: "transcriptSegment",
+                role: tail.role,
+                text: tail.text,
+              },
+              captureState,
+            );
+          }
+        });
+        yield* client.handleServerNotification("thread/realtime/item/started", (payload) =>
+          Effect.sync(() => {
+            const item = payload.item;
+            if (item.type !== "transcriptSegment") return;
+            const tails = realtimeTails.get(payload.threadId) ?? new Map();
+            tails.set(item.id, {
+              realtimeSessionId: item.realtimeSessionId,
+              role: item.role,
+              text: item.text,
+            });
+            realtimeTails.set(payload.threadId, tails);
+          }),
+        );
+        // Deltas name no session; map them only through an item this connection saw start.
+        yield* client.handleServerNotification("thread/realtime/item/transcript/delta", (payload) =>
+          Effect.sync(() => {
+            const tail = realtimeTails.get(payload.threadId)?.get(payload.itemId);
+            if (tail !== undefined) tail.text += payload.delta;
+          }),
+        );
+        yield* client.handleServerNotification("thread/realtime/item/completed", (payload) =>
+          Effect.gen(function* () {
+            realtimeTails.get(payload.threadId)?.delete(payload.item.id);
+            yield* emitRealtimeVoiceItem(payload.threadId, payload.item, "canonical_completed");
+          }),
+        );
+
         yield* client.handleServerNotification("thread/realtime/sdp", (payload) =>
           Effect.gen(function* () {
             const answer = realtimeAnswers.get(payload.threadId);
             if (answer !== undefined) yield* Deferred.succeed(answer, payload.sdp);
           }),
         );
-        const closeRealtime = (
+        const releaseRealtimeOffers = Effect.fn("CodexAdapterV2.releaseRealtimeOffers")(function* (
+          threadId: string,
+        ) {
+          yield* Effect.forEach(
+            Array.from(realtimeTurns.entries()).filter(
+              ([, held]) => held.nativeThreadId === threadId && !held.offered,
+            ),
+            ([nativeTurnId]) => releaseRealtimeTurn(nativeTurnId),
+            { discard: true },
+          );
+        });
+        const closeRealtime = Effect.fn("CodexAdapterV2.closeRealtime")(function* (
           threadId: string,
           message: string,
           session = realtimeThreads.get(threadId),
-        ) =>
-          Effect.gen(function* () {
-            if (realtimeThreads.get(threadId) !== session) return;
-            const answer = realtimeAnswers.get(threadId);
-            realtimeThreads.delete(threadId);
-            realtimeAnswers.delete(threadId);
-            yield* Effect.forEach(
-              Array.from(realtimeTurns.entries()).filter(
-                ([, held]) => held.nativeThreadId === threadId && !held.offered,
-              ),
-              ([nativeTurnId]) => releaseRealtimeTurn(nativeTurnId),
-              { discard: true },
+        ) {
+          if (realtimeThreads.get(threadId) !== session) return;
+          const answer = realtimeAnswers.get(threadId);
+          realtimeThreads.delete(threadId);
+          realtimeAnswers.delete(threadId);
+          yield* releaseRealtimeOffers(threadId);
+          if (answer !== undefined)
+            yield* Deferred.fail(
+              answer,
+              CodexErrors.CodexAppServerRequestError.invalidParams(message),
             );
-            if (answer !== undefined)
-              yield* Deferred.fail(
-                answer,
-                CodexErrors.CodexAppServerRequestError.invalidParams(message),
-              );
-          });
+          if (session !== undefined) yield* Deferred.succeed(session.closed, undefined);
+        });
+        const requestRealtimeStop = Effect.fn("CodexAdapterV2.requestRealtimeStop")(function* (
+          threadId: string,
+          session: RealtimeVoiceSession,
+        ) {
+          if (realtimeThreads.get(threadId) !== session || session.stopping) return;
+          session.stopping = true;
+          yield* client.raw.request("thread/realtime/stop", { threadId }).pipe(
+            Effect.timeout("5 seconds"),
+            Effect.ensuring(releaseRealtimeOffers(threadId)),
+            Effect.tap(() =>
+              Effect.sync(() => {
+                session.stopAcknowledged = true;
+              }),
+            ),
+          );
+        });
+        yield* client.handleServerNotification("thread/realtime/started", (payload) =>
+          Effect.sync(() => {
+            const session = realtimeThreads.get(payload.threadId);
+            if (session !== undefined) {
+              session.nativeStarted = true;
+              if (isNativeRealtimeSessionId(payload.realtimeSessionId))
+                session.nativeSessionId = payload.realtimeSessionId;
+            }
+          }),
+        );
         yield* client.handleServerNotification("thread/realtime/error", (payload) =>
-          closeRealtime(payload.threadId, payload.message),
+          Effect.gen(function* () {
+            realtimeFailedThreads.add(payload.threadId);
+            const session = realtimeThreads.get(payload.threadId);
+            if (session === undefined) return;
+            yield* Deferred.fail(
+              session.answer,
+              CodexErrors.CodexAppServerRequestError.invalidParams(
+                "Codex realtime session failed.",
+              ),
+            );
+            // Error is not proof of transport closure. Quarantine until the actual closed signal.
+            yield* realtimeVoiceLock
+              .withLock(payload.threadId, requestRealtimeStop(payload.threadId, session))
+              .pipe(
+                Effect.catch(() => Effect.void),
+                Effect.forkIn(scope),
+              );
+          }),
         );
         yield* client.handleServerNotification("thread/realtime/closed", (payload) =>
-          closeRealtime(payload.threadId, "Codex realtime session closed before SDP was received."),
+          closeRealtime(
+            payload.threadId,
+            "Codex realtime session closed before SDP was received.",
+          ).pipe(Effect.andThen(flushRealtimeTails(payload.threadId))),
         );
 
         yield* client.handleServerNotification("turn/started", (payload) =>
@@ -5074,7 +5324,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             }
             const realtimeProviderThread = rootProviderThreads.get(payload.threadId);
             if (
-              realtimeThreads.has(payload.threadId) &&
+              realtimeThreads.get(payload.threadId)?.stopping === false &&
               realtimeProviderThread?.appThreadId != null &&
               !goalHolds.has(payload.threadId) &&
               !goalStops.has(payload.threadId) &&
@@ -5085,6 +5335,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               const userItem = payload.turn.items.find((item) => item.type === "userMessage");
               realtimeTurns.set(payload.turn.id, {
                 nativeThreadId: payload.threadId,
+                voiceSession: realtimeThreads.get(payload.threadId)!,
                 startedAt: codexTimestamp(payload.turn.startedAt),
                 messageId: yield* idAllocator.allocate.message({
                   threadId: realtimeProviderThread.appThreadId,
@@ -5330,6 +5581,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // their command items, while the shared provider session stays alive.
         yield* client.handleServerNotification("thread/closed", (payload) =>
           Effect.gen(function* () {
+            // The native thread is gone, so any streaming segment was cut off by it.
+            realtimeFailedThreads.add(payload.threadId);
+            yield* flushRealtimeTails(payload.threadId);
+            forgetHistoryBinding(payload.threadId);
             const completedAt = yield* DateTime.now;
             for (const context of (yield* Ref.get(settledTurns)).values()) {
               if (context.providerThread.nativeThreadRef?.nativeId !== payload.threadId) continue;
@@ -5517,6 +5772,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               return;
             }
             const { context, settled } = resolved;
+            if (context.providerThread.nativeThreadRef?.nativeId !== payload.threadId) {
+              yield* Effect.logDebug("Codex item completion does not belong to its native thread.");
+              return;
+            }
 
             if (payload.item.type === "reasoning") {
               yield* completeReasoning(payload.turnId, payload.item);
@@ -6811,6 +7070,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (context === undefined) {
               return;
             }
+            if (context.providerThread.nativeThreadRef?.nativeId !== payload.threadId) {
+              yield* Effect.logDebug("Codex turn completion does not belong to its native thread.");
+              return;
+            }
             const nativeStatus = mapCodexTurnStatus(payload.turn.status);
             const status =
               nativeStatus === "completed" &&
@@ -7350,41 +7613,49 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               ),
             ),
           ensureThread: (threadInput) =>
-            attachThreadOptimizers(threadInput.threadId, threadInput.runtimePolicy.cwd).pipe(
-              Effect.andThen(ensureInitialized),
-              Effect.andThen(mcpSessions.read(threadInput.threadId)),
-              Effect.flatMap((mcpSession) =>
-                client.request(
-                  "thread/start",
-                  codexThreadRuntimeParams({
-                    threadId: threadInput.threadId,
-                    mcpSession,
-                    modelSelection: threadInput.modelSelection,
-                    runtimePolicy: threadInput.runtimePolicy,
+            Effect.suspend(() => {
+              const epoch = historyBindingEpoch;
+              return attachThreadOptimizers(
+                threadInput.threadId,
+                threadInput.runtimePolicy.cwd,
+              ).pipe(
+                Effect.andThen(ensureInitialized),
+                Effect.andThen(mcpSessions.read(threadInput.threadId)),
+                Effect.flatMap((mcpSession) =>
+                  client.request(
+                    "thread/start",
+                    codexThreadRuntimeParams({
+                      threadId: threadInput.threadId,
+                      mcpSession,
+                      modelSelection: threadInput.modelSelection,
+                      runtimePolicy: threadInput.runtimePolicy,
+                    }),
+                  ),
+                ),
+                Effect.map((response): OrchestrationV2ProviderThread =>
+                  providerThreadFromCodexThread({
+                    appThreadId: threadInput.threadId,
+                    idAllocator,
+                    ownerNodeId: null,
+                    providerSessionId: input.providerSessionId,
+                    providerInstanceId: adapterOptions.instanceId,
+                    thread: response.thread,
                   }),
                 ),
-              ),
-              Effect.map((response): OrchestrationV2ProviderThread =>
-                providerThreadFromCodexThread({
-                  appThreadId: threadInput.threadId,
-                  idAllocator,
-                  ownerNodeId: null,
-                  providerSessionId: input.providerSessionId,
-                  providerInstanceId: adapterOptions.instanceId,
-                  thread: response.thread,
-                }),
-              ),
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterEnsureThreadError({
-                    driver: CODEX_PROVIDER,
-                    threadId: threadInput.threadId,
-                    cause: normalizeCodexCause(cause),
-                  }),
-              ),
-            ),
+                Effect.tap((thread) => Effect.sync(() => rememberHistoryBinding(thread, epoch))),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                      driver: CODEX_PROVIDER,
+                      threadId: threadInput.threadId,
+                      cause: normalizeCodexCause(cause),
+                    }),
+                ),
+              );
+            }),
           resumeThread: Effect.fn("CodexAdapterV2.resumeThread")(
             function* (threadInput) {
+              const epoch = historyBindingEpoch;
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
               yield* attachThreadOptimizers(
                 threadInput.threadId ?? threadInput.providerThread.appThreadId,
@@ -7429,7 +7700,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
                 Effect.flatMap(decodeCodexResumeMetadata),
               );
-              return {
+              const resumed = {
                 ...threadInput.providerThread,
                 providerSessionId: input.providerSessionId,
                 providerInstanceId: adapterOptions.instanceId,
@@ -7442,6 +7713,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 nativeConversationHeadRef: threadInput.providerThread.nativeConversationHeadRef,
                 updatedAt: codexTimestamp(response.thread.updatedAt),
               } satisfies OrchestrationV2ProviderThread;
+              rememberHistoryBinding(resumed, epoch);
+              return resumed;
             },
             (effect, threadInput) =>
               effect.pipe(
@@ -7609,11 +7882,78 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
               ),
           ),
+          readRealtimeHistoryPage: Effect.fn("CodexAdapterV2.readRealtimeHistoryPage")(
+            function* (request) {
+              const rejected = () =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Realtime history read rejected: invalid request or inactive binding.",
+                });
+              const binding = historyBindings.get(request.providerThread.id);
+              const matches = () =>
+                !historyRuntimeClosed &&
+                binding !== undefined &&
+                historyBindings.get(request.providerThread.id) === binding &&
+                request.providerThread.driver === CODEX_PROVIDER &&
+                request.providerThread.appThreadId === binding.threadId &&
+                request.providerThread.providerSessionId === binding.providerSessionId &&
+                request.providerThread.providerInstanceId === binding.providerInstanceId &&
+                request.providerThread.nativeThreadRef?.driver === CODEX_PROVIDER &&
+                request.providerThread.nativeThreadRef.nativeId === binding.nativeThreadId;
+              if (!isValidRealtimeHistoryRequest(request) || binding === undefined || !matches())
+                return yield* rejected();
+              yield* ensureInitialized.pipe(
+                Effect.mapError(
+                  () =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CODEX_PROVIDER,
+                      detail: "Realtime history initialization failed.",
+                    }),
+                ),
+              );
+              if (!matches()) return yield* rejected();
+              const response = yield* client.raw
+                .request("thread/timeline/list", {
+                  threadId: binding.nativeThreadId,
+                  limit: request.limit ?? MAX_REALTIME_HISTORY_ITEMS,
+                  ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+                })
+                .pipe(Effect.timeout("10 seconds"), Effect.result);
+              if (!matches()) return yield* rejected();
+              if (response._tag === "Failure") {
+                const error = response.failure;
+                if (
+                  error._tag === "CodexAppServerRequestError" &&
+                  error.operation === "receive-response" &&
+                  error.method === "thread/timeline/list" &&
+                  error.code === -32601
+                ) {
+                  return { ...binding, type: "unsupported", reason: "method_unavailable" };
+                }
+                return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Realtime history read failed.",
+                });
+              }
+              const page = yield* decodeRealtimeHistoryPage(response.success, request).pipe(
+                Effect.mapError(
+                  (error) =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: CODEX_PROVIDER,
+                      detail: `Realtime history page rejected: ${error.reason}.`,
+                    }),
+                ),
+              );
+              if (!matches()) return yield* rejected();
+              return { ...binding, type: "page", ...page };
+            },
+          ),
           // Dropping this connection's subscription lets the shared app-server
           // shut the native thread (and its MCP servers) down once it is idle.
           unloadThread: Effect.fn("CodexAdapterV2.unloadThread")(
             function* (unloadInput) {
               const nativeThreadId = yield* getNativeThreadId(unloadInput.providerThread);
+              forgetHistoryBinding(nativeThreadId);
               sessionApprovals.delete(nativeThreadId);
               yield* client.request("thread/unsubscribe", { threadId: nativeThreadId });
             },
@@ -8067,84 +8407,185 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
               ),
           ),
-          startRealtimeVoice: (voiceInput) =>
-            Effect.gen(function* () {
+          hasActiveRealtimeVoice: (providerThread) =>
+            Effect.sync(() => {
+              const nativeThreadId = providerThread?.nativeThreadRef?.nativeId;
+              const sessions =
+                nativeThreadId == null
+                  ? realtimeThreads.values()
+                  : [realtimeThreads.get(nativeThreadId)];
+              return Array.from(sessions).some(
+                (session) => session !== undefined && !session.expired && !session.stopAcknowledged,
+              );
+            }),
+          startRealtimeVoice: Effect.fn("CodexAdapterV2.startRealtimeVoice")(
+            function* (voiceInput) {
               const threadId = yield* getNativeThreadId(voiceInput.providerThread);
-              if (realtimeThreads.has(threadId))
-                return yield* toProtocolError(
-                  "Codex realtime voice is already active on this thread.",
-                );
-              const answer = yield* Deferred.make<string, CodexErrors.CodexAppServerError>();
-              realtimeAnswers.set(threadId, answer);
-              realtimeThreads.set(threadId, answer);
-              yield* rememberRootProviderThread(voiceInput.providerThread);
-              return yield* ensureInitialized.pipe(
-                Effect.andThen(
-                  client.raw.request("thread/realtime/start", {
-                    threadId,
-                    outputModality: "audio",
-                    version: "v3",
-                    transport: { type: "webrtc", sdp: voiceInput.sdp },
-                  }),
-                ),
-                Effect.andThen(Deferred.await(answer)),
-                Effect.timeout("20 seconds"),
-                Effect.map((sdp) => ({ sdp })),
-                Effect.onError(() =>
-                  Effect.gen(function* () {
-                    if (realtimeThreads.get(threadId) !== answer) return;
-                    // A timed-out or cancelled WebRTC negotiation may already
-                    // have started Codex's session. Stop it before allowing retry.
-                    yield* client.raw.request("thread/realtime/stop", { threadId }).pipe(
-                      Effect.timeout("5 seconds"),
-                      Effect.catch((cause) =>
-                        Effect.logWarning(
-                          "Failed to stop Codex realtime voice after startup failure.",
-                          { cause },
+              return yield* realtimeVoiceLock.withLock(
+                threadId,
+                Effect.gen(function* () {
+                  const operationKey =
+                    voiceInput.operationId === undefined
+                      ? undefined
+                      : `${encodeURIComponent(threadId)}:${encodeURIComponent(voiceInput.operationId)}`;
+                  if (operationKey !== undefined && usedRealtimeOperations.has(operationKey))
+                    return yield* toProtocolError(
+                      "Codex realtime voice operation was already used.",
+                    );
+                  if (realtimeThreads.has(threadId))
+                    return yield* toProtocolError(
+                      "Codex realtime voice is already active or awaiting native closure on this thread.",
+                    );
+                  const answer = yield* Deferred.make<string, CodexErrors.CodexAppServerError>();
+                  const now = yield* DateTime.now;
+                  const session: RealtimeVoiceSession = {
+                    answer,
+                    closed: yield* Deferred.make<void>(),
+                    ...(voiceInput.operationId === undefined
+                      ? {}
+                      : {
+                          operationId: voiceInput.operationId,
+                          token: yield* crypto.randomUUIDv4(),
+                        }),
+                    // The native protocol has no owner-disconnect lease. Bound an abandoned call without a heartbeat.
+                    expiresAt: DateTime.makeUnsafe(
+                      DateTime.toEpochMillis(now) + 4 * 60 * 60 * 1000,
+                    ),
+                    nativeStarted: false,
+                    stopping: false,
+                    stopAcknowledged: false,
+                    expired: false,
+                  };
+                  realtimeThreads.set(threadId, session);
+                  if (operationKey !== undefined) usedRealtimeOperations.add(operationKey);
+                  realtimeAnswers.set(threadId, answer);
+                  yield* Deferred.await(session.closed).pipe(
+                    Effect.timeout("4 hours"),
+                    Effect.catch(() =>
+                      Effect.gen(function* () {
+                        if (realtimeThreads.get(threadId) !== session) return;
+                        yield* realtimeVoiceLock
+                          .withLock(threadId, requestRealtimeStop(threadId, session))
+                          .pipe(Effect.catch(() => Effect.void));
+                        session.expired = true;
+                      }),
+                    ),
+                    Effect.forkIn(scope),
+                  );
+                  yield* rememberRootProviderThread(voiceInput.providerThread);
+                  return yield* ensureInitialized.pipe(
+                    Effect.andThen(
+                      client.raw
+                        .request("thread/realtime/start", {
+                          threadId,
+                          outputModality: "audio",
+                          version: "v3",
+                          transport: { type: "webrtc", sdp: voiceInput.sdp },
+                        })
+                        .pipe(
+                          Effect.catchTags({
+                            CodexAppServerRequestError: (error) =>
+                              Effect.gen(function* () {
+                                // Method-not-found proves no invocation. Internal errors, invalid SDP, timeouts and observed native activity do not prove absence of a call.
+                                if (
+                                  error.code === -32601 &&
+                                  error.operation === "receive-response" &&
+                                  error.method === "thread/realtime/start" &&
+                                  !session.nativeStarted &&
+                                  !(yield* Deferred.isDone(answer)) &&
+                                  !Array.from(realtimeTurns.values()).some(
+                                    (held) => held.voiceSession === session,
+                                  )
+                                )
+                                  yield* closeRealtime(
+                                    threadId,
+                                    "Codex rejected realtime startup before opening a session.",
+                                    session,
+                                  );
+                                return yield* error;
+                              }),
+                          }),
+                        ),
+                    ),
+                    Effect.andThen(Deferred.await(answer)),
+                    Effect.timeout("20 seconds"),
+                    Effect.map((sdp) =>
+                      voiceInput.operationId === undefined
+                        ? { sdp }
+                        : {
+                            sdp,
+                            operationId: voiceInput.operationId,
+                            voiceSessionToken: session.token,
+                            providerInstanceId: adapterOptions.instanceId,
+                            providerSessionId: input.providerSessionId,
+                            providerThreadId: voiceInput.providerThread.id,
+                            expiresAt: DateTime.formatIso(session.expiresAt),
+                            ...(session.nativeSessionId === undefined
+                              ? {}
+                              : { nativeRealtimeSessionId: session.nativeSessionId }),
+                          },
+                    ),
+                    Effect.onError(() =>
+                      requestRealtimeStop(threadId, session).pipe(
+                        Effect.andThen(Deferred.await(session.closed)),
+                        Effect.timeout("5 seconds"),
+                        Effect.catch(() => Effect.void),
+                        // The caller receives no call. Retain the slot quarantine for uncertain native work, but let idle runtime teardown reap it.
+                        Effect.ensuring(
+                          Effect.sync(() => {
+                            session.expired = true;
+                          }),
                         ),
                       ),
-                      Effect.ensuring(
-                        closeRealtime(threadId, "Codex realtime voice startup failed.", answer),
-                      ),
-                    );
-                  }),
-                ),
-                Effect.ensuring(
-                  Effect.sync(() => {
-                    if (realtimeAnswers.get(threadId) === answer) realtimeAnswers.delete(threadId);
-                  }),
-                ),
+                    ),
+                    Effect.ensuring(
+                      Effect.sync(() => {
+                        if (realtimeAnswers.get(threadId) === answer)
+                          realtimeAnswers.delete(threadId);
+                      }),
+                    ),
+                  );
+                }),
               );
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: CODEX_PROVIDER,
-                    detail: "Failed to start Codex realtime voice.",
-                    cause,
-                  }),
-              ),
+            },
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Failed to start Codex realtime voice.",
+                  cause,
+                }),
             ),
-          stopRealtimeVoice: (voiceInput) =>
-            Effect.gen(function* () {
+          ),
+          stopRealtimeVoice: Effect.fn("CodexAdapterV2.stopRealtimeVoice")(
+            function* (voiceInput) {
               const threadId = yield* getNativeThreadId(voiceInput.providerThread);
-              const session = realtimeThreads.get(threadId);
-              yield* ensureInitialized.pipe(
-                Effect.andThen(client.raw.request("thread/realtime/stop", { threadId })),
-                Effect.ensuring(
-                  closeRealtime(threadId, "Codex realtime voice was stopped.", session),
-                ),
+              return yield* realtimeVoiceLock.withLock(
+                threadId,
+                Effect.gen(function* () {
+                  const session = realtimeThreads.get(threadId);
+                  if (session === undefined) return;
+                  if (
+                    session.operationId !== voiceInput.operationId ||
+                    session.token !== voiceInput.voiceSessionToken
+                  )
+                    return yield* toProtocolError("Codex realtime voice ownership does not match.");
+                  yield* requestRealtimeStop(threadId, session);
+                  // Native closed/error events have no session ID. Do not admit a replacement before closure.
+                  if (session.token !== undefined)
+                    yield* Deferred.await(session.closed).pipe(Effect.timeout("5 seconds"));
+                }),
               );
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver: CODEX_PROVIDER,
-                    detail: "Failed to stop Codex realtime voice.",
-                    cause,
-                  }),
-              ),
+            },
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_PROVIDER,
+                  detail: "Failed to stop Codex realtime voice.",
+                  cause,
+                }),
             ),
+          ),
           uploadFeedback: Effect.fn("CodexAdapterV2.uploadFeedback")(
             function* (feedbackInput) {
               const threadId = yield* getNativeThreadId(feedbackInput.providerThread);

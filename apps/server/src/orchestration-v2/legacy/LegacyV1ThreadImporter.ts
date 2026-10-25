@@ -261,7 +261,7 @@ function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
     snoozedAt: nullableDateTime(row.snoozed_at),
     goal: goalFor(row),
     goalLoop: goalLoopFor(row),
-    voiceNotifications: row.voice_notifications !== 0,
+    voiceNotifications: row.voice_notifications === 1,
     pinnedAt: nullableDateTime(row.pinned_at),
     autoSettleDisabledAt: nullableDateTime(row.auto_settle_disabled_at),
     pinOrderKey: row.pin_order_key?.trim() || null,
@@ -465,7 +465,7 @@ const make = Effect.gen(function* () {
       : sql`NULL`;
     const legacyVoiceNotifications = legacyThreadColumns.has("voice_notifications")
       ? sql`thread.voice_notifications`
-      : sql`1`;
+      : sql`0`;
     const repairRows = yield* sql<LegacyRepairRow>`
       SELECT
         thread.thread_id,

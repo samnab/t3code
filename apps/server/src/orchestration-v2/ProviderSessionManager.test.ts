@@ -10,11 +10,14 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
   type Project,
   ProjectId,
   ProviderDriverKind,
+  ContextHandoffId,
   ProviderInstanceId,
   type ProviderSessionId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -50,6 +53,8 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProviderRealtimeVoiceService from "./ProviderRealtimeVoiceService.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -328,6 +333,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
       readonly providerSessionId: ProviderSessionId;
       readonly initialProviderItemIdentityVersion?: 2;
     }) => Effect.Effect<void>;
+    readonly hasActiveRealtimeVoice?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly backgroundTasksEndWithProcess?: boolean;
@@ -336,6 +342,8 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly beforeUnload?: Effect.Effect<void>;
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
+    readonly readRealtimeHistoryPage?: ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"];
+    readonly startRealtimeVoice?: ProviderAdapter.ProviderAdapterV2SessionRuntime["startRealtimeVoice"];
   } = {},
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -414,6 +422,15 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
           ...(options.backgroundTasksEndWithProcess === false
             ? {}
             : { backgroundTasksEndWithProcess: true as const }),
+          ...(options.hasActiveRealtimeVoice === undefined
+            ? {}
+            : { hasActiveRealtimeVoice: () => options.hasActiveRealtimeVoice! }),
+          ...(options.readRealtimeHistoryPage === undefined
+            ? {}
+            : { readRealtimeHistoryPage: options.readRealtimeHistoryPage }),
+          ...(options.startRealtimeVoice === undefined
+            ? {}
+            : { startRealtimeVoice: options.startRealtimeVoice }),
           ...(options.hasPendingBackgroundWork === undefined
             ? {}
             : { hasPendingBackgroundWork: options.hasPendingBackgroundWork }),
@@ -460,6 +477,16 @@ function layerTest(input: {
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
+  readonly failVoiceWrites?: boolean;
+  /** Fails voice marker writes while positive, signalling each attempt. */
+  readonly failVoiceMarkers?: {
+    readonly remaining: Ref.Ref<number>;
+    readonly attempted: Queue.Queue<void>;
+  };
+  readonly pauseVoiceMarkerWrite?: {
+    readonly paused: Deferred.Deferred<void>;
+    readonly resume: Deferred.Deferred<void>;
+  };
   readonly failEventStream?: boolean;
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
   readonly mcpConfigs?: Ref.Ref<
@@ -477,6 +504,9 @@ function layerTest(input: {
     readonly armed: Ref.Ref<boolean>;
     readonly paused: Deferred.Deferred<void>;
   };
+  readonly hasActiveRealtimeVoice?: Effect.Effect<boolean>;
+  readonly readRealtimeHistoryPage?: ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"];
+  readonly startRealtimeVoice?: ProviderAdapter.ProviderAdapterV2SessionRuntime["startRealtimeVoice"];
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
@@ -488,22 +518,93 @@ function layerTest(input: {
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
 }) {
-  const layerConfiguredEventSink =
-    input.flakyReleaseWrites !== undefined
-      ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
-      : input.pauseAttachWrite !== undefined
-        ? layerPausingAttachEventSink(input.pauseAttachWrite)
-        : input.beforeUnchangedWrite !== undefined
-          ? layerBeforeUnchangedWriteEventSink(input.beforeUnchangedWrite)
-          : input.failReleaseEventWrites
-            ? layerFailingReleaseEventSink
-            : layerTestEventSink;
+  const inputOptions = input;
+  const layerVoiceFailingSink = Layer.effect(
+    EventSink.EventSinkV2,
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      return EventSink.EventSinkV2.of({
+        ...sink,
+        write: (input) =>
+          input.events.some(
+            (event) =>
+              event.type === "turn-item.updated" && event.payload.type === "realtime_voice",
+          )
+            ? Effect.fail(new EventSink.EventSinkWriteError({ eventCount: input.events.length }))
+            : Effect.gen(function* () {
+                const pause = inputOptions.pauseVoiceMarkerWrite;
+                if (
+                  pause !== undefined &&
+                  input.events.some(
+                    (event) =>
+                      event.type === "turn-item.updated" &&
+                      event.payload.type === "error" &&
+                      event.payload.failure.code === "voice_history_incomplete",
+                  )
+                ) {
+                  yield* Deferred.succeed(pause.paused, undefined);
+                  yield* Deferred.await(pause.resume);
+                }
+                return yield* sink.write(input);
+              }),
+      });
+    }),
+  ).pipe(Layer.provide(layerTestEventSink));
+  const failVoiceMarkers = input.failVoiceMarkers;
+  const layerMarkerFailingSink = Layer.effect(
+    EventSink.EventSinkV2,
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      return EventSink.EventSinkV2.of({
+        ...sink,
+        write: (input) =>
+          Effect.gen(function* () {
+            const marker = input.events.some(
+              (event) =>
+                event.type === "turn-item.updated" &&
+                event.payload.type === "error" &&
+                event.payload.failure.code === "voice_history_incomplete",
+            );
+            if (marker && failVoiceMarkers !== undefined) {
+              yield* Queue.offer(failVoiceMarkers.attempted, undefined);
+              if ((yield* Ref.getAndUpdate(failVoiceMarkers.remaining, (n) => n - 1)) > 0)
+                return yield* new EventSink.EventSinkWriteError({
+                  eventCount: input.events.length,
+                });
+            }
+            return yield* sink.write(input);
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(layerTestEventSink));
+  const layerConfiguredEventSink = input.failVoiceWrites
+    ? layerVoiceFailingSink
+    : failVoiceMarkers !== undefined
+      ? layerMarkerFailingSink
+      : input.flakyReleaseWrites !== undefined
+        ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
+        : input.pauseAttachWrite !== undefined
+          ? layerPausingAttachEventSink(input.pauseAttachWrite)
+          : input.beforeUnchangedWrite !== undefined
+            ? layerBeforeUnchangedWriteEventSink(input.beforeUnchangedWrite)
+            : input.failReleaseEventWrites
+              ? layerFailingReleaseEventSink
+              : layerTestEventSink;
   const layerRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
       ...(input.beforeOpen === undefined ? {} : { beforeOpen: input.beforeOpen }),
+      ...(input.hasActiveRealtimeVoice === undefined
+        ? {}
+        : { hasActiveRealtimeVoice: input.hasActiveRealtimeVoice }),
+      ...(input.readRealtimeHistoryPage === undefined
+        ? {}
+        : { readRealtimeHistoryPage: input.readRealtimeHistoryPage }),
+      ...(input.startRealtimeVoice === undefined
+        ? {}
+        : { startRealtimeVoice: input.startRealtimeVoice }),
       ...(input.hasPendingBackgroundWork === undefined
         ? {}
         : { hasPendingBackgroundWork: input.hasPendingBackgroundWork }),
@@ -3501,4 +3602,1387 @@ it.effect(
       });
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 persists bound canonical voice without any run subscriber",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("voice-owner");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              type: "provider-thread.updated",
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const item = {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "old-session",
+            nativeItemId: "speech",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "old-session",
+          nativeRealtimeItemId: "speech",
+          content: { type: "transcriptSegment", role: "assistant", text: "durable speech" },
+          captureState: "canonical_completed",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        } satisfies OrchestrationV2TurnItem;
+        const afterSequence = yield* sink.latestSequence({ threadId });
+        const persisted = yield* sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter((stored) => stored.event.type === "turn-item.updated"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(events);
+        yield* Queue.offerAll(events!, [
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...item, providerInstanceId: ProviderInstanceId.make("wrong-provider") },
+          },
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...item, nativeThreadId: "wrong-native-thread" },
+          },
+          { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: item },
+        ]);
+        const committed = Array.from(yield* Fiber.join(persisted));
+        assert.lengthOf(committed, 1);
+        const stored = yield* projections.getTurnItem({ threadId, itemId: item.id });
+        assert.equal(stored?.type, "realtime_voice");
+        if (stored?.type === "realtime_voice") {
+          assert.equal(stored.nativeThreadId, "native-thread");
+          assert.equal(stored.providerInstanceId, modelSelection.instanceId);
+          assert.equal(stored.realtimeSessionId, "old-session");
+        }
+        assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
+    }),
+);
+
+type HistoryPage = {
+  readonly entries: ReadonlyArray<ProviderAdapter.ProviderAdapterV2RealtimeHistoryEntry>;
+  readonly nextCursor: string | null;
+};
+
+function makeHistoryReader(pages: Ref.Ref<ReadonlyMap<string | null, HistoryPage>>) {
+  return ((request) =>
+    Ref.get(pages).pipe(
+      Effect.map((current) => {
+        const page = current.get(request.cursor ?? null) ?? { entries: [], nextCursor: null };
+        const providerThread = request.providerThread;
+        return {
+          threadId: providerThread.appThreadId!,
+          providerInstanceId: providerThread.providerInstanceId,
+          providerSessionId: providerThread.providerSessionId!,
+          providerThreadId: providerThread.id,
+          nativeThreadId: providerThread.nativeThreadRef?.nativeId ?? "",
+          type: "page" as const,
+          entries: page.entries,
+          activeRealtimeSessionAtPageStart: null,
+          nextCursor: page.nextCursor,
+        };
+      }),
+    )) satisfies NonNullable<
+    ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"]
+  >;
+}
+
+// A live record already captured, so loading the thread reads provider history.
+function seededVoiceEvent(input: {
+  readonly ids: IdAllocator.IdAllocatorV2["Service"];
+  readonly threadId: ThreadId;
+  readonly providerThread: OrchestrationV2ProviderThread;
+  readonly now: DateTime.Utc;
+  readonly nativeItemId: string;
+}) {
+  return Effect.gen(function* () {
+    return {
+      id: yield* input.ids.allocate.event({ threadId: input.threadId }),
+      threadId: input.threadId,
+      type: "turn-item.updated" as const,
+      occurredAt: input.now,
+      payload: {
+        id: input.ids.derive.realtimeVoiceTurnItem({
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "session",
+          nativeItemId: input.nativeItemId,
+        }),
+        threadId: input.threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: input.providerThread.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: input.now,
+        updatedAt: input.now,
+        type: "realtime_voice",
+        providerInstanceId: modelSelection.instanceId,
+        nativeThreadId: "native-thread",
+        realtimeSessionId: "session",
+        nativeRealtimeItemId: input.nativeItemId,
+        content: { type: "transcriptSegment", role: "user", text: input.nativeItemId },
+        captureState: "canonical_completed",
+        historyCoverage: "live_only",
+        sourceOrder: "unreconciled",
+        timestampProvenance: "observed",
+      } satisfies OrchestrationV2TurnItem,
+    };
+  });
+}
+
+const historySpeech = (
+  position: number,
+  id: string,
+): ProviderAdapter.ProviderAdapterV2RealtimeHistoryEntry => ({
+  type: "realtime",
+  position,
+  item: { id, realtimeSessionId: "session", type: "transcriptSegment", role: "user", text: id },
+});
+
+it.effect(
+  "ProviderSessionManagerV2 recovers committed voice from overlapping history pages without starting work",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+        new Map<string | null, HistoryPage>([
+          [null, { entries: [historySpeech(1, "s1"), historySpeech(2, "s2")], nextCursor: "c1" }],
+          ["c1", { entries: [historySpeech(2, "s2"), historySpeech(3, "s3")], nextCursor: null }],
+        ]),
+      );
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("voice-recovery");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              type: "provider-thread.updated",
+              occurredAt: now,
+              payload: providerThread,
+            },
+            yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "s1" }),
+          ],
+        });
+        const voiceWrites = (count: number) =>
+          Effect.gen(function* () {
+            const afterSequence = yield* sink.latestSequence({ threadId });
+            return yield* sink.stream({ threadId, afterSequence }).pipe(
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "turn-item.updated" &&
+                  stored.event.payload.type === "realtime_voice",
+              ),
+              Stream.take(count),
+              Stream.runCollect,
+              Effect.forkScoped,
+            );
+          });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        // s1 was captured live; the overlapping pages add only s2 and s3.
+        const recovered = yield* voiceWrites(2);
+        yield* runtime.resumeThread({ threadId, providerThread });
+        assert.lengthOf(Array.from(yield* Fiber.join(recovered)), 2);
+
+        // Native close triggers a second read that replays everything plus one new commit.
+        yield* Ref.set(
+          pages,
+          new Map<string | null, HistoryPage>([
+            [
+              null,
+              {
+                entries: [1, 2, 3]
+                  .map((n) => historySpeech(n, `s${n}`))
+                  .concat(historySpeech(4, "s4")),
+                nextCursor: null,
+              },
+            ],
+          ]),
+        );
+        const replayed = yield* voiceWrites(2);
+        const close = {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "session",
+            nativeItemId: "close",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "session",
+          nativeRealtimeItemId: "close",
+          content: { type: "realtimeSessionClosed", outcome: "ended" },
+          captureState: "canonical_completed",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        } satisfies OrchestrationV2TurnItem;
+        const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        yield* Queue.offer(events!, {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: close,
+        });
+        assert.lengthOf(Array.from(yield* Fiber.join(replayed)), 2);
+
+        const projection = yield* projections.getThreadProjection(threadId);
+        const voice = projection.turnItems.filter((item) => item.type === "realtime_voice");
+        assert.deepEqual(voice.map((item) => item.nativeRealtimeItemId).sort(), [
+          "close",
+          "s1",
+          "s2",
+          "s3",
+          "s4",
+        ]);
+        for (const item of voice) {
+          const recoveredItem = !["close", "s1"].includes(item.nativeRealtimeItemId);
+          assert.equal(item.historyCoverage, recoveredItem ? "provider_history" : "live_only");
+          assert.equal(item.timestampProvenance, recoveredItem ? "recovered" : "observed");
+        }
+        assert.lengthOf(projection.runs, 0);
+        assert.lengthOf(projection.turnItems, voice.length);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            readRealtimeHistoryPage: makeHistoryReader(pages),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 upgrades a stored voice tail in place when history has its commit",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+        new Map<string | null, HistoryPage>([
+          [null, { entries: [historySpeech(1, "tail")], nextCursor: null }],
+        ]),
+      );
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("voice-tail-upgrade");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              type: "provider-thread.updated",
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const tail = {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "session",
+            nativeItemId: "tail",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "interrupted",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "session",
+          nativeRealtimeItemId: "tail",
+          content: { type: "transcriptSegment", role: "user", text: "ta" },
+          captureState: "interrupted",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        } satisfies OrchestrationV2TurnItem;
+        const writes = (count: number) =>
+          Effect.gen(function* () {
+            const afterSequence = yield* sink.latestSequence({ threadId });
+            return yield* sink.stream({ threadId, afterSequence }).pipe(
+              Stream.filter((stored) => stored.event.type === "turn-item.updated"),
+              Stream.take(count),
+              Stream.runCollect,
+              Effect.forkScoped,
+            );
+          });
+        const live = yield* writes(1);
+        const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        yield* Queue.offer(events!, {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: tail,
+        });
+        yield* Fiber.join(live);
+        const stored = yield* projections.getTurnItem({ threadId, itemId: tail.id });
+
+        const upgraded = yield* writes(1);
+        yield* runtime.resumeThread({ threadId, providerThread });
+        yield* Fiber.join(upgraded);
+        const committed = yield* projections.getTurnItem({ threadId, itemId: tail.id });
+        assert.equal(
+          committed?.type === "realtime_voice" ? committed.captureState : null,
+          "canonical_completed",
+        );
+        assert.equal(
+          committed?.type === "realtime_voice" && committed.content.type === "transcriptSegment"
+            ? committed.content.text
+            : null,
+          "tail",
+        );
+        assert.equal(committed?.ordinal, stored?.ordinal);
+        assert.equal(
+          committed?.type === "realtime_voice" ? committed.timestampProvenance : null,
+          "observed",
+        );
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            readRealtimeHistoryPage: makeHistoryReader(pages),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect.each([
+  {
+    name: "an unsafe native position",
+    pages: [[null, { entries: [historySpeech(2 ** 53, "unsafe")], nextCursor: null }]] as const,
+  },
+  {
+    name: "an entry that moved between pages",
+    pages: [
+      [null, { entries: [historySpeech(1, "moved")], nextCursor: "next" }],
+      ["next", { entries: [historySpeech(2, "moved")], nextCursor: null }],
+    ] as const,
+  },
+])("ProviderSessionManagerV2 rejects history with $name visibly", ({ pages: history }) =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+      new Map<string | null, HistoryPage>(history),
+    );
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-unsafe-history");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const marker = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter((stored) => stored.event.type === "turn-item.updated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      const [stored] = Array.from(yield* Fiber.join(marker));
+      assert.isTrue(
+        stored?.event.type === "turn-item.updated" &&
+          stored.event.payload.type === "error" &&
+          stored.event.payload.failure.code === "voice_history_incomplete" &&
+          stored.event.payload.failure.message.includes("could not be recovered"),
+      );
+      const projection = yield* projections.getThreadProjection(threadId);
+      assert.deepEqual(
+        projection.turnItems.flatMap((item) =>
+          item.type === "realtime_voice" ? [item.nativeRealtimeItemId] : [],
+        ),
+        ["seed"],
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          readRealtimeHistoryPage: makeHistoryReader(pages),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 keeps capped history passes and marks the rest missing", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    // Every page points at another one, so the read stops at its page bound.
+    const endless: NonNullable<
+      ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"]
+    > = (request) => {
+      const page = request.cursor == null ? 0 : Number(request.cursor);
+      return makeHistoryReader(
+        Ref.makeUnsafe<ReadonlyMap<string | null, HistoryPage>>(
+          new Map([
+            [
+              request.cursor ?? null,
+              { entries: [historySpeech(page + 1, `p${page}`)], nextCursor: String(page + 1) },
+            ],
+          ]),
+        ),
+      )(request);
+    };
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-capped-history");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const marker = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "turn-item.updated" && stored.event.payload.type === "error",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      yield* Fiber.join(marker);
+      const recovered = (yield* projections.getThreadProjection(threadId)).turnItems.filter(
+        (item) => item.type === "realtime_voice" && item.historyCoverage === "provider_history",
+      );
+      // Five 40-page passes per trigger; each later pass re-reads the page the last one ended on.
+      assert.lengthOf(recovered, 40 + 39 * 4);
+    }).pipe(
+      Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, readRealtimeHistoryPage: endless })),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 recovers recent speech past the first history pass", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    // 45 pages of older coding history, then speech: past one 40-page pass.
+    const pageCount = 45;
+    const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+      new Map<string | null, HistoryPage>(
+        Array.from({ length: pageCount }, (_, page): [string | null, HistoryPage] => [
+          page === 0 ? null : String(page),
+          {
+            entries:
+              page === pageCount - 1
+                ? [historySpeech(page + 1, "recent")]
+                : [{ type: "turnStarted", position: page + 1, nativeTurnId: `old-${page}` }],
+            nextCursor: page === pageCount - 1 ? null : String(page + 1),
+          },
+        ]),
+      ),
+    );
+    const requested = yield* Queue.unbounded<string | null>();
+    const reader = makeHistoryReader(pages);
+    const recording: NonNullable<
+      ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"]
+    > = (request) =>
+      Queue.offer(requested, request.cursor ?? null).pipe(Effect.andThen(reader(request)));
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-long-history");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const firstOutcome = (afterSequence: number) =>
+        sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" &&
+              (stored.event.payload.type === "error" ||
+                stored.event.payload.type === "realtime_voice"),
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+      const outcome = yield* firstOutcome(yield* sink.latestSequence({ threadId }));
+      yield* runtime.resumeThread({ threadId, providerThread });
+      const [stored] = Array.from(yield* Fiber.join(outcome));
+      assert.isTrue(
+        stored?.event.type === "turn-item.updated" &&
+          stored.event.payload.type === "realtime_voice" &&
+          stored.event.payload.nativeRealtimeItemId === "recent",
+      );
+
+      // A later close resumes at the last page read instead of the start of history.
+      yield* Queue.clear(requested);
+      const close = yield* seededVoiceEvent({
+        ids,
+        threadId,
+        providerThread,
+        now,
+        nativeItemId: "close",
+      });
+      const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      yield* Queue.offer(events!, {
+        type: "turn_item.updated",
+        driver: CODEX_DRIVER,
+        turnItem: {
+          ...close.payload,
+          content: { type: "realtimeSessionClosed", outcome: "ended" },
+        },
+      });
+      assert.equal(yield* Queue.take(requested), String(pageCount - 1));
+    }).pipe(
+      Effect.provide(
+        layerTest({ state, idleTimeoutMs: 60_000, readRealtimeHistoryPage: recording }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 rereads all history when a stored cursor moved", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    // The stored cursor now starts at different history, as after a native rollback.
+    const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+      new Map<string | null, HistoryPage>([
+        [null, { entries: [historySpeech(1, "kept")], nextCursor: null }],
+        ["moved", { entries: [historySpeech(7, "other")], nextCursor: null }],
+      ]),
+    );
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-moved-cursor");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const key = {
+        threadId,
+        providerInstanceId: modelSelection.instanceId,
+        nativeThreadId: "native-thread",
+      };
+      yield* projections.setRealtimeVoiceHistoryResume(key, {
+        cursor: "moved",
+        firstIdentity: "stale",
+        firstPosition: 7,
+        anchorOrdinal: null,
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const recovered = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "turn-item.updated" &&
+            stored.event.payload.type === "realtime_voice",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      const [stored] = Array.from(yield* Fiber.join(recovered));
+      assert.equal(
+        stored?.event.type === "turn-item.updated" && stored.event.payload.type === "realtime_voice"
+          ? stored.event.payload.nativeRealtimeItemId
+          : null,
+        "kept",
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          readRealtimeHistoryPage: makeHistoryReader(pages),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 reconciles again after a failed read and a failed marker", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const reads = yield* Ref.make(0);
+    const failVoiceMarkers = {
+      remaining: yield* Ref.make(1),
+      attempted: yield* Queue.unbounded<void>(),
+    };
+    const pages = yield* Ref.make<ReadonlyMap<string | null, HistoryPage>>(
+      new Map<string | null, HistoryPage>([
+        [null, { entries: [historySpeech(1, "missed")], nextCursor: null }],
+      ]),
+    );
+    const reader = makeHistoryReader(pages);
+    // The first read fails, so the first pass writes a marker, and that write fails too.
+    const flaky: NonNullable<
+      ProviderAdapter.ProviderAdapterV2SessionRuntime["readRealtimeHistoryPage"]
+    > = (request) =>
+      Ref.getAndUpdate(reads, (count) => count + 1).pipe(
+        Effect.flatMap((count) =>
+          count === 0
+            ? Effect.fail(
+                new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver: CODEX_DRIVER,
+                  detail: "history unavailable",
+                }),
+              )
+            : reader(request),
+        ),
+      );
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-double-failure");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+          yield* seededVoiceEvent({ ids, threadId, providerThread, now, nativeItemId: "seed" }),
+        ],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* runtime.resumeThread({ threadId, providerThread });
+      yield* Queue.take(failVoiceMarkers.attempted);
+
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const recovered = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "turn-item.updated" &&
+            stored.event.payload.type === "realtime_voice" &&
+            stored.event.payload.nativeRealtimeItemId === "missed",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      // A later close must still reach provider history.
+      const close = yield* seededVoiceEvent({
+        ids,
+        threadId,
+        providerThread,
+        now,
+        nativeItemId: "close",
+      });
+      const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      yield* Queue.offer(events!, {
+        type: "turn_item.updated",
+        driver: CODEX_DRIVER,
+        turnItem: {
+          ...close.payload,
+          content: { type: "realtimeSessionClosed", outcome: "ended" },
+        },
+      });
+      assert.lengthOf(Array.from(yield* Fiber.join(recovered)), 1);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          readRealtimeHistoryPage: flaky,
+          failVoiceMarkers,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 keeps late voice from a binding that is no longer active", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-late-binding");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      // The thread already moved to "native-thread"; this record is its previous binding.
+      const previous = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+        nativeThreadId: "previous-native-thread",
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: previous,
+          },
+        ],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      const item = {
+        id: ids.derive.realtimeVoiceTurnItem({
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "previous-native-thread",
+          realtimeSessionId: "session",
+          nativeItemId: "late",
+        }),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: previous.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: now,
+        updatedAt: now,
+        type: "realtime_voice",
+        providerInstanceId: modelSelection.instanceId,
+        nativeThreadId: "previous-native-thread",
+        realtimeSessionId: "session",
+        nativeRealtimeItemId: "late",
+        content: { type: "transcriptSegment", role: "assistant", text: "late speech" },
+        captureState: "canonical_completed",
+        historyCoverage: "live_only",
+        sourceOrder: "unreconciled",
+        timestampProvenance: "observed",
+      } satisfies OrchestrationV2TurnItem;
+      const afterSequence = yield* sink.latestSequence({ threadId });
+      const persisted = yield* sink.stream({ threadId, afterSequence }).pipe(
+        Stream.filter((stored) => stored.event.type === "turn-item.updated"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      yield* Queue.offerAll(events!, [
+        // A different native thread is never vouched for by this record.
+        {
+          type: "turn_item.updated",
+          driver: CODEX_DRIVER,
+          turnItem: { ...item, nativeThreadId: "native-thread" },
+        },
+        { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: item },
+      ]);
+      assert.lengthOf(Array.from(yield* Fiber.join(persisted)), 1);
+      const stored = yield* projections.getTurnItem({ threadId, itemId: item.id });
+      assert.equal(
+        stored?.type === "realtime_voice" ? stored.nativeThreadId : null,
+        "previous-native-thread",
+      );
+    }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
+it.effect("ProviderRealtimeVoiceServiceV2 starts voice on an unloaded thread without a turn", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const voiceStarts = yield* Ref.make(0);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const voice = yield* ProviderRealtimeVoiceService.ProviderRealtimeVoiceServiceV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-unloaded-start");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
+      });
+      // Stopping never opens a session for a call that cannot exist.
+      const stop = yield* voice.stop({ threadId }).pipe(Effect.flip);
+      assert.equal(stop._tag, "ProviderRealtimeVoiceError");
+      assert.equal((yield* Ref.get(state)).openCount, 0);
+
+      assert.deepEqual(yield* voice.start({ threadId, sdp: "offer" }), { sdp: "answer" });
+      const runtime = yield* Ref.get(state);
+      assert.equal(runtime.openCount, 1);
+      assert.equal(runtime.resumeCount, 1);
+      assert.equal(yield* Ref.get(voiceStarts), 1);
+      assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
+
+      // The thread is now loaded, so another start must not reload it with other settings.
+      const thread = yield* projections.getThread(threadId);
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "thread.model-selection-updated",
+            occurredAt: now,
+            payload: { ...thread!, modelSelection: { ...modelSelection, model: "gpt-5.5" } },
+          },
+        ],
+      });
+      yield* voice.start({ threadId, sdp: "offer" });
+      assert.equal((yield* Ref.get(state)).resumeCount, 1);
+      assert.equal(yield* Ref.get(voiceStarts), 2);
+
+      // Earlier history waiting for this provider thread is only delivered by a turn.
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "context-handoff.updated",
+            occurredAt: now,
+            payload: {
+              id: ContextHandoffId.make("handoff:voice"),
+              threadId,
+              targetRunId: RunId.make("run:voice-handoff"),
+              fromProviderThreadIds: [],
+              toProviderThreadId: providerThread.id,
+              coveredRunOrdinals: { from: 1, to: 1 },
+              strategy: "full_thread_summary",
+              status: "ready",
+              summaryMessageId: null,
+              summaryText: "",
+              createdByProviderInstanceId: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      const blocked = yield* voice.start({ threadId, sdp: "offer" }).pipe(Effect.flip);
+      assert.equal(blocked._tag, "ProviderRealtimeVoiceError");
+      assert.equal(yield* Ref.get(voiceStarts), 2);
+    }).pipe(
+      Effect.provide(
+        ProviderRealtimeVoiceService.layer.pipe(
+          Layer.provideMerge(
+            Layer.merge(
+              layerTest({
+                state,
+                idleTimeoutMs: 60_000,
+                startTurn: Effect.die("voice must not start a coding turn"),
+                startRealtimeVoice: () =>
+                  Ref.update(voiceStarts, (count) => count + 1).pipe(Effect.as({ sdp: "answer" })),
+              }),
+              RuntimePolicy.layer,
+            ),
+          ),
+        ),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 preserves quiet voice beyond the background pin budget", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const reserved = yield* Ref.make(true);
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("quiet-voice");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* sink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* TestClock.adjust("5 seconds");
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
+      yield* Ref.set(reserved, false);
+      yield* TestClock.adjust("1 second");
+      assert.isFalse(yield* manager.isLive(providerSessionId));
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 1000,
+          maxIdlePinMs: 1000,
+          hasActiveRealtimeVoice: Ref.get(reserved),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect.each(["malformed", "unpersistable"] as const)(
+  "ProviderSessionManagerV2 isolates %s voice records from coding event subscribers",
+  (failure) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("voice-owner");
+        const providerSessionId = ids.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator: ids,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+            {
+              id: yield* ids.allocate.event({ threadId }),
+              threadId,
+              type: "provider-thread.updated",
+              occurredAt: now,
+              payload: providerThread,
+            },
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const item = {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "old-session",
+            nativeItemId: "speech",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "old-session",
+          nativeRealtimeItemId: "speech",
+          content: { type: "transcriptSegment", role: "assistant", text: "durable speech" },
+          captureState: "canonical_completed",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        } satisfies OrchestrationV2TurnItem;
+        const runtime = Option.getOrThrow(yield* manager.get(providerSessionId));
+        const subscription = yield* runtime.subscribeEvents!;
+        const coding = yield* subscription.events.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const afterSequence = yield* sink.latestSequence({ threadId });
+        const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(events);
+        yield* Queue.offerAll(events!, [
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: {
+              ...item,
+              nativeRealtimeItemId: failure === "malformed" ? "" : item.nativeRealtimeItemId,
+            },
+          },
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...item, type: "command_execution", input: "echo coding continues" },
+          },
+        ]);
+        assert.lengthOf(Array.from(yield* Fiber.join(coding)), 1);
+        assert.isTrue(yield* manager.isLive(providerSessionId));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+        const marker = yield* sink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" &&
+              stored.event.payload.type === "error" &&
+              stored.event.payload.failure.code === "voice_history_incomplete",
+          ),
+          Stream.take(1),
+          Stream.runCollect,
+        );
+        assert.lengthOf(Array.from(marker), 1);
+        assert.lengthOf((yield* projections.getThreadProjection(threadId)).runs, 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 1000, failVoiceWrites: failure === "unpersistable" }),
+        ),
+      );
+    }),
+);
+
+it.effect("ProviderSessionManagerV2 finishes a failed voice marker before session removal", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const pause = { paused: yield* Deferred.make<void>(), resume: yield* Deferred.make<void>() };
+    yield* Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("voice-marker-release");
+      const providerSessionId = ids.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "provider-thread.updated",
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      const events = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      if (events === undefined) return yield* Effect.die("Missing provider event queue");
+      yield* Queue.offer(events, {
+        type: "turn_item.updated",
+        driver: CODEX_DRIVER,
+        turnItem: {
+          id: ids.derive.realtimeVoiceTurnItem({
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            realtimeSessionId: "session",
+            nativeItemId: "speech",
+          }),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          startedAt: null,
+          completedAt: now,
+          updatedAt: now,
+          type: "realtime_voice",
+          providerInstanceId: modelSelection.instanceId,
+          nativeThreadId: "native-thread",
+          realtimeSessionId: "session",
+          nativeRealtimeItemId: "speech",
+          content: { type: "transcriptSegment", role: "assistant", text: "fixture speech" },
+          captureState: "canonical_completed",
+          historyCoverage: "live_only",
+          sourceOrder: "unreconciled",
+          timestampProvenance: "observed",
+        },
+      });
+      yield* Deferred.await(pause.paused);
+      const closed = yield* manager
+        .close(providerSessionId)
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+      yield* Deferred.succeed(pause.resume, undefined);
+      yield* Fiber.join(closed);
+      assert.isFalse(yield* manager.isLive(providerSessionId));
+      const projection = yield* projections.getThreadProjection(threadId);
+      assert.equal(
+        projection.turnItems.filter(
+          (item) => item.type === "error" && item.failure.code === "voice_history_incomplete",
+        ).length,
+        1,
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          failVoiceWrites: true,
+          pauseVoiceMarkerWrite: pause,
+        }),
+      ),
+    );
+  }),
 );

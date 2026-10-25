@@ -13,6 +13,7 @@ import {
 import { ThreadContextDivider } from "./thread-context-divider";
 import { ThreadHandoffDivider, ThreadHandoffRow } from "./thread-handoff-row";
 import { SecretRequestCard } from "./SecretRequestCard";
+import { ThreadVoiceTranscriptRow } from "./ThreadVoiceTranscriptRow";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import {
   WorktreeWorkingHeader,
@@ -1343,6 +1344,16 @@ function renderFeedEntry(
         icon="arrow.down.right.and.arrow.up.left"
         iconColor={iconSubtleColor}
         active={active}
+      />
+    );
+  }
+
+  if (entry.type === "realtime-voice") {
+    return (
+      <ThreadVoiceTranscriptRow
+        entry={entry}
+        timestampLabel={formatMessageTime(entry.createdAt)}
+        iconColor={iconSubtleColor}
       />
     );
   }

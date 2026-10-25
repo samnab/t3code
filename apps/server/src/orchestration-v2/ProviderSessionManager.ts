@@ -5,6 +5,7 @@ import {
   isOrchestrationV2WorkActive,
   ModelSelection,
   OrchestrationV2DomainEvent,
+  OrchestrationV2TurnItem,
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
@@ -52,7 +53,12 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as RealtimeVoiceHistoryReconciler from "./RealtimeVoiceHistoryReconciler.ts";
 
+const isValidVoiceHistoryItem = Schema.is(OrchestrationV2TurnItem);
+
+// 5 passes of 40 pages: 15,000 history entries per trigger before the rest is marked missing.
+const MAX_VOICE_RECONCILE_PASSES = 5;
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
 const RELEASE_SCOPE_CLOSE_TIMEOUT_MS = 30 * 1000;
@@ -163,6 +169,11 @@ export interface ProviderSessionManagerV2Shape {
     ProviderSessionManagerV2Error
   >;
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  /** Whether a live session holds the thread loaded under any model or runtime settings. */
+  readonly isThreadLoaded: (input: {
+    readonly providerSessionId: ProviderSessionId;
+    readonly threadId: ThreadId;
+  }) => Effect.Effect<boolean>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -388,6 +399,11 @@ export const layerWithOptions = (
           }),
       );
       const sessions = yield* Ref.make(new Map<string, LiveSessionEntry>());
+      // Per live runtime: provider thread -> whether another pass was requested while one ran.
+      const voiceReconciliations = new WeakMap<
+        ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        Map<ProviderThreadId, boolean>
+      >();
       // One retry per released entry, so a later release with the same id
       // cannot drop cleanup for threads only the earlier session served.
       const releaseRecordRetries = yield* FiberSet.make();
@@ -1124,6 +1140,14 @@ export const layerWithOptions = (
           // Capture runtime identity before yielding: a replacement session
           // can reuse the same providerSessionId while this fiber is parked.
           const probedRuntime = entry.runtime;
+          if (
+            probedRuntime.hasActiveRealtimeVoice !== undefined &&
+            (yield* probedRuntime.hasActiveRealtimeVoice())
+          ) {
+            // Voice owns a bounded adapter reservation, independent of the background-work pin budget.
+            yield* Effect.sleep(Duration.millis(idleTimeoutMs));
+            return yield* releaseIfStillIdle(input);
+          }
           const hasPendingWork =
             probedRuntime.hasPendingBackgroundWork === undefined
               ? false
@@ -1605,6 +1629,11 @@ export const layerWithOptions = (
               ) {
                 return "skipped" as const;
               }
+              if (
+                entry.runtime.hasActiveRealtimeVoice !== undefined &&
+                (yield* entry.runtime.hasActiveRealtimeVoice(pending.providerThread))
+              )
+                return "deferred" as const;
               // Unloading stops the native thread's background terminals, so a
               // thread still running background work stays loaded.
               const hasPendingWork =
@@ -1789,7 +1818,20 @@ export const layerWithOptions = (
                 isProviderThreadLoaded({ providerSessionId, threadId, providerThreadKey }),
               ),
               Effect.flatMap((loaded) =>
-                loaded ? Effect.succeed(input.providerThread) : runtime.resumeThread(input),
+                loaded
+                  ? Effect.succeed(input.providerThread)
+                  : runtime.resumeThread(input).pipe(
+                      Effect.tap((providerThread) =>
+                        Ref.get(sessions).pipe(
+                          Effect.flatMap((current) => {
+                            const entry = current.get(sessionKey(providerSessionId));
+                            return entry?.runtime === runtime
+                              ? scheduleVoiceReconciliationOnLoad(entry, providerThread)
+                              : Effect.void;
+                          }),
+                        ),
+                      ),
+                    ),
               ),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({
@@ -1873,6 +1915,62 @@ export const layerWithOptions = (
                 ),
               ),
             ),
+          ...(runtime.startRealtimeVoice === undefined
+            ? {}
+            : {
+                startRealtimeVoice: Effect.fn("ProviderSessionManager.startRealtimeVoice")(
+                  function* (
+                    voiceInput: Parameters<
+                      NonNullable<
+                        ProviderAdapter.ProviderAdapterV2SessionRuntime["startRealtimeVoice"]
+                      >
+                    >[0],
+                  ) {
+                    const threadId = voiceInput.providerThread.appThreadId;
+                    if (threadId === null)
+                      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: runtime.driver,
+                        detail: "Voice requires an app-owned provider thread.",
+                      });
+                    yield* observeActivity(providerSessionId, touchActivity(providerSessionId));
+                    yield* holdThreadLoaded({
+                      providerSessionId,
+                      threadId,
+                      providerThread: voiceInput.providerThread,
+                    });
+                    const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+                    if (
+                      entry?.runtime !== runtime ||
+                      !entry.loadedProviderThreadKeyByThread.has(threadId)
+                    )
+                      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                        driver: runtime.driver,
+                        detail: "Voice requires a loaded provider thread. Send a message first.",
+                      });
+                    const providerThread = voiceInput.providerThread;
+                    return yield* runtime.startRealtimeVoice!({
+                      ...voiceInput,
+                      providerThread,
+                    }).pipe(
+                      Effect.ensuring(scheduleThreadUnload(providerSessionId, providerThread.id)),
+                    );
+                  },
+                ),
+              }),
+          ...(runtime.stopRealtimeVoice === undefined
+            ? {}
+            : {
+                stopRealtimeVoice: Effect.fn("ProviderSessionManager.stopRealtimeVoice")(function* (
+                  voiceInput: Parameters<
+                    NonNullable<
+                      ProviderAdapter.ProviderAdapterV2SessionRuntime["stopRealtimeVoice"]
+                    >
+                  >[0],
+                ) {
+                  yield* observeActivity(providerSessionId, touchActivity(providerSessionId));
+                  return yield* runtime.stopRealtimeVoice!(voiceInput);
+                }),
+              }),
           steerTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(runtime.steerTurn(input).pipe(turnMetrics("steer"))),
@@ -1959,6 +2057,293 @@ export const layerWithOptions = (
           ),
         );
 
+      const markVoiceHistoryIncomplete = Effect.fn(
+        "ProviderSessionManager.markVoiceHistoryIncomplete",
+      )(
+        function* (
+          entry: LiveSessionEntry,
+          threadId: ThreadId,
+          reason: "invalid_record" | "persistence" | "reconciliation",
+        ) {
+          yield* Effect.logWarning("orchestration-v2.driver-session.voice-history-incomplete", {
+            providerSessionId: entry.runtime.providerSessionId,
+            threadId,
+            reason,
+          });
+          const current = (yield* Ref.get(sessions)).get(
+            sessionKey(entry.runtime.providerSessionId),
+          );
+          if (current?.runtime !== entry.runtime || !current.attachedThreadIds.has(threadId))
+            return;
+          const thread = yield* projectionStore.getThread(threadId);
+          if (
+            thread === null ||
+            thread.deletedAt !== null ||
+            thread.providerInstanceId !== entry.runtime.instanceId
+          )
+            return;
+          const unrecovered = reason === "reconciliation";
+          const id = idAllocator.derive.turnItemFromProviderItem({
+            driver: entry.runtime.driver,
+            nativeItemId: `${entry.runtime.providerSessionId}:${threadId}:${unrecovered ? "voice-history-unrecovered" : "voice-history-incomplete"}`,
+          });
+          if ((yield* projectionStore.getTurnItem({ threadId, itemId: id })) !== null) return;
+          const now = yield* DateTime.now;
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* idAllocator.allocate.event({ threadId }),
+                threadId,
+                type: "turn-item.updated",
+                occurredAt: now,
+                payload: {
+                  id,
+                  threadId,
+                  runId: null,
+                  nodeId: null,
+                  providerThreadId: thread.activeProviderThreadId,
+                  providerTurnId: null,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: 0,
+                  status: "failed",
+                  title: "Voice history incomplete",
+                  startedAt: null,
+                  completedAt: now,
+                  updatedAt: now,
+                  type: "error",
+                  failure: {
+                    class: "provider_error",
+                    code: "voice_history_incomplete",
+                    message: unrecovered
+                      ? "Voice history could not be recovered from the provider. Some speech may be missing."
+                      : "Voice history capture is incomplete. A provider record could not be saved.",
+                    retryable: false,
+                  },
+                },
+              },
+            ],
+          });
+        },
+        (effect, entry, threadId) =>
+          effect.pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.interrupt
+                : Effect.logWarning(
+                    "orchestration-v2.driver-session.voice-history-marker-unavailable",
+                    { providerSessionId: entry.runtime.providerSessionId, threadId },
+                  ),
+            ),
+          ),
+      );
+
+      /**
+       * Persists one canonical voice record; callers hold the session's request permit. Returns the
+       * provider thread when it is still the thread's active binding, or null. A binding that is
+       * no longer active still vouches for late records of its own native thread.
+       */
+      const persistVoiceItem = Effect.fn("ProviderSessionManager.persistVoiceItem")(function* (
+        entry: LiveSessionEntry,
+        item: Extract<OrchestrationV2TurnItem, { readonly type: "realtime_voice" }>,
+      ) {
+        const declined = Effect.logDebug("orchestration-v2.driver-session.voice-binding-declined", {
+          providerSessionId: entry.runtime.providerSessionId,
+        }).pipe(Effect.as(null));
+        const current = (yield* Ref.get(sessions)).get(sessionKey(entry.runtime.providerSessionId));
+        if (
+          current?.runtime !== entry.runtime ||
+          item.providerInstanceId !== entry.runtime.instanceId ||
+          item.providerThreadId === null
+        )
+          return yield* declined;
+        const thread = yield* projectionStore.getThread(item.threadId);
+        if (thread === null || thread.deletedAt !== null) return yield* declined;
+        const { providerThreads } = yield* projectionStore.getThreadRecords(item.threadId, [
+          "providerThreads",
+        ]);
+        const providerThread = providerThreads.find(
+          (candidate) => candidate.id === item.providerThreadId,
+        );
+        if (
+          providerThread?.appThreadId !== item.threadId ||
+          providerThread.providerInstanceId !== item.providerInstanceId ||
+          providerThread.nativeThreadRef?.nativeId !== item.nativeThreadId
+        )
+          return yield* declined;
+        if (
+          !isValidVoiceHistoryItem(item) ||
+          item.runId !== null ||
+          item.nodeId !== null ||
+          item.providerTurnId !== null
+        ) {
+          yield* markVoiceHistoryIncomplete(entry, item.threadId, "invalid_record");
+          return null;
+        }
+        yield* providerEventIngestor.ingestNormalized({
+          providerSessionId: entry.runtime.providerSessionId,
+          providerInstanceId: entry.runtime.instanceId,
+          threadId: item.threadId,
+          event: { type: "turn_item.updated", driver: entry.runtime.driver, turnItem: item },
+        });
+        // Only the active binding's history can be read back through this session.
+        return thread.activeProviderThreadId === providerThread.id ? providerThread : null;
+      });
+
+      /**
+       * Recovers committed voice the projection is missing from the provider's own history. Runs
+       * forked in the session scope: the history read replies through the provider's serial
+       * reader, which this session's event pump must keep draining. Recovered records are
+       * descriptive and pass the same binding checks as live ones; nothing here starts work.
+       */
+      const scheduleVoiceReconciliation = Effect.fn(
+        "ProviderSessionManager.scheduleVoiceReconciliation",
+      )(function* (entry: LiveSessionEntry, providerThread: OrchestrationV2ProviderThread) {
+        const readRealtimeHistoryPage = entry.runtime.readRealtimeHistoryPage;
+        const threadId = providerThread.appThreadId;
+        if (readRealtimeHistoryPage === undefined || threadId === null) return;
+        // Claims belong to one live runtime, so a reopened session never inherits a stuck claim.
+        const claims =
+          voiceReconciliations.get(entry.runtime) ??
+          voiceReconciliations.set(entry.runtime, new Map()).get(entry.runtime)!;
+        const key = providerThread.id;
+        const claimed = yield* Effect.sync(() => {
+          if (claims.has(key)) {
+            claims.set(key, true);
+            return false;
+          }
+          claims.set(key, false);
+          return true;
+        });
+        if (!claimed) return;
+        // One pass; failures become the visible marker, so the drain below always continues.
+        const reconcileOnce = RealtimeVoiceHistoryReconciler.reconcileRealtimeVoiceHistory({
+          providerThread,
+          readRealtimeHistoryPage,
+        }).pipe(
+          Effect.provideService(ProjectionStore.ProjectionStoreV2, projectionStore),
+          Effect.provideService(IdAllocator.IdAllocatorV2, idAllocator),
+          Effect.tap(({ items, resume }) =>
+            Effect.forEach(
+              items,
+              (item) => persistVoiceItem(entry, item).pipe(entry.requestEventPermit.withPermits(1)),
+              { discard: true },
+            ).pipe(
+              Effect.andThen(
+                resume === null
+                  ? Effect.void
+                  : projectionStore.setRealtimeVoiceHistoryResume(resume.key, resume.resume),
+              ),
+            ),
+          ),
+          Effect.map(({ complete }) => complete),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.interrupt
+              : markVoiceHistoryIncomplete(entry, threadId, "reconciliation").pipe(
+                  entry.requestEventPermit.withPermits(1),
+                  Effect.as(true),
+                ),
+          ),
+        );
+        // A long history continues from its stored resume point; past the per-trigger bound the
+        // rest is disclosed as missing and the next trigger carries on.
+        const passes = (pass: number): Effect.Effect<void> =>
+          reconcileOnce.pipe(
+            Effect.flatMap((complete) =>
+              complete
+                ? Effect.void
+                : pass + 1 < MAX_VOICE_RECONCILE_PASSES
+                  ? Effect.suspend(() => passes(pass + 1))
+                  : markVoiceHistoryIncomplete(entry, threadId, "reconciliation").pipe(
+                      entry.requestEventPermit.withPermits(1),
+                    ),
+            ),
+          );
+        const drain: Effect.Effect<void> = passes(0).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              if (claims.get(key) === true) {
+                claims.set(key, false);
+                return true;
+              }
+              claims.delete(key);
+              return false;
+            }),
+          ),
+          Effect.flatMap((again) => (again ? Effect.suspend(() => drain) : Effect.void)),
+        );
+        yield* drain.pipe(
+          Effect.onExit((exit) =>
+            Exit.isSuccess(exit) ? Effect.void : Effect.sync(() => claims.delete(key)),
+          ),
+          Effect.forkIn(entry.scope),
+        );
+      });
+
+      // Loading is where speech committed while T3 was away becomes visible. Only threads that
+      // already hold voice from this native thread pay for a provider history read.
+      const scheduleVoiceReconciliationOnLoad = (
+        entry: LiveSessionEntry,
+        providerThread: OrchestrationV2ProviderThread,
+      ) =>
+        providerThread.appThreadId === null ||
+        providerThread.nativeThreadRef?.nativeId == null ||
+        entry.runtime.readRealtimeHistoryPage === undefined
+          ? Effect.void
+          : projectionStore
+              .hasRealtimeVoice({
+                threadId: providerThread.appThreadId,
+                providerInstanceId: providerThread.providerInstanceId,
+                nativeThreadId: providerThread.nativeThreadRef.nativeId,
+              })
+              .pipe(
+                Effect.flatMap((present) =>
+                  present ? scheduleVoiceReconciliation(entry, providerThread) : Effect.void,
+                ),
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.interrupt
+                    : Effect.logWarning("orchestration-v2.driver-session.voice-reconcile-skipped", {
+                        providerSessionId: entry.runtime.providerSessionId,
+                      }),
+                ),
+              );
+
+      const scheduleVoiceReconciliationForItem = (
+        entry: LiveSessionEntry,
+        item: Extract<OrchestrationV2TurnItem, { readonly type: "realtime_voice" }>,
+      ) =>
+        projectionStore.getThreadRecords(item.threadId, ["providerThreads"]).pipe(
+          Effect.map(({ providerThreads }) =>
+            providerThreads.find(
+              (candidate) =>
+                candidate.id === item.providerThreadId &&
+                candidate.appThreadId === item.threadId &&
+                candidate.nativeThreadRef?.nativeId === item.nativeThreadId,
+            ),
+          ),
+          Effect.flatMap((providerThread) =>
+            projectionStore
+              .getThread(item.threadId)
+              .pipe(
+                Effect.map((thread) =>
+                  thread?.activeProviderThreadId === providerThread?.id
+                    ? providerThread
+                    : undefined,
+                ),
+              ),
+          ),
+          Effect.flatMap((providerThread) =>
+            providerThread === undefined
+              ? Effect.void
+              : scheduleVoiceReconciliation(entry, providerThread),
+          ),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause) ? Effect.interrupt : Effect.void,
+          ),
+        );
+
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
         return entry.runtime.events.pipe(
@@ -2022,6 +2407,30 @@ export const layerWithOptions = (
                         loadedProviderThreadKeyByThread,
                       });
                     });
+                  }
+                  // Canonical speech is session history even when no coding run is subscribed.
+                  if (
+                    event.type === "turn_item.updated" &&
+                    event.turnItem.type === "realtime_voice"
+                  ) {
+                    const item = event.turnItem;
+                    yield* persistVoiceItem(entry, item).pipe(
+                      Effect.flatMap((providerThread) =>
+                        // A closed realtime session is the point its provider history is complete.
+                        providerThread !== null && item.content.type === "realtimeSessionClosed"
+                          ? scheduleVoiceReconciliation(entry, providerThread)
+                          : Effect.void,
+                      ),
+                      Effect.catchCause((cause) =>
+                        Cause.hasInterruptsOnly(cause)
+                          ? Effect.interrupt
+                          : markVoiceHistoryIncomplete(entry, item.threadId, "persistence").pipe(
+                              Effect.andThen(scheduleVoiceReconciliationForItem(entry, item)),
+                            ),
+                      ),
+                      entry.requestEventPermit.withPermits(1),
+                    );
+                    return;
                   }
                   // Some providers can block before a run subscriber exists
                   // (project trust, login, or session-switch hooks). Persist
@@ -2318,6 +2727,15 @@ export const layerWithOptions = (
         isLive: (providerSessionId) =>
           Ref.get(sessions).pipe(
             Effect.map((current) => current.has(sessionKey(providerSessionId))),
+          ),
+        isThreadLoaded: ({ providerSessionId, threadId }) =>
+          Ref.get(sessions).pipe(
+            Effect.map(
+              (current) =>
+                current
+                  .get(sessionKey(providerSessionId))
+                  ?.loadedProviderThreadKeyByThread.has(threadId) ?? false,
+            ),
           ),
         get: Effect.fn("ProviderSessionManager.get")(
           function* (providerSessionId) {

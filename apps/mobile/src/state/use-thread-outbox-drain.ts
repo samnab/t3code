@@ -1033,7 +1033,7 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
-          voiceNotifications: queuedMessage.voiceNotifications ?? true,
+          voiceNotifications: queuedMessage.voiceNotifications ?? false,
           workspaceMode: workspace.workspaceMode,
           branch: workspace.branch,
           worktreePath: workspace.worktreePath,

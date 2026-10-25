@@ -7,6 +7,7 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { isOrchestrationV2MessageHistoryItem } from "@t3tools/shared/orchestrationV2Timeline";
 import { searchableMessageSegments, searchablePlanSegments } from "@t3tools/shared/threadFindText";
 import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
 import * as Cache from "effect/Cache";
@@ -40,7 +41,7 @@ interface FindDocument extends FindRow {
 }
 class TextKey extends Data.Class<{
   text: string;
-  role: "user" | "assistant" | "plan";
+  role: "user" | "assistant" | "plan" | "voice";
   streaming: boolean;
   hasContext: boolean;
   cwd: string | undefined;
@@ -58,9 +59,19 @@ function textKey(
         ? item.markdown
         : item.type === "user_message" || item.type === "assistant_message"
           ? item.text
-          : "",
+          : item.type === "realtime_voice" &&
+              isOrchestrationV2MessageHistoryItem(item) &&
+              item.content.type === "transcriptSegment"
+            ? item.content.text
+            : "",
     role:
-      item.type === "proposed_plan" ? "plan" : item.type === "user_message" ? "user" : "assistant",
+      item.type === "proposed_plan"
+        ? "plan"
+        : item.type === "realtime_voice"
+          ? "voice"
+          : item.type === "user_message"
+            ? "user"
+            : "assistant",
     streaming: item.type === "assistant_message" && item.streaming,
     hasContext: item.type === "user_message" && item.context !== undefined,
     cwd,
@@ -68,7 +79,9 @@ function textKey(
   });
 }
 
+// Voice rows render the transcript verbatim, so there is no markup to strip.
 function parseText(key: TextKey): readonly string[] {
+  if (key.role === "voice") return [key.text];
   return key.role === "plan"
     ? searchablePlanSegments(key.text, key.cwd)
     : (searchableMessageSegments(
@@ -93,8 +106,9 @@ function searchableRows(items: readonly OrchestrationV2ProjectedTurnItem[]) {
   );
   return items.filter(
     ({ item }) =>
-      ["user_message", "assistant_message", "proposed_plan"].includes(item.type) &&
-      !(item.type === "user_message" && foldedAnswers.has(item.messageId)),
+      ["user_message", "assistant_message", "proposed_plan", "realtime_voice"].includes(
+        item.type,
+      ) && !(item.type === "user_message" && foldedAnswers.has(item.messageId)),
   );
 }
 
@@ -336,9 +350,13 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
       const candidates = index
         .map((row, position) => ({ ...row, position }))
         .filter((row) =>
-          ["user_message", "assistant_message", "proposed_plan", "user_input_request"].includes(
-            row.item.type,
-          ),
+          [
+            "user_message",
+            "assistant_message",
+            "proposed_plan",
+            "user_input_request",
+            "realtime_voice",
+          ].includes(row.item.type),
         );
       const payloads: FindPayload[] = [];
       for (let start = 0; start < candidates.length; start += 128) {

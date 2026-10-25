@@ -352,7 +352,7 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
       assert.equal(shellProjection.thread.pinOrderKey, "m");
       assert.isNull(shellProjection.thread.goal);
       assert.isNull(shellProjection.thread.goalLoop);
-      assert.isTrue(shellProjection.thread.voiceNotifications);
+      assert.isFalse(shellProjection.thread.voiceNotifications);
       assert.deepEqual(
         shellProjection.thread.snoozedUntil,
         DateTime.makeUnsafe("2026-02-01T00:00:00.000Z"),

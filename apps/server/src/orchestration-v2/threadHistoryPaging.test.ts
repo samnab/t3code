@@ -12,6 +12,9 @@ import * as DateTime from "effect/DateTime";
 
 import {
   buildBoundedThreadProjection,
+  isConversationHistoryItem,
+  isThreadHistoryUserTurn,
+  threadHistoryTurnStarts,
   boundedTimelineEncodedBytes,
   computeLatestLocalTurnOrdinal,
   encodeThreadHistoryCursor,
@@ -687,4 +690,21 @@ describe("threadHistoryPaging", () => {
     });
     expect(bounded.payloadBudgetExceeded).toBe(false);
   });
+});
+
+it("reads historical user voice without making it a coding user-turn boundary", () => {
+  const speech = {
+    type: "realtime_voice",
+    status: "completed",
+    runId: null,
+    captureState: "canonical_completed",
+    content: { type: "transcriptSegment" },
+  } as const;
+  expect(isConversationHistoryItem(speech)).toBe(true);
+  expect(isThreadHistoryUserTurn(speech)).toBe(false);
+  expect(threadHistoryTurnStarts([speech])).toEqual([false]);
+  expect(isConversationHistoryItem({ ...speech, content: { type: "bemItemPromoted" } })).toBe(
+    false,
+  );
+  expect(isConversationHistoryItem({ ...speech, status: "running" })).toBe(false);
 });

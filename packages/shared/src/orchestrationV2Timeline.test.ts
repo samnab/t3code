@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   createOrchestrationV2TurnItemVisibility,
+  isOrchestrationV2MessageHistoryItem,
   isOrchestrationV2TurnItemVisible,
 } from "./orchestrationV2Timeline.ts";
 
@@ -92,4 +93,21 @@ describe.each([
       }),
     ).toBe(true);
   });
+});
+
+it("includes finalized speech in message history while excluding voice activity and unfinished text", () => {
+  const voice = {
+    type: "realtime_voice",
+    status: "completed",
+    captureState: "canonical_completed",
+    content: { type: "transcriptSegment" },
+  } as const;
+  expect(isOrchestrationV2MessageHistoryItem(voice)).toBe(true);
+  expect(isOrchestrationV2MessageHistoryItem({ ...voice, status: "running" })).toBe(false);
+  expect(isOrchestrationV2MessageHistoryItem({ ...voice, captureState: "incomplete" })).toBe(false);
+  for (const type of ["realtimeSessionStarted", "bemItemPromoted", "realtimeSessionClosed"]) {
+    expect(isOrchestrationV2MessageHistoryItem({ ...voice, content: { type } })).toBe(false);
+  }
+  expect(isOrchestrationV2MessageHistoryItem({ type: "user_message" })).toBe(true);
+  expect(isOrchestrationV2MessageHistoryItem({ type: "command_execution" })).toBe(false);
 });

@@ -30,6 +30,9 @@ import { useUiRuntimeMemoryWarningGc } from "./lib/useUiRuntimeMemoryWarningGc";
 import { SubscriptionUsageCoordinator } from "./widgets/SubscriptionUsageCoordinator";
 import { VoiceInputProvider } from "./features/voice-input/VoiceInputProvider";
 import { GlobalVoiceInputControl } from "./features/voice-input/GlobalVoiceInputControl";
+import { RealtimeVoiceProvider } from "./features/realtime-voice/RealtimeVoiceProvider";
+import { GlobalRealtimeVoiceControl } from "./features/realtime-voice/GlobalRealtimeVoiceControl";
+import { navigationRef } from "./features/realtime-voice/navigationRef";
 import { NativeLayoutMetricsProvider } from "./native/native-layout-metrics";
 
 import "../global.css";
@@ -96,26 +99,35 @@ function AppContent() {
       <GestureHandlerRootView className="flex-1">
         <KeyboardProvider statusBarTranslucent>
           <SafeAreaProvider>
-            <VoiceInputProvider>
-              <StatusBar barStyle={themeAppearance === "dark" ? "light-content" : "dark-content"} />
-              {/* The navigation theme drives the NATIVE header appearance: native-stack
+            <RealtimeVoiceProvider>
+              <VoiceInputProvider>
+                <StatusBar
+                  barStyle={themeAppearance === "dark" ? "light-content" : "dark-content"}
+                />
+                {/* The navigation theme drives the NATIVE header appearance: native-stack
                 forwards `dark` as the nav bar's overrideUserInterfaceStyle. Without
                 this, React Navigation defaults to its light theme and every native
                 header (glass buttons, title, materials) is forced light even when
                 the system is in dark mode. */}
-              <GlobalVoiceInputControl>
-                <NativeLayoutMetricsProvider>
-                  <IncomingShareProvider>
-                    <Navigation linking={appLinking} theme={navigationTheme} />
-                  </IncomingShareProvider>
-                  <Dialog.Host />
-                  <ThreadArrangementHost />
-                </NativeLayoutMetricsProvider>
-              </GlobalVoiceInputControl>
-              {/* Anchored-menu overlays render here — in-window, so the
+                <GlobalVoiceInputControl>
+                  <NativeLayoutMetricsProvider>
+                    <IncomingShareProvider>
+                      <Navigation
+                        ref={navigationRef}
+                        linking={appLinking}
+                        theme={navigationTheme}
+                      />
+                    </IncomingShareProvider>
+                    <Dialog.Host />
+                    <ThreadArrangementHost />
+                  </NativeLayoutMetricsProvider>
+                </GlobalVoiceInputControl>
+                {/* Anchored-menu overlays render here — in-window, so the
                 keyboard stays up while a dropdown is open. */}
-              <OverlayPortalHost />
-            </VoiceInputProvider>
+                <OverlayPortalHost />
+                <GlobalRealtimeVoiceControl />
+              </VoiceInputProvider>
+            </RealtimeVoiceProvider>
           </SafeAreaProvider>
         </KeyboardProvider>
       </GestureHandlerRootView>

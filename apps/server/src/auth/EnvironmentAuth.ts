@@ -495,6 +495,7 @@ export class EnvironmentAuth extends Context.Service<
     >;
     readonly createPairingLink: (input?: {
       readonly ttl?: Duration.Duration;
+      readonly desktopSessionTtlDays?: number;
       readonly label?: string;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly subject?: string;
@@ -922,7 +923,7 @@ export const make = Effect.gen(function* () {
 
   type ResolvedBootstrapGrant = Pick<
     PairingGrantStore.BootstrapGrant,
-    "scopes" | "subject" | "label"
+    "scopes" | "subject" | "label" | "desktopSessionTtlDays"
   > & {
     readonly method: PairingGrantStore.BootstrapGrant["method"] | "reusable-dev-token";
   };
@@ -985,6 +986,11 @@ export const make = Effect.gen(function* () {
                       proofKeyThumbprint: input.proofKeyThumbprint,
                       ttl: Duration.hours(1),
                     }
+                  : {}),
+                ...(!input?.proofKeyThumbprint &&
+                requestMetadata.deviceType === "desktop" &&
+                grant.desktopSessionTtlDays !== undefined
+                  ? { ttl: Duration.days(grant.desktopSessionTtlDays) }
                   : {}),
                 replaceActiveForSubjectAndMethod: grant.method === "desktop-bootstrap",
                 client: {
@@ -1054,6 +1060,9 @@ export const make = Effect.gen(function* () {
         scopes: input?.scopes ?? AuthStandardClientScopes,
         subject: input?.subject ?? "one-time-token",
         ...(input?.ttl ? { ttl: input.ttl } : {}),
+        ...(input?.desktopSessionTtlDays === undefined
+          ? {}
+          : { desktopSessionTtlDays: input.desktopSessionTtlDays }),
         ...(input?.label ? { label: input.label } : {}),
         ...(input?.proofKeyThumbprint ? { proofKeyThumbprint: input.proofKeyThumbprint } : {}),
         ...(input?.purpose ? { purpose: input.purpose } : {}),

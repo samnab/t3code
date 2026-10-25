@@ -42,6 +42,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderRuntimeRecoveryService from "./ProviderRuntimeRecoveryService.ts";
 import * as ProviderBackgroundTaskService from "./ProviderBackgroundTaskService.ts";
+import * as ProviderRealtimeVoiceService from "./ProviderRealtimeVoiceService.ts";
 import * as ProviderSwitchService from "./ProviderSwitchService.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
@@ -340,6 +341,15 @@ const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.laye
 const layerProviderBackgroundTaskProvided = ProviderBackgroundTaskService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
+const layerProviderRealtimeVoiceProvided = ProviderRealtimeVoiceService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerProviderSessionManagerProvided,
+      layerRuntimePolicyProvided,
+    ),
+  ),
+);
 
 const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
   Layer.provide(
@@ -362,6 +372,7 @@ export const layer = Layer.mergeAll(
   layerProviderAuthServiceProvided,
   layerProviderRuntimeRecoveryProvided,
   layerProviderBackgroundTaskProvided,
+  layerProviderRealtimeVoiceProvided,
   layerProjectionMaintenanceProvided,
   layerLegacyV1ThreadImporterProvided,
 );

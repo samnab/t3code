@@ -59,7 +59,10 @@ import {
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
+  MicOffIcon,
   PaletteIcon,
+  PauseIcon,
+  PlayIcon,
   RotateCcwIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -221,6 +224,7 @@ import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog"
 import { toggleThemeEditorForTheme } from "./settings/themeEditorStore";
 import { searchSettings, SETTINGS_SECTION_LABELS } from "./settings/settingsSearch";
 import { primaryServerKeybindingsAtom } from "../state/server";
+import { useRealtimeVoice } from "./voice/RealtimeVoiceProvider";
 import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
 import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "./ui/command";
 import { Button } from "./ui/button";
@@ -573,6 +577,7 @@ function OpenCommandPaletteDialog(props: {
   };
   const threads = useThreadShells();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const voice = useRealtimeVoice();
   const providersByEnvironment = useEnvironmentProviders();
   const { changeThemeItem, changeAppearanceItem, themeEditorItem } = useCommandPaletteThemeItems();
   const currentView = viewStack.at(-1)?.view ?? null;
@@ -1184,6 +1189,34 @@ function OpenCommandPaletteDialog(props: {
   };
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+
+  const voiceMode = voice.snapshot.mode;
+  if (voiceMode === "paused" || voiceMode === "transmitting" || voiceMode === "connecting") {
+    const paused = voiceMode === "paused";
+    actionItems.push({
+      kind: "action",
+      value: paused ? "action:voice-resume" : "action:voice-pause",
+      searchTerms: ["voice", "microphone", "mic", "privacy", paused ? "resume" : "pause"],
+      title: paused ? "Resume voice" : "Pause voice",
+      icon: paused ? (
+        <PlayIcon className={ITEM_ICON_CLASS} />
+      ) : (
+        <PauseIcon className={ITEM_ICON_CLASS} />
+      ),
+      disabled: paused && voice.snapshot.replacementBlocked,
+      run: async () => (paused ? voice.resume() : voice.pause()),
+    });
+  }
+  if (voiceMode !== "off") {
+    actionItems.push({
+      kind: "action",
+      value: "action:voice-mic-off",
+      searchTerms: ["voice", "microphone", "mic off", "end voice", "stop"],
+      title: "Mic off (end voice)",
+      icon: <MicOffIcon className={ITEM_ICON_CLASS} />,
+      run: async () => voice.end(),
+    });
+  }
 
   if (projects.length > 0) {
     const activeProjectTitle =

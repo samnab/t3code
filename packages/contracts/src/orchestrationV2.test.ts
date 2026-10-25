@@ -75,7 +75,7 @@ describe("orchestration V2 contracts", () => {
 
     expect(thread.goal).toBeNull();
     expect(thread.goalLoop).toBeNull();
-    expect(thread.voiceNotifications).toBe(true);
+    expect(thread.voiceNotifications).toBe(false);
   });
 
   it("decodes thread goal-loop and voice commands and events", () => {

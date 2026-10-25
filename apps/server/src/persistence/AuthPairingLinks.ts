@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
-import { AuthEnvironmentScopes } from "@t3tools/contracts";
+import { AuthDesktopSessionTtlDays, AuthEnvironmentScopes } from "@t3tools/contracts";
 
 import {
   type AuthPairingLinkRepositoryError,
@@ -24,6 +24,7 @@ export const AuthPairingLinkRecord = Schema.Struct({
   subject: Schema.String,
   label: Schema.NullOr(Schema.String),
   proofKeyThumbprint: Schema.NullOr(Schema.String),
+  desktopSessionTtlDays: Schema.optionalKey(Schema.NullOr(AuthDesktopSessionTtlDays)),
   createdAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
   consumedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -39,6 +40,7 @@ export const CreateAuthPairingLinkInput = Schema.Struct({
   subject: Schema.String,
   label: Schema.NullOr(Schema.String),
   proofKeyThumbprint: Schema.NullOr(Schema.String),
+  desktopSessionTtlDays: Schema.optionalKey(Schema.NullOr(AuthDesktopSessionTtlDays)),
   createdAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
 });
@@ -77,6 +79,7 @@ const AuthPairingLinkRawDbRow = Schema.Struct({
   subject: Schema.Unknown,
   label: Schema.Unknown,
   proofKeyThumbprint: Schema.Unknown,
+  desktopSessionTtlDays: Schema.Unknown,
   createdAt: Schema.Unknown,
   expiresAt: Schema.Unknown,
   consumedAt: Schema.Unknown,
@@ -137,6 +140,7 @@ export const make = Effect.gen(function* () {
           subject,
           label,
           proof_key_thumbprint,
+          desktop_session_ttl_days,
           created_at,
           expires_at,
           consumed_at,
@@ -150,6 +154,7 @@ export const make = Effect.gen(function* () {
           ${input.subject},
           ${input.label},
           ${input.proofKeyThumbprint},
+          ${input.desktopSessionTtlDays ?? null},
           ${input.createdAt},
           ${input.expiresAt},
           NULL,
@@ -188,6 +193,7 @@ export const make = Effect.gen(function* () {
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",
+          desktop_session_ttl_days AS "desktopSessionTtlDays",
           created_at AS "createdAt",
           expires_at AS "expiresAt",
           consumed_at AS "consumedAt",
@@ -208,6 +214,7 @@ export const make = Effect.gen(function* () {
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",
+          desktop_session_ttl_days AS "desktopSessionTtlDays",
           created_at AS "createdAt",
           expires_at AS "expiresAt",
           consumed_at AS "consumedAt",
@@ -247,6 +254,7 @@ export const make = Effect.gen(function* () {
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",
+          desktop_session_ttl_days AS "desktopSessionTtlDays",
           created_at AS "createdAt",
           expires_at AS "expiresAt",
           consumed_at AS "consumedAt",

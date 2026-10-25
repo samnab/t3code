@@ -317,7 +317,7 @@ export function presentThreadShell(
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     goal: thread.goal ?? null,
     goalLoop: thread.goalLoop ?? null,
-    voiceNotifications: thread.voiceNotifications ?? true,
+    voiceNotifications: thread.voiceNotifications ?? false,
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],
     providerInstanceHistory: thread.providerInstanceHistory ?? [],
     providerGoal: thread.providerGoal ?? null,

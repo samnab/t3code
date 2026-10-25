@@ -104,6 +104,11 @@ function shouldDropMissingPartialTurnItem(
   if (projection.visibleTurnItems.some((row) => row.sourceItemId === item.id)) {
     return false;
   }
+  // Recovered voice is stitched between rows already loaded, below the receipt watermark.
+  if (item.type === "realtime_voice" && item.sourceOrder === "provider_anchored") {
+    const oldest = oldestLocalTurnOrdinal(projection.visibleTurnItems);
+    return oldest === null || item.ordinal < oldest;
+  }
   if (item.runId === null) {
     return isBelowPartialWindow(projection, item, latestLocalTurnOrdinal);
   }

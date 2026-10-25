@@ -962,13 +962,13 @@ export default function ChatView(props: ChatViewProps) {
   }
   const voiceNotifications = isServerThread
     ? activeThreadShell === null
-      ? true
+      ? false
       : readThreadVoiceNotifications({
           ...(activeThreadShell.voiceNotifications === undefined
             ? {}
             : { voiceNotifications: activeThreadShell.voiceNotifications }),
         })
-    : (composerVoiceNotifications ?? true);
+    : (composerVoiceNotifications ?? false);
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&

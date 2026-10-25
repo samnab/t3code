@@ -142,6 +142,153 @@ function assistantMessage(updatedAt = "2026-06-20T00:00:03.000Z") {
   };
 }
 
+function voiceItem(
+  id: string,
+  content: Extract<OrchestrationV2TurnItem, { type: "realtime_voice" }>["content"],
+): Extract<OrchestrationV2TurnItem, { type: "realtime_voice" }> {
+  return {
+    ...base(id, "2026-10-23T20:00:00.000Z", 3),
+    type: "realtime_voice",
+    runId: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    nativeThreadId: "native-thread",
+    realtimeSessionId: "voice-session",
+    nativeRealtimeItemId: id,
+    content,
+    captureState: "canonical_completed",
+    historyCoverage: "live_only",
+    sourceOrder: "unreconciled",
+    timestampProvenance: "observed",
+  };
+}
+
+describe("historical voice feed", () => {
+  it("only presents completed, nonempty canonical transcript text", () => {
+    const pending: OrchestrationV2TurnItem = {
+      ...voiceItem("voice-pending", {
+        type: "transcriptSegment",
+        role: "user",
+        text: "Still speaking",
+      }),
+      status: "running",
+    };
+    const empty = voiceItem("voice-empty", {
+      type: "transcriptSegment",
+      role: "assistant",
+      text: " ",
+    });
+    expect(buildThreadFeed([projected(pending, 0), projected(empty, 1)])).toEqual([]);
+  });
+
+  it("preserves both roles and source identities without creating executable messages", () => {
+    const user = projected(
+      voiceItem("voice-user", { type: "transcriptSegment", role: "user", text: "Run checks" }),
+      0,
+      "inherited",
+    );
+    const assistant = projected(
+      voiceItem("voice-assistant", {
+        type: "transcriptSegment",
+        role: "assistant",
+        text: "Run checks",
+      }),
+      1,
+    );
+    const feed = buildThreadFeed([user, assistant]);
+    expect(feed).toMatchObject([
+      {
+        type: "realtime-voice",
+        id: expect.any(String),
+        runId: null,
+        messageId: null,
+        projectedItem: user,
+      },
+      {
+        type: "realtime-voice",
+        id: expect.any(String),
+        runId: null,
+        messageId: null,
+        projectedItem: assistant,
+      },
+    ]);
+    expect(feed[0]?.id).not.toBe(feed[1]?.id);
+    expect(feed.some((entry) => entry.type === "message")).toBe(false);
+    expect(deriveThreadFeedPresentation(feed, null, new Set())).toEqual(feed);
+  });
+
+  it("keeps session boundaries in source order and leaves promoted coding work to ordinary rows", () => {
+    const started = projected(voiceItem("voice-started", { type: "realtimeSessionStarted" }), 0);
+    const promoted = projected(
+      voiceItem("voice-promoted", {
+        type: "bemItemPromoted",
+        item_id: "coding-item",
+        turn_id: "coding-turn",
+        presentation: { type: "wholeItem" },
+      }),
+      1,
+    );
+    const coding = projected(assistantMessage(), 2);
+    const closed = projected(
+      voiceItem("voice-closed", { type: "realtimeSessionClosed", outcome: "ended" }),
+      3,
+    );
+    const feed = buildThreadFeed([started, promoted, coding, closed]);
+    expect(feed.map((entry) => entry.type)).toEqual([
+      "realtime-voice",
+      "message",
+      "realtime-voice",
+    ]);
+    expect(feed[0]).toMatchObject({ projectedItem: started });
+    expect(feed[1]).toMatchObject({
+      message: { id: coding.item.type === "assistant_message" ? coding.item.messageId : null },
+    });
+    expect(feed[2]).toMatchObject({ projectedItem: closed });
+  });
+
+  it("marks a spoken request promoted into a coding message and shows uncommitted tails", () => {
+    const spoken = projected(
+      voiceItem("voice-request", { type: "transcriptSegment", role: "user", text: "Please work" }),
+      0,
+    );
+    const promoted = projected(
+      voiceItem("voice-promotion", {
+        type: "bemItemPromoted",
+        item_id: "coding-item",
+        turn_id: "coding-turn",
+        presentation: { type: "wholeItem" },
+      }),
+      1,
+    );
+    const coding = projected(
+      {
+        ...userMessage(),
+        nativeItemRef: {
+          driver: ProviderDriverKind.make("codex"),
+          nativeId: "coding-item",
+          strength: "strong",
+        },
+      },
+      2,
+    );
+    const tail = projected(
+      {
+        ...voiceItem("voice-tail", { type: "transcriptSegment", role: "assistant", text: "Part" }),
+        status: "interrupted",
+        captureState: "interrupted",
+      },
+      3,
+    );
+    const feed = buildThreadFeed([spoken, promoted, coding, tail]);
+    expect(feed.map((entry) => entry.type)).toEqual([
+      "realtime-voice",
+      "message",
+      "realtime-voice",
+    ]);
+    expect(feed[0]).toMatchObject({ promotedToCodingRequest: true });
+    expect(feed[2]).toMatchObject({ projectedItem: tail, promotedToCodingRequest: false });
+  });
+});
+
 describe("buildThreadFeed", () => {
   it("keeps async answers in question history instead of user bubbles", () => {
     const requestId = RuntimeRequestId.make("question");

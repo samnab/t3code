@@ -176,6 +176,12 @@ export interface IdAllocatorV2Derive {
     readonly driver: ProviderDriverKind;
     readonly nativeItemId: string;
   }) => TurnItemId;
+  readonly realtimeVoiceTurnItem: (input: {
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly nativeThreadId: string;
+    readonly realtimeSessionId: string;
+    readonly nativeItemId: string;
+  }) => TurnItemId;
   readonly approvalNode: (input: { readonly requestId: RuntimeRequestId }) => NodeId;
   readonly approvalTurnItem: (input: { readonly requestId: RuntimeRequestId }) => TurnItemId;
 }
@@ -287,6 +293,17 @@ export const derive: IdAllocatorV2Derive = {
   turnItemFromProviderItem: (input) =>
     TurnItemId.make(
       joinId("turn-item", "provider", input.driver, "native-item", input.nativeItemId),
+    ),
+  realtimeVoiceTurnItem: (input) =>
+    TurnItemId.make(
+      joinId(
+        "turn-item",
+        "realtime-voice",
+        input.providerInstanceId,
+        input.nativeThreadId,
+        input.realtimeSessionId,
+        input.nativeItemId,
+      ),
     ),
   approvalNode: (input) => NodeId.make(joinId("node", "runtime-request", input.requestId)),
   approvalTurnItem: (input) =>

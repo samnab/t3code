@@ -3,19 +3,18 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProviderBackgroundTaskService from "./orchestration-v2/ProviderBackgroundTaskService.ts";
+import * as ProviderRealtimeVoiceService from "./orchestration-v2/ProviderRealtimeVoiceService.ts";
 
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Base64 from "effect/encoding/Base64";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
@@ -76,7 +75,6 @@ import {
   ProjectWriteFileError,
   ProjectMutationError,
   ProviderUploadFeedbackError,
-  ProviderRealtimeVoiceError,
   ProviderSetupError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
@@ -266,7 +264,6 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
-const isProviderRealtimeVoiceError = Schema.is(ProviderRealtimeVoiceError);
 
 const resolveDiscoveryForConfig = <A, E, R>(
   discovery: Effect.Effect<A, E, R>,
@@ -1249,6 +1246,8 @@ export const layerWsRpc = (
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const providerBackgroundTasks =
         yield* ProviderBackgroundTaskService.ProviderBackgroundTaskServiceV2;
+      const providerRealtimeVoice =
+        yield* ProviderRealtimeVoiceService.ProviderRealtimeVoiceServiceV2;
       const mcpAppRequests = yield* McpAppRequests.McpAppRequests;
       const analytics = yield* AnalyticsService.AnalyticsService;
       const originProps = clientAnalyticsProps;
@@ -1863,32 +1862,6 @@ export const layerWsRpc = (
         return result;
       });
 
-      // Resolves the provider thread and running session a thread-scoped
-      // provider operation (feedback upload, realtime voice) targets, failing
-      // with the user-facing reason when either is missing.
-      const resolveActiveProviderSession = Effect.fn("ws.providers.resolveActiveSession")(
-        function* (threadId: ThreadId) {
-          const projection = yield* threadManagement.getThreadRecords(threadId, [
-            "providerThreads",
-          ]);
-          const providerThread =
-            projection.providerThreads.find(
-              (candidate) => candidate.id === projection.thread.activeProviderThreadId,
-            ) ?? projection.providerThreads.at(-1);
-          const providerSessionId = providerThread?.providerSessionId ?? null;
-          if (providerThread === undefined || providerSessionId === null) {
-            return yield* Effect.fail("No provider session has run in this thread yet.");
-          }
-          const runtime = Option.getOrNull(yield* providerSessionsV2.get(providerSessionId));
-          if (runtime === null) {
-            return yield* Effect.fail(
-              "The provider session is no longer running. Send a message first.",
-            );
-          }
-          return { providerThread, runtime };
-        },
-      );
-
       const handlers = ServerWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.stopBackgroundTask]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
@@ -2402,73 +2375,8 @@ export const layerWsRpc = (
                 ),
               ),
           ),
-        [WS_METHODS.providerRealtimeVoiceStart]: (input) =>
-          Effect.gen(function* () {
-            const { providerThread, runtime } = yield* resolveActiveProviderSession(
-              input.threadId,
-            ).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderRealtimeVoiceError({
-                    threadId: input.threadId,
-                    cause,
-                  }),
-              ),
-            );
-            if (runtime.startRealtimeVoice === undefined) {
-              return yield* Effect.fail(
-                new ProviderRealtimeVoiceError({
-                  threadId: input.threadId,
-                  cause: `Provider '${runtime.driver}' does not support realtime voice.`,
-                }),
-              );
-            }
-            return yield* runtime.startRealtimeVoice({
-              providerThread,
-              sdp: input.sdp,
-            });
-          }).pipe(
-            Effect.mapError((cause) =>
-              isProviderRealtimeVoiceError(cause)
-                ? cause
-                : new ProviderRealtimeVoiceError({
-                    threadId: input.threadId,
-                    cause,
-                  }),
-            ),
-          ),
-        [WS_METHODS.providerRealtimeVoiceStop]: (input) =>
-          Effect.gen(function* () {
-            const { providerThread, runtime } = yield* resolveActiveProviderSession(
-              input.threadId,
-            ).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderRealtimeVoiceError({
-                    threadId: input.threadId,
-                    cause,
-                  }),
-              ),
-            );
-            if (runtime.stopRealtimeVoice === undefined) {
-              return yield* Effect.fail(
-                new ProviderRealtimeVoiceError({
-                  threadId: input.threadId,
-                  cause: `Provider '${runtime.driver}' does not support realtime voice.`,
-                }),
-              );
-            }
-            return yield* runtime.stopRealtimeVoice({ providerThread });
-          }).pipe(
-            Effect.mapError((cause) =>
-              isProviderRealtimeVoiceError(cause)
-                ? cause
-                : new ProviderRealtimeVoiceError({
-                    threadId: input.threadId,
-                    cause,
-                  }),
-            ),
-          ),
+        [WS_METHODS.providerRealtimeVoiceStart]: (input) => providerRealtimeVoice.start(input),
+        [WS_METHODS.providerRealtimeVoiceStop]: (input) => providerRealtimeVoice.stop(input),
         [WS_METHODS.serverUpdateProvider]: (input) =>
           providerMaintenanceRunner.updateProvider(input),
         [WS_METHODS.providerConsumeResetCredit]:

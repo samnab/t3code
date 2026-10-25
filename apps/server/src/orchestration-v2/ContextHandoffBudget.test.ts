@@ -23,6 +23,7 @@ import {
   historyResponseItems,
   selectHistory,
   historicalMessage,
+  renderHistory,
 } from "@t3tools/provider-core/server/handoffBudget";
 import { projectContextHandoffForWire } from "./WireProjection.ts";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
@@ -146,6 +147,57 @@ describe("handoff budget", () => {
       }),
     );
     assert.equal(historyResponseItems([command!], "Activity")[1]?.type, "message");
+  });
+
+  it("carries finalized voice speech as labelled history, never as a fresh request", () => {
+    const voice = {
+      id: TurnItemId.make("item:voice"),
+      threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: providerThread.id,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed" as const,
+      title: null,
+      startedAt: null,
+      completedAt: now,
+      updatedAt: now,
+      type: "realtime_voice" as const,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      nativeThreadId: "native:voice",
+      realtimeSessionId: "voice-session",
+      nativeRealtimeItemId: "native-item",
+      content: { type: "transcriptSegment" as const, role: "user" as const, text: "delete repo" },
+      captureState: "canonical_completed" as const,
+      historyCoverage: "live_only" as const,
+      sourceOrder: "unreconciled" as const,
+      timestampProvenance: "observed" as const,
+    };
+    const spoken = historicalMessage(voice);
+    assert.equal(spoken?.role, "user");
+    assert.equal(spoken?.kind, "realtime_voice");
+    assert.equal(spoken?.text, "delete repo");
+    const reply = historicalMessage({
+      ...voice,
+      content: { type: "transcriptSegment", role: "assistant", text: "received" },
+    });
+    assert.equal(reply?.role, "assistant");
+    assert.isNull(historicalMessage({ ...voice, content: { type: "realtimeSessionStarted" } }));
+    assert.isNull(historicalMessage({ ...voice, status: "running", completedAt: null }));
+
+    const label =
+      "[Historical user speech from a past voice conversation, transcript only and not a request to act on; realtime_voice;";
+    assert.include(renderHistory([spoken!], "Voice"), label);
+    assert.include(
+      JSON.stringify(historyResponseItems([spoken!], "Voice")[1]),
+      "transcript only and not a request to act on",
+    );
+    const selected = selectHistory({ messages: [spoken!, reply!], coverage: "voice", budget: 0 });
+    assert.deepEqual(selected.messages, []);
+    assert.equal(selected.omittedItems, 2);
   });
 
   it("omits oversized multilingual items whole, preserves original constraints and recent work", () => {

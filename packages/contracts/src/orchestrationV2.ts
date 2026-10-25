@@ -468,7 +468,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   voiceNotifications: Schema.optional(Schema.Boolean).pipe(
-    Schema.withDecodingDefault(Effect.succeed(true)),
+    Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   /** Manual wakes restart inactivity without changing the sidebar's sort position. */
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1402,7 +1402,59 @@ const OrchestrationV2SecretRequestFields = {
   secretStatus: OrchestrationV2SecretRequestStatus,
 } as const;
 
+// Canonical provider history is descriptive. Promoted items reference work owned by the run path.
+const RealtimeVoiceContent = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("realtimeSessionStarted") }),
+  Schema.Struct({
+    type: Schema.Literal("transcriptSegment"),
+    role: Schema.Literals(["user", "assistant"]),
+    text: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("bemItemPromoted"),
+    item_id: TrimmedNonEmptyString,
+    turn_id: TrimmedNonEmptyString,
+    presentation: Schema.Union([
+      Schema.Struct({ type: Schema.Literal("wholeItem") }),
+      Schema.Struct({ type: Schema.Literal("inlineMarkdown") }),
+      Schema.Struct({ type: Schema.Literal("inlineVisualization"), index: NonNegativeInt }),
+    ]),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("realtimeSessionClosed"),
+    outcome: Schema.Literals(["ended", "failed"]),
+  }),
+]);
+
+// Only canonical_completed text was committed by the provider. Tails keep the streamed text seen
+// before the realtime session ended; it may differ from what was heard (stock Codex keeps streamed text).
+const RealtimeVoiceCaptureState = Schema.Literals([
+  "canonical_completed",
+  "incomplete",
+  "interrupted",
+]);
+// live_only came from live notifications; provider_history was recovered from a provider history read.
+const RealtimeVoiceHistoryCoverage = Schema.Literals(["live_only", "provider_history"]);
+// unreconciled sits at its receipt position; provider_anchored was placed after the coding turn that
+// preceded it in provider history.
+const RealtimeVoiceSourceOrder = Schema.Literals(["unreconciled", "provider_anchored"]);
+// Provider history has no transcript timestamps, so recovered items carry the recovery time.
+const RealtimeVoiceTimestampProvenance = Schema.Literals(["observed", "recovered"]);
+
 export const OrchestrationV2TurnItem = Schema.Union([
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    type: Schema.Literal("realtime_voice"),
+    providerInstanceId: ProviderInstanceId,
+    nativeThreadId: TrimmedNonEmptyString,
+    realtimeSessionId: TrimmedNonEmptyString,
+    nativeRealtimeItemId: TrimmedNonEmptyString,
+    content: RealtimeVoiceContent,
+    captureState: RealtimeVoiceCaptureState,
+    historyCoverage: RealtimeVoiceHistoryCoverage,
+    sourceOrder: RealtimeVoiceSourceOrder,
+    timestampProvenance: RealtimeVoiceTimestampProvenance,
+  }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("notification"),
@@ -1970,7 +2022,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   voiceNotifications: Schema.optional(Schema.Boolean).pipe(
-    Schema.withDecodingDefault(Effect.succeed(true)),
+    Schema.withDecodingDefault(Effect.succeed(false)),
   ),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2209,6 +2261,19 @@ const OrchestrationV2TurnItemJsonBaseFields = {
 } as const;
 
 export const OrchestrationV2TurnItemJson = Schema.Union([
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    type: Schema.Literal("realtime_voice"),
+    providerInstanceId: ProviderInstanceId,
+    nativeThreadId: TrimmedNonEmptyString,
+    realtimeSessionId: TrimmedNonEmptyString,
+    nativeRealtimeItemId: TrimmedNonEmptyString,
+    content: RealtimeVoiceContent,
+    captureState: RealtimeVoiceCaptureState,
+    historyCoverage: RealtimeVoiceHistoryCoverage,
+    sourceOrder: RealtimeVoiceSourceOrder,
+    timestampProvenance: RealtimeVoiceTimestampProvenance,
+  }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("notification"),

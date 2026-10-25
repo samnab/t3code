@@ -32,7 +32,7 @@ const modelSelection = {
 
 const appThread = (
   threadId: ThreadId,
-  voiceNotifications: boolean,
+  voiceNotifications: boolean | undefined,
   now: DateTime.Utc,
 ): OrchestrationV2AppThread => ({
   createdBy: "user",
@@ -88,7 +88,7 @@ const withVoiceFiles = <A, E>(
     readonly suffix: string;
     readonly driver: ProviderDriverKind;
     readonly nativeId: string;
-    readonly voiceNotifications: boolean;
+    readonly voiceNotifications?: boolean;
   },
   body: (context: {
     readonly directory: string;
@@ -145,6 +145,14 @@ const withVoiceFiles = <A, E>(
   );
 
 it.layer(NodeServices.layer)("codex voice preference files", (it) => {
+  it.effect("writes off for a native thread with no stored completion voice preference", () =>
+    withVoiceFiles({ suffix: "missing", driver: codex, nativeId: "0199c0de-missing" }, ({ read }) =>
+      Effect.gen(function* () {
+        assert.equal(yield* read("0199c0de-missing"), "0");
+      }),
+    ),
+  );
+
   it.effect("tracks one Codex thread's preference through toggle and deletion", () =>
     withVoiceFiles(
       { suffix: "codex", driver: codex, nativeId: "0199c0de-beef", voiceNotifications: false },

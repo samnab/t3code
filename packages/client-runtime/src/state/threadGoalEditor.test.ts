@@ -102,7 +102,8 @@ describe("thread goal metadata", () => {
     });
     expect(readThreadGoalState({})).toEqual({ goal: null, goalLoop: null });
     expect(readThreadVoiceNotifications({ voiceNotifications: false })).toBe(false);
-    expect(readThreadVoiceNotifications({})).toBe(true);
+    expect(readThreadVoiceNotifications({ voiceNotifications: true })).toBe(true);
+    expect(readThreadVoiceNotifications({})).toBe(false);
   });
 });
 

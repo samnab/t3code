@@ -33,7 +33,11 @@ const SearchRow = Schema.Struct({
   source: OrchestrationThreadSearchSource,
   matchText: Schema.String,
   messageCreatedAt: Schema.NullOr(IsoDateTime),
+  voice: Schema.BooleanFromBit,
 });
+
+// The match contract has no voice source, so spoken hits carry it in the snippet.
+const VOICE_SNIPPET_PREFIX = "(voice) ";
 
 function escapeLikePattern(value: string): string {
   return value.replaceAll("!", "!!").replaceAll("%", "!%").replaceAll("_", "!_");
@@ -43,14 +47,14 @@ function foldAsciiCase(value: string): string {
   return value.replace(/[A-Z]/g, (character) => character.toLowerCase());
 }
 
-function buildSearchSnippet(text: string, query: string): string {
+function buildSearchSnippet(text: string, query: string, maxLength = 240): string {
   const normalizedText = text.replace(/\s+/g, " ").trim();
-  if (normalizedText.length <= 240) {
+  if (normalizedText.length <= maxLength) {
     return normalizedText;
   }
   const normalizedQuery = foldAsciiCase(query.replace(/\s+/g, " ").trim());
   const matchIndex = foldAsciiCase(normalizedText).indexOf(normalizedQuery);
-  const bodyLength = 236;
+  const bodyLength = maxLength - 4;
   const idealStart = Math.max(0, matchIndex - 72);
   const start = Math.min(idealStart, normalizedText.length - bodyLength);
   const end = Math.min(normalizedText.length, start + bodyLength);
@@ -84,7 +88,8 @@ export const make = Effect.gen(function* () {
           json_extract(messages.payload_json, '$.text') AS match_text,
           messages.created_at AS message_created_at,
           messages.message_id,
-          threads.updated_at AS thread_updated_at
+          threads.updated_at AS thread_updated_at,
+          0 AS voice
         FROM orchestration_v2_projection_messages AS messages
         INNER JOIN orchestration_v2_projection_threads AS threads
           ON threads.thread_id = messages.thread_id
@@ -96,6 +101,34 @@ export const make = Effect.gen(function* () {
           AND messages.streaming = 0
           AND messages.role IN ('user', 'assistant')
           AND json_extract(messages.payload_json, '$.text') LIKE ${pattern} ESCAPE '!'
+        UNION ALL
+        -- Finalized speech lives only in turn items; same predicate as message history.
+        -- ponytail: scans every turn item; add a partial index on type = 'realtime_voice' if search slows.
+        SELECT
+          threads.thread_id,
+          threads.project_id,
+          json_extract(items.payload_json, '$.content.role') AS role,
+          json_extract(items.payload_json, '$.content.text') AS match_text,
+          COALESCE(
+            json_extract(items.payload_json, '$.completedAt'),
+            json_extract(items.payload_json, '$.updatedAt')
+          ) AS message_created_at,
+          items.turn_item_id AS message_id,
+          threads.updated_at AS thread_updated_at,
+          1 AS voice
+        FROM orchestration_v2_projection_turn_items AS items
+        INNER JOIN orchestration_v2_projection_threads AS threads
+          ON threads.thread_id = items.thread_id
+        INNER JOIN projection_projects AS projects
+          ON projects.project_id = threads.project_id
+        WHERE threads.deleted_at IS NULL
+          AND threads.archived_at IS NULL
+          AND projects.deleted_at IS NULL
+          AND items.type = 'realtime_voice'
+          AND items.status = 'completed'
+          AND json_extract(items.payload_json, '$.captureState') = 'canonical_completed'
+          AND json_extract(items.payload_json, '$.content.type') = 'transcriptSegment'
+          AND json_extract(items.payload_json, '$.content.text') LIKE ${pattern} ESCAPE '!'
       ),
       ranked AS (
         SELECT
@@ -104,6 +137,7 @@ export const make = Effect.gen(function* () {
           role AS source,
           match_text,
           message_created_at,
+          voice,
           CASE role WHEN 'user' THEN 0 ELSE 1 END AS match_rank,
           thread_updated_at,
           ROW_NUMBER() OVER (
@@ -120,7 +154,8 @@ export const make = Effect.gen(function* () {
         project_id AS "projectId",
         source,
         match_text AS "matchText",
-        message_created_at AS "messageCreatedAt"
+        message_created_at AS "messageCreatedAt",
+        voice
       FROM ranked
       WHERE thread_match_rank = 1
       ORDER BY match_rank ASC, thread_updated_at DESC, thread_id ASC
@@ -154,7 +189,13 @@ export const make = Effect.gen(function* () {
           threadId: row.threadId,
           projectId: row.projectId,
           source: row.source,
-          snippet: buildSearchSnippet(row.matchText, input.query),
+          snippet: row.voice
+            ? `${VOICE_SNIPPET_PREFIX}${buildSearchSnippet(
+                row.matchText,
+                input.query,
+                240 - VOICE_SNIPPET_PREFIX.length,
+              )}`
+            : buildSearchSnippet(row.matchText, input.query),
           messageCreatedAt: row.messageCreatedAt,
         })),
       };

@@ -718,6 +718,64 @@ const threadWorktreePathsIncludeArchivedOnRequest = Effect.gen(function* () {
   ]);
 });
 
+const voiceHistoryResumeRemovedWithThread = Effect.gen(function* () {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const now = yield* DateTime.now;
+  const resume = { cursor: "page", firstIdentity: "first", firstPosition: 3, anchorOrdinal: 7 };
+  const keyFor = (threadId: ThreadId) => ({
+    threadId,
+    providerInstanceId,
+    nativeThreadId: "native-thread",
+  });
+  for (const id of ["thread:voice-kept", "thread:voice-deleted"]) {
+    const threadId = ThreadId.make(id);
+    yield* store.apply({
+      id: EventId.make(`event:${id}:created`),
+      type: "thread.created",
+      threadId,
+      occurredAt: now,
+      payload: {
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        id: threadId,
+        projectId: ProjectId.make("project:voice-resume"),
+        title: id,
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      },
+    });
+    yield* store.setRealtimeVoiceHistoryResume(keyFor(threadId), resume);
+  }
+  const deleted = yield* store.getThread(ThreadId.make("thread:voice-deleted"));
+  yield* store.apply({
+    id: EventId.make("event:thread:voice-deleted:deleted"),
+    type: "thread.deleted",
+    threadId: deleted!.id,
+    occurredAt: now,
+    payload: { ...deleted!, deletedAt: now },
+  });
+
+  assert.isNull(yield* store.getRealtimeVoiceHistoryResume(keyFor(deleted!.id)));
+  assert.deepEqual(
+    yield* store.getRealtimeVoiceHistoryResume(keyFor(ThreadId.make("thread:voice-kept"))),
+    resume,
+  );
+});
+
 const commandReadsSkipSettledLeafNodes = Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;
@@ -1168,6 +1226,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
   it.effect(
     "worktree path lookup defaults to active threads and can include archived threads",
     () => threadWorktreePathsIncludeArchivedOnRequest,
+  );
+  it.effect(
+    "thread deletion removes that thread's voice history resume point",
+    () => voiceHistoryResumeRemovedWithThread,
   );
 
   it.effect(
@@ -5838,3 +5900,110 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 });
+
+it.effect.each([
+  ["memory", ProjectionStore.layerMemory],
+  ["SQL", layerTest],
+] as const)(
+  "%s message history pages include only completed canonical voice transcripts",
+  ([, layer]) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("voice-message-history");
+      const now = yield* DateTime.now;
+      const voice = {
+        id: TurnItemId.make("voice:user"),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 3,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: now,
+        updatedAt: now,
+        type: "realtime_voice",
+        providerInstanceId,
+        nativeThreadId: "native:voice",
+        realtimeSessionId: "session:voice",
+        nativeRealtimeItemId: "native:user",
+        content: { type: "transcriptSegment", role: "user", text: "historical instruction" },
+        captureState: "canonical_completed",
+        historyCoverage: "live_only",
+        sourceOrder: "unreconciled",
+        timestampProvenance: "observed",
+      } satisfies OrchestrationV2TurnItem;
+      const items: ReadonlyArray<OrchestrationV2TurnItem> = [
+        {
+          ...voice,
+          id: TurnItemId.make("voice:opened"),
+          ordinal: 2,
+          content: { type: "realtimeSessionStarted" },
+        },
+        voice,
+        {
+          ...voice,
+          id: TurnItemId.make("voice:promoted"),
+          ordinal: 4,
+          content: {
+            type: "bemItemPromoted",
+            item_id: "work",
+            turn_id: "turn",
+            presentation: { type: "wholeItem" },
+          },
+        },
+        {
+          ...voice,
+          id: TurnItemId.make("voice:assistant"),
+          ordinal: 5,
+          content: { type: "transcriptSegment", role: "assistant", text: "historical answer" },
+        },
+        {
+          ...voice,
+          id: TurnItemId.make("voice:unfinished"),
+          ordinal: 6,
+          status: "running",
+          completedAt: null,
+        },
+      ];
+      for (const item of items)
+        yield* store.apply({
+          id: EventId.make(`event:${item.id}`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: item,
+        });
+      const first = yield* store.getTimelinePage(threadId, { view: "messages", limit: 1 });
+      assert.deepEqual(
+        first.items.map((row) => row.item.id),
+        [voice.id],
+      );
+      assert.isTrue(first.hasMore);
+      const second = yield* store.getTimelinePage(threadId, {
+        view: "messages",
+        limit: 1,
+        afterPosition: first.items[0]!.position,
+      });
+      assert.deepEqual(
+        second.items.map((row) => row.item.id),
+        [TurnItemId.make("voice:assistant")],
+      );
+      assert.isFalse(second.hasMore);
+      assert.equal(second.items[0]!.item.type, "realtime_voice");
+      assert.equal(second.items[0]!.item.runId, null);
+      assert.lengthOf(
+        (yield* store.getTimelinePage(threadId, { view: "activity", limit: 10 })).items,
+        5,
+      );
+      const byId = yield* store.getTimelinePage(threadId, {
+        itemId: TurnItemId.make("voice:opened"),
+        limit: 1,
+      });
+      assert.equal(byId.items[0]?.item.type, "realtime_voice");
+    }).pipe(Effect.provide(layer)),
+);

@@ -91,7 +91,7 @@ export const make = Effect.gen(function* () {
   const apply = (event: OrchestrationV2DomainEvent): Effect.Effect<void> => {
     switch (event.type) {
       case "thread.created":
-        return refreshThread(event.payload.id, event.payload.voiceNotifications ?? true);
+        return refreshThread(event.payload.id, event.payload.voiceNotifications ?? false);
       case "thread.voice-notifications-set":
         return refreshThread(event.payload.threadId, event.payload.voiceNotifications);
       case "thread.deleted":
@@ -107,7 +107,7 @@ export const make = Effect.gen(function* () {
           return Effect.void;
         }
         return projections.getThread(appThreadId).pipe(
-          Effect.flatMap((thread) => write(nativeThreadId, thread.voiceNotifications ?? true)),
+          Effect.flatMap((thread) => write(nativeThreadId, thread.voiceNotifications ?? false)),
           Effect.catchCause((cause) =>
             Effect.logWarning("voice.preference-file.lookup-failed", {
               threadId: appThreadId,

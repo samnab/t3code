@@ -1,4 +1,5 @@
 import {
+  AuthDesktopSessionTtlDays,
   AuthStandardClientScopes,
   type AuthEnvironmentScope,
   type AuthPairingLink,
@@ -30,6 +31,7 @@ export interface BootstrapGrant {
   readonly label?: string;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt: DateTime.DateTime;
+  readonly desktopSessionTtlDays?: number;
 }
 
 export class UnknownBootstrapCredentialError extends Schema.TaggedError<UnknownBootstrapCredentialError>()(
@@ -209,6 +211,7 @@ export class PairingGrantStore extends Context.Service<
   {
     readonly issueOneTimeToken: (input?: {
       readonly ttl?: Duration.Duration;
+      readonly desktopSessionTtlDays?: number;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly subject?: string;
       readonly label?: string;
@@ -253,6 +256,8 @@ const PAIRING_TOKEN_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const PAIRING_TOKEN_LENGTH = 12;
 const PAIRING_TOKEN_REJECTION_LIMIT =
   Math.floor(256 / PAIRING_TOKEN_ALPHABET.length) * PAIRING_TOKEN_ALPHABET.length;
+
+const decodeDesktopSessionTtlDays = Schema.decodeEffect(AuthDesktopSessionTtlDays);
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
@@ -385,6 +390,19 @@ const make = Effect.gen(function* () {
             new PairingCredentialRandomGenerationError({ operation: "generate-id", cause }),
         ),
       );
+    const desktopSessionTtlDays =
+      input?.desktopSessionTtlDays === undefined
+        ? undefined
+        : yield* decodeDesktopSessionTtlDays(input.desktopSessionTtlDays).pipe(
+            Effect.mapError(
+              (cause) =>
+                new PairingCredentialIssueError({
+                  pairingLinkId: id,
+                  subject: input?.subject ?? "one-time-token",
+                  cause,
+                }),
+            ),
+          );
     const credential = yield* generatePairingToken;
     const isDevStartupToken = config.devUrl !== undefined && input?.purpose === "startup";
     const ttl =
@@ -409,6 +427,7 @@ const make = Effect.gen(function* () {
         subject,
         label: input?.label ?? null,
         proofKeyThumbprint: input?.proofKeyThumbprint ?? null,
+        ...(desktopSessionTtlDays === undefined ? {} : { desktopSessionTtlDays }),
         createdAt: now,
         expiresAt: expiresAt,
       })
@@ -563,6 +582,9 @@ const make = Effect.gen(function* () {
           ...(consumed.value.proofKeyThumbprint
             ? { proofKeyThumbprint: consumed.value.proofKeyThumbprint }
             : {}),
+          ...(consumed.value.desktopSessionTtlDays == null
+            ? {}
+            : { desktopSessionTtlDays: consumed.value.desktopSessionTtlDays }),
           expiresAt: consumed.value.expiresAt,
         } satisfies BootstrapGrant;
       }

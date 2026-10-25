@@ -123,6 +123,10 @@
       "types": "./src/voice-input/index.ts",
       "default": "./src/voice-input/index.ts"
     },
+    "./realtime-voice": {
+      "types": "./src/realtime-voice/privacyController.ts",
+      "default": "./src/realtime-voice/privacyController.ts"
+    },
     "./t3ToolSummary": {
       "types": "./src/t3ToolSummary.ts",
       "default": "./src/t3ToolSummary.ts"

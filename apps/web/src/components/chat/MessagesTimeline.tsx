@@ -112,6 +112,7 @@ import {
   McpAppTimelineRow,
 } from "./TimelineAssistantRows";
 import { V2EventTimelineRow } from "./TimelineV2EventRow";
+import { VoiceTranscriptTimelineRow } from "./TimelineVoiceTranscriptRow";
 import { useTimelinePositionRestore } from "./useTimelinePositionRestore";
 import { useThreadFindPositionReader } from "./useThreadFindPositionReader";
 import { ThreadActivityAnnouncer } from "./ThreadActivityAnnouncer";
@@ -1311,7 +1312,13 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "mcp-app" ? <McpAppTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
       {row.kind === "worktree-setup" ? <WorktreeSetupTimelineRow row={row} /> : null}
-      {row.kind === "event" ? <V2EventTimelineRow row={row} /> : null}
+      {row.kind === "event" ? (
+        row.projectedItem.item.type === "realtime_voice" ? (
+          <VoiceTranscriptTimelineRow row={row} />
+        ) : (
+          <V2EventTimelineRow row={row} />
+        )
+      ) : null}
     </div>
   );
 });

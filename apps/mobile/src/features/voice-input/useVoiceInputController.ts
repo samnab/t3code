@@ -6,6 +6,7 @@ import {
 } from "@t3tools/client-runtime/voice-input";
 
 import type { ComposerEditorSelection } from "../../components/ComposerEditor";
+import { microphoneArbiter } from "../realtime-voice/microphoneArbiter";
 import { useGlobalVoiceInput } from "./VoiceInputProvider";
 import { createVoiceInputTarget } from "./voiceInputSession";
 
@@ -45,6 +46,7 @@ export function useVoiceInputController(input: {
   const start = useCallback(() => {
     const captured = latestInput.current;
     if (!captured.ownerKey || captured.disabled) return;
+    if (microphoneArbiter.holder() === "realtime-voice") return;
     void session.start({
       ...createVoiceInputTarget(
         captured.ownerKey,

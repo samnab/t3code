@@ -1,10 +1,11 @@
 {
   "platforms": ["apple", "android"],
   "apple": {
-    "modules": ["T3NativeControlsModule", "T3KeyboardCommandsModule"],
+    "modules": ["T3NativeControlsModule", "T3KeyboardCommandsModule", "T3RealtimeVoiceAudioModule"],
     "appDelegateSubscribers": [
       "T3WorkspaceOrientationSubscriber",
-      "T3MenuDismissTouchGateSubscriber"
+      "T3MenuDismissTouchGateSubscriber",
+      "T3RealtimeVoiceAppDelegateSubscriber"
     ]
   },
   "android": {
