@@ -3,6 +3,7 @@ import {
   type KeybindingsConfigError,
   OrchestratorMcpFailure,
   type ResolvedKeybindingsConfig,
+  RuntimeMode,
   type ServerSettings,
   shouldRecommendDatabaseCompaction,
 } from "@t3tools/contracts";
@@ -17,6 +18,7 @@ import * as Settings from "../../../serverSettings.ts";
 import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { resolveRuntimeMode } from "../../OrchestratorMcpService.ts";
 import { readCaller, unavailable } from "../../threadAccess.ts";
 import { EnvironmentToolkit } from "./tools.ts";
 
@@ -34,6 +36,10 @@ export function preferences(settings: ServerSettings) {
     favorites,
     providerModelPreferences,
     snoozeLimitedThreads,
+    autoResumeLimitedThreads,
+    continueThreadsAfterServerUpdate,
+    responseStreamingMode,
+    defaultRuntimeMode,
   } = settings;
   const characters = Array.from(sourceControlWritingStyle.customInstructions);
   return {
@@ -54,8 +60,14 @@ export function preferences(settings: ServerSettings) {
     providerModelPreferences,
     idleCompaction: globalIdleCompaction(settings),
     snoozeLimitedThreads,
+    autoResumeLimitedThreads,
+    continueThreadsAfterServerUpdate,
+    responseStreamingMode,
+    defaultRuntimeMode,
   };
 }
+// Literals are declared narrowest first.
+const runtimeModeRank = (mode: RuntimeMode) => RuntimeMode.literals.indexOf(mode);
 const access = Effect.gen(function* () {
   const context = yield* readCaller();
   const environment = yield* Environment.ServerEnvironment;
@@ -118,9 +130,34 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
       check,
       Effect.gen(function* () {
         const { settings } = yield* access;
-        return preferences(
-          yield* settings.updateSettings(patch).pipe(Effect.mapError(unavailable)),
-        );
+        const requested = patch.defaultRuntimeMode;
+        if (requested !== undefined) {
+          const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
+          yield* resolveRuntimeMode(current.defaultRuntimeMode, requested).pipe(
+            Effect.mapError(
+              (failure) =>
+                new OrchestratorMcpFailure({
+                  code: failure.code,
+                  message:
+                    "defaultRuntimeMode can only be lowered by agents; raise it in Settings.",
+                }),
+            ),
+          );
+        }
+        // The rank check repeats under the settings write lock so a human
+        // lowering the default between the check above and the write is kept.
+        const updated = yield* settings
+          .modifySettings((current) => {
+            if (
+              requested === undefined ||
+              runtimeModeRank(requested) <= runtimeModeRank(current.defaultRuntimeMode)
+            )
+              return patch;
+            const { defaultRuntimeMode: _raised, ...rest } = patch;
+            return rest;
+          })
+          .pipe(Effect.mapError(unavailable));
+        return preferences(updated);
       }),
     ),
   ),

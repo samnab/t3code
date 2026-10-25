@@ -502,6 +502,62 @@ it.layer(
   );
 });
 
+it.layer(
+  Layer.mergeAll(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3code-environment-resume-test-" }),
+    SqlitePersistence.layerMemory,
+  ).pipe(Layer.provideMerge(NodeServices.layer)),
+)("resume, streaming, and default runtime mode", (it) => {
+  it.effect("round-trips the unrestricted fields and only lowers defaultRuntimeMode", () =>
+    Effect.gen(function* () {
+      const scope = threadScope();
+      const caller = liveThreadShell(threadId);
+      const update = (
+        patch: Pick<
+          ServerSettingsPatch,
+          | "autoResumeLimitedThreads"
+          | "continueThreadsAfterServerUpdate"
+          | "responseStreamingMode"
+          | "defaultRuntimeMode"
+        >,
+      ) =>
+        Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+          finalResult(toolkit.handle("t3_environment_preferences_update", patch)),
+        ).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+      const read = Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+        finalResult(toolkit.handle("t3_environment_read", {})),
+      ).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+      const stored = reloadSettings.pipe(Effect.provide(restartedSettings()));
+
+      const written = yield* update({
+        autoResumeLimitedThreads: true,
+        continueThreadsAfterServerUpdate: false,
+        responseStreamingMode: "turn",
+        defaultRuntimeMode: "auto",
+      });
+      const expected = {
+        autoResumeLimitedThreads: true,
+        continueThreadsAfterServerUpdate: false,
+        responseStreamingMode: "turn",
+        defaultRuntimeMode: "auto",
+      };
+      expect(written?.encodedResult).toMatchObject(expected);
+      expect(yield* stored).toMatchObject(expected);
+      expect((yield* read)?.encodedResult).toMatchObject({ preferences: expected });
+
+      const raised = yield* update({ defaultRuntimeMode: "full-access" });
+      expect(raised?.result).toMatchObject({
+        code: "runtime_mode_escalation_denied",
+        message: "defaultRuntimeMode can only be lowered by agents; raise it in Settings.",
+      });
+      expect((yield* stored).defaultRuntimeMode).toBe("auto");
+
+      yield* update({ defaultRuntimeMode: "approval-required" });
+      expect(yield* stored).toMatchObject({ ...expected, defaultRuntimeMode: "approval-required" });
+    }),
+  );
+});
+
 const staticSettings = Layer.mock(Settings.ServerSettingsService)({
   getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
 });

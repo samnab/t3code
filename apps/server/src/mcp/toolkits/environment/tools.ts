@@ -41,6 +41,10 @@ const PreferenceFields = {
   providerModelPreferences: ServerSettings.fields.providerModelPreferences,
   idleCompaction: IdleCompactionMode,
   snoozeLimitedThreads: ServerSettings.fields.snoozeLimitedThreads,
+  autoResumeLimitedThreads: ServerSettings.fields.autoResumeLimitedThreads,
+  continueThreadsAfterServerUpdate: ServerSettings.fields.continueThreadsAfterServerUpdate,
+  responseStreamingMode: ServerSettings.fields.responseStreamingMode,
+  defaultRuntimeMode: ServerSettings.fields.defaultRuntimeMode,
 };
 const shared = {
   failure: OrchestratorMcpFailure,
@@ -70,7 +74,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
 const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update", {
   ...shared,
   description:
-    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental: setModelFavorites and setModelsHidden set each listed entry's favorite/hidden flag, setProviderModelOrder replaces one provider's order, setProviderModelDefault merges that provider's defaults (defaultModel null clears). Provider instance ids come from orchestrator_capabilities and are not validated. idleCompaction sets the environment-wide mode; snoozeLimitedThreads snoozes usage-limited threads until their limit resets and does not resume them.",
+    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental: setModelFavorites and setModelsHidden set each listed entry's favorite/hidden flag, setProviderModelOrder replaces one provider's order, setProviderModelDefault merges that provider's defaults (defaultModel null clears). Provider instance ids come from orchestrator_capabilities and are not validated. idleCompaction sets the environment-wide mode; snoozeLimitedThreads snoozes usage-limited threads until their limit resets and does not resume them. autoResumeLimitedThreads dispatches a continuation turn into usage-limited threads when their limit resets, at each thread's existing modes. continueThreadsAfterServerUpdate re-queues runs a server restart interrupted. defaultRuntimeMode applies to threads humans start later and can only be lowered by agents; raise it in Settings. These are environment values; project overrides belong to t3_project_settings_update.",
   parameters: Schema.Struct({
     completionAudio: ServerSettingsPatch.fields.completionAudio,
     defaultThreadEnvMode: ServerSettingsPatch.fields.defaultThreadEnvMode,
@@ -87,6 +91,10 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
     setProviderModelDefault: ServerSettingsPatch.fields.setProviderModelDefault,
     idleCompaction: ServerSettingsPatch.fields.idleCompaction,
     snoozeLimitedThreads: ServerSettingsPatch.fields.snoozeLimitedThreads,
+    autoResumeLimitedThreads: ServerSettingsPatch.fields.autoResumeLimitedThreads,
+    continueThreadsAfterServerUpdate: ServerSettingsPatch.fields.continueThreadsAfterServerUpdate,
+    responseStreamingMode: ServerSettingsPatch.fields.responseStreamingMode,
+    defaultRuntimeMode: ServerSettingsPatch.fields.defaultRuntimeMode,
   }),
   success: Schema.Struct(PreferenceFields),
 }).annotate(Tool.Destructive, true);
