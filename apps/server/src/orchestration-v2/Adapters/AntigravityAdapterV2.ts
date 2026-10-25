@@ -22,6 +22,7 @@ import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSession
 import {
   antigravityPermissionMode,
   applyAntigravityAcpModelSelection,
+  buildAntigravityPrompt,
   type AntigravityAcpRuntimeInput,
 } from "../../provider/acp/AntigravityAcpSupport.ts";
 import {
@@ -90,10 +91,7 @@ export type AntigravityAdapterRuntimeInput = Omit<
 > &
   Pick<AcpAdapterV2RuntimeInput, "processEnvironment">;
 
-/**
- * ACP 1.1.1 exposes subagent invocations as ordinary `start_subagent` tools without child
- * session ids.
- */
+/** ACP 1.1.1 reports `start_subagent` tools without child session ids. */
 const extractAntigravitySubagentUpdate: NonNullable<AcpAdapterV2Flavor["extractSubagentUpdate"]> = (
   toolCall,
 ) => {
@@ -167,8 +165,17 @@ export function makeAntigravityAcpAdapterFlavor(
     runtimeHarness: "Antigravity",
     capabilities: AntigravityProviderCapabilitiesV2,
     makeRuntime,
-    // Loading history replays every tool call; resume restores the session
-    // without the replay and is what the official client does.
+    buildPrompt: ({ text, attachments, promptCapabilities }) =>
+      buildAntigravityPrompt({
+        input: text,
+        attachments,
+        attachmentsDir: options.host.paths.attachmentsDir,
+        promptCapabilities,
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, options.fileSystem),
+        Effect.provideService(Path.Path, options.path),
+      ),
+    // Loading history replays tool calls; resume avoids replay.
     preferResumeSession: true,
     subagentsIdleOnTurnCompletion: true,
     ...(options.onSessionEvent === undefined ? {} : { onSessionEvent: options.onSessionEvent }),

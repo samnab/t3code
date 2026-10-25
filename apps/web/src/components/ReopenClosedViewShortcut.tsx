@@ -197,10 +197,8 @@ export function ReopenClosedViewShortcut() {
         isWeb: false,
       },
     };
-    // A focused browser page is a separate process, so these chords never reach
-    // the app's keydown listeners. The desktop claims them in the guest and
-    // sends each command back as a menu action. Voice chords are claimed only
-    // during a call, and the voice owner lets their menu actions only revoke.
+    // Guest browser processes miss app keydown listeners; desktop forwards the chords as menu actions.
+    // Voice chords are claimed only during a call, and the voice owner's menu actions only revoke.
     const commands = [
       ...(hasHistory ? (["view.reopenClosed"] as const) : []),
       ...PREVIEW_FORWARDED_LAYOUT_COMMANDS,

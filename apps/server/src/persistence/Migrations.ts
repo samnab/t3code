@@ -72,8 +72,9 @@ import Migration0065 from "./Migrations/065_CodexUsageNativeTurnIndex.ts";
 import Migration0066 from "./Migrations/066_RepairClientSettlementTimestamps.ts";
 import Migration0067 from "./Migrations/067_WebhookDedupe.ts";
 import Migration0068 from "./Migrations/068_ShellStopRequestIndex.ts";
-import Migration0069 from "./Migrations/069_AuthDesktopPairingSessionTtl.ts";
-import Migration0070 from "./Migrations/070_RealtimeVoiceHistoryResume.ts";
+import Migration0069 from "./Migrations/069_ThreadMessageSearch.ts";
+import Migration0070 from "./Migrations/070_AuthDesktopPairingSessionTtl.ts";
+import Migration0071 from "./Migrations/071_RealtimeVoiceHistoryResume.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -145,8 +146,9 @@ const migrationEntries = [
   [66, "RepairClientSettlementTimestamps", Migration0066],
   [67, "WebhookDedupe", Migration0067],
   [68, "ShellStopRequestIndex", Migration0068],
-  [69, "AuthDesktopPairingSessionTtl", Migration0069],
-  [70, "RealtimeVoiceHistoryResume", Migration0070],
+  [69, "ThreadMessageSearch", Migration0069],
+  [70, "AuthDesktopPairingSessionTtl", Migration0070],
+  [71, "RealtimeVoiceHistoryResume", Migration0071],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -162,12 +164,7 @@ const makeMigrationLoader = (throughId?: number) =>
 
 const FIRST_V2_MIGRATION_ID = 55;
 
-/**
- * Fail before migrating when the migrator would skip one of V2's own
- * migrations. It skips every id up to the highest recorded one, whatever name
- * was recorded, so a database that took a V2 id for another migration would
- * start without V2's schema and fail on first use.
- */
+// Migrators skip ids up to the highest recorded; reject collisions that would skip V2 schema.
 const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function* (
   throughId?: number,
 ) {
@@ -230,6 +227,21 @@ const reconcileDesktopPairingBackport = Effect.fn("reconcileDesktopPairingBackpo
   yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 57 AND name = 'AuthDesktopPairingSessionTtl'`;
 });
 
+// Fork worktree dev databases recorded 69/70 before upstream took 069. Both
+// migrations are idempotent, so dropping their rows lets 69–71 run in order.
+const reconcileForkRenumber069 = Effect.fn("reconcileForkRenumber069")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (tables.length === 0) return;
+  yield* sql`
+    DELETE FROM effect_sql_migrations
+    WHERE (migration_id = 69 AND name = 'AuthDesktopPairingSessionTtl')
+      OR (migration_id = 70 AND name = 'RealtimeVoiceHistoryResume')
+  `;
+});
+
 const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
@@ -245,6 +257,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
   const forkMigrations = includesV2 ? yield* reconcileForkMigrationLedger() : [];
   if (includesV2) {
     yield* reconcileDesktopPairingBackport();
+    yield* reconcileForkRenumber069();
     yield* assertV2MigrationsCanRun(toMigrationInclusive);
   }
   const executedMigrations = [

@@ -6,7 +6,7 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
-import DesktopPairingMigration from "./Migrations/069_AuthDesktopPairingSessionTtl.ts";
+import DesktopPairingMigration from "./Migrations/070_AuthDesktopPairingSessionTtl.ts";
 import { reconcileForkMigrationLedger } from "./reconcileForkMigrationLedger.ts";
 
 const forkHistory = [
@@ -393,7 +393,7 @@ describe("desktop pairing backport upgrade", () => {
           "ScheduledTaskWebhooks",
         );
         assert.strictEqual(
-          history.find((row) => row.migration_id === 69)?.name,
+          history.find((row) => row.migration_id === 70)?.name,
           "AuthDesktopPairingSessionTtl",
         );
         assert.strictEqual(history.length, migrationManifest.length);
@@ -412,6 +412,27 @@ describe("desktop pairing backport upgrade", () => {
       const before = yield* readHistory;
       assert.isTrue(Exit.isFailure(yield* Effect.exit(runMigrations())));
       assert.deepStrictEqual(yield* readHistory, before);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+});
+
+describe("fork 069/070 renumber", () => {
+  it.effect("reruns the renumbered fork migrations after upstream 069", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 68 });
+      yield* DesktopPairingMigration;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (69, 'AuthDesktopPairingSessionTtl'), (70, 'RealtimeVoiceHistoryResume')`;
+      yield* runMigrations();
+      const history = yield* readHistory;
+      assert.deepStrictEqual(
+        history.filter((row) => row.migration_id >= 69).map((row) => [row.migration_id, row.name]),
+        [
+          [69, "ThreadMessageSearch"],
+          [70, "AuthDesktopPairingSessionTtl"],
+          [71, "RealtimeVoiceHistoryResume"],
+        ],
+      );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });

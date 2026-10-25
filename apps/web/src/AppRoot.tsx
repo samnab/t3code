@@ -14,9 +14,7 @@ import { RealtimeVoiceProvider } from "./components/voice/RealtimeVoiceProvider"
 import { GlobalRealtimeVoiceControl } from "./components/voice/GlobalRealtimeVoiceControl";
 import { buildThreadRouteParams } from "./threadRoutes";
 
-/**
- * Browser webviews and voice media outlive routed views and share their atom registry.
- */
+// Keep webviews and voice media outside the router but inside its atom registry so route changes preserve them.
 export function AppRoot({ router }: { readonly router: AppRouter }) {
   useEffect(
     () =>

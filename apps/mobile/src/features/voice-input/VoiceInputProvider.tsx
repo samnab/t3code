@@ -3,8 +3,6 @@ import {
   AudioModule,
   RecordingPresets,
   requestRecordingPermissionsAsync,
-  setAudioModeAsync,
-  setIsAudioActiveAsync,
   type RecorderState,
   type RecordingStatus,
 } from "expo-audio";
@@ -43,11 +41,15 @@ import {
 import { createLazyVoiceRecorder, type LazyVoiceRecorder } from "./lazyVoiceRecorder";
 import { normalizeVoiceInputDecibels, VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
 import { VoiceInputSession } from "./voiceInputSession";
+import {
+  acquireAudioSession,
+  activateAudioSession,
+  releaseAudioSession,
+} from "../../lib/audioSession";
 
 const INITIAL_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: null };
 const VOICE_METERING_INTERVAL_MS = 80;
-// The native constructor takes platform-flattened options, as `useAudioRecorder`
-// builds them with expo-audio's internal `createRecordingOptions`.
+// The native constructor expects platform-flattened options, as built by useAudioRecorder.
 const { ios: IOS_RECORDING_OPTIONS, android: ANDROID_RECORDING_OPTIONS } =
   RecordingPresets.HIGH_QUALITY;
 const VOICE_RECORDING_OPTIONS = {
@@ -58,44 +60,6 @@ const VOICE_RECORDING_OPTIONS = {
   isMeteringEnabled: true,
   ...(Platform.OS === "ios" ? IOS_RECORDING_OPTIONS : ANDROID_RECORDING_OPTIONS),
 };
-
-async function releaseVoiceRecordingAudio(): Promise<void> {
-  try {
-    // expo-audio's mode setter stops every recorder and replaces the category, which
-    // would cut and deactivate an active realtime voice session.
-    if (realtimeVoiceOwnsAudio()) return;
-    try {
-      await setAudioModeAsync({ allowsRecording: false });
-    } finally {
-      // Expo does not deactivate AVAudioSession when recording stops or its
-      // category changes. Explicit deactivation resumes interrupted app audio.
-      await setIsAudioActiveAsync(false);
-    }
-  } finally {
-    // Released only after teardown so realtime voice cannot claim a still-recording session.
-    microphoneArbiter.release("dictation");
-  }
-}
-
-async function configureVoiceRecordingAudio(): Promise<void> {
-  if (realtimeVoiceOwnsAudio() || !microphoneArbiter.acquire("dictation")) {
-    throw new Error("The microphone is in use by voice conversation.");
-  }
-  try {
-    await setAudioModeAsync({
-      allowsRecording: true,
-      interruptionMode: "doNotMix",
-      playsInSilentMode: true,
-      shouldPlayInBackground: false,
-    });
-    await setIsAudioActiveAsync(true);
-  } catch (error) {
-    try {
-      await releaseVoiceRecordingAudio();
-    } catch {}
-    throw error;
-  }
-}
 
 const VoiceInputContext = createContext<ReturnType<typeof useVoiceInputRuntime> | null>(null);
 
@@ -136,6 +100,7 @@ function useVoiceInputRuntime() {
   const audioLevels = useSharedValue(audioLevelsRef.current);
   const sessionRef = useRef<VoiceInputSession | null>(null);
   const recorderRef = useRef<LazyVoiceRecorder<RecorderState> | null>(null);
+  const audioToken = useRef<ReturnType<typeof acquireAudioSession> | null>(null);
 
   if (!sessionRef.current || !recorderRef.current) {
     const recorder = createLazyVoiceRecorder({
@@ -172,8 +137,32 @@ function useVoiceInputRuntime() {
         const permission = await requestRecordingPermissionsAsync();
         return { granted: permission.granted, canAskAgain: permission.canAskAgain };
       },
-      configureRecording: configureVoiceRecordingAudio,
-      releaseRecording: releaseVoiceRecordingAudio,
+      configureRecording: async () => {
+        if (realtimeVoiceOwnsAudio() || !microphoneArbiter.acquire("dictation")) {
+          throw new Error("The microphone is in use by voice conversation.");
+        }
+        const token = acquireAudioSession("recording");
+        audioToken.current = token;
+        try {
+          await activateAudioSession(token);
+        } catch (error) {
+          await releaseAudioSession(token).catch(() => {});
+          microphoneArbiter.release("dictation");
+          throw error;
+        }
+      },
+      releaseRecording: async () => {
+        try {
+          // Resetting the audio mode stops every recorder and would cut a live realtime voice session.
+          if (audioToken.current && !realtimeVoiceOwnsAudio()) {
+            await releaseAudioSession(audioToken.current);
+          }
+          audioToken.current = null;
+        } finally {
+          // Released only after teardown so realtime voice cannot claim a still-recording session.
+          microphoneArbiter.release("dictation");
+        }
+      },
       deleteRecording: (uri) => new File(uri).delete(),
       onStateChange: (nextState) =>
         setState({
@@ -190,9 +179,7 @@ function useVoiceInputRuntime() {
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
-      // iOS reports `inactive` while its permission dialog is open. Only the
-      // real background state cancels preparation; recorder status handles
-      // calls and route interruptions during capture.
+      // iOS permission dialogs report inactive; cancel preparation only on background. Recorder status handles capture interruptions.
       if (nextState === "background") controller.appMovedToBackground();
     });
     return () => subscription.remove();

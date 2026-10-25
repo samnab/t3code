@@ -84,19 +84,25 @@ describe("orchestration cache envelopes", () => {
     const thread = decodeStoredThreadSnapshotJson(encodedThread);
     expect(thread.snapshot.projection).toEqual({
       ...v2Projection,
-      thread: { ...v2Projection.thread, goal: null, goalLoop: null, voiceNotifications: true },
+      thread: { ...v2Projection.thread, goal: null, goalLoop: null, voiceNotifications: false },
     });
     expect(thread.snapshot.snapshotSequence).toBe(4);
   });
 
-  it("rejects thread snapshots saved before queued-run items were kept, but not shells", () => {
-    const staleThread = encodeStoredThreadSnapshotJson({
+  it("rejects thread snapshots saved before human history was bounded, but not shells", () => {
+    const currentThread = encodeStoredThreadSnapshotJson({
       schemaVersion: ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
       environmentId,
       threadId: v2ThreadId,
       snapshot: { snapshotSequence: 4, projection: v2Projection },
-    }).replace(`"schemaVersion":${ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION}`, `"schemaVersion":3`);
-    expect(() => decodeStoredThreadSnapshotJson(staleThread)).toThrow();
+    });
+    for (const staleVersion of [3, 4]) {
+      const staleThread = currentThread.replace(
+        `"schemaVersion":${ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION}`,
+        `"schemaVersion":${staleVersion}`,
+      );
+      expect(() => decodeStoredThreadSnapshotJson(staleThread)).toThrow();
+    }
     const shell = encodeStoredShellSnapshot({
       schemaVersion: ORCHESTRATION_CACHE_SCHEMA_VERSION,
       environmentId,
