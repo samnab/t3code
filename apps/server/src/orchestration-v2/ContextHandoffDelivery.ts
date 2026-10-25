@@ -1,6 +1,8 @@
 import type {
   OrchestrationV2ContextHandoff,
+  OrchestrationV2ConversationMessage,
   OrchestrationV2ProviderThread,
+  OrchestrationV2Run,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { ContextHandoffBudgetError } from "@t3tools/provider-core/server/failure";
@@ -11,6 +13,31 @@ import {
   renderHistory,
   selectHistory,
 } from "@t3tools/provider-core/server/handoffBudget";
+
+/**
+ * A ready handoff stays `ready` after delivery. The next turn on its provider thread redelivers it
+ * only when its target run failed, was interrupted, or was a completed `/compact` that never
+ * recorded a delivery.
+ */
+export const isContextHandoffRedeliverable = (
+  handoff: OrchestrationV2ContextHandoff,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  messages: ReadonlyArray<OrchestrationV2ConversationMessage>,
+) =>
+  runs.some(
+    (source) =>
+      source.id === handoff.targetRunId &&
+      (source.status === "failed" ||
+        source.status === "interrupted" ||
+        (source.status === "completed" &&
+          handoff.delivery === undefined &&
+          messages.some(
+            (message) =>
+              message.id === source.userMessageId &&
+              message.attachments.length === 0 &&
+              message.text.trim().toLowerCase() === "/compact",
+          ))),
+  );
 
 /** Persist around injection; ambiguous delivery requires a fresh native thread. Call unsent if refused before prompt consumption. */
 export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextHandoffs")(

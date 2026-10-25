@@ -2,6 +2,7 @@ import * as DateTime from "effect/DateTime";
 import {
   EnvironmentId,
   ProviderInstanceId,
+  ProviderRealtimeVoiceError,
   ProviderSessionId,
   ProviderThreadId,
   ThreadId,
@@ -720,6 +721,24 @@ describe("app-owned realtime voice", () => {
     expect(f.stopProvider).not.toHaveBeenCalled();
     expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", replacementBlocked: true });
     expect(f.releaseOwner).toHaveBeenCalledOnce();
+  });
+
+  it("allows a new call after the host refuses a start before reaching the provider", async () => {
+    const f = fixture();
+    f.startProvider.mockRejectedValueOnce(
+      new ProviderRealtimeVoiceError({
+        threadId: f.owner.threadId,
+        cause: "Send a message first.",
+        refusedBeforeStart: true,
+      }),
+    );
+    await f.controller.start(f.owner);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", replacementBlocked: false });
+    expect(f.controller.getSnapshot().reason).not.toContain("New calls remain blocked");
+    await f.controller.start(f.owner);
+    expect(f.transports).toHaveLength(2);
+    expect(f.controller.getSnapshot().mode).toBe("transmitting");
+    expect(f.stopProvider).not.toHaveBeenCalled();
   });
 
   it("retains the replacement gate after failed stop and sends stop only once", async () => {

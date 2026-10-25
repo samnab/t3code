@@ -10,11 +10,13 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2RunStatus,
   type OrchestrationV2TurnItem,
   type Project,
   ProjectId,
   ProviderDriverKind,
   ContextHandoffId,
+  MessageId,
   ProviderInstanceId,
   type ProviderSessionId,
   RunId,
@@ -4727,6 +4729,7 @@ it.effect("ProviderRealtimeVoiceServiceV2 starts voice on an unloaded thread wit
       assert.equal(yield* Ref.get(voiceStarts), 2);
 
       // Earlier history waiting for this provider thread is only delivered by a turn.
+      const handoffRunId = RunId.make("run:voice-handoff");
       yield* sink.write({
         events: [
           {
@@ -4737,7 +4740,7 @@ it.effect("ProviderRealtimeVoiceServiceV2 starts voice on an unloaded thread wit
             payload: {
               id: ContextHandoffId.make("handoff:voice"),
               threadId,
-              targetRunId: RunId.make("run:voice-handoff"),
+              targetRunId: handoffRunId,
               fromProviderThreadIds: [],
               toProviderThreadId: providerThread.id,
               coveredRunOrdinals: { from: 1, to: 1 },
@@ -4754,7 +4757,47 @@ it.effect("ProviderRealtimeVoiceServiceV2 starts voice on an unloaded thread wit
       });
       const blocked = yield* voice.start({ threadId, sdp: "offer" }).pipe(Effect.flip);
       assert.equal(blocked._tag, "ProviderRealtimeVoiceError");
+      assert.isTrue(blocked.refusedBeforeStart);
       assert.equal(yield* Ref.get(voiceStarts), 2);
+
+      // The handoff stays `ready` after its target run delivers it; only a run that has not
+      // delivered it, or one the next turn redelivers after, still blocks voice.
+      const startWithTargetRun = (status: OrchestrationV2RunStatus) =>
+        Effect.gen(function* () {
+          yield* sink.write({
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId }),
+                threadId,
+                type: "run.updated",
+                occurredAt: now,
+                payload: {
+                  id: handoffRunId,
+                  threadId,
+                  ordinal: 1,
+                  providerInstanceId: modelSelection.instanceId,
+                  modelSelection,
+                  providerThreadId: providerThread.id,
+                  userMessageId: MessageId.make("message:voice-handoff"),
+                  rootNodeId: null,
+                  activeAttemptId: null,
+                  status,
+                  requestedAt: now,
+                  startedAt: null,
+                  completedAt: null,
+                  checkpointId: null,
+                  contextHandoffId: ContextHandoffId.make("handoff:voice"),
+                },
+              },
+            ],
+          });
+          return yield* voice.start({ threadId, sdp: "offer" }).pipe(Effect.exit);
+        });
+      for (const status of ["failed", "interrupted", "queued", "running"] as const)
+        assert.isTrue(Exit.isFailure(yield* startWithTargetRun(status)), status);
+      assert.equal(yield* Ref.get(voiceStarts), 2);
+      assert.isTrue(Exit.isSuccess(yield* startWithTargetRun("completed")));
+      assert.equal(yield* Ref.get(voiceStarts), 3);
     }).pipe(
       Effect.provide(
         ProviderRealtimeVoiceService.layer.pipe(
