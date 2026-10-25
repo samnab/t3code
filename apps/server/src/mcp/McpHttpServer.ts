@@ -1018,7 +1018,7 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
-export const layerCompletionAudioToolkit = toolkitRegistration(
+const layerCompletionAudioToolkit = toolkitRegistration(
   CompletionAudioToolkit,
   CompletionAudioHandlers.layer,
 );
