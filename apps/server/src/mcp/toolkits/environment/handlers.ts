@@ -9,7 +9,6 @@ import {
   type ProviderInstanceId,
   type ResolvedKeybindingsConfig,
   resolveProjectProviderInstanceEnabled,
-  RuntimeMode,
   type ServerSettings,
   shouldRecommendDatabaseCompaction,
 } from "@t3tools/contracts";
@@ -21,6 +20,7 @@ import * as Stream from "effect/Stream";
 import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Keybindings from "../../../keybindings.ts";
+import { runtimeModeRank } from "../../../orchestration-v2/DispatchModeLimit.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as DatabaseStorage from "../../../persistence/DatabaseStorage.ts";
 import { BUILT_IN_DRIVERS } from "../../../provider/builtInDrivers.ts";
@@ -144,8 +144,7 @@ export function preferences(settings: ServerSettings) {
     ),
   };
 }
-// Literals are declared narrowest first.
-const runtimeModeRank = (mode: RuntimeMode) => RuntimeMode.literals.indexOf(mode);
+
 // Explicit fields only: the link state also carries the linked account id and
 // relay identifiers, which must not reach a provider transcript.
 const connectSummary = Effect.gen(function* () {
@@ -256,7 +255,7 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
           .modifySettings((current) => {
             if (
               requested === undefined ||
-              runtimeModeRank(requested) <= runtimeModeRank(current.defaultRuntimeMode)
+              runtimeModeRank[requested] <= runtimeModeRank[current.defaultRuntimeMode]
             )
               return patch;
             const { defaultRuntimeMode: _raised, ...rest } = patch;
@@ -280,7 +279,9 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
               code: "invalid_request",
               message: `Unknown provider instance ${instanceId}.`,
             });
-          const acceptsCustomModels = customModelsGuard(known.driver);
+          // The settings UI never shows antigravity's list, so a write here would be invisible.
+          const acceptsCustomModels =
+            known.driver === "antigravity" ? undefined : customModelsGuard(known.driver);
           if (
             customModels !== undefined &&
             (acceptsCustomModels === undefined || !acceptsCustomModels(customModels))
@@ -293,11 +294,12 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
             .updateProviderInstance((stored) => {
               // Built from the persisted instance, so its environment and
               // stored secrets are carried over without being materialized.
-              const base =
-                stored.providerInstances[instanceId] ??
-                deriveProviderInstanceConfigMap(stored)[instanceId];
               // Removed while this waited for the lock: removing again is a no-op.
-              if (base === undefined) return { operation: "remove", instanceId };
+              if (deriveProviderInstanceConfigMap(stored)[instanceId] === undefined)
+                return { operation: "remove", instanceId };
+              // Not the derived entry: a project override would make it enabled
+              // environment-wide.
+              const base = stored.providerInstances[instanceId] ?? { driver: known.driver };
               return {
                 operation: "upsert",
                 instanceId,

@@ -6,8 +6,10 @@ import {
   type EnvironmentCloudLinkStateResult,
   EnvironmentId,
   type KeybindingCommand,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  resolveProjectProviderInstanceEnabled,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type ServerSettingsPatch,
@@ -177,6 +179,8 @@ const countingSettings = (updates: Ref.Ref<number>) =>
     getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
     updateSettings: () =>
       Ref.update(updates, (count) => count + 1).pipe(Effect.as(DEFAULT_SERVER_SETTINGS)),
+    modifySettings: () =>
+      Ref.update(updates, (count) => count + 1).pipe(Effect.as(DEFAULT_SERVER_SETTINGS)),
     updateProviderInstance: () =>
       Ref.update(updates, (count) => count + 1).pipe(Effect.as(DEFAULT_SERVER_SETTINGS)),
   });
@@ -337,7 +341,13 @@ it.effect.each([
     scope: threadScope({ environmentId: EnvironmentId.make("environment:other") }),
     caller: liveThreadShell(threadId),
   },
-])("denies auto-settle writes from $label", ({ scope, caller }) =>
+  {
+    label: "a caller whose turn ended",
+    scope: threadScope(),
+    caller: liveThreadShell(threadId, { activeRunId: null }),
+    code: "parent_not_active",
+  },
+])("denies environment writes from $label", ({ scope, caller, code = "capability_denied" }) =>
   Effect.gen(function* () {
     const updates = yield* Ref.make(0);
     const result = yield* Effect.gen(function* () {
@@ -350,7 +360,7 @@ it.effect.each([
         }),
       );
     }).pipe(Effect.provide(environmentLayer(scope, caller, countingSettings(updates))));
-    expect(result?.result).toMatchObject({ code: "capability_denied" });
+    expect(result?.result).toMatchObject({ code });
     const instanceWrite = yield* Effect.flatMap(EnvironmentToolkit, (toolkit) =>
       finalResult(
         toolkit.handle("t3_provider_instance_update", {
@@ -359,7 +369,7 @@ it.effect.each([
         }),
       ),
     ).pipe(Effect.provide(environmentLayer(scope, caller, countingSettings(updates))));
-    expect(instanceWrite?.result).toMatchObject({ code: "capability_denied" });
+    expect(instanceWrite?.result).toMatchObject({ code });
     expect(yield* Ref.get(updates)).toBe(0);
   }),
 );
@@ -601,20 +611,21 @@ it.layer(
     Effect.gen(function* () {
       const scope = threadScope();
       const caller = liveThreadShell(threadId);
-      const work = ProviderInstanceId.make("antigravity_work");
+      const work = ProviderInstanceId.make("opencode_work");
+      const antigravity = ProviderInstanceId.make("antigravity_work");
       const pi = ProviderInstanceId.make("pi_work");
       const fork = ProviderInstanceId.make("fork_work");
       const acp = ProviderInstanceId.make("acp_work");
-      const apiKey = "canary-api-key-4f1d";
+      const serverPassword = "canary-server-password-4f1d";
       const envSecret = "canary-env-secret-9b2e";
       yield* Effect.flatMap(Settings.ServerSettingsService, (service) =>
         service.updateSettings({
           providerInstances: {
             [work]: {
-              driver: ProviderDriverKind.make("antigravity"),
+              driver: ProviderDriverKind.make("opencode"),
               displayName: "Work",
               enabled: false,
-              config: { apiKey, customModels: ["old-model"] },
+              config: { serverPassword, customModels: ["old-model"] },
               environment: [{ name: "SECRET_TOKEN", value: envSecret, sensitive: true }],
             },
             [pi]: {
@@ -622,6 +633,7 @@ it.layer(
               config: { customModels: ["keep", "drop"], modelConcurrency: { keep: 2, drop: 3 } },
             },
             [fork]: { driver: ProviderDriverKind.make("forkOnly") },
+            [antigravity]: { driver: ProviderDriverKind.make("antigravity") },
             [acp]: { driver: ProviderDriverKind.make("acpRegistry") },
           },
         }),
@@ -652,7 +664,7 @@ it.layer(
           providerInstances: {
             codex: { driver: "codex", enabled: true, customModels: [] },
             [work]: {
-              driver: "antigravity",
+              driver: "opencode",
               displayName: "Work",
               accentColor: null,
               enabled: false,
@@ -669,7 +681,7 @@ it.layer(
         accentColor: "violet",
       });
       expect(edited?.encodedResult).toEqual({
-        driver: "antigravity",
+        driver: "opencode",
         displayName: null,
         accentColor: "violet",
         enabled: false,
@@ -679,7 +691,7 @@ it.layer(
       expect(afterEdit.providerInstances[work]).toMatchObject({
         enabled: false,
         accentColor: "violet",
-        config: { apiKey, customModels: ["new-model", { slug: "named", name: "Named" }] },
+        config: { serverPassword, customModels: ["new-model", { slug: "named", name: "Named" }] },
         environment: [{ name: "SECRET_TOKEN", value: envSecret, sensitive: true }],
       });
       expect(afterEdit.providerInstances[work]?.displayName).toBeUndefined();
@@ -702,6 +714,7 @@ it.layer(
         { instanceId: ProviderInstanceId.make("missing"), displayName: "Nope" },
         { instanceId: fork, customModels: ["x"] },
         { instanceId: acp, customModels: [{ slug: "object-entry" }] },
+        { instanceId: antigravity, customModels: ["hidden-in-settings"] },
       ]) {
         expect((yield* call(refused))?.result).toMatchObject({ code: "invalid_request" });
       }
@@ -712,10 +725,44 @@ it.layer(
       const disk = yield* Effect.flatMap(FileSystem.FileSystem, (fs) =>
         fs.readFileString(config.settingsPath),
       );
-      for (const canary of [apiKey, envSecret]) {
+      for (const canary of [serverPassword, envSecret]) {
         expect(JSON.stringify(outputs)).not.toContain(canary);
         expect(disk).not.toContain(canary);
       }
+    }),
+  );
+
+  it.effect("a metadata edit never enables an instance a project override turned on", () =>
+    Effect.gen(function* () {
+      const cursor = ProviderInstanceId.make("cursor");
+      const projectId = ProjectId.make("project:cursor-on");
+      yield* Effect.flatMap(Settings.ServerSettingsService, (service) =>
+        service.updateSettings({
+          projectSettingsOverrides: {
+            [projectId]: { providerInstances: { [cursor]: { enabled: true } } },
+          },
+        }),
+      ).pipe(Effect.provide(restartedSettingsWithSecrets()));
+      const edited = yield* Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+        finalResult(
+          toolkit.handle("t3_provider_instance_update", {
+            instanceId: cursor,
+            displayName: "Cursor",
+          }),
+        ),
+      ).pipe(
+        Effect.provide(
+          environmentLayer(
+            threadScope(),
+            liveThreadShell(threadId),
+            restartedSettingsWithSecrets(),
+          ),
+        ),
+      );
+      expect(edited?.encodedResult).toMatchObject({ displayName: "Cursor", enabled: false });
+      const stored = yield* reloadSettings.pipe(Effect.provide(restartedSettingsWithSecrets()));
+      expect(resolveProjectProviderInstanceEnabled(stored, null, cursor)).toBe(false);
+      expect(stored.providerInstances[cursor]).toEqual({ driver: "cursor", displayName: "Cursor" });
     }),
   );
 });
