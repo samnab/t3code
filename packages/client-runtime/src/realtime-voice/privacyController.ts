@@ -1,11 +1,13 @@
 import * as DateTime from "effect/DateTime";
-import type {
-  EnvironmentId,
-  ProviderInstanceId,
-  ProviderSessionId,
-  ProviderThreadId,
-  ProviderRealtimeVoiceStartResult,
-  ThreadId,
+import * as Schema from "effect/Schema";
+import {
+  type EnvironmentId,
+  type ProviderInstanceId,
+  ProviderRealtimeVoiceError,
+  type ProviderSessionId,
+  type ProviderThreadId,
+  type ProviderRealtimeVoiceStartResult,
+  type ThreadId,
 } from "@t3tools/contracts";
 
 export interface VoiceOwner {
@@ -52,6 +54,7 @@ export const VOICE_REPLACEMENT_GATE =
 const VOICE_OWNERSHIP_REQUIRED =
   "Microphone off. This host did not return matching voice ownership. Update the T3 host before starting another call.";
 const MAX_VOICE_LIFETIME_MS = 4 * 60 * 60 * 1_000;
+const isVoiceError = Schema.is(ProviderRealtimeVoiceError);
 class VoiceOwnershipUnavailable extends Error {
   constructor() {
     super(VOICE_OWNERSHIP_REQUIRED);
@@ -382,12 +385,15 @@ export function createRealtimeVoiceController(deps: {
       if (!value.cancelled) cancelAttempt(deps.describeError(error));
       // Missing/mismatched ownership and ambiguous start failure never authorize a legacy stop.
       if (value.ownership === null) {
-        if (value.remoteRequested)
+        // A host refusal before reaching the provider cannot leave a call open.
+        const unstarted =
+          !value.remoteRequested || (isVoiceError(error) && error.refusedBeforeStart === true);
+        if (!unstarted)
           value.reason =
             error instanceof VoiceOwnershipUnavailable
               ? VOICE_OWNERSHIP_REQUIRED
               : `${VOICE_REPLACEMENT_GATE} ${deps.describeError(error)}`;
-        finish(value, !value.remoteRequested);
+        finish(value, unstarted);
       }
     } finally {
       // getUserMedia cannot be aborted. Its reservation lasts until the late stream is stopped.

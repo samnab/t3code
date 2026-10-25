@@ -4757,6 +4757,7 @@ it.effect("ProviderRealtimeVoiceServiceV2 starts voice on an unloaded thread wit
       });
       const blocked = yield* voice.start({ threadId, sdp: "offer" }).pipe(Effect.flip);
       assert.equal(blocked._tag, "ProviderRealtimeVoiceError");
+      assert.isTrue(blocked.refusedBeforeStart);
       assert.equal(yield* Ref.get(voiceStarts), 2);
 
       // The handoff stays `ready` after its target run delivers it; only a run that has not

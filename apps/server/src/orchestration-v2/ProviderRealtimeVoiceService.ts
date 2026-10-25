@@ -59,8 +59,9 @@ export const layer: Layer.Layer<
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runtimePolicy = yield* RuntimePolicyV2;
 
+    // Only for refusals before any provider call, so clients know no call can be left open.
     const fail = (threadId: ThreadId, cause: string) =>
-      new ProviderRealtimeVoiceError({ threadId, cause });
+      new ProviderRealtimeVoiceError({ threadId, cause, refusedBeforeStart: true });
 
     const resolve = Effect.fn("ProviderRealtimeVoiceService.resolve")(function* (
       threadId: ThreadId,

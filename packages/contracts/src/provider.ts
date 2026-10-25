@@ -178,6 +178,8 @@ export class ProviderRealtimeVoiceError extends Schema.TaggedError<ProviderRealt
   {
     threadId: ThreadId,
     cause: Schema.optional(Schema.Defect()),
+    /** The host refused before reaching the provider, so no call can be left open. */
+    refusedBeforeStart: Schema.optional(Schema.Boolean),
   },
 ) {
   override get message(): string {
