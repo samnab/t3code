@@ -1,4 +1,8 @@
-import { OrchestratorMcpFailure, type ServerSettings } from "@t3tools/contracts";
+import {
+  globalIdleCompaction,
+  OrchestratorMcpFailure,
+  type ServerSettings,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -21,6 +25,7 @@ export function preferences(settings: ServerSettings) {
     sidebarAutoSettleKeepPullRequests,
     favorites,
     providerModelPreferences,
+    snoozeLimitedThreads,
   } = settings;
   const characters = Array.from(sourceControlWritingStyle.customInstructions);
   return {
@@ -39,6 +44,8 @@ export function preferences(settings: ServerSettings) {
     sidebarAutoSettleKeepPullRequests,
     favorites,
     providerModelPreferences,
+    idleCompaction: globalIdleCompaction(settings),
+    snoozeLimitedThreads,
   };
 }
 const access = Effect.gen(function* () {

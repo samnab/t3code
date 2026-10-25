@@ -2,6 +2,7 @@ import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
   ExecutionEnvironmentDescriptor,
+  IdleCompactionMode,
   OrchestratorMcpFailure,
   ServerSettings,
   ServerSettingsPatch,
@@ -31,6 +32,8 @@ const PreferenceFields = {
   sidebarAutoSettleKeepPullRequests: ServerSettings.fields.sidebarAutoSettleKeepPullRequests,
   favorites: ServerSettings.fields.favorites,
   providerModelPreferences: ServerSettings.fields.providerModelPreferences,
+  idleCompaction: IdleCompactionMode,
+  snoozeLimitedThreads: ServerSettings.fields.snoozeLimitedThreads,
 };
 const shared = {
   failure: OrchestratorMcpFailure,
@@ -46,7 +49,7 @@ const shared = {
 const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
-    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. favorites and providerModelPreferences (hidden models, order, default model/options per provider instance id) are the stored model preferences.",
+    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. favorites and providerModelPreferences (hidden models, order, default model/options per provider instance id) are the stored model preferences. idleCompaction is the effective environment-wide mode.",
   success: Schema.Struct({
     environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
     label: Schema.String,
@@ -75,6 +78,8 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
     setModelsHidden: ServerSettingsPatch.fields.setModelsHidden,
     setProviderModelOrder: ServerSettingsPatch.fields.setProviderModelOrder,
     setProviderModelDefault: ServerSettingsPatch.fields.setProviderModelDefault,
+    idleCompaction: ServerSettingsPatch.fields.idleCompaction,
+    snoozeLimitedThreads: ServerSettingsPatch.fields.snoozeLimitedThreads,
   }),
   success: Schema.Struct(PreferenceFields),
 }).annotate(Tool.Destructive, true);

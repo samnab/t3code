@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2ThreadShell,
+  type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -431,6 +432,67 @@ it.layer(
             },
           },
         },
+      });
+    }),
+  );
+});
+
+it.layer(
+  Layer.mergeAll(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3code-environment-idle-test-" }),
+    SqlitePersistence.layerMemory,
+  ).pipe(Layer.provideMerge(NodeServices.layer)),
+)("idle compaction and limited-thread snooze", (it) => {
+  it.effect("reads the effective mode and keeps the legacy switch consistent", () =>
+    Effect.gen(function* () {
+      const scope = threadScope();
+      const caller = liveThreadShell(threadId);
+      const read = Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        return (yield* finalResult(toolkit.handle("t3_environment_read", {})))?.encodedResult;
+      }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+      const update = (
+        patch: Pick<
+          ServerSettingsPatch,
+          "idleCompaction" | "snoozeLimitedThreads" | "defaultThreadEnvMode"
+        >,
+      ) =>
+        Effect.gen(function* () {
+          const toolkit = yield* EnvironmentToolkit;
+          return yield* finalResult(toolkit.handle("t3_environment_preferences_update", patch));
+        }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+
+      // Only the legacy boolean, as written by a client from before modes.
+      yield* Effect.flatMap(Settings.ServerSettingsService, (service) =>
+        service.updateSettings({ compactIdleThreads: true }),
+      ).pipe(Effect.provide(restartedSettings()));
+      expect(yield* read).toMatchObject({
+        preferences: { idleCompaction: "beforeCacheExpires", snoozeLimitedThreads: false },
+      });
+
+      expect(
+        (yield* update({ idleCompaction: "off", snoozeLimitedThreads: true }))?.encodedResult,
+      ).toMatchObject({ idleCompaction: "off", snoozeLimitedThreads: true });
+      expect(yield* reloadSettings.pipe(Effect.provide(restartedSettings()))).toMatchObject({
+        idleCompaction: "off",
+        compactIdleThreads: false,
+        snoozeLimitedThreads: true,
+      });
+
+      yield* update({ idleCompaction: "beforeCacheExpires" });
+      yield* update({ defaultThreadEnvMode: "worktree" });
+      expect(yield* reloadSettings.pipe(Effect.provide(restartedSettings()))).toMatchObject({
+        idleCompaction: "beforeCacheExpires",
+        compactIdleThreads: true,
+        snoozeLimitedThreads: true,
+      });
+      expect(yield* read).toMatchObject({
+        preferences: { idleCompaction: "beforeCacheExpires", snoozeLimitedThreads: true },
+      });
+
+      yield* update({ snoozeLimitedThreads: false });
+      expect(yield* read).toMatchObject({
+        preferences: { idleCompaction: "beforeCacheExpires", snoozeLimitedThreads: false },
       });
     }),
   );
