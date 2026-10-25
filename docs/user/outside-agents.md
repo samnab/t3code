@@ -55,7 +55,7 @@ Then choose what the agent may do:
 - **Full access** also lets it change this environment's settings, provider
   custom models and keybindings, manage projects including deleting them, and
   see whether T3 Connect is linked. Agents can only lower permission modes,
-  never raise them. Appearance, notification and saved-connection preferences
+  never raise them. Appearance and saved-connection preferences
   stay on each device.
 
 ## Claude Code
