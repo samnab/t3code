@@ -18,6 +18,10 @@ import {
   RunId,
   NonNegativeInt,
   ProjectId,
+  ThreadGoal,
+  ThreadGoalLoopClientCommand,
+  ThreadGoalLoopJson,
+  ThreadGoalLoopState,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
@@ -32,7 +36,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
+    "Pin, snooze, settle, archive, mark a thread unread, or turn its automatic settling on or off. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals([
@@ -45,6 +49,8 @@ const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
       "archive",
       "unarchive",
       "mark_unread",
+      "enable_auto_settle",
+      "disable_auto_settle",
     ]),
     snoozedUntil: Schema.optional(IsoDateTime),
   }),
@@ -175,13 +181,17 @@ const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
 
 const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
   ...commandTool,
-  description: "Read a thread's provider, model, and modes. Omit `threadId` for this thread.",
+  description:
+    "Read a thread's provider, model, modes, automatic settling, goal, and goal loop. Omit `threadId` for this thread.",
   parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
   success: Schema.Struct({
     threadId: ThreadId,
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
+    autoSettle: Schema.Boolean,
+    goal: Schema.NullOr(ThreadGoal),
+    goalLoop: Schema.NullOr(ThreadGoalLoopJson),
   }),
 })
   .annotate(Tool.Readonly, true)
@@ -200,6 +210,41 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
     modelSelection: ModelSelection,
   }),
 }).annotate(Tool.Destructive, true);
+
+const ThreadGoalTool = Tool.make("t3_thread_goal", {
+  ...commandTool,
+  description:
+    "Set or clear (goal=null) a thread's goal. Omit threadId for this thread. Clearing stops its goal loop. A new goal starts the goal loop, so setting is refused unless the thread's goal loop is paused; it then stays paused until t3_thread_goal_loop resumes it.",
+  parameters: Schema.Struct({
+    threadId: Schema.optional(ThreadId),
+    goal: Schema.NullOr(ThreadGoal),
+  }),
+}).annotate(Tool.Destructive, true);
+const ThreadGoalLoopTool = Tool.make("t3_thread_goal_loop", {
+  ...commandTool,
+  description:
+    "Control a thread's goal loop: pause, resume, continue, complete, block or reset. resume, continue and reset let the loop start provider turns. expectedState is the loop state you last read with t3_thread_configuration (idle for a goal whose loop has not run); the call is refused if it differs.",
+  parameters: Schema.Struct({
+    threadId: Schema.optional(ThreadId),
+    action: ThreadGoalLoopClientCommand.fields.action,
+    expectedState: ThreadGoalLoopState,
+    reason: ThreadGoalLoopClientCommand.fields.reason,
+  }),
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+const RunStartTool = Tool.make("t3_run_start", {
+  ...commandTool,
+  description:
+    "Start held work on a stopped thread. runId is the run you expect to start: retry_preparation retries that run's failed workspace preparation, start_queued sends that queued message now, and resume_queue resumes a held queue only if that run is next in it. The call is refused if the thread no longer matches.",
+  parameters: Schema.Struct({
+    threadId: Schema.optional(ThreadId),
+    action: Schema.Literals(["retry_preparation", "start_queued", "resume_queue"]),
+    runId: RunId,
+  }),
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
 
 const transferResult = Schema.Struct({ sequence: NonNegativeInt, targetThreadId: ThreadId });
 const ThreadForkTool = Tool.make("t3_thread_fork", {
@@ -293,6 +338,9 @@ export const ThreadToolkit = Toolkit.make(
   ThreadTransfersTool,
   ThreadConfigurationTool,
   ThreadConfigureTool,
+  ThreadGoalTool,
+  ThreadGoalLoopTool,
+  RunStartTool,
   PendingRequestListTool,
   PendingRequestReadTool,
   PendingRequestRespondTool,

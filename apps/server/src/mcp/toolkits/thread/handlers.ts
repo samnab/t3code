@@ -79,6 +79,9 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
     });
   return { ...context, request, item };
 });
+const refuse = (message: string) =>
+  new OrchestratorMcpFailure({ code: "invalid_request", message });
+
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
@@ -185,6 +188,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         modelSelection: thread.modelSelection,
         runtimeMode: thread.runtimeMode,
         interactionMode: thread.interactionMode,
+        autoSettle: thread.autoSettleDisabledAt == null,
+        goal: thread.goal ?? null,
+        goalLoop: thread.goalLoop ?? null,
       };
     }),
   ),
@@ -217,6 +223,88 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           threadId: thread.id,
           commandId: yield* newCommandId(),
           modelSelection: input.modelSelection,
+        })
+        .pipe(Effect.mapError(dispatchFailure));
+      return { sequence: result.sequence };
+    }),
+  ),
+  t3_thread_goal: writesThread((input) =>
+    Effect.gen(function* () {
+      const {
+        threads,
+        projection: { thread },
+      } = yield* readThread(input.threadId);
+      // A changed goal resets the loop to idle, which GoalLoopService drives, unless it was
+      // paused. The orchestrator reads "paused" again under the thread lock, so a goal set
+      // here never starts work; only someone else's resume can.
+      if (input.goal !== null && thread.goalLoop?.state !== "paused")
+        return yield* refuse(
+          "Setting a goal would start the goal loop. Pause the loop first, or ask the user to set the goal.",
+        );
+      const result = yield* threads
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: yield* newCommandId(),
+          threadId: thread.id,
+          goal: input.goal,
+        })
+        .pipe(Effect.mapError(dispatchFailure));
+      return { sequence: result.sequence };
+    }),
+  ),
+  // ponytail: expected state is checked before dispatch, not under the thread lock (dispatch
+  // takes that lock and it is not reentrant). A guard field on the client loop command would
+  // close the window.
+  t3_thread_goal_loop: writesThread((input) =>
+    Effect.gen(function* () {
+      const {
+        projection: { thread },
+      } = yield* readThread(input.threadId);
+      if (thread.goal == null) return yield* refuse("The thread has no goal.");
+      const state = thread.goalLoop?.state ?? "idle";
+      if (state !== input.expectedState)
+        return yield* refuse(`The goal loop is ${state}, not ${input.expectedState}.`);
+      return yield* dispatch(thread.id, (common) => ({
+        ...common,
+        type: "thread.goal.loop",
+        action: input.action,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      }));
+    }),
+  ),
+  t3_run_start: writesThread((input) =>
+    Effect.gen(function* () {
+      // The orchestrator only retries a run whose workspace preparation failed and only starts
+      // a queued run while the thread is stopped, so runId is checked atomically there.
+      if (input.action === "retry_preparation")
+        return yield* dispatch(input.threadId, (common) => ({
+          ...common,
+          type: "prepared-run.retry",
+          runId: input.runId,
+        }));
+      if (input.action === "start_queued")
+        return yield* dispatch(input.threadId, (common) => ({
+          ...common,
+          type: "queued-run.start",
+          runId: input.runId,
+        }));
+      // ponytail: queue.resume has no expected-run field, so the head is checked before
+      // dispatch; a queue edit in that window can change what starts.
+      const { threads, projection } = yield* readThread(input.threadId, ["runs", "messages"]);
+      const next = queuedRunsInDeliveryOrder(projection)[0];
+      if (next?.id !== input.runId || next.queueHeld !== true)
+        return yield* refuse(
+          next === undefined
+            ? "The thread has no queued run."
+            : next.queueHeld !== true
+              ? "The queue is not held."
+              : `The next queued run is ${next.id}.`,
+        );
+      const result = yield* threads
+        .dispatch({
+          type: "queue.resume",
+          commandId: yield* newCommandId(),
+          threadId: projection.thread.id,
         })
         .pipe(Effect.mapError(dispatchFailure));
       return { sequence: result.sequence };
@@ -338,6 +426,14 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           break;
         case "mark_unread":
           command = { ...common, type: "thread.mark-unread" };
+          break;
+        case "enable_auto_settle":
+        case "disable_auto_settle":
+          command = {
+            ...common,
+            type: "thread.auto-settle.set",
+            enabled: input.action === "enable_auto_settle",
+          };
           break;
         default:
           command = { ...common, type: `thread.${input.action}` };
