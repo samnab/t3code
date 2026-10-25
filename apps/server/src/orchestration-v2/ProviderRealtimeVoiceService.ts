@@ -11,6 +11,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { isContextHandoffRedeliverable } from "./ContextHandoffDelivery.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
@@ -37,6 +38,13 @@ const isProviderRealtimeVoiceError = Schema.is(ProviderRealtimeVoiceError);
 
 // A run in these states already holds its provider thread; reloading it could reset the turn.
 const PROVIDER_HOLDING_RUN_STATUSES = new Set(["starting", "running", "waiting"]);
+const SETTLED_RUN_STATUSES = new Set([
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
 
 export const layer: Layer.Layer<
   ProviderRealtimeVoiceServiceV2,
@@ -59,12 +67,11 @@ export const layer: Layer.Layer<
       source: { readonly providerThreadId?: string; readonly providerSessionId?: string },
       load: boolean,
     ) {
-      const records = yield* projections.getThreadRecords(threadId, [
-        "providerThreads",
-        "providerSessions",
-        "runs",
-        "contextHandoffs",
-      ]);
+      const records = yield* projections.getThreadRecords(
+        threadId,
+        ["providerThreads", "providerSessions", "runs", "contextHandoffs", "messages"],
+        { messageRoles: ["user"] },
+      );
       const providerThread =
         source.providerThreadId === undefined
           ? (records.providerThreads.find(
@@ -93,12 +100,19 @@ export const layer: Layer.Layer<
       }
       if (providerThread.nativeThreadRef?.nativeId == null)
         return yield* fail(threadId, "Send a message in this conversation before starting voice.");
-      // Only a turn delivers handoffs; voice on this thread would start without that history.
+      // Only a turn delivers handoffs; voice would start without history a turn still owes it.
+      // Handoffs stay `ready` after delivery, so a settled target run counts as delivered.
       if (
-        records.contextHandoffs.some(
-          (handoff) =>
-            handoff.status === "ready" && handoff.toProviderThreadId === providerThread.id,
-        )
+        records.contextHandoffs.some((handoff) => {
+          if (handoff.status !== "ready" || handoff.toProviderThreadId !== providerThread.id)
+            return false;
+          const target = records.runs.find((run) => run.id === handoff.targetRunId);
+          return (
+            target === undefined ||
+            !SETTLED_RUN_STATUSES.has(target.status) ||
+            isContextHandoffRedeliverable(handoff, records.runs, records.messages)
+          );
+        })
       )
         return yield* fail(
           threadId,
