@@ -16,6 +16,7 @@ import {
   OrchestratorMcpFailure,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
+  ProjectSettingsOverrides,
   ServerSettings as ServerSettingsSchema,
   ThreadEnvMode,
 } from "@t3tools/contracts";
@@ -24,6 +25,7 @@ import * as Path from "effect/Path";
 import * as ServerConfig from "../../../config.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadLaunchService from "../../../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
@@ -94,41 +96,91 @@ const fields = ServerSettingsSchema.fields;
 // Runtime and permission modes, scripts, agent browser/device access, provider
 // enablement, submodules, auto-resume and free-text agent instructions are left out:
 // each widens what agents may run or what reaches their prompts.
+const settingsDependencies = [
+  ...shared.dependencies,
+  ServerSettings.ServerSettingsService,
+  FileSystem.FileSystem,
+  Path.Path,
+];
+const overrides = ProjectSettingsOverrides.fields;
+const WRITABLE_PROJECT_SETTINGS = [
+  "worktreeCleanup",
+  "defaultModelSelection",
+  "defaultThreadEnvMode",
+  "newWorktreesStartFromOrigin",
+  "defaultAutoPull",
+  "textGenerationModelSelection",
+  "sourceControlWriterModelSelection",
+  "reviewGuideModelSelection",
+  "removeAgentCreditsOnMerge",
+  "branchNamingMode",
+  "branchNamePrefix",
+  "pullRequestMergeMethod",
+  "sidebarAutoSettleOnMerge",
+  "sidebarAutoSettleAfterDays",
+  "sidebarAutoSettleKeepPullRequests",
+] as const;
+const ProjectSettingsView = Schema.Struct({
+  projectId: ProjectId,
+  settings: Schema.Struct({
+    worktreeCleanup: setting(fields.worktreeCleanup),
+    defaultModelSelection: setting(fields.defaultModelSelection),
+    defaultThreadEnvMode: setting(ThreadEnvMode),
+    newWorktreesStartFromOrigin: setting(fields.newWorktreesStartFromOrigin),
+    defaultAutoPull: setting(fields.defaultAutoPull),
+    textGenerationModelSelection: setting(fields.textGenerationModelSelection),
+    sourceControlWriterModelSelection: setting(fields.sourceControlWriterModelSelection),
+    reviewGuideModelSelection: setting(fields.reviewGuideModelSelection),
+    removeAgentCreditsOnMerge: setting(fields.removeAgentCreditsOnMerge),
+    branchNamingMode: setting(fields.branchNamingMode),
+    branchNamePrefix: setting(fields.branchNamePrefix),
+    pullRequestMergeMethod: setting(fields.pullRequestMergeMethod),
+    sidebarAutoSettleOnMerge: setting(fields.sidebarAutoSettleOnMerge),
+    sidebarAutoSettleAfterDays: setting(fields.sidebarAutoSettleAfterDays),
+    sidebarAutoSettleKeepPullRequests: setting(fields.sidebarAutoSettleKeepPullRequests),
+    responseStreamingMode: setting(fields.responseStreamingMode),
+  }),
+});
 const ProjectSettingsReadTool = Tool.make("t3_project_settings_read", {
   ...shared,
   description:
     'Read a project\'s effective settings with where each value comes from: "project" is this project\'s override, "environment" is the environment default (or built-in), "t3.json" is the project\'s checked-in file. Covers the safe subset of project overrides; scripts are on t3_project_read.',
   parameters: Schema.Struct({ projectId: ProjectId }),
-  success: Schema.Struct({
-    projectId: ProjectId,
-    settings: Schema.Struct({
-      worktreeCleanup: setting(fields.worktreeCleanup),
-      defaultModelSelection: setting(fields.defaultModelSelection),
-      defaultThreadEnvMode: setting(ThreadEnvMode),
-      newWorktreesStartFromOrigin: setting(fields.newWorktreesStartFromOrigin),
-      defaultAutoPull: setting(fields.defaultAutoPull),
-      textGenerationModelSelection: setting(fields.textGenerationModelSelection),
-      sourceControlWriterModelSelection: setting(fields.sourceControlWriterModelSelection),
-      reviewGuideModelSelection: setting(fields.reviewGuideModelSelection),
-      removeAgentCreditsOnMerge: setting(fields.removeAgentCreditsOnMerge),
-      branchNamingMode: setting(fields.branchNamingMode),
-      branchNamePrefix: setting(fields.branchNamePrefix),
-      pullRequestMergeMethod: setting(fields.pullRequestMergeMethod),
-      sidebarAutoSettleOnMerge: setting(fields.sidebarAutoSettleOnMerge),
-      sidebarAutoSettleAfterDays: setting(fields.sidebarAutoSettleAfterDays),
-      sidebarAutoSettleKeepPullRequests: setting(fields.sidebarAutoSettleKeepPullRequests),
-      responseStreamingMode: setting(fields.responseStreamingMode),
-    }),
-  }),
-  dependencies: [
-    ...shared.dependencies,
-    ServerSettings.ServerSettingsService,
-    FileSystem.FileSystem,
-    Path.Path,
-  ],
+  success: ProjectSettingsView,
+  dependencies: settingsDependencies,
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
+const ProjectSettingsUpdateTool = Tool.make("t3_project_settings_update", {
+  ...shared,
+  description:
+    "Set or clear this project's overrides for the writable subset of t3_project_settings_read (responseStreamingMode is read-only). set stores an override; null is a real value where the setting allows it (for example no default model). clear removes overrides so the environment default applies again. Other fields and other projects are untouched. Requires a live full-access/default calling thread. Returns the same shape as t3_project_settings_read.",
+  parameters: Schema.Struct({
+    projectId: ProjectId,
+    set: Schema.optionalKey(
+      Schema.Struct({
+        worktreeCleanup: overrides.worktreeCleanup,
+        defaultModelSelection: overrides.defaultModelSelection,
+        defaultThreadEnvMode: overrides.defaultThreadEnvMode,
+        newWorktreesStartFromOrigin: overrides.newWorktreesStartFromOrigin,
+        defaultAutoPull: overrides.defaultAutoPull,
+        textGenerationModelSelection: overrides.textGenerationModelSelection,
+        sourceControlWriterModelSelection: overrides.sourceControlWriterModelSelection,
+        reviewGuideModelSelection: overrides.reviewGuideModelSelection,
+        removeAgentCreditsOnMerge: overrides.removeAgentCreditsOnMerge,
+        branchNamingMode: overrides.branchNamingMode,
+        branchNamePrefix: overrides.branchNamePrefix,
+        pullRequestMergeMethod: overrides.pullRequestMergeMethod,
+        sidebarAutoSettleOnMerge: overrides.sidebarAutoSettleOnMerge,
+        sidebarAutoSettleAfterDays: overrides.sidebarAutoSettleAfterDays,
+        sidebarAutoSettleKeepPullRequests: overrides.sidebarAutoSettleKeepPullRequests,
+      }),
+    ),
+    clear: Schema.optionalKey(Schema.Array(Schema.Literals(WRITABLE_PROJECT_SETTINGS))),
+  }),
+  success: ProjectSettingsView,
+  dependencies: [...settingsDependencies, ThreadCommandExecutor.ThreadCommandExecutor],
+}).annotate(Tool.Destructive, true);
 const ProjectCloneTool = Tool.make("t3_project_clone", {
   ...shared,
   description:
@@ -198,6 +250,7 @@ export const ProjectToolkit = Toolkit.make(
   ProjectListTool,
   ProjectReadTool,
   ProjectSettingsReadTool,
+  ProjectSettingsUpdateTool,
   ProjectCreateTool,
   ProjectUpdateTool,
   ProjectDeleteTool,
