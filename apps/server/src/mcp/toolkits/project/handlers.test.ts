@@ -482,3 +482,21 @@ it.layer(
     }),
   );
 });
+
+// McpHttpServer gives the project and environment registrations their own
+// `Layer.provide(ThreadCommandExecutor.layer)`, as the orchestration runtime does;
+// the server builds them in one Layer.launch, so this is the sharing they rely on.
+it.effect("sibling provides of the thread lock layer share one lock in a build", () =>
+  Effect.gen(function* () {
+    const seen: Array<ThreadCommandExecutor.ThreadCommandExecutor["Service"]> = [];
+    const consumer = () =>
+      Layer.effectDiscard(
+        Effect.map(ThreadCommandExecutor.ThreadCommandExecutor, (executor) => {
+          seen.push(executor);
+        }),
+      ).pipe(Layer.provide(ThreadCommandExecutor.layer));
+    yield* Layer.build(Layer.mergeAll(consumer(), consumer()));
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBe(seen[1]);
+  }).pipe(Effect.scoped),
+);
