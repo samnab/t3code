@@ -8,9 +8,10 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
-import { DispatchModeLimit } from "./DispatchModeLimit.ts";
+import { DispatchModeLimit, type DispatchModeRefusal } from "./DispatchModeLimit.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
@@ -91,6 +92,49 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
         .dispatch(rename)
         .pipe(Effect.provideService(DispatchModeLimit, supervised));
       assert.equal((yield* projections.getThreadShell(threadId))?.title, "After");
+    }),
+  );
+
+  it.effect("lets a limited sender lower a thread's modes but not raise them", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("thread:limit-lower-only");
+      yield* createThread(threadId);
+      const fullAccess = { runtimeMode: "full-access", interactionMode: "default" } as const;
+      yield* orchestrator
+        .dispatch({
+          type: "thread.interaction-mode.set",
+          commandId: CommandId.make("lower-interaction"),
+          threadId,
+          interactionMode: "plan",
+        })
+        .pipe(Effect.provideService(DispatchModeLimit, fullAccess));
+
+      const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+      const raiseRuntime = yield* orchestrator
+        .dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("raise-runtime"),
+          threadId,
+          runtimeMode: "auto",
+        })
+        .pipe(Effect.provideService(DispatchModeLimit, { ...fullAccess, refused }), Effect.flip);
+      assert.equal(raiseRuntime._tag, "OrchestratorThreadAboveModeLimitError");
+      assert.equal((yield* Ref.get(refused))?.mode, "runtime");
+      const raiseInteraction = yield* orchestrator
+        .dispatch({
+          type: "thread.interaction-mode.set",
+          commandId: CommandId.make("raise-interaction"),
+          threadId,
+          interactionMode: "default",
+        })
+        .pipe(Effect.provideService(DispatchModeLimit, fullAccess), Effect.flip);
+      assert.equal(raiseInteraction._tag, "OrchestratorThreadAboveModeLimitError");
+
+      const shell = yield* projections.getThreadShell(threadId);
+      assert.equal(shell?.runtimeMode, "approval-required");
+      assert.equal(shell?.interactionMode, "plan");
     }),
   );
 

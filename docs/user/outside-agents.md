@@ -52,6 +52,11 @@ Then choose what the agent may do:
 - **Supervised** through **Full access** also let it start, message and stop
   threads in every project. A thread it starts or steers cannot run with more
   permissions than the mode you chose.
+- **Full access** also lets it change this environment's settings, provider
+  custom models and keybindings, manage projects including deleting them, and
+  see whether T3 Connect is linked. Agents can only lower permission modes,
+  never raise them. Appearance and saved-connection preferences
+  stay on each device.
 
 ## Claude Code
 

@@ -3970,7 +3970,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.goal !== undefined &&
       command.goal !== thread.goal
     ) {
-      const nextLoop =
+      const reseeded =
         command.goal === null
           ? null
           : thread.goalLoop == null
@@ -3982,6 +3982,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 reason: null,
                 updatedAt: now,
               };
+      const nextLoop =
+        reseeded !== null && command.goalLoopState === "paused"
+          ? { ...reseeded, state: "paused" as const }
+          : reseeded;
       if (nextLoop !== null || thread.goalLoop !== null) {
         yield* emit(
           events,
@@ -12303,7 +12307,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const shell = yield* projectionStore
         .getThreadShell(threadId)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
-      if (shell !== null) yield* refuseAboveDispatchModeLimit(command, threadId, shell);
+      if (shell !== null) {
+        yield* refuseAboveDispatchModeLimit(command, threadId, shell);
+        // A limited sender may only lower a thread's modes, never raise them
+        // back toward its own ceiling.
+        if (
+          command.type === "thread.runtime-mode.set" ||
+          command.type === "thread.interaction-mode.set"
+        ) {
+          yield* refuseAboveDispatchModeLimit(command, threadId, {
+            runtimeMode:
+              command.type === "thread.runtime-mode.set" ? command.runtimeMode : shell.runtimeMode,
+            interactionMode:
+              command.type === "thread.interaction-mode.set"
+                ? command.interactionMode
+                : shell.interactionMode,
+          }).pipe(
+            Effect.provideService(DispatchModeLimit, {
+              ...limit,
+              runtimeMode: shell.runtimeMode,
+              interactionMode: shell.interactionMode,
+            }),
+          );
+        }
+      }
     }
 
     const plan = yield* dispatchOnce(command).pipe(

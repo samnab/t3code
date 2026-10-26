@@ -13,6 +13,7 @@ import { formatThreadLink } from "@t3tools/shared/threadLinks";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  assertTargetWithinLimits,
   dispatchFailure,
   newCommandId,
   readCaller,
@@ -79,6 +80,9 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
     });
   return { ...context, request, item };
 });
+const refuse = (message: string) =>
+  new OrchestratorMcpFailure({ code: "invalid_request", message });
+
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
@@ -185,6 +189,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         modelSelection: thread.modelSelection,
         runtimeMode: thread.runtimeMode,
         interactionMode: thread.interactionMode,
+        autoSettle: thread.autoSettleDisabledAt == null,
+        goal: thread.goal ?? null,
+        goalLoop: thread.goalLoop ?? null,
       };
     }),
   ),
@@ -217,6 +224,117 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           threadId: thread.id,
           commandId: yield* newCommandId(),
           modelSelection: input.modelSelection,
+        })
+        .pipe(Effect.mapError(dispatchFailure));
+      return { sequence: result.sequence };
+    }),
+  ),
+  // The orchestrator re-checks the direction under the thread lock; this
+  // pre-check only gives the refusal its message.
+  t3_thread_lower_modes: writesThread((input) =>
+    Effect.gen(function* () {
+      const {
+        threads,
+        projection: { thread },
+      } = yield* readThread(input.threadId);
+      const runtimeMode = input.runtimeMode ?? thread.runtimeMode;
+      const interactionMode = input.interactionMode ?? thread.interactionMode;
+      yield* assertTargetWithinLimits(thread, { runtimeMode, interactionMode }).pipe(
+        Effect.mapError(
+          (error) =>
+            new OrchestratorMcpFailure({
+              code: error.code,
+              message: "Agents can only lower a thread's modes; raise them in the app.",
+            }),
+        ),
+      );
+      const commands: Array<OrchestrationV2Command> = [];
+      if (runtimeMode !== thread.runtimeMode)
+        commands.push({
+          type: "thread.runtime-mode.set",
+          commandId: yield* newCommandId(),
+          threadId: thread.id,
+          runtimeMode,
+        });
+      if (interactionMode !== thread.interactionMode)
+        commands.push({
+          type: "thread.interaction-mode.set",
+          commandId: yield* newCommandId(),
+          threadId: thread.id,
+          interactionMode,
+        });
+      if (commands.length === 0)
+        return yield* refuse(`The thread already runs in ${runtimeMode}/${interactionMode} mode.`);
+      let sequence = 0;
+      for (const command of commands) {
+        sequence = (yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure)))
+          .sequence;
+      }
+      return { sequence };
+    }),
+  ),
+  // An idle loop is driven by GoalLoopService, so a goal set here seeds its loop paused.
+  t3_thread_goal: writesThread((input) =>
+    dispatch(input.threadId, (common) => ({
+      ...common,
+      type: "thread.metadata.update",
+      goal: input.goal,
+      ...(input.goal === null ? {} : { goalLoopState: "paused" as const }),
+    })),
+  ),
+  // ponytail: expected state is checked before dispatch, not under the thread lock (dispatch
+  // takes that lock and it is not reentrant). A guard field on the client loop command would
+  // close the window.
+  t3_thread_goal_loop: writesThread((input) =>
+    Effect.gen(function* () {
+      const {
+        projection: { thread },
+      } = yield* readThread(input.threadId);
+      if (thread.goal == null) return yield* refuse("The thread has no goal.");
+      const state = thread.goalLoop?.state ?? "idle";
+      if (state !== input.expectedState)
+        return yield* refuse(`The goal loop is ${state}, not ${input.expectedState}.`);
+      return yield* dispatch(thread.id, (common) => ({
+        ...common,
+        type: "thread.goal.loop",
+        action: input.action,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      }));
+    }),
+  ),
+  t3_run_start: writesThread((input) =>
+    Effect.gen(function* () {
+      // The orchestrator only retries a run whose workspace preparation failed and only starts
+      // a queued run while the thread is stopped, so runId is checked atomically there.
+      if (input.action === "retry_preparation")
+        return yield* dispatch(input.threadId, (common) => ({
+          ...common,
+          type: "prepared-run.retry",
+          runId: input.runId,
+        }));
+      if (input.action === "start_queued")
+        return yield* dispatch(input.threadId, (common) => ({
+          ...common,
+          type: "queued-run.start",
+          runId: input.runId,
+        }));
+      // ponytail: queue.resume has no expected-run field, so the head is checked before
+      // dispatch; a queue edit in that window can change what starts.
+      const { threads, projection } = yield* readThread(input.threadId, ["runs", "messages"]);
+      const next = queuedRunsInDeliveryOrder(projection)[0];
+      if (next?.id !== input.runId || next.queueHeld !== true)
+        return yield* refuse(
+          next === undefined
+            ? "The thread has no queued run."
+            : next.queueHeld !== true
+              ? "The queue is not held."
+              : `The next queued run is ${next.id}.`,
+        );
+      const result = yield* threads
+        .dispatch({
+          type: "queue.resume",
+          commandId: yield* newCommandId(),
+          threadId: projection.thread.id,
         })
         .pipe(Effect.mapError(dispatchFailure));
       return { sequence: result.sequence };
@@ -338,6 +456,14 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           break;
         case "mark_unread":
           command = { ...common, type: "thread.mark-unread" };
+          break;
+        case "enable_auto_settle":
+        case "disable_auto_settle":
+          command = {
+            ...common,
+            type: "thread.auto-settle.set",
+            enabled: input.action === "enable_auto_settle",
+          };
           break;
         default:
           command = { ...common, type: `thread.${input.action}` };

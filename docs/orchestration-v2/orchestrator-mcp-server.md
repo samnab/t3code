@@ -496,6 +496,9 @@ results use the latest assistant content from the final work turn.
 
 ## Policy And Idempotency
 
+Settings and other future-authority controls follow
+[MCP clients are a separate audience](../internals/environment-auth.md#mcp-clients-are-a-separate-audience).
+
 - A child runtime mode may stay equal to or become narrower than the parent
   mode. It may not escalate privileges.
 - A child interaction mode may stay equal to or narrow from `default` to

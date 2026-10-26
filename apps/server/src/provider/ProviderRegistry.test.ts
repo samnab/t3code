@@ -270,12 +270,13 @@ function makeMutableServerSettingsService(
           yield* PubSub.publish(changes, next);
           return next;
         }),
+      modifySettings: () => Effect.die("Unexpected settings modify"),
       updateProviderInstance: (mutation, patch = {}) =>
         Effect.gen(function* () {
           const current = yield* Ref.get(settingsRef);
           const next = ServerSettingsModule.applyProviderInstanceMutation(
             applyServerSettingsPatch(current, patch),
-            mutation,
+            typeof mutation === "function" ? mutation(current) : mutation,
           );
           encodeServerSettings(next);
           yield* Ref.set(settingsRef, next);

@@ -1,19 +1,40 @@
 import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
+  CustomModelSetting,
+  EnvironmentConnectReachabilityCause,
   ExecutionEnvironmentDescriptor,
+  IdleCompactionMode,
   OrchestratorMcpFailure,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ServerSettings,
+  ServerRemoveKeybindingInput,
   ServerSettingsPatch,
+  ServerUpsertKeybindingInput,
+  ServerUpsertKeybindingResult,
+  StorageCleanupReport,
+  TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
+import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as Keybindings from "../../../keybindings.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as DatabaseStorage from "../../../persistence/DatabaseStorage.ts";
 import * as Settings from "../../../serverSettings.ts";
+import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
+const ProviderInstanceView = Schema.Struct({
+  driver: ProviderDriverKind,
+  displayName: Schema.NullOr(Schema.String),
+  accentColor: Schema.NullOr(Schema.String),
+  enabled: Schema.Boolean,
+  customModels: Schema.Array(CustomModelSetting),
+});
 const PreferenceFields = {
   completionAudio: ServerSettings.fields.completionAudio,
   defaultThreadEnvMode: ServerSettings.fields.defaultThreadEnvMode,
@@ -29,6 +50,15 @@ const PreferenceFields = {
   sidebarAutoSettleAfterDays: ServerSettings.fields.sidebarAutoSettleAfterDays,
   sidebarAutoSettleOnMerge: ServerSettings.fields.sidebarAutoSettleOnMerge,
   sidebarAutoSettleKeepPullRequests: ServerSettings.fields.sidebarAutoSettleKeepPullRequests,
+  favorites: ServerSettings.fields.favorites,
+  providerModelPreferences: ServerSettings.fields.providerModelPreferences,
+  idleCompaction: IdleCompactionMode,
+  snoozeLimitedThreads: ServerSettings.fields.snoozeLimitedThreads,
+  autoResumeLimitedThreads: ServerSettings.fields.autoResumeLimitedThreads,
+  continueThreadsAfterServerUpdate: ServerSettings.fields.continueThreadsAfterServerUpdate,
+  responseStreamingMode: ServerSettings.fields.responseStreamingMode,
+  defaultRuntimeMode: ServerSettings.fields.defaultRuntimeMode,
+  providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceView),
 };
 const shared = {
   failure: OrchestratorMcpFailure,
@@ -39,18 +69,35 @@ const shared = {
     ServerEnvironment.ServerEnvironment,
     Settings.ServerSettingsService,
     ThreadCommandExecutor.ThreadCommandExecutor,
+    CloudLink.CloudLink,
   ],
 };
 const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
-    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client.",
+    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. Also model `favorites`/`providerModelPreferences`, `idleCompaction`, `providerInstances`, and `connect` (null if unknown; Connect changes stay in Settings).",
   success: Schema.Struct({
     environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
     label: Schema.String,
     serverVersion: Schema.String,
     platform: ExecutionEnvironmentDescriptor.fields.platform,
     preferences: Schema.Struct(PreferenceFields),
+    connect: Schema.NullOr(
+      Schema.Struct({
+        linked: Schema.Boolean,
+        linkRevoked: Schema.Boolean,
+        managedTunnelActive: Schema.Boolean,
+        publishAgentActivity: Schema.Boolean,
+        holdWebhooksWhileOffline: Schema.Boolean,
+        reachability: Schema.NullOr(
+          Schema.Struct({
+            status: Schema.Literals(["reachable", "unreachable"]),
+            checkedAt: Schema.String,
+            cause: Schema.optionalKey(EnvironmentConnectReachabilityCause),
+          }),
+        ),
+      }),
+    ),
   }),
 })
   .annotate(Tool.Readonly, true)
@@ -58,7 +105,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
 const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update", {
   ...shared,
   description:
-    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads.",
+    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental; provider instance ids come from `orchestrator_capabilities`. `snoozeLimitedThreads` never resumes threads. `defaultRuntimeMode` can only be lowered; raise it in Settings. Per-project values: `t3_project_settings_update`.",
   parameters: Schema.Struct({
     completionAudio: ServerSettingsPatch.fields.completionAudio,
     defaultThreadEnvMode: ServerSettingsPatch.fields.defaultThreadEnvMode,
@@ -69,7 +116,93 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
     sidebarAutoSettleAfterDays: ServerSettingsPatch.fields.sidebarAutoSettleAfterDays,
     sidebarAutoSettleOnMerge: ServerSettingsPatch.fields.sidebarAutoSettleOnMerge,
     sidebarAutoSettleKeepPullRequests: ServerSettingsPatch.fields.sidebarAutoSettleKeepPullRequests,
+    setModelFavorites: ServerSettingsPatch.fields.setModelFavorites,
+    setModelsHidden: ServerSettingsPatch.fields.setModelsHidden,
+    setProviderModelOrder: ServerSettingsPatch.fields.setProviderModelOrder,
+    setProviderModelDefault: ServerSettingsPatch.fields.setProviderModelDefault,
+    idleCompaction: ServerSettingsPatch.fields.idleCompaction,
+    snoozeLimitedThreads: ServerSettingsPatch.fields.snoozeLimitedThreads,
+    autoResumeLimitedThreads: ServerSettingsPatch.fields.autoResumeLimitedThreads,
+    continueThreadsAfterServerUpdate: ServerSettingsPatch.fields.continueThreadsAfterServerUpdate,
+    responseStreamingMode: ServerSettingsPatch.fields.responseStreamingMode,
+    defaultRuntimeMode: ServerSettingsPatch.fields.defaultRuntimeMode,
   }),
   success: Schema.Struct(PreferenceFields),
 }).annotate(Tool.Destructive, true);
-export const EnvironmentToolkit = Toolkit.make(EnvironmentReadTool, EnvironmentPreferencesTool);
+const ProviderInstanceUpdateTool = Tool.make("t3_provider_instance_update", {
+  ...shared,
+  description:
+    "Edit one provider instance: `customModels` replaces its list; `displayName` and `accentColor` set or clear (null). Ids: `t3_environment_read` `providerInstances`. Enabling, executables, env, credentials, and login stay in Settings.",
+  parameters: Schema.Struct({
+    instanceId: ProviderInstanceId,
+    customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
+    displayName: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+    accentColor: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  }),
+  success: ProviderInstanceView,
+}).annotate(Tool.Destructive, true);
+const keybindings = {
+  ...shared,
+  dependencies: [...shared.dependencies, Keybindings.Keybindings],
+  success: ServerUpsertKeybindingResult,
+};
+const KeybindingsListTool = Tool.make("t3_keybindings_list", {
+  ...keybindings,
+  description:
+    "List effective keybindings and config issues. `t3_keybinding_remove` needs a custom rule's exact `key`, `command`, and `when`.",
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+const KeybindingUpsertTool = Tool.make("t3_keybinding_upsert", {
+  ...keybindings,
+  description:
+    "Add or replace one custom keybinding. `command` is a keybinding command or `script.<id>.run`; `replace` names the rule to swap. Returns effective keybindings.",
+  parameters: ServerUpsertKeybindingInput,
+}).annotate(Tool.Destructive, true);
+const KeybindingRemoveTool = Tool.make("t3_keybinding_remove", {
+  ...keybindings,
+  description:
+    "Remove the custom keybinding with exactly this `key`, `command`, and `when`. Defaults cannot be removed. Returns effective keybindings.",
+  parameters: ServerRemoveKeybindingInput,
+}).annotate(Tool.Destructive, true);
+const StorageReportTool = Tool.make("t3_environment_storage_report", {
+  ...shared,
+  dependencies: [
+    ...shared.dependencies,
+    StorageCleanup.StorageCleanup,
+    DatabaseStorage.DatabaseStorage,
+  ],
+  description:
+    "Summarize storage: database size, reclaimable space, and the latest cleanup totals (null if not measured). Read-only.",
+  success: Schema.Struct({
+    database: Schema.NullOr(
+      Schema.Struct({
+        databaseBytes: Schema.Number,
+        reclaimableBytes: Schema.Number,
+        incrementalVacuumEnabled: Schema.Boolean,
+        compactionRecommended: Schema.Boolean,
+      }),
+    ),
+    lastCleanup: Schema.NullOr(
+      Schema.Struct({
+        trigger: StorageCleanupReport.fields.trigger,
+        startedAt: Schema.String,
+        finishedAt: Schema.String,
+        counts: StorageCleanupReport.fields.counts,
+        bytesFreed: Schema.Number,
+        entryCount: Schema.Number,
+      }),
+    ),
+  }),
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+export const EnvironmentToolkit = Toolkit.make(
+  EnvironmentReadTool,
+  EnvironmentPreferencesTool,
+  ProviderInstanceUpdateTool,
+  KeybindingsListTool,
+  KeybindingUpsertTool,
+  KeybindingRemoveTool,
+  StorageReportTool,
+);

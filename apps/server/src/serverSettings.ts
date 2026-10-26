@@ -181,8 +181,22 @@ export class ServerSettingsService extends Context.Service<
       patch: ServerSettingsPatch,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
+    /**
+     * `updateSettings` for a patch that depends on the stored settings: `patch`
+     * runs under the write lock against the freshly reloaded value, so a
+     * read-modify-write cannot drop a concurrent write.
+     */
+    readonly modifySettings: (
+      patch: (current: ServerSettings) => ServerSettingsPatch,
+    ) => Effect.Effect<ServerSettings, ServerSettingsError>;
+
+    /**
+     * A function `mutation` runs under the write lock against the reloaded,
+     * persisted settings (secrets not materialized), so an edit built from the
+     * stored instance cannot drop a concurrent write.
+     */
     readonly updateProviderInstance: (
-      mutation: ProviderInstanceMutation,
+      mutation: ProviderInstanceMutation | ((current: ServerSettings) => ProviderInstanceMutation),
       patch?: ServerSettingsPatch,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
@@ -238,12 +252,17 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
       updateTestSettings((currentSettings) =>
         Effect.succeed(applyServerSettingsPatch(currentSettings, patch)),
       ),
+    modifySettings: (patch) =>
+      updateTestSettings((currentSettings) =>
+        Effect.succeed(applyServerSettingsPatch(currentSettings, patch(currentSettings))),
+      ),
     updateProviderInstance: (mutation, patch = {}) =>
       updateTestSettings((currentSettings) =>
         Effect.gen(function* () {
-          yield* ensureProviderInstanceMutationAllowed(currentSettings, mutation, "test settings");
+          const resolved = typeof mutation === "function" ? mutation(currentSettings) : mutation;
+          yield* ensureProviderInstanceMutationAllowed(currentSettings, resolved, "test settings");
           const patched = applyServerSettingsPatch(currentSettings, patch);
-          return applyProviderInstanceMutation(patched, mutation);
+          return applyProviderInstanceMutation(patched, resolved);
         }),
       ),
     withSettingsSnapshot: (use) =>
@@ -1150,12 +1169,17 @@ const make = Effect.gen(function* () {
       updateAndPersistSettings((current) =>
         Effect.succeed(applyServerSettingsPatch(current, patch)),
       ),
+    modifySettings: (patch) =>
+      updateAndPersistSettings((current) =>
+        Effect.succeed(applyServerSettingsPatch(current, patch(current))),
+      ),
     updateProviderInstance: (mutation, patch = {}) =>
       updateAndPersistSettings((current) =>
         Effect.gen(function* () {
-          yield* ensureProviderInstanceMutationAllowed(current, mutation, settingsPath);
+          const resolved = typeof mutation === "function" ? mutation(current) : mutation;
+          yield* ensureProviderInstanceMutationAllowed(current, resolved, settingsPath);
           const patched = applyServerSettingsPatch(current, patch);
-          return applyProviderInstanceMutation(patched, mutation);
+          return applyProviderInstanceMutation(patched, resolved);
         }),
       ),
     withSettingsSnapshot,

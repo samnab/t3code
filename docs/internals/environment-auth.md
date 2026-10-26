@@ -53,8 +53,9 @@ state. Approval spends a one-time pairing code, or uses a browser session with
 `access:write`; proof-bound T3 Connect codes are refused without being spent.
 
 The user grants either read-only access or a runtime-mode ceiling, not a
-scope list: MCP tools are all orchestration, and `orchestration:operate`
-alone would let an agent start a thread in full access and act through it.
+scope list: `orchestration:operate` alone would let an agent start a thread
+in full access and act through it. A full-access grant also carries
+`settings:write` and `source-control:write`.
 The result is an ordinary session with subject `mcp-client`. A read-only
 grant holds `orchestration:read` alone. On `/mcp` it passes only tools
 declared as reads in [McpToolAccess](../../apps/server/src/mcp/McpToolAccess.ts),
@@ -64,6 +65,14 @@ path rejects that subject, because the RPC surface would let the agent act
 above its ceiling. Inside MCP the credential sets the limits and tool
 parameters only pick targets; see
 [threadAccess](../../apps/server/src/mcp/threadAccess.ts).
+
+Controls that set future authority (default runtime mode, thread modes, agent
+browser and device access, provider instance enablement) are lower-only or
+unreachable for agents. Provider executables, environment variables,
+credentials, accounts, access management and Connect linking are intentionally
+unreachable over `/mcp`. Provider custom models and display metadata are model
+preferences under `settings:write`. Which tools a grant may call is declared in
+[McpToolAccess](../../apps/server/src/mcp/McpToolAccess.ts).
 
 Issuer and resource URLs come from the request's Host and
 `X-Forwarded-Proto`, so one server answers over loopback, Tailscale Serve and a

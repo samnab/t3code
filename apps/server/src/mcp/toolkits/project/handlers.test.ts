@@ -6,6 +6,7 @@ import {
   type Project as ProjectRecord,
   type ModelSelection,
   type RuntimeMode,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -16,6 +17,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
+import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
+import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
+import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
@@ -27,6 +31,7 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { liveThreadShell } from "../../McpToolAccess.testkit.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -306,4 +311,192 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
     expect((yield* launchFrom("main")).at(-1)?.result).toMatchObject({ projectId });
     expect(launched).toHaveLength(1);
   }),
+);
+
+it.effect("project settings read reports each effective value with its source", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-settings-" });
+    yield* fileSystem.writeFileString(
+      path.join(workspaceRoot, "t3.json"),
+      JSON.stringify({ defaultThreadEnvMode: "worktree" }),
+    );
+    const overrideModel = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-project" };
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched: [],
+      workspaceRoot,
+      overrideModel,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const read = (id: ProjectId) =>
+      toolkit
+        .handle("t3_project_settings_read", { projectId: id })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    expect((yield* read(projectId)).at(-1)?.result).toMatchObject({
+      projectId,
+      settings: {
+        defaultModelSelection: { value: overrideModel, source: "project" },
+        defaultThreadEnvMode: { value: "worktree", source: "t3.json" },
+        branchNamePrefix: { value: "t3", source: "environment" },
+      },
+    });
+    expect((yield* read(ProjectId.make("project:missing"))).at(-1)?.result).toMatchObject({
+      code: "invalid_request",
+      message: "The project was not found.",
+    });
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+// A fresh service per build rereads settings.json, so each build is a server restart.
+const restartedSettings = () =>
+  Layer.fresh(ServerSettings.layer).pipe(
+    Layer.provide(
+      Layer.succeed(
+        ServerSecretStore.ServerSecretStore,
+        ServerSecretStore.ServerSecretStore.of({
+          get: () => Effect.succeedNone,
+          set: () => Effect.void,
+          create: () => Effect.void,
+          getOrCreateRandom: () => Effect.succeed(new Uint8Array()),
+          remove: () => Effect.void,
+        }),
+      ),
+    ),
+  );
+const storedOverrides = Effect.flatMap(ServerSettings.ServerSettingsService, (service) =>
+  Effect.map(service.getSettings, (settings) => settings.projectSettingsOverrides),
+).pipe(Effect.provide(restartedSettings()));
+
+it.layer(
+  Layer.mergeAll(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3code-project-settings-test-" }),
+    SqlitePersistence.layerMemory,
+  ).pipe(Layer.provideMerge(NodeServices.layer)),
+)("project settings update", (it) => {
+  it.effect("sets and clears one project's overrides field by field", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:target");
+      const otherProjectId = ProjectId.make("project:other");
+      const threadId = ThreadId.make("thread:project-settings");
+      yield* Effect.flatMap(ServerSettings.ServerSettingsService, (service) =>
+        service.updateSettings({
+          projectSettingsOverrides: {
+            [projectId]: { branchNamePrefix: "keep" },
+            [otherProjectId]: { defaultAutoPull: false },
+          },
+        }),
+      ).pipe(Effect.provide(restartedSettings()));
+      const dependencies = Layer.mergeAll(
+        ThreadCommandExecutor.layer,
+        NodeCrypto.layer,
+        Layer.succeed(McpInvocationContext.McpInvocationContext, {
+          environmentId: EnvironmentId.make("environment"),
+          requestNamespace: "provider:project-settings",
+          thread: {
+            threadId,
+            providerSessionId: "provider:project-settings",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+          },
+          client: undefined,
+          capabilities: new Set(["orchestration" as const]),
+          issuedAt: 0,
+        }),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: () => Effect.succeed(liveThreadShell(threadId)),
+        }),
+        Layer.mock(Project.ProjectService)({
+          getById: (id) =>
+            Effect.succeed(
+              id === projectId || id === otherProjectId
+                ? Option.some({ id, workspaceRoot: `/missing/${id}` } as unknown as ProjectRecord)
+                : Option.none(),
+            ),
+        }),
+        restartedSettings(),
+      );
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const update = (input: Parameters<typeof toolkit.handle<"t3_project_settings_update">>[1]) =>
+        toolkit.handle("t3_project_settings_update", input).pipe(
+          Stream.unwrap,
+          Stream.runCollect,
+          Effect.map((results) => results.at(-1)?.result),
+          Effect.provide(dependencies),
+        );
+
+      expect(
+        yield* update({
+          projectId,
+          set: { defaultAutoPull: true, sidebarAutoSettleAfterDays: null },
+        }),
+      ).toMatchObject({
+        settings: {
+          defaultAutoPull: { value: true, source: "project" },
+          sidebarAutoSettleAfterDays: { value: null, source: "project" },
+          branchNamePrefix: { value: "keep", source: "project" },
+          pullRequestMergeMethod: { source: "environment" },
+        },
+      });
+      expect(yield* storedOverrides).toEqual({
+        [projectId]: {
+          branchNamePrefix: "keep",
+          defaultAutoPull: true,
+          sidebarAutoSettleAfterDays: null,
+        },
+        [otherProjectId]: { defaultAutoPull: false },
+      });
+
+      expect(yield* update({ projectId, clear: ["defaultAutoPull"] })).toMatchObject({
+        settings: {
+          defaultAutoPull: { source: "environment" },
+          sidebarAutoSettleAfterDays: { value: null, source: "project" },
+        },
+      });
+      expect(yield* storedOverrides).toEqual({
+        [projectId]: { branchNamePrefix: "keep", sidebarAutoSettleAfterDays: null },
+        [otherProjectId]: { defaultAutoPull: false },
+      });
+
+      expect(
+        yield* update({
+          projectId: ProjectId.make("project:missing"),
+          set: { defaultAutoPull: true },
+        }),
+      ).toMatchObject({ code: "invalid_request", message: "The project was not found." });
+      expect(
+        yield* update({ projectId, set: { defaultAutoPull: true }, clear: ["defaultAutoPull"] }),
+      ).toMatchObject({ code: "invalid_request" });
+      expect(Object.keys(yield* storedOverrides).toSorted()).toEqual([otherProjectId, projectId]);
+    }),
+  );
+});
+
+// McpHttpServer gives the project and environment registrations their own
+// `Layer.provide(ThreadCommandExecutor.layer)`, as the orchestration runtime does;
+// the server builds them in one Layer.launch, so this is the sharing they rely on.
+it.effect("sibling provides of the thread lock layer share one lock in a build", () =>
+  Effect.gen(function* () {
+    const seen: Array<ThreadCommandExecutor.ThreadCommandExecutor["Service"]> = [];
+    const consumer = () =>
+      Layer.effectDiscard(
+        Effect.map(ThreadCommandExecutor.ThreadCommandExecutor, (executor) => {
+          seen.push(executor);
+        }),
+      ).pipe(Layer.provide(ThreadCommandExecutor.layer));
+    yield* Layer.build(Layer.mergeAll(consumer(), consumer()));
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBe(seen[1]);
+  }).pipe(Effect.scoped),
 );

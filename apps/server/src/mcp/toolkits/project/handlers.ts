@@ -1,19 +1,32 @@
-import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools/contracts";
+import {
+  MessageId,
+  ThreadId,
+  OrchestratorMcpFailure,
+  ProjectId,
+  type ServerSettings as ServerSettingsValue,
+  type ServerSettingsError,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
+import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as T3ProjectFileLoader from "../../../project/T3ProjectFileLoader.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import {
+  clearProjectSettingsOverrides,
+  resolveProjectSettings,
+} from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import { resolveRuntimeMode } from "../../OrchestratorMcpService.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { hiddenModelMessage } from "../../ModelVisibility.ts";
@@ -48,6 +61,64 @@ const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (
       message:
         "worktreePath must be one of the project's git worktrees. t3_worktree_list shows them.",
     });
+});
+
+/**
+ * Resolves the project first so an unknown id fails before `load` runs, which
+ * keeps an update from writing overrides for a project that does not exist.
+ */
+const projectSettingsView = Effect.fn("mcp.projectSettingsView")(function* (
+  projectId: ProjectId,
+  load: (
+    settings: ServerSettings.ServerSettingsService["Service"],
+  ) => Effect.Effect<ServerSettingsValue, ServerSettingsError>,
+) {
+  const projects = yield* Project.ProjectService;
+  const project = yield* projects.getById(projectId).pipe(Effect.mapError(unavailable));
+  if (Option.isNone(project))
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "The project was not found.",
+    });
+  const settings = yield* ServerSettings.ServerSettingsService.pipe(
+    Effect.flatMap(load),
+    Effect.mapError(unavailable),
+  );
+  // The loader is stateless; building it here keeps t3.json-backed values
+  // resolving the same way the composer resolves them.
+  const loader = yield* T3ProjectFileLoader.make;
+  const projectFile = yield* loader.load(project.value.workspaceRoot);
+  const { settings: effective, sources } = resolveProjectSettings(
+    settings,
+    projectId,
+    project.value,
+    Option.getOrNull(projectFile),
+  );
+  const read = <K extends keyof typeof sources & keyof typeof effective>(key: K) => ({
+    value: effective[key],
+    source: sources[key],
+  });
+  return {
+    projectId,
+    settings: {
+      worktreeCleanup: read("worktreeCleanup"),
+      defaultModelSelection: read("defaultModelSelection"),
+      defaultThreadEnvMode: read("defaultThreadEnvMode"),
+      newWorktreesStartFromOrigin: read("newWorktreesStartFromOrigin"),
+      defaultAutoPull: read("defaultAutoPull"),
+      textGenerationModelSelection: read("textGenerationModelSelection"),
+      sourceControlWriterModelSelection: read("sourceControlWriterModelSelection"),
+      reviewGuideModelSelection: read("reviewGuideModelSelection"),
+      removeAgentCreditsOnMerge: read("removeAgentCreditsOnMerge"),
+      branchNamingMode: read("branchNamingMode"),
+      branchNamePrefix: read("branchNamePrefix"),
+      pullRequestMergeMethod: read("pullRequestMergeMethod"),
+      sidebarAutoSettleOnMerge: read("sidebarAutoSettleOnMerge"),
+      sidebarAutoSettleAfterDays: read("sidebarAutoSettleAfterDays"),
+      sidebarAutoSettleKeepPullRequests: read("sidebarAutoSettleKeepPullRequests"),
+      responseStreamingMode: read("responseStreamingMode"),
+    },
+  };
 });
 
 const access = Effect.gen(function* () {
@@ -246,6 +317,48 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         });
       return result.value;
     }),
+  ),
+  t3_project_settings_read: McpToolAccess.reads(({ projectId }) =>
+    Effect.gen(function* () {
+      yield* access;
+      return yield* projectSettingsView(projectId, (settings) => settings.getSettings);
+    }),
+  ),
+  t3_project_settings_update: McpToolAccess.writesEnvironment(
+    ({ projectId, set = {}, clear = [] }, check) =>
+      Effect.gen(function* () {
+        if (clear.some((key) => Object.hasOwn(set, key)))
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "A setting cannot be in both set and clear.",
+          });
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+        const update = Effect.gen(function* () {
+          // The turn may have ended, or the thread's modes changed, while this waited for the lock.
+          yield* check;
+          return yield* projectSettingsView(projectId, (settings) =>
+            // Patch entries replace a project's whole override set, so the merge
+            // must read the stored entry under the settings write lock.
+            settings.modifySettings((current) => ({
+              projectSettingsOverrides: {
+                [projectId]: clearProjectSettingsOverrides(
+                  {
+                    projectSettingsOverrides: {
+                      [projectId]: { ...current.projectSettingsOverrides[projectId], ...set },
+                    },
+                  },
+                  projectId,
+                  clear,
+                ),
+              },
+            })),
+          );
+        });
+        return yield* scope.thread === undefined
+          ? update
+          : executor.withLock(scope.thread.threadId, update);
+      }),
   ),
   t3_project_create: McpToolAccess.writesEnvironment(({ workspaceRoot, ...input }) =>
     Effect.gen(function* () {
