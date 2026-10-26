@@ -6,9 +6,10 @@ import type { VoiceTransport } from "@t3tools/client-runtime/realtime-voice";
  * (the source → destination connection) is open, so the sender never holds the raw track.
  * `tapKeywords`, when given, also feeds the microphone to the local keyword detector.
  */
-// Audio already in the track pipeline at gate-open predates it. Holding 8 quanta still leaked in
-// 1-2 of 50 synthetic trials; 12 leaked none (Chromium, Electron 44); 24 none in 100 each.
-// Re-measure on physical and Bluetooth mics: apps/web/test/voice-privacy/cutoff-benchmark.html.
+// Audio already in the track pipeline at gate-open predates it. With synthetic tracks, holding 8
+// quanta still leaked a 5 ms block in 8-11 of 50 trials; 12 and 24 leaked none in 50 or 100
+// (Chromium, Electron 44). Re-measure on physical and Bluetooth mics with
+// apps/web/test/voice-privacy/cutoff-benchmark.html.
 const GATE_DISCARD_QUANTA = 24;
 
 export function createBrowserVoiceTransport(

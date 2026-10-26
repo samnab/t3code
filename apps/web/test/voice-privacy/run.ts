@@ -11,9 +11,27 @@ import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
+import { config } from "../../vercel.ts";
 
 const here = import.meta.dirname;
-const WORKER_CSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'";
+// The worker's policy comes from the hosted web config, not a copy, so this tests what ships.
+const workerRoute: unknown = config.routes?.find(
+  (route: unknown) =>
+    typeof route === "object" &&
+    route !== null &&
+    "src" in route &&
+    route.src === "/voice/kws/kws.worker.js",
+);
+const WORKER_CSP =
+  typeof workerRoute === "object" &&
+  workerRoute !== null &&
+  "headers" in workerRoute &&
+  typeof workerRoute.headers === "object" &&
+  workerRoute.headers !== null &&
+  "Content-Security-Policy" in workerRoute.headers
+    ? String(workerRoute.headers["Content-Security-Policy"])
+    : null;
+if (WORKER_CSP === null) throw new Error("vercel.ts has no keyword worker policy");
 // Every request the keyword detector path may make; anything else under voice/kws is a finding.
 const KEYWORD_ASSETS =
   /\/voice\/kws\/(kws\.worker\.js|capture\.worklet\.js|manifest\.json|vendor\/[\w.-]+)$/;

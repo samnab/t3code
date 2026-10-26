@@ -87,7 +87,8 @@ const microphoneOut = generator.createMediaStreamDestination();
 oscillator.connect(amplitude).connect(microphoneOut);
 oscillator.start();
 
-const FREQUENCY = { A: 700, C: 3300, B0: 1900, B1: 2300 } as const;
+// R marks the spoken resume phrase: it plays under the phrase, which must never reach the new call.
+const FREQUENCY = { A: 700, C: 3300, B0: 1900, B1: 2300, R: 1300 } as const;
 const NONCE = Array.from(crypto.getRandomValues(new Uint8Array(4)), (byte) =>
   byte.toString(16).padStart(2, "0"),
 ).join("");
@@ -99,7 +100,7 @@ const NONCE_BITS = [
     return [3, 2, 1, 0].map((bit) => (value >> bit) & 1);
   }),
 ];
-type Marker = "A" | "B" | "C" | null;
+type Marker = "A" | "B" | "C" | "R" | null;
 let marker: Marker = null;
 const timeline: Array<{ at: number; event: string }> = [];
 const t0 = performance.now();
@@ -116,7 +117,8 @@ function setMarker(next: Marker) {
   oscillator.frequency.cancelScheduledValues(at);
   amplitude.gain.cancelScheduledValues(at);
   amplitude.gain.setValueAtTime(next === null ? 0 : 0.5, at);
-  if (next === "A" || next === "C") oscillator.frequency.setValueAtTime(FREQUENCY[next], at);
+  if (next === "A" || next === "C" || next === "R")
+    oscillator.frequency.setValueAtTime(FREQUENCY[next], at);
   if (next === "B") {
     // 40 ms chirps for two minutes, keyed by the nonce bits.
     for (let index = 0; index < 3_000; index += 1) {
@@ -164,7 +166,16 @@ async function speak(url: string, markerGain: number) {
   voice.buffer = buffer;
   const level = generator.createGain();
   level.gain.value = 0.8;
-  voice.connect(level).connect(microphoneOut);
+  // Notch the marker bands out of the speech so a formant can never read as B or R.
+  let path: AudioNode = voice;
+  for (const frequency of [FREQUENCY.R, FREQUENCY.B0, FREQUENCY.B1]) {
+    const notch = generator.createBiquadFilter();
+    notch.type = "notch";
+    notch.frequency.value = frequency;
+    notch.Q.value = 4;
+    path = path.connect(notch);
+  }
+  path.connect(level).connect(microphoneOut);
   amplitude.gain.setValueAtTime(markerGain, generator.currentTime);
   note(`speak ${url}`);
   voice.start();
@@ -246,6 +257,7 @@ function record(track: MediaStreamTrack, label: string, remote: boolean): Record
 }
 
 const WINDOW = 1024;
+const HOP = 256;
 const DETECT_RMS = 1e-3; // -60 dBFS
 const TRACE_RMS = 1e-5; // -100 dBFS
 const DETECT_RATIO = 0.2; // share of window energy in the marker bin; white noise is ~2/WINDOW
@@ -272,6 +284,8 @@ interface Analysis {
   readonly b: number;
   readonly c: number;
   readonly bTrace: number;
+  readonly r: number;
+  readonly rTrace: number;
   readonly maxBRatio: number;
   readonly medianADb: number | null;
   readonly medianCDb: number | null;
@@ -295,10 +309,13 @@ function analyze(recording: Recording): Analysis {
   let b = 0;
   let c = 0;
   let bTrace = 0;
+  let r = 0;
+  let rTrace = 0;
   let maxBRatio = 0;
   const aDb: Array<number> = [];
   const cDb: Array<number> = [];
-  for (let start = 0; start + WINDOW <= samples.length; start += WINDOW) {
+  // Overlapping windows: a leak of a few milliseconds dominates at least one of them.
+  for (let start = 0; start + WINDOW <= samples.length; start += HOP) {
     windows += 1;
     let energy = 0;
     for (let index = start; index < start + WINDOW; index += 1) energy += samples[index]! ** 2;
@@ -309,7 +326,10 @@ function analyze(recording: Recording): Analysis {
       binRatio(samples, start, energy, FREQUENCY.B1);
     maxBRatio = Math.max(maxBRatio, bRatio);
     if (bRatio > DETECT_RATIO) bTrace += 1;
+    const rRatio = binRatio(samples, start, energy, FREQUENCY.R);
+    if (rRatio > DETECT_RATIO) rTrace += 1;
     if (rms < DETECT_RMS) continue;
+    if (rRatio > DETECT_RATIO) r += 1;
     audibleWindows += 1;
     const aRatio = binRatio(samples, start, energy, FREQUENCY.A);
     const cRatio = binRatio(samples, start, energy, FREQUENCY.C);
@@ -332,6 +352,8 @@ function analyze(recording: Recording): Analysis {
     b,
     c,
     bTrace,
+    r,
+    rTrace,
     maxBRatio: Math.round(maxBRatio * 1e4) / 1e4,
     medianADb: median(aDb),
     medianCDb: median(cDb),
@@ -575,6 +597,12 @@ async function withCase(
     name: "no B marker in any received stream or post-gate tap",
     ok: leaked.length === 0,
     detail: leaked,
+  });
+  const phraseLeaks = analyses.filter((analysis) => analysis.r > 0 || analysis.rTrace > 0);
+  checks.push({
+    name: "no resume-phrase marker R in any received stream or post-gate tap",
+    ok: phraseLeaks.length === 0,
+    detail: phraseLeaks,
   });
   checks.push({
     name: "receivers got no data-channel payloads",
@@ -991,7 +1019,13 @@ function Expose() {
   useEffect(() => {
     exposed = voice;
     note(`provider mode ${voice.snapshot.mode}`);
-    if (voice.snapshot.mode !== "transmitting" && marker !== null && marker !== "B") setMarker("B");
+    if (
+      voice.snapshot.mode !== "transmitting" &&
+      marker !== null &&
+      marker !== "B" &&
+      marker !== "R"
+    )
+      setMarker("B");
   });
   return null;
 }
@@ -1214,14 +1248,22 @@ async function caseKeywords(): Promise<CaseResult> {
       await until(() => snapshot().listening === "listening", "local listening");
       checks.push({ name: "spoken pause pauses and listens locally", ok: startCalls === 1 });
       await sleep(3_000);
-      attempts.resume = await sayUntil(resumePhraseUrl, 0, () => snapshot().listening === "armed");
+      setMarker("R");
+      attempts.resume = await sayUntil(
+        resumePhraseUrl,
+        0.1,
+        () => snapshot().listening === "armed",
+      );
+      setMarker("B");
       checks.push({
         name: "spoken resume only arms",
         ok: providerMode() === "paused" && startCalls === 1,
       });
       await until(() => snapshot().listening === "listening", "arm expiry", 12_000);
       checks.push({ name: "arming expires", ok: providerMode() === "paused" });
-      attempts.rearm = await sayUntil(resumePhraseUrl, 0, () => snapshot().listening === "armed");
+      setMarker("R");
+      attempts.rearm = await sayUntil(resumePhraseUrl, 0.1, () => snapshot().listening === "armed");
+      setMarker("B");
       syntheticChord();
       syntheticChord();
       await sleep(1_000);

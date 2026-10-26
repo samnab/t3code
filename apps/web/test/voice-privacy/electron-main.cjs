@@ -26,8 +26,6 @@ const csp = [
   "form-action 'self'",
 ].join("; ");
 
-const workerCsp = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'";
-
 app.whenReady().then(async () => {
   const requests = [];
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === "media");
@@ -39,10 +37,13 @@ app.whenReady().then(async () => {
     callback({});
   });
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-    // As ElectronProtocol.ts: the keyword worker gets its own no-network policy.
-    const policy = details.url.endsWith("/voice/kws/kws.worker.js") ? workerCsp : csp;
+    // The keyword worker keeps the policy the harness server sent (taken from vercel.ts).
+    if (details.url.endsWith("/voice/kws/kws.worker.js")) {
+      callback({ responseHeaders: details.responseHeaders });
+      return;
+    }
     callback({
-      responseHeaders: { ...details.responseHeaders, "Content-Security-Policy": [policy] },
+      responseHeaders: { ...details.responseHeaders, "Content-Security-Policy": [csp] },
     });
   });
   const window = new BrowserWindow({
