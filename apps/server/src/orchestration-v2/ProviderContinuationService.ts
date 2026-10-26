@@ -295,7 +295,9 @@ export const layer = Layer.effectDiscard(
             }),
           ),
           // A spoken request holds a native Codex turn on a short deadline.
-          // One slow commit must not hold later requests until theirs expire.
+          // One slow commit must not hold later requests until theirs expire,
+          // even on the same thread, so contended commits may land out of
+          // spoken order. Each request is still its own message and run.
           (handled) =>
             request.origin === "voice" ? Effect.asVoid(Effect.forkScoped(handled)) : handled,
         ),
