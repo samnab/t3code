@@ -19,4 +19,4 @@ It builds `harness.tsx` with `vite.config.ts` into `/tmp/t3-voice-privacy-egress
 - Fetch, XHR, WebSocket, beacon, data-channel sends, console output, toasts and provider start/stop payloads are captured. The runner checks that none of them contains the B nonce and that no request leaves the harness origin.
 - `electron-main.cjs` loads the same page in Electron under the shipped desktop CSP, and sends the trusted chord with `sendInputEvent`.
 
-Case 1b is a measurement, not a pass/fail gate. B keeps playing during the resume negotiation, so it shows how much audio captured after the Resume action but before `transmitting` reaches the new call.
+Case 1b is a measurement, not a pass/fail gate. B keeps playing during the resume negotiation and switches to C inside the transport's real `enableMicrophone` call, so any B it finds was emitted before the gate opened.

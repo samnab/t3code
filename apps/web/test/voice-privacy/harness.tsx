@@ -103,6 +103,10 @@ const timeline: Array<{ at: number; event: string }> = [];
 const t0 = performance.now();
 const note = (event: string) => timeline.push({ at: Math.round(performance.now() - t0), event });
 
+// When set, the next real gate-open switches to this marker inside enableMicrophone itself, so the
+// marker boundary is the actual enable instant rather than a later published mode.
+let markerOnEnable: Marker = null;
+
 function setMarker(next: Marker) {
   marker = next;
   note(`marker ${next ?? "silence"}`);
@@ -403,6 +407,15 @@ function makeController(revoke?: Revocation): Handle {
   const controller = createRealtimeVoiceController({
     createTransport: (events) => {
       const real = createBrowserVoiceTransport(events);
+      const enableMicrophone = real.enableMicrophone.bind(real);
+      real.enableMicrophone = () => {
+        if (markerOnEnable !== null) {
+          note(`enable at generator ${generator.currentTime.toFixed(4)}`);
+          setMarker(markerOnEnable);
+          markerOnEnable = null;
+        }
+        enableMicrophone();
+      };
       return revoke ? wrap(real) : real;
     },
     createOperationId: randomUUID,
@@ -624,9 +637,9 @@ async function caseResumeBleed(): Promise<CaseResult> {
       await sleep(800);
       await pauseAndAck(handle);
       await sleep(800);
+      markerOnEnable = "C";
       void handle.controller.resume(owner);
       await until(() => mode(handle) === "transmitting", "transmitting after resume");
-      setMarker("C");
       await sleep(1_000);
       handle.controller.end();
       await until(() => mode(handle) === "off", "off");
