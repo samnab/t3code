@@ -4807,6 +4807,102 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  // Regression: the order Codex sent when realtime input hit a running /compact.
+  it.effect("completes a compaction that Codex failed only for a rejected realtime steer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "compact-steer-thread";
+        const nativeTurnId = "compact-steer-turn";
+        const item = { type: "contextCompaction", id: "compact-steer-item" };
+        const error = {
+          message: "failed to submit turn input: ActiveTurnNotSteerable { turn_kind: Compact }",
+          codexErrorInfo: "badRequest",
+          additionalDetails: null,
+        };
+        const transcript = makeCodexReplayTranscript({
+          scenario: "compaction-rejected-steer",
+          entries: [
+            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "unused" }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "thread/compact/start",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 3, result: {} } },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "turn/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "item/started",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId, item },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "error",
+                params: {
+                  error,
+                  willRetry: false,
+                  threadId: nativeThreadId,
+                  turnId: "rejected-realtime-turn",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "item/completed",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId, item },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: {
+                    ...makeCodexReplayTurn({ id: nativeTurnId, status: "failed" }),
+                    error,
+                  },
+                },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.compactThread!(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("compact-steer-attempt"),
+            text: "/compact",
+          }),
+        );
+        yield* harness.firstTerminal;
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect.each(["failed", "interrupted", "Stop"] as const)(
     "settles unfinished compaction on %s without changing completed compaction",
     (outcome) =>
