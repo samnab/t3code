@@ -1153,13 +1153,18 @@ export const layer: Layer.Layer<
             );
       // A spoken request started as native Codex work, so a failed adoption
       // left no provider turn even though Codex already has the exchange.
+      // Only the run's own prompt counts; spoken steers join typed runs.
       const spokenRunIds = new Set(
-        undeliveredItems.flatMap((item) =>
-          item.type === "user_message" &&
-          item.createdBy === "user" &&
-          item.creationSource === "provider" &&
-          item.runId !== null
-            ? [item.runId]
+        undeliveredRuns.flatMap((source) =>
+          undeliveredItems.some(
+            (item) =>
+              item.type === "user_message" &&
+              item.runId === source.id &&
+              item.messageId === source.userMessageId &&
+              item.createdBy === "user" &&
+              item.creationSource === "provider",
+          )
+            ? [source.id]
             : [],
         ),
       );
