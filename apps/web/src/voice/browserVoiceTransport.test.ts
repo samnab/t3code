@@ -35,9 +35,18 @@ function fixture(contextState: AudioContextState = "running") {
     stream: { getAudioTracks: () => [outputTrack], getTracks: () => [outputTrack] },
     receive: (frame: string) => sent.push(frame),
   };
-  const source = {
+  // The post-open discard is a gain ramp; frames here are the ones it lets through.
+  const opening = {
     target: null as typeof output | null,
-    connect: vi.fn((target: typeof output) => {
+    gain: { value: 1, setValueAtTime: vi.fn() },
+    connect: (target: typeof output) => {
+      opening.target = target;
+    },
+    receive: (frame: string) => opening.target?.receive(frame),
+  };
+  const source = {
+    target: null as typeof opening | null,
+    connect: vi.fn((target: typeof opening) => {
       source.target = target;
     }),
     disconnect: vi.fn(() => {
@@ -52,6 +61,9 @@ function fixture(contextState: AudioContextState = "running") {
     state = contextState;
     createMediaStreamSource = () => source;
     createMediaStreamDestination = () => output;
+    createGain = () => opening;
+    currentTime = 0;
+    sampleRate = 48_000;
     resume = resumeContext;
     close = closeContext;
     constructor() {

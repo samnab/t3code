@@ -54,6 +54,12 @@ export const VOICE_REPLACEMENT_GATE =
 const VOICE_OWNERSHIP_REQUIRED =
   "Microphone off. This host did not return matching voice ownership. Update the T3 host before starting another call.";
 const MAX_VOICE_LIFETIME_MS = 4 * 60 * 60 * 1_000;
+const LOCAL_LISTENING_UNAVAILABLE = "Paused: local listening unavailable";
+/** How long a spoken resume phrase keeps the confirm prompt open. */
+const RESUME_ARM_MS = 10_000;
+// ponytail: fixed, not measured on real speakers. The call's playback element is gone once paused,
+// so this only covers room echo and output latency. Calibrate with a physical speaker test.
+const RESUME_ECHO_TAIL_MS = 2_000;
 const isVoiceError = Schema.is(ProviderRealtimeVoiceError);
 class VoiceOwnershipUnavailable extends Error {
   constructor() {
@@ -67,11 +73,26 @@ type VoiceState = {
   readonly expiresAt: string | null;
 };
 /**
+ * On-device keyword listening while paused. "listening": the microphone is captured for the local
+ * detector only and no call exists. "armed": the resume phrase was heard; a trusted local confirm is
+ * still required. "unavailable": capture or the detector failed, so nothing is listening.
+ * Always "off" outside "paused".
+ */
+export type LocalListening = "off" | "listening" | "armed" | "unavailable";
+type KeywordState = { readonly keywords: boolean; readonly listening: LocalListening };
+// What callers publish; the controller adds the keyword fields from its own state.
+type Published = VoiceSnapshot extends infer S
+  ? S extends unknown
+    ? Omit<S, keyof KeywordState>
+    : never
+  : never;
+/**
  * Pause and Mic off revoke the microphone the same way: locally first, then the provider stop.
  * Pause ("pausing" → "paused") keeps the conversation so Resume can start a fresh call in it.
  * Mic off ("ending" → "off") forgets the conversation; nothing can resume it.
  */
 export type VoiceSnapshot = VoiceState &
+  KeywordState &
   (
     | { readonly mode: "off"; readonly owner: null }
     | {
@@ -95,6 +116,8 @@ interface Attempt {
   capturePending: boolean;
   pause: boolean;
   reason: string | null;
+  listeningFailed: boolean;
+  closedAt: number;
   releaseOwner: (() => void) | null;
   cancelExpiry: (() => void) | null;
   expiresAt: number | null;
@@ -125,9 +148,10 @@ function readOwnership(
   });
 }
 
-/** The shared mode/generation/owner authority. Platform transports enforce local teardown.
- * Pause releases the microphone as well: local-only listening needs an on-device detector and is
- * deliberately unavailable here. No remote input can call `resume`. */
+/** The shared mode/generation/owner authority; platform transports enforce local teardown.
+ * Paused with keywords on, `localListening` is a separate detector-only capture, stopped before
+ * Resume creates the new call. A keyword pause acts at once; a keyword resume only arms the
+ * confirm prompt. No remote input can call `resume`. */
 export function createRealtimeVoiceController(deps: {
   readonly createTransport: (events: {
     connected(): void;
@@ -147,21 +171,54 @@ export function createRealtimeVoiceController(deps: {
   readonly watchOwner: (owner: VoiceOwner, lost: (reason: string) => void) => () => void;
   readonly now: () => number;
   readonly scheduleExpiry: (expiresAt: number, expired: () => void) => () => void;
+  /** Starts and stops the detector-only capture. `start` may throw; that reads as unavailable. */
+  readonly localListening?: { start(): void; stop(): void };
+  readonly keywordsEnabled?: boolean;
 }) {
+  let keywords = deps.keywordsEnabled === true && deps.localListening !== undefined;
+  let listening: LocalListening = "off";
+  let pausedAt = 0;
+  let cancelArm: (() => void) | null = null;
   let snapshot: VoiceSnapshot = {
     mode: "off",
     owner: null,
     reason: null,
     replacementBlocked: false,
     expiresAt: null,
+    keywords,
+    listening,
   };
   let generation = 0;
   let attempt: Attempt | null = null;
   let moveIntent: object | null = null;
   const listeners = new Set<() => void>();
-  const publish = (next: VoiceSnapshot) => {
-    snapshot = next;
+  const clearArm = () => {
+    cancelArm?.();
+    cancelArm = null;
+  };
+  const stopListening = () => {
+    clearArm();
+    if (listening === "listening" || listening === "armed") deps.localListening?.stop();
+    listening = "off";
+  };
+  // Every exit from "paused" passes here, so the detector's capture never outlives it.
+  const publish = (next: Published) => {
+    if (next.mode !== "paused") stopListening();
+    snapshot = { ...next, keywords, listening };
     for (const listener of listeners) listener();
+  };
+  const republish = () => publish(snapshot);
+  // Only from "paused": the call's capture is already closed, so this is a fresh, separate one.
+  const startListening = () => {
+    if (!keywords || deps.localListening === undefined || listening === "listening") return;
+    if (listening === "armed") return;
+    try {
+      deps.localListening.start();
+      listening = "listening";
+    } catch {
+      deps.localListening.stop();
+      listening = "unavailable";
+    }
   };
   const current = (value: Attempt) =>
     attempt === value && !value.cancelled && value.generation === generation;
@@ -177,11 +234,13 @@ export function createRealtimeVoiceController(deps: {
     releaseOwner(value);
     attempt = null;
     const state = { reason: value.reason, replacementBlocked: !safe, expiresAt: null };
-    publish(
-      value.pause
-        ? { ...state, mode: "paused", owner: value.owner }
-        : { ...state, mode: "off", owner: null },
-    );
+    if (value.pause) {
+      pausedAt = value.closedAt;
+      publish({ ...state, mode: "paused", owner: value.owner });
+      if (value.listeningFailed) listening = "unavailable";
+      else startListening();
+      if (listening !== "off") republish();
+    } else publish({ ...state, mode: "off", owner: null });
     value.resolveFinished(safe);
   };
   const stopRemote = async (value: Attempt) => {
@@ -204,6 +263,7 @@ export function createRealtimeVoiceController(deps: {
     value.cancelled = true;
     value.pause = pause;
     value.reason = reason;
+    value.closedAt = deps.now();
     generation += 1;
     // Local capture and playback stop before entering the serialized RPC queue.
     value.transport?.close();
@@ -222,6 +282,7 @@ export function createRealtimeVoiceController(deps: {
   /** Mic off. Overrides a pending pause and forgets a paused conversation. */
   const end = (reason: string | null = null) => {
     moveIntent = null;
+    stopListening();
     const value = attempt;
     if (value === null) {
       if (snapshot.mode === "paused") {
@@ -295,6 +356,8 @@ export function createRealtimeVoiceController(deps: {
       capturePending: false,
       pause: false,
       reason: null,
+      listeningFailed: false,
+      closedAt: 0,
       releaseOwner: null,
       cancelExpiry: null,
       expiresAt: null,
@@ -443,7 +506,53 @@ export function createRealtimeVoiceController(deps: {
       snapshot.owner.threadId !== owner.threadId
     )
       return;
-    await start(owner);
+    // Release the detector's capture first: the new call acquires its own microphone afterwards.
+    stopListening();
+    try {
+      await start(owner);
+    } finally {
+      // A refused start (blocked replacement, failed owner check) leaves voice paused.
+      if (attempt === null && snapshot.mode === "paused") {
+        startListening();
+        republish();
+      }
+    }
+  };
+  /** The spoken resume phrase. Opens only the local confirm prompt, and expires on its own. */
+  const armResume = () => {
+    if (snapshot.mode !== "paused" || listening !== "listening") return;
+    // Ignore the room's echo of the assistant's last words after the call closed.
+    if (deps.now() < pausedAt + RESUME_ECHO_TAIL_MS) return;
+    listening = "armed";
+    cancelArm = deps.scheduleExpiry(deps.now() + RESUME_ARM_MS, () => cancelResume());
+    republish();
+  };
+  const cancelResume = () => {
+    if (listening !== "armed") return;
+    clearArm();
+    listening = "listening";
+    republish();
+  };
+  /** Capture or detector failure. Never resumes; a live call pauses so no keyword is relied on. */
+  const localListeningFailed = () => {
+    const value = attempt;
+    if (snapshot.mode === "paused" && value === null) {
+      if (listening === "off" || listening === "unavailable") return;
+      stopListening();
+      listening = "unavailable";
+      republish();
+    } else if (value !== null) {
+      value.listeningFailed = true;
+      if (!value.cancelled) pause(LOCAL_LISTENING_UNAVAILABLE);
+    }
+  };
+  const setKeywords = (enabled: boolean) => {
+    keywords = enabled && deps.localListening !== undefined;
+    if (snapshot.mode === "paused" && attempt === null) {
+      if (keywords) startListening();
+      else stopListening();
+    }
+    republish();
   };
   return {
     start,
@@ -451,6 +560,10 @@ export function createRealtimeVoiceController(deps: {
     end,
     pause,
     resume,
+    armResume,
+    cancelResume,
+    localListeningFailed,
+    setKeywords,
     getSnapshot: () => snapshot,
     subscribe: (listener: () => void) => {
       listeners.add(listener);

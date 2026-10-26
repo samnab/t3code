@@ -59,6 +59,7 @@ import {
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
+  MicIcon,
   MicOffIcon,
   PaletteIcon,
   PauseIcon,
@@ -1216,16 +1217,45 @@ function OpenCommandPaletteDialog(props: {
       kind: "action",
       value: paused ? "action:voice-resume" : "action:voice-pause",
       searchTerms: ["voice", "microphone", "mic", "privacy", paused ? "resume" : "pause"],
-      title: paused ? "Resume voice" : "Pause voice",
+      title: paused
+        ? voice.snapshot.listening === "armed"
+          ? "Confirm voice resume"
+          : "Resume voice"
+        : "Pause voice",
       icon: paused ? (
         <PlayIcon className={ITEM_ICON_CLASS} />
       ) : (
         <PauseIcon className={ITEM_ICON_CLASS} />
       ),
       disabled: paused && voice.snapshot.replacementBlocked,
-      run: async () => (paused ? voice.resume() : voice.pause()),
+      // Resuming sends audio, so it needs a real key press or click in this window, like the
+      // voice bar's button and the shortcut.
+      run: async () => {
+        if (!paused) voice.pause();
+        else if (navigator.userActivation.isActive) voice.resume();
+      },
     });
   }
+  if (voice.snapshot.listening === "armed") {
+    actionItems.push({
+      kind: "action",
+      value: "action:voice-cancel-resume",
+      searchTerms: ["voice", "cancel", "resume", "keyword"],
+      title: "Cancel voice resume",
+      icon: <MicOffIcon className={ITEM_ICON_CLASS} />,
+      run: async () => voice.cancelResume(),
+    });
+  }
+  // A call's keyword tap is fixed when it starts, so keywords change only outside a live call.
+  if (voiceMode === "off" || voiceMode === "paused")
+    actionItems.push({
+      kind: "action",
+      value: "action:voice-keywords",
+      searchTerms: ["voice", "keywords", "privacy", "pause", "resume", "listening"],
+      title: voice.snapshot.keywords ? "Turn voice keywords off" : "Turn voice keywords on",
+      icon: <MicIcon className={ITEM_ICON_CLASS} />,
+      run: async () => voice.setKeywords(!voice.snapshot.keywords),
+    });
   if (voiceMode !== "off") {
     actionItems.push({
       kind: "action",

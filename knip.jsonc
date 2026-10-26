@@ -84,6 +84,9 @@
       // Worktree setup (scripts/setup-worktree.ts) runs this directly, and evidence
       // fixtures run under node.
       "entry": ["scripts/warm-dep-cache.ts", "test/fixtures/**/*.mjs"],
+      // Keyword-spotting assets load by URL from a worker, and the voice privacy
+      // harness runs as its own browser/Electron program with the root's electron.
+      "ignore": ["public/voice/kws/**", "test/voice-privacy/**"],
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.

@@ -1,0 +1,111 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Voice gate cutoff benchmark</title>
+<!--
+Measures how much audio from before the gate instant reaches the sender track, the basis for
+GATE_DISCARD_QUANTA in src/voice/browserVoiceTransport.ts. Serve this folder over http, open the
+page, and run in the console:
+  await runCutoff(["early", "discard12", "discard24"], 50)
+Each trial returns [B blocks of 256 samples, B windows of 1024 samples]; any non-zero count for a
+discard variant means that hold is too short. Add ?mic to play the tones through the speakers and
+capture them with the real microphone (physical or Bluetooth calibration).
+-->
+<script>
+  // Measures how much tone B emitted before the gate instant reaches the sender track.
+  // Generator: B (1900 Hz) until the gate instant T, then C (3300 Hz), switched inside the gate call
+  // exactly like the voice-privacy harness. Variants: "early" (source made at acquisition, the
+  // shipped transport), "fresh" (source made at T), "discardN" (early source through a gain that
+  // opens N render quanta after T).
+  const params = new URLSearchParams(location.search);
+  const gen = new AudioContext({ sampleRate: 48000 });
+  const osc = gen.createOscillator();
+  const amp = gen.createGain();
+  amp.gain.value = 0.5;
+  const out = gen.createMediaStreamDestination();
+  osc.connect(amp).connect(out);
+  osc.start();
+  // ?mic: play the tones through the speakers and capture them with the real microphone instead.
+  let micTrack = null;
+  if (params.has("mic")) amp.connect(gen.destination);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function goertzel(x, f, sr) {
+    const k = 2 * Math.cos((2 * Math.PI * f) / sr);
+    let s1 = 0,
+      s2 = 0;
+    for (const v of x) {
+      const s = v + k * s1 - s2;
+      s2 = s1;
+      s1 = s;
+    }
+    return s1 * s1 + s2 * s2 - k * s1 * s2;
+  }
+  async function trial(variant) {
+    osc.frequency.setValueAtTime(1900, gen.currentTime);
+    if (params.has("mic") && micTrack === null)
+      micTrack = (await navigator.mediaDevices.getUserMedia({ audio: true })).getAudioTracks()[0];
+    const track = (micTrack ?? out.stream.getAudioTracks()[0]).clone();
+    const ctx = new AudioContext();
+    await ctx.resume();
+    const stream = new MediaStream([track]);
+    track.enabled = false;
+    const early = ctx.createMediaStreamSource(stream);
+    const dest = ctx.createMediaStreamDestination();
+    // record the sender track
+    const rec = new AudioContext();
+    await rec.resume();
+    const rsrc = rec.createMediaStreamSource(dest.stream);
+    const proc = rec.createScriptProcessor(256, 1, 1);
+    const blocks = [];
+    proc.onaudioprocess = (e) => blocks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    rsrc.connect(proc).connect(rec.destination);
+    await sleep(400 + Math.random() * 200); // connecting
+    // gate instant
+    osc.frequency.setValueAtTime(3300, gen.currentTime);
+    track.enabled = true;
+    if (variant === "fresh") ctx.createMediaStreamSource(stream).connect(dest);
+    else if (variant.startsWith("discard")) {
+      const n = Number(variant.slice(7));
+      const g = ctx.createGain();
+      g.gain.value = 0;
+      g.gain.setValueAtTime(1, ctx.currentTime + (n * 128) / ctx.sampleRate);
+      early.connect(g).connect(dest);
+    } else early.connect(dest);
+    await sleep(500);
+    proc.disconnect();
+    rsrc.disconnect();
+    track.stop();
+    await ctx.close();
+    await rec.close();
+    // B samples: 256-sample blocks where 1900 Hz dominates
+    let bBlocks = 0;
+    for (const b of blocks) {
+      const e = b.reduce((a, v) => a + v * v, 0);
+      if (e < 1e-6) continue;
+      const pb = goertzel(b, 1900, rec.sampleRate),
+        pc = goertzel(b, 3300, rec.sampleRate);
+      if (pb > 4 * pc) bBlocks++;
+    }
+    // Lane E's detector granularity: 1024-sample windows, B bins >= 20% of window energy, >= -60 dBFS.
+    const all = new Float32Array(blocks.length * 256);
+    blocks.forEach((b, i) => all.set(b, i * 256));
+    let wide = 0;
+    for (let o = 0; o + 1024 <= all.length; o += 1024) {
+      const w = all.subarray(o, o + 1024);
+      const e = w.reduce((a, v) => a + v * v, 0);
+      if (10 * Math.log10(e / 1024 + 1e-12) < -60) continue;
+      const total = (e * 1024) / 2;
+      const pb = goertzel(w, 1900, rec.sampleRate);
+      if (pb / total >= 0.2) wide++;
+    }
+    return [bBlocks, wide]; // 256-sample blocks (~5.3 ms), 1024-sample windows
+  }
+  window.runCutoff = async (variants, n) => {
+    await gen.resume();
+    const res = {};
+    for (const v of variants) {
+      res[v] = [];
+      for (let i = 0; i < n; i++) res[v].push(await trial(v));
+    }
+    return { rate: new AudioContext().sampleRate, res };
+  };
+</script>
