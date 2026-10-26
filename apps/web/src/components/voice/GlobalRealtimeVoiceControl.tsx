@@ -79,7 +79,11 @@ export function GlobalRealtimeVoiceControl() {
           size="sm"
           variant="ghost"
           aria-pressed={snapshot.keywords}
-          title={KEYWORDS_HINT}
+          // A call's keyword tap is fixed when it starts; change keywords while paused.
+          disabled={snapshot.mode !== "paused"}
+          title={
+            snapshot.mode === "paused" ? KEYWORDS_HINT : `${KEYWORDS_HINT} Change while paused.`
+          }
           onClick={() => setKeywords(!snapshot.keywords)}
         >
           {snapshot.keywords ? "Keywords on" : "Keywords off"}

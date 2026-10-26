@@ -86,7 +86,8 @@ export function RealtimeVoiceControl({
                 size={size}
                 type="button"
                 disabled={settling || snapshot.replacementBlocked}
-                onClick={() => move(environmentId, threadId)}
+                // Moving starts a microphone; only a real click may do that.
+                onClick={(event) => event.isTrusted && move(environmentId, threadId)}
                 aria-label={`End voice in ${owner.threadTitle} and talk in this conversation`}
               />
             }
