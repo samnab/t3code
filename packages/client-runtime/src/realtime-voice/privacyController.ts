@@ -192,12 +192,6 @@ export function createRealtimeVoiceController(deps: {
   let attempt: Attempt | null = null;
   let moveIntent: object | null = null;
   const listeners = new Set<() => void>();
-  const publish = (next: Published) => {
-    if (next.mode !== "paused") listening = "off";
-    snapshot = { ...next, keywords, listening };
-    for (const listener of listeners) listener();
-  };
-  const republish = () => publish(snapshot);
   const clearArm = () => {
     cancelArm?.();
     cancelArm = null;
@@ -207,6 +201,13 @@ export function createRealtimeVoiceController(deps: {
     if (listening === "listening" || listening === "armed") deps.localListening?.stop();
     listening = "off";
   };
+  // Every exit from "paused" passes here, so the detector's capture never outlives it.
+  const publish = (next: Published) => {
+    if (next.mode !== "paused") stopListening();
+    snapshot = { ...next, keywords, listening };
+    for (const listener of listeners) listener();
+  };
+  const republish = () => publish(snapshot);
   // Only from "paused": the call's capture is already closed, so this is a fresh, separate one.
   const startListening = () => {
     if (!keywords || deps.localListening === undefined || listening === "listening") return;

@@ -928,6 +928,20 @@ describe("local privacy pause", () => {
       expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", listening: "off" });
     });
 
+    it("stops local listening before a move or start from pause acquires a new microphone", async () => {
+      for (const leave of ["move", "start"] as const) {
+        const f = await pausedWithKeywords();
+        f.operations.length = 0;
+        if (leave === "move") await f.controller.move(f.other);
+        else await f.controller.start(f.owner);
+        expect(f.localListening.stop).toHaveBeenCalledOnce();
+        expect(f.operations.indexOf("unlisten")).toBeGreaterThanOrEqual(0);
+        expect(f.operations.indexOf("unlisten")).toBeLessThan(f.operations.indexOf("microphone"));
+        f.controller.end();
+        expect(f.localListening.stop).toHaveBeenCalledOnce();
+      }
+    });
+
     it("never opens sending from a keyword", async () => {
       const f = await pausedWithKeywords();
       f.setNow(f.initialNow + 5_000);
