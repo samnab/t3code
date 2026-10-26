@@ -214,7 +214,7 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
 const ThreadLowerModesTool = Tool.make("t3_thread_lower_modes", {
   ...commandTool,
   description:
-    "Lower a thread's runtime mode (full-access > auto > auto-accept-edits > approval-required) or interaction mode (default > plan). Omit threadId for this thread. Agents can never raise a mode; the user raises it in the app. Runtime and interaction are applied as two separate changes, so one may apply if the other is refused. When the runtime mode is lowered, a provider that cannot switch in-session (for example Claude) detaches its session, interrupting a running turn, this thread's own included; others (for example Codex) switch live.",
+    "Lower a thread's runtime or interaction mode; agents can never raise one. Omit `threadId` for this thread. The two modes apply separately, so one can be refused. Providers that cannot switch in-session (Claude) interrupt a running turn.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     runtimeMode: Schema.optional(RuntimeMode),
@@ -225,7 +225,7 @@ const ThreadLowerModesTool = Tool.make("t3_thread_lower_modes", {
 const ThreadGoalTool = Tool.make("t3_thread_goal", {
   ...commandTool,
   description:
-    "Set or clear (goal=null) a thread's goal. Omit threadId for this thread. This never starts work: a set goal's loop is paused until t3_thread_goal_loop resumes it, and clearing stops the loop. Setting the same goal again changes nothing; use t3_thread_goal_loop pause to stop a running loop.",
+    "Set or clear (`goal: null`) a thread's goal. Omit `threadId` for this thread. Never starts work: a new goal's loop stays paused until `t3_thread_goal_loop` resumes it. Clearing stops the loop.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     goal: Schema.NullOr(ThreadGoal),
@@ -234,7 +234,7 @@ const ThreadGoalTool = Tool.make("t3_thread_goal", {
 const ThreadGoalLoopTool = Tool.make("t3_thread_goal_loop", {
   ...commandTool,
   description:
-    "Control a thread's goal loop: pause, resume, continue, complete, block or reset. resume, continue and reset let the loop start provider turns. expectedState is the loop state you last read with t3_thread_configuration (idle for a goal whose loop has not run); the call is refused if it differs.",
+    "Pause, resume, continue, complete, block, or reset a thread's goal loop. Resume, continue, and reset start turns. `expectedState` is the state last read from `t3_thread_configuration` (`idle` if never run); refused on mismatch.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: ThreadGoalLoopClientCommand.fields.action,
@@ -247,7 +247,7 @@ const ThreadGoalLoopTool = Tool.make("t3_thread_goal_loop", {
 const RunStartTool = Tool.make("t3_run_start", {
   ...commandTool,
   description:
-    "Start held work on a stopped thread. runId is the run you expect to start: retry_preparation retries that run's failed workspace preparation, start_queued sends that queued message now, and resume_queue resumes a held queue only if that run is next in it. The call is refused if the thread no longer matches.",
+    "Start held work on a stopped thread. `runId` is the run you expect: `retry_preparation` retries its setup, `start_queued` sends it now, `resume_queue` resumes only if it is next. Refused on mismatch.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     action: Schema.Literals(["retry_preparation", "start_queued", "resume_queue"]),

@@ -144,7 +144,7 @@ const ProjectSettingsView = Schema.Struct({
 const ProjectSettingsReadTool = Tool.make("t3_project_settings_read", {
   ...shared,
   description:
-    'Read a project\'s effective settings with where each value comes from: "project" is this project\'s override, "environment" is the environment default (or built-in), "t3.json" is the project\'s checked-in file. Covers the safe subset of project overrides; scripts are on t3_project_read.',
+    "Read one project's effective settings and each value's source: `project`, `environment`, or `t3.json`. Scripts are on `t3_project_read`.",
   parameters: Schema.Struct({ projectId: ProjectId }),
   success: ProjectSettingsView,
   dependencies: settingsDependencies,
@@ -154,7 +154,7 @@ const ProjectSettingsReadTool = Tool.make("t3_project_settings_read", {
 const ProjectSettingsUpdateTool = Tool.make("t3_project_settings_update", {
   ...shared,
   description:
-    "Set or clear this project's overrides for the writable subset of t3_project_settings_read (responseStreamingMode is read-only). set stores an override; null is a real value where the setting allows it (for example no default model). clear removes overrides so the environment default applies again. Other fields and other projects are untouched. Requires a live full-access/default calling thread. Returns the same shape as t3_project_settings_read.",
+    "Set or clear one project's overrides for fields from `t3_project_settings_read` (`responseStreamingMode` is read-only). `clear` restores the environment default. Returns the new settings.",
   parameters: Schema.Struct({
     projectId: ProjectId,
     set: Schema.optionalKey(

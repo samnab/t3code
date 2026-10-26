@@ -75,7 +75,7 @@ const shared = {
 const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
-    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. favorites and providerModelPreferences (hidden models, order, default model/options per provider instance id) are the stored model preferences. idleCompaction is the effective environment-wide mode. connect summarizes T3 Connect: whether this host is linked, the link was revoked, the managed tunnel is active, the sharing preferences, and the latest reachability check the server ran on its own; null when unavailable. Linking, unlinking, and Connect preferences stay in Settings. providerInstances lists every configured and built-in default provider instance with its display metadata, whether it is enabled, and its custom models.",
+    "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. Also model `favorites`/`providerModelPreferences`, `idleCompaction`, `providerInstances`, and `connect` (null if unknown; Connect changes stay in Settings).",
   success: Schema.Struct({
     environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
     label: Schema.String,
@@ -105,7 +105,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
 const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update", {
   ...shared,
   description:
-    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental: setModelFavorites and setModelsHidden set each listed entry's favorite/hidden flag, setProviderModelOrder replaces one provider's order, setProviderModelDefault merges that provider's defaults (defaultModel null clears). Provider instance ids come from orchestrator_capabilities and are not validated. idleCompaction sets the environment-wide mode; snoozeLimitedThreads snoozes usage-limited threads until their limit resets and does not resume them. autoResumeLimitedThreads dispatches a continuation turn into usage-limited threads when their limit resets, at each thread's existing modes. continueThreadsAfterServerUpdate re-queues runs a server restart interrupted. defaultRuntimeMode applies to threads humans start later and can only be lowered by agents; raise it in Settings. These are environment values; project overrides belong to t3_project_settings_update.",
+    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental; provider instance ids come from `orchestrator_capabilities`. `snoozeLimitedThreads` never resumes threads. `defaultRuntimeMode` can only be lowered; raise it in Settings. Per-project values: `t3_project_settings_update`.",
   parameters: Schema.Struct({
     completionAudio: ServerSettingsPatch.fields.completionAudio,
     defaultThreadEnvMode: ServerSettingsPatch.fields.defaultThreadEnvMode,
@@ -132,7 +132,7 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
 const ProviderInstanceUpdateTool = Tool.make("t3_provider_instance_update", {
   ...shared,
   description:
-    "Edit one provider instance's metadata: customModels replaces its custom model list, displayName and accentColor set or (null) clear its label and colour. Requires a live full-access/default calling thread. Instance ids come from t3_environment_read providerInstances. Custom model slugs are passed to the provider CLI as model names. Executables, environment variables, credentials, login, install, enabling, and creating or removing instances stay in Settings. Returns the instance.",
+    "Edit one provider instance: `customModels` replaces its list; `displayName` and `accentColor` set or clear (null). Ids: `t3_environment_read` `providerInstances`. Enabling, executables, env, credentials, and login stay in Settings.",
   parameters: Schema.Struct({
     instanceId: ProviderInstanceId,
     customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
@@ -149,20 +149,20 @@ const keybindings = {
 const KeybindingsListTool = Tool.make("t3_keybindings_list", {
   ...keybindings,
   description:
-    "List this environment's effective keybindings (defaults merged with the user's custom rules) and any config issues. Shortcuts are returned parsed; t3_keybinding_remove matches the exact key/command/when strings a custom rule was written with.",
+    "List effective keybindings and config issues. `t3_keybinding_remove` needs a custom rule's exact `key`, `command`, and `when`.",
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
 const KeybindingUpsertTool = Tool.make("t3_keybinding_upsert", {
   ...keybindings,
   description:
-    "Add or replace a custom keybinding rule through the normal keybindings config, notifying open clients. Requires a live full-access/default calling thread. key is a shortcut like mod+shift+k; command must be a known keybinding command or script.<id>.run; replace names an existing rule to swap out. Returns the effective keybindings.",
+    "Add or replace one custom keybinding. `command` is a keybinding command or `script.<id>.run`; `replace` names the rule to swap. Returns effective keybindings.",
   parameters: ServerUpsertKeybindingInput,
 }).annotate(Tool.Destructive, true);
 const KeybindingRemoveTool = Tool.make("t3_keybinding_remove", {
   ...keybindings,
   description:
-    "Remove the custom keybinding rule with exactly this key, command, and when. Requires a live full-access/default calling thread. Default keybindings cannot be removed. Returns the effective keybindings.",
+    "Remove the custom keybinding with exactly this `key`, `command`, and `when`. Defaults cannot be removed. Returns effective keybindings.",
   parameters: ServerRemoveKeybindingInput,
 }).annotate(Tool.Destructive, true);
 const StorageReportTool = Tool.make("t3_environment_storage_report", {
@@ -173,7 +173,7 @@ const StorageReportTool = Tool.make("t3_environment_storage_report", {
     DatabaseStorage.DatabaseStorage,
   ],
   description:
-    "Summarize this environment's storage: state database size and reclaimable space, and the totals of the latest storage cleanup run. Either is null when not yet measured or not available. Read-only; cleanup and compaction stay with the user.",
+    "Summarize storage: database size, reclaimable space, and the latest cleanup totals (null if not measured). Read-only.",
   success: Schema.Struct({
     database: Schema.NullOr(
       Schema.Struct({
