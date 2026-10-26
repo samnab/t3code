@@ -54,7 +54,7 @@ export const VOICE_REPLACEMENT_GATE =
 const VOICE_OWNERSHIP_REQUIRED =
   "Microphone off. This host did not return matching voice ownership. Update the T3 host before starting another call.";
 const MAX_VOICE_LIFETIME_MS = 4 * 60 * 60 * 1_000;
-export const LOCAL_LISTENING_UNAVAILABLE = "Paused: local listening unavailable";
+const LOCAL_LISTENING_UNAVAILABLE = "Paused: local listening unavailable";
 /** How long a spoken resume phrase keeps the confirm prompt open. */
 const RESUME_ARM_MS = 10_000;
 // ponytail: fixed, not measured on real speakers. The call's playback element is gone once paused,
