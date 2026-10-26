@@ -1137,24 +1137,46 @@ export const layer: Layer.Layer<
         ...runningProviderThread,
         contextUsage: handoffUsage,
       };
-      const missedRuns = projection.runs.filter(
+      const undeliveredRuns = projection.runs.filter(
         (source) =>
           source.ordinal < run.ordinal &&
           source.providerThreadId === providerThread.id &&
           (source.status === "failed" || source.status === "interrupted") &&
           !deliveredAttemptIds.has(source.activeAttemptId),
       );
-      const missedRunIds = new Set(missedRuns.map((source) => source.id));
-      const missedItems =
-        missedRunIds.size === 0
+      const undeliveredItems =
+        undeliveredRuns.length === 0
           ? []
-          : (yield* projectionStore.getTurnStartHistory(input.threadId, [...missedRunIds])).filter(
-              (item) =>
-                item.runId !== null &&
-                missedRunIds.has(item.runId) &&
-                !coveredItemIds.has(item.id) &&
-                historicalMessage(item) !== null,
+          : yield* projectionStore.getTurnStartHistory(
+              input.threadId,
+              undeliveredRuns.map((source) => source.id),
             );
+      // A spoken request started as native Codex work, so a failed adoption
+      // left no provider turn even though Codex already has the exchange.
+      // Only the run's own prompt counts; spoken steers join typed runs.
+      const spokenRunIds = new Set(
+        undeliveredRuns.flatMap((source) =>
+          undeliveredItems.some(
+            (item) =>
+              item.type === "user_message" &&
+              item.runId === source.id &&
+              item.messageId === source.userMessageId &&
+              item.createdBy === "user" &&
+              item.creationSource === "provider",
+          )
+            ? [source.id]
+            : [],
+        ),
+      );
+      const missedRuns = undeliveredRuns.filter((source) => !spokenRunIds.has(source.id));
+      const missedRunIds = new Set(missedRuns.map((source) => source.id));
+      const missedItems = undeliveredItems.filter(
+        (item) =>
+          item.runId !== null &&
+          missedRunIds.has(item.runId) &&
+          !coveredItemIds.has(item.id) &&
+          historicalMessage(item) !== null,
+      );
       const startWithHandoffs = Effect.fn("ProviderTurnStartService.startWithHandoffs")(
         function* (turnInput: Parameters<typeof session.startTurn>[0], compact = false) {
           const retryHandoff =

@@ -1057,6 +1057,110 @@ describe("orchestration v2 provider switching", () => {
       ),
   );
 
+  // Regression: a spoken request whose adoption failed was replayed as missed
+  // work, although Codex had already run it natively.
+  it.live("does not replay a spoken request Codex already ran natively", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("spoken-adoption-failure");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
+        const failOnce = yield* Ref.make(false);
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
+          makeTestAdapter({
+            instanceId: CODEX_MODEL_SELECTION.instanceId,
+            driver: CODEX_DRIVER,
+            capabilities: CodexProviderCapabilitiesV2,
+            modelSelection: CODEX_MODEL_SELECTION,
+            responseByRunOrdinal: {},
+            capturedTurns,
+            injectedHistory,
+            failStartOnce: failOnce,
+          }),
+        ]);
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const dispatch = (ordinal: number, text: string, creationSource: "web" | "provider") =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`spoken:${ordinal}`),
+              threadId,
+              messageId: MessageId.make(`spoken:${ordinal}`),
+              createdBy: "user",
+              creationSource,
+              text,
+              attachments: [],
+              modelSelection: CODEX_MODEL_SELECTION,
+              dispatchMode: { type: "start_immediately" },
+            });
+          const wait = (ordinal: number, status: "failed" | "completed") =>
+            orchestrator.streamStoredEvents.pipe(
+              Stream.filter(
+                ({ event }) =>
+                  event.type === "run.updated" &&
+                  event.payload.ordinal === ordinal &&
+                  (event.payload.status === "completed" || event.payload.status === "failed"),
+              ),
+              Stream.runHead,
+              Effect.andThen(worker.drain()),
+              Effect.andThen(
+                Effect.gen(function* () {
+                  assert.equal(
+                    (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)?.status,
+                    status,
+                  );
+                }),
+              ),
+            );
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("spoken:create"),
+            threadId,
+            projectId,
+            createdBy: "user",
+            creationSource: "web",
+            title: "Spoken adoption failure",
+            modelSelection: CODEX_MODEL_SELECTION,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          });
+          yield* dispatch(1, "Typed request", "web");
+          yield* wait(1, "completed");
+          yield* Ref.set(failOnce, true);
+          yield* dispatch(2, "Spoken request", "provider");
+          yield* wait(2, "failed");
+          const handoffsBefore = (yield* orchestrator.getThreadProjection(threadId)).contextHandoffs
+            .length;
+          yield* dispatch(3, "Next typed request", "web");
+          yield* wait(3, "completed");
+          assert.equal((yield* Ref.get(capturedTurns)).at(-1)?.text, "Next typed request");
+          assert.notInclude(yield* encodeJson(yield* Ref.get(injectedHistory)), "Spoken request");
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(threadId)).contextHandoffs.length,
+            handoffsBefore,
+          );
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              {
+                name: "spoken-adoption-failure",
+                runtimePolicyOverride: {
+                  cwd,
+                  approvalPolicy: "never",
+                  sandboxPolicy: { type: "readOnly" },
+                },
+              },
+              layerRegistry,
+            ),
+          ),
+        );
+      }),
+    ),
+  );
+
   it.live.each(["native", "legacy"] as const)(
     "starts a replacement native thread as new after the resume fallback with %s attempts",
     (attempts) =>

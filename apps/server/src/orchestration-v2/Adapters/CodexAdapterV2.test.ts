@@ -2990,6 +2990,60 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
+  it.effect("releases a dispatched realtime turn that is never adopted", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "voice-dispatched-unadopted";
+      const nativeTurnId = "held-turn";
+      const interrupted = yield* Deferred.make<void>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "voice-dispatched-unadopted",
+          entries: [
+            ...heldVoiceEntries(nativeThreadId, nativeTurnId, false),
+            {
+              type: "expect_outbound",
+              frame: { id: "held-approval", result: { decision: "decline" } },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "turn/interrupt",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+          ],
+        }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (method) =>
+          method === "turn/interrupt"
+            ? Deferred.succeed(interrupted, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      });
+      const offer = harness.continuationRequests[0]!;
+      assert.isTrue(Option.isSome(yield* offer.dispatchIfCurrent!(Effect.void)));
+      // The first deadline sees a settled dispatch and restarts; the second expires.
+      yield* TestClock.adjust("30 seconds");
+      yield* TestClock.adjust("30 seconds");
+      yield* Deferred.await(interrupted);
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect.each([
     "voice",
     "steered-user",
@@ -3180,6 +3234,99 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         replay.cursor,
         harness.replayDriver.transcript.entries.length - (stopBeforeAdoption ? 1 : 0),
       );
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  // Regression: a dispatch blocked on the DB writer outlived the 30 s hold, so
+  // the hold interrupted a turn Codex had already completed and adoption failed.
+  it.effect("keeps a held realtime turn while its dispatch outlives the hold deadline", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "voice-slow-dispatch";
+      const nativeTurnId = "held-slow-dispatch";
+      const approvalDeclined = yield* Deferred.make<void>();
+      const runtimeReady = yield* Deferred.make<ProviderAdapter.ProviderAdapterV2SessionRuntime>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "voice-slow-dispatch",
+          entries: [
+            ...heldVoiceEntries(nativeThreadId, nativeTurnId, true),
+            {
+              type: "expect_outbound",
+              frame: { id: "held-approval", result: { decision: "decline" } },
+            },
+            {
+              type: "emit_inbound",
+              label: "approval-declined",
+              frame: {
+                method: "thread/realtime/sdp",
+                params: { threadId: nativeThreadId, sdp: "answer" },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/realtime/stop",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+          ],
+        }),
+        (event) =>
+          event.type === "runtime_request.updated"
+            ? Deferred.await(runtimeReady).pipe(
+                Effect.flatMap((runtime) =>
+                  runtime.respondToRuntimeRequest({
+                    requestId: event.runtimeRequest.id,
+                    decision: "decline",
+                  }),
+                ),
+                Effect.orDie,
+              )
+            : Effect.void,
+        undefined,
+        undefined,
+        (entry) =>
+          entry.label === "approval-declined"
+            ? Deferred.succeed(approvalDeclined, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* Deferred.succeed(runtimeReady, harness.runtime);
+      yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      });
+      const offer = harness.continuationRequests[0]!;
+      const commitAllowed = yield* Deferred.make<void>();
+      const dispatch = yield* offer.dispatchIfCurrent!(Deferred.await(commitAllowed)).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* TestClock.adjust("2 minutes");
+      yield* Deferred.succeed(commitAllowed, undefined);
+      assert.isTrue(Option.isSome(yield* Fiber.join(dispatch)));
+      const turnInput = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("slow-dispatch"),
+        text: offer.detail!,
+      });
+      yield* harness.runtime.startTurn({
+        ...turnInput,
+        message: { ...turnInput.message, messageId: offer.messageId!, creationSource: "provider" },
+      });
+      yield* harness.firstTerminal;
+      yield* Deferred.await(approvalDeclined);
+      assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
     }).pipe(
       Effect.provide(
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
@@ -4705,6 +4852,102 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ["running", "completed"],
         );
         assert.equal(items[0]?.id, items[1]?.id);
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  // Regression: the order Codex sent when realtime input hit a running /compact.
+  it.effect("completes a compaction that Codex failed only for a rejected realtime steer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "compact-steer-thread";
+        const nativeTurnId = "compact-steer-turn";
+        const item = { type: "contextCompaction", id: "compact-steer-item" };
+        const error = {
+          message: "failed to submit turn input: ActiveTurnNotSteerable { turn_kind: Compact }",
+          codexErrorInfo: "badRequest",
+          additionalDetails: null,
+        };
+        const transcript = makeCodexReplayTranscript({
+          scenario: "compaction-rejected-steer",
+          entries: [
+            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "unused" }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 3,
+                method: "thread/compact/start",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 3, result: {} } },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "turn/started",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "inProgress" }),
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "item/started",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId, item },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "error",
+                params: {
+                  error,
+                  willRetry: false,
+                  threadId: nativeThreadId,
+                  turnId: "rejected-realtime-turn",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "item/completed",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId, item },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: {
+                    ...makeCodexReplayTurn({ id: nativeTurnId, status: "failed" }),
+                    error,
+                  },
+                },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.compactThread!(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("compact-steer-attempt"),
+            text: "/compact",
+          }),
+        );
+        yield* harness.firstTerminal;
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
       }).pipe(
         Effect.provide(

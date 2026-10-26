@@ -1223,6 +1223,7 @@ interface ActiveCodexTurnContext {
   realtimeInputItemId?: string;
   realtimeInputMessageId?: ProviderAdapter.ProviderAdapterV2TurnMessage["messageId"];
   closedCommandItemIds?: ReadonlySet<string>;
+  compactionCompleted?: boolean;
   latestProviderFailure?: {
     readonly nativeMessage: string;
     readonly nativeCode: string | null;
@@ -5288,12 +5289,25 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ...(userItem === undefined ? {} : { userItemId: userItem.id }),
               });
               const held = realtimeTurns.get(payload.turn.id)!;
-              // Covers dropped dispatches, cancelled queues and provider switches
-              // without coupling the adapter to every orchestration exit.
-              yield* Deferred.await(held.ready).pipe(
+              // Bounds unowned turns (cancelled queues, provider switches). The
+              // deadline restarts once a dispatch settles so a slow commit keeps
+              // its turn. Codex opens voice turns only on an idle native thread,
+              // so a run still queued at the second deadline is rare; it fails.
+              const expire = Effect.suspend(() =>
+                held.adopting ? Effect.void : releaseRealtimeTurn(payload.turn.id),
+              );
+              const deadline = Deferred.await(held.ready).pipe(
                 Effect.timeout("30 seconds"),
+                Effect.asVoid,
+              );
+              yield* deadline.pipe(
                 Effect.catch(() =>
-                  held.adopting ? Effect.void : releaseRealtimeTurn(payload.turn.id),
+                  held.dispatching
+                    ? Deferred.await(held.dispatched).pipe(
+                        Effect.andThen(deadline),
+                        Effect.catch(() => expire),
+                      )
+                    : expire,
                 ),
                 Effect.forkIn(scope),
               );
@@ -5479,6 +5493,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           );
           if (status === "running") context.runningCompactionItemIds.add(nativeItemId);
           else context.runningCompactionItemIds.delete(nativeItemId);
+          if (status === "completed") context.compactionCompleted = true;
           yield* emitProviderEvent({
             type: "turn_item.updated",
             driver: CODEX_PROVIDER,
@@ -7000,7 +7015,17 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               yield* Effect.logDebug("Codex turn completion does not belong to its native thread.");
               return;
             }
-            const nativeStatus = mapCodexTurnStatus(payload.turn.status);
+            // Codex fails a compact turn when realtime input tries to steer into
+            // it, even after the compaction itself landed. That input belongs to
+            // another turn; the compaction succeeded.
+            const rejectedSteerOnly =
+              context.compactionCompleted === true &&
+              payload.turn.error?.message.includes(
+                "ActiveTurnNotSteerable { turn_kind: Compact }",
+              ) === true;
+            const nativeStatus = rejectedSteerOnly
+              ? "completed"
+              : mapCodexTurnStatus(payload.turn.status);
             const status =
               nativeStatus === "completed" &&
               (yield* Ref.get(interruptingNativeTurns)).has(payload.turn.id)
@@ -7011,7 +7036,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeTurnId: payload.turn.id,
               status,
               completedAt: codexTimestamp(payload.turn.completedAt),
-              ...(payload.turn.error?.message === undefined
+              ...(rejectedSteerOnly || payload.turn.error?.message === undefined
                 ? {}
                 : {
                     failureMessage: payload.turn.error.message,

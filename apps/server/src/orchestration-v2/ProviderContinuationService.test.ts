@@ -130,6 +130,30 @@ describe("ProviderContinuationService", () => {
     }),
   );
 
+  // Regression: later spoken requests waited behind a commit stuck on the DB
+  // writer until their adapter holds expired, then vanished.
+  it.effect("dispatches a spoken request while an earlier one is still committing", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* Queue.unbounded<unknown>();
+      const stuck = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        yield* requests.offer({
+          ...request(() => Deferred.await(stuck).pipe(Effect.as(Option.none()))),
+          origin: "voice",
+          detail: "First",
+        });
+        yield* requests.offer({ ...request(), origin: "voice", detail: "Second" });
+        assert.deepInclude(yield* Queue.take(dispatched), { text: "Second" });
+      }).pipe(
+        Effect.provide(
+          layerTest({ dispatched, getThreadRecords: () => Effect.succeed(projection) }),
+        ),
+        Effect.scoped,
+      );
+    }),
+  );
+
   it.effect("clears an adapter offer after a dispatch failure", () =>
     Effect.gen(function* () {
       const cleared = yield* Deferred.make<void>();
