@@ -38,7 +38,7 @@ app.whenReady().then(async () => {
   });
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     // The keyword worker keeps the policy the harness server sent (taken from vercel.ts).
-    if (details.url.endsWith("/voice/kws/kws.worker.js")) {
+    if (details.url.endsWith("/voice/kws/vendor/kws.worker.js")) {
       callback({ responseHeaders: details.responseHeaders });
       return;
     }

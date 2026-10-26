@@ -1,6 +1,24 @@
 # Local keyword detector assets
 
-These files serve the opt-in voice privacy keywords. `kws.worker.js` and `capture.worklet.js` are ours. Everything in `vendor/` is third-party and pinned by SHA-256 in `manifest.json`. The page checks every vendor file against it, including the two glue scripts the worker loads with `importScripts`, before starting the worker. The manifest is served from the same origin, so this catches corruption and version skew, not a tampered host. Notices are in `THIRD_PARTY_NOTICES.txt`.
+These files serve the opt-in voice privacy keywords. `worker.src.js` and `capture.worklet.js` are ours. Everything in `vendor/` is third-party or generated, and each file is pinned by SHA-256 in `manifest.json`. That includes `vendor/kws.worker.js`, which is generated (see below). The page checks the worker script, WASM and model files against the manifest before starting the worker. The manifest is served from the same origin, so this catches corruption and version skew, not a tampered host. Notices are in `THIRD_PARTY_NOTICES.txt`.
+
+## Worker: `vendor/kws.worker.js`
+
+The worker is one file, so it loads no scripts and its CSP can allow none. After editing `worker.src.js`, regenerate it and the manifest from this directory:
+
+```sh
+{
+  echo '// Generated from worker.src.js and the pinned sherpa-onnx glue; see BUILD.md. Do not edit.'
+  echo 'function loadEngine(Module) {'
+  cat vendor/sherpa-onnx-wasm-kws-main.js; echo; cat vendor/sherpa-onnx-kws.js
+  echo 'return createKws;'
+  echo '}'
+  echo '(() => {'; echo '"use strict";'; cat worker.src.js; echo '})();'
+} > vendor/kws.worker.js
+# then rewrite manifest.json "files" with each vendor/ file's sha256
+```
+
+The two glue files stay in `vendor/` as inputs to this step. At runtime nothing loads them.
 
 ## Engine: `vendor/sherpa-onnx-wasm-kws-main.{js,wasm}` and `vendor/sherpa-onnx-kws.js`
 
@@ -59,12 +77,10 @@ These come from https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-mode
 
 ## Worker CSP
 
-The worker's response carries `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'`. `'wasm-unsafe-eval'` is there only to compile the engine, and it applies to this worker alone. Three places send this policy:
+The worker's response carries `default-src 'none'; script-src 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'`. With no script source allowed, `importScripts`, dynamic `import()` and nested workers are all blocked. `'wasm-unsafe-eval'` is there only to compile the engine, and it applies to this worker alone. Three places send this policy:
 
 - the desktop protocol in `apps/desktop/src/electron/ElectronProtocol.ts`;
 - the T3 server's static handler in `apps/server/src/http.ts`;
 - the hosted web app in `apps/web/vercel.ts`.
 
-The Vite dev server does not send it, so dev is unenforced.
-
-Once initialised, the worker also replaces `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `WebTransport`, `importScripts` and `Worker` with `undefined`.
+The Vite dev server sends no policy. In dev, the worker's own guard is all there is: it deletes `importScripts` from its prototype chain and replaces `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `WebTransport` and `Worker` with `undefined`. JavaScript cannot remove dynamic `import()`, so in dev a same-origin GET stays possible.

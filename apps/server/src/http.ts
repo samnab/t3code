@@ -56,7 +56,7 @@ import {
 } from "./httpCors.ts";
 
 const KEYWORD_WORKER_CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'";
+  "default-src 'none'; script-src 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'";
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
@@ -658,7 +658,7 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
     // The voice keyword detector worker runs local inference only; see
     // apps/web/public/voice/kws/BUILD.md. The same policy is set in ElectronProtocol and vercel.ts.
     const policy: Record<string, string> =
-      relativePath === "voice/kws/kws.worker.js"
+      relativePath === "voice/kws/vendor/kws.worker.js"
         ? { "Content-Security-Policy": KEYWORD_WORKER_CONTENT_SECURITY_POLICY }
         : {};
     const headers: Record<string, string> = {

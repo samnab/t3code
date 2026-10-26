@@ -1,14 +1,24 @@
-// Classic worker so it can importScripts the pinned sherpa-onnx glue. The parent
-// (apps/web/src/voice/kws/keywordDetector.ts) supplies hash-checked WASM and model bytes, so no
-// network is needed. It posts only commands and acks, never recognised text or audio.
+// Source of the keyword worker. BUILD.md concatenates it after the sherpa-onnx glue into
+// vendor/kws.worker.js, so the worker loads no scripts and its CSP can allow none. The parent
+// (apps/web/src/voice/kws/keywordDetector.ts) supplies hash-checked WASM and model bytes.
 
 // In: init {wasm, encoder, decoder, joiner, tokens}; reset {generation, sampleRate}; audio
 // {generation, samples}. Out: ready | failed; processed and command {generation, endSample}, one
 // processed per audio message. endSample counts capture-rate samples since the reset.
-"use strict";
 
-// Belt and braces under the worker CSP (connect-src 'none'): nothing below may reach the network.
-for (const name of ["fetch", "XMLHttpRequest", "WebSocket", "EventSource", "WebTransport"]) {
+// Belt and braces under the worker CSP, and the only guard where none is sent (Vite dev). Dynamic
+// import() cannot be removed from JavaScript; only the CSP's script-src blocks it.
+for (let proto = self; proto; proto = Object.getPrototypeOf(proto)) {
+  if (Object.prototype.hasOwnProperty.call(proto, "importScripts")) delete proto.importScripts;
+}
+for (const name of [
+  "fetch",
+  "XMLHttpRequest",
+  "WebSocket",
+  "EventSource",
+  "WebTransport",
+  "Worker",
+]) {
   try {
     Object.defineProperty(self, name, { value: undefined, configurable: false, writable: false });
   } catch {}
@@ -83,16 +93,17 @@ function fail() {
 }
 
 async function init(message) {
-  // The pinned build is not modularised: it reads a global Module config when its script runs.
+  // The glue is not modularised: loadEngine (prepended by BUILD.md) runs it with this config.
+  let createKws = null;
   const Module = await new Promise((resolve, reject) => {
-    self.Module = {
+    const config = {
       wasmBinary: message.wasm,
       print: () => {},
       printErr: () => {},
       onAbort: reject,
-      onRuntimeInitialized: () => resolve(self.Module),
+      onRuntimeInitialized: () => resolve(config),
     };
-    importScripts("./vendor/sherpa-onnx-wasm-kws-main.js", "./vendor/sherpa-onnx-kws.js");
+    createKws = loadEngine(config);
   });
   const files = {
     "encoder.onnx": message.encoder,
@@ -103,7 +114,7 @@ async function init(message) {
   for (const [name, bytes] of Object.entries(files)) {
     Module.FS_createDataFile("/", name, new Uint8Array(bytes), true, false, false);
   }
-  kws = self.createKws(Module, {
+  kws = createKws(Module, {
     featConfig: { samplingRate: MODEL_RATE, featureDim: 80 },
     modelConfig: {
       transducer: { encoder: "/encoder.onnx", decoder: "/decoder.onnx", joiner: "/joiner.onnx" },
@@ -149,9 +160,6 @@ self.addEventListener("message", (event) => {
     try {
       if (message.type === "init") {
         await init(message);
-        // Same-origin script loads and nested workers are the last ways out once running.
-        self.importScripts = undefined;
-        self.Worker = undefined;
         self.postMessage({ type: "ready" });
       } else if (kws === null) {
         fail();

@@ -1,9 +1,9 @@
 import { matchers, routes, type Transform, type VercelConfig } from "@vercel/config/v1";
 
 const ROUTER_HOST = "app.t3.codes";
-const KEYWORD_WORKER_PATH = "/voice/kws/kws.worker.js";
+const KEYWORD_WORKER_PATH = "/voice/kws/vendor/kws.worker.js";
 const KEYWORD_WORKER_CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'";
+  "default-src 'none'; script-src 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'";
 const HOSTED_WEB_CHANNEL_COOKIE = "t3code_web_channel";
 const LATEST_ORIGIN = "https://latest.app.t3.codes";
 const NIGHTLY_ORIGIN = "https://nightly.app.t3.codes";

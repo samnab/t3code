@@ -20,7 +20,7 @@ const workerRoute: unknown = config.routes?.find(
     typeof route === "object" &&
     route !== null &&
     "src" in route &&
-    route.src === "/voice/kws/kws.worker.js",
+    route.src === "/voice/kws/vendor/kws.worker.js",
 );
 const WORKER_CSP =
   typeof workerRoute === "object" &&
@@ -33,8 +33,7 @@ const WORKER_CSP =
     : null;
 if (WORKER_CSP === null) throw new Error("vercel.ts has no keyword worker policy");
 // Every request the keyword detector path may make; anything else under voice/kws is a finding.
-const KEYWORD_ASSETS =
-  /\/voice\/kws\/(kws\.worker\.js|capture\.worklet\.js|manifest\.json|vendor\/[\w.-]+)$/;
+const KEYWORD_ASSETS = /\/voice\/kws\/(capture\.worklet\.js|manifest\.json|vendor\/[\w.-]+)$/;
 const webDir = NodePath.resolve(here, "../..");
 const out = process.env.VOICE_PRIVACY_ARTIFACTS ?? "/tmp/t3-voice-privacy-egress";
 const dist = NodePath.join(out, "dist");
@@ -61,7 +60,7 @@ const server = NodeHttp.createServer((request, response) => {
       : "application/octet-stream";
   const headers: Record<string, string> = { "content-type": type };
   // Same worker-only policy as apps/desktop/src/electron/ElectronProtocol.ts.
-  if (pathname.endsWith("/voice/kws/kws.worker.js"))
+  if (pathname.endsWith("/voice/kws/vendor/kws.worker.js"))
     headers["content-security-policy"] = WORKER_CSP;
   response.writeHead(200, headers).end(NodeFS.readFileSync(file));
 });

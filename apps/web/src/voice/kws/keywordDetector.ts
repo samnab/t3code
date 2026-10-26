@@ -50,11 +50,10 @@ async function loadVerified() {
     if (files[name] !== (await sha256(bytes))) throw new Error(`Keyword asset ${name} mismatch`);
     return bytes;
   };
-  // The worker importScripts the two glue files itself; checking them here catches a corrupt or
-  // mismatched copy, not a hostile server (which serves this page's code too).
-  const [, , wasm, encoder, decoder, joiner, tokens] = await Promise.all([
-    load("sherpa-onnx-wasm-kws-main.js"),
-    load("sherpa-onnx-kws.js"),
+  // The browser fetches the worker script itself; checking it here catches a corrupt or mismatched
+  // copy, not a hostile server (which serves this page's code too).
+  const [, wasm, encoder, decoder, joiner, tokens] = await Promise.all([
+    load("kws.worker.js"),
     load(MODEL_FILES.wasm),
     load(MODEL_FILES.encoder),
     load(MODEL_FILES.decoder),
@@ -83,7 +82,7 @@ export function createKeywordDetector(events: {
     events.failed();
   };
   const start = () => {
-    const next = new Worker(`${ASSETS}kws.worker.js`);
+    const next = new Worker(`${ASSETS}vendor/kws.worker.js`);
     worker = next;
     let resolveReady: () => void = () => {};
     let rejectReady: (error: Error) => void = () => {};

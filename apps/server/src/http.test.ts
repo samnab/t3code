@@ -214,14 +214,14 @@ it.layer(
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-kws-" });
-      yield* fs.makeDirectory(path.join(staticDir, "voice/kws"), { recursive: true });
-      yield* fs.writeFileString(path.join(staticDir, "voice/kws/kws.worker.js"), "");
+      yield* fs.makeDirectory(path.join(staticDir, "voice/kws/vendor"), { recursive: true });
+      yield* fs.writeFileString(path.join(staticDir, "voice/kws/vendor/kws.worker.js"), "");
       yield* fs.writeFileString(path.join(staticDir, "app.js"), "");
       const request = yield* makeStaticRequest(staticDir);
 
-      const worker = yield* request("/voice/kws/kws.worker.js");
+      const worker = yield* request("/voice/kws/vendor/kws.worker.js");
       expect(worker.headers["content-security-policy"]).toBe(
-        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'",
+        "default-src 'none'; script-src 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'",
       );
       const app = yield* request("/app.js");
       expect(app.headers["content-security-policy"]).toBeUndefined();
