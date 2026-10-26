@@ -87,6 +87,8 @@ const microphoneOut = generator.createMediaStreamDestination();
 oscillator.connect(amplitude).connect(microphoneOut);
 oscillator.start();
 
+// Marker gain under the spoken resume phrase, in case 6 and its detector control 0b.
+const R_UNDER_SPEECH = 0.1;
 // R marks the spoken resume phrase: it plays under the phrase, which must never reach the new call.
 const FREQUENCY = { A: 700, C: 3300, B0: 1900, B1: 2300, R: 1300 } as const;
 const NONCE = Array.from(crypto.getRandomValues(new Uint8Array(4)), (byte) =>
@@ -723,6 +725,31 @@ async function caseBDetectable(): Promise<CaseResult> {
   return { ...result, checks, ok: result.error === undefined && checks.every((check) => check.ok) };
 }
 
+/** Detector control for R: the resume phrase over R, mixed as in case 6, is detected when sent. */
+async function caseRDetectable(): Promise<CaseResult> {
+  const result = await withCase(
+    "0b. detector control: resume phrase over R sent while transmitting is detected",
+    async (_, modes) => {
+      const handle = makeController();
+      await startTransmitting(handle);
+      setMarker("R");
+      await speak(resumePhraseUrl, R_UNDER_SPEECH);
+      setMarker(null);
+      handle.controller.end();
+      await until(() => mode(handle) === "off", "off");
+      modes.push(...handle.modes);
+    },
+  );
+  const rx0 = byLabel(result.analyses, "rx0");
+  // Tap labels count across cases; this case records exactly one.
+  const tap = result.analyses.find((analysis) => analysis.label.startsWith("tap"));
+  const checks = [
+    { name: "R detected at rx0", ok: (rx0?.r ?? 0) >= 20, detail: rx0 },
+    { name: "R detected at the post-gate tap", ok: (tap?.r ?? 0) >= 20, detail: tap },
+  ];
+  return { ...result, checks, ok: result.error === undefined && checks.every((check) => check.ok) };
+}
+
 /** Informational: B keeps playing through the resume negotiation, until "transmitting". */
 async function caseResumeBleed(): Promise<CaseResult> {
   return withCase(
@@ -1251,7 +1278,7 @@ async function caseKeywords(): Promise<CaseResult> {
       setMarker("R");
       attempts.resume = await sayUntil(
         resumePhraseUrl,
-        0.1,
+        R_UNDER_SPEECH,
         () => snapshot().listening === "armed",
       );
       setMarker("B");
@@ -1262,7 +1289,11 @@ async function caseKeywords(): Promise<CaseResult> {
       await until(() => snapshot().listening === "listening", "arm expiry", 12_000);
       checks.push({ name: "arming expires", ok: providerMode() === "paused" });
       setMarker("R");
-      attempts.rearm = await sayUntil(resumePhraseUrl, 0.1, () => snapshot().listening === "armed");
+      attempts.rearm = await sayUntil(
+        resumePhraseUrl,
+        R_UNDER_SPEECH,
+        () => snapshot().listening === "armed",
+      );
       setMarker("B");
       syntheticChord();
       syntheticChord();
@@ -1274,9 +1305,18 @@ async function caseKeywords(): Promise<CaseResult> {
       });
       if (!window.voicePrivacyPressTrusted)
         throw new Error("runner did not supply a trusted key press");
+      // Every microphone grant after the first call's belongs to local listening.
+      const detectorTracks = issuedTracks.slice(1);
       markerOnEnable = "C";
       await window.voicePrivacyPressTrusted();
       await until(() => providerMode() === "transmitting", "transmitting after trusted confirm");
+      checks.push({
+        name: "every detector-only track ended after the trusted confirm",
+        ok:
+          detectorTracks.length > 0 &&
+          detectorTracks.every((track) => track.readyState === "ended"),
+        detail: detectorTracks.map((track) => track.readyState),
+      });
       await sleep(1_000);
       checks.push({
         name: "A at rx0, C at rx1",
@@ -1286,7 +1326,13 @@ async function caseKeywords(): Promise<CaseResult> {
       });
       exposed!.end();
       await until(() => providerMode() === "off", "off");
-      checks.push({ name: "mic off ends local listening", ok: snapshot().listening === "off" });
+      checks.push({
+        name: "mic off ends local listening and every microphone track",
+        ok:
+          snapshot().listening === "off" &&
+          issuedTracks.every((track) => track.readyState === "ended"),
+        detail: issuedTracks.map((track) => track.readyState),
+      });
       checks.push({ name: "utterances needed per keyword", ok: true, detail: attempts });
     } finally {
       markerOnEnable = null;
@@ -1303,6 +1349,7 @@ async function runAll(): Promise<HarnessReport> {
   const cases: Array<CaseResult> = [];
   const environment = await probe();
   cases.push(await caseBDetectable());
+  cases.push(await caseRDetectable());
   cases.push(await caseAbc());
   cases.push(await caseResumeBleed());
   cases.push(...(await caseRaces()));
