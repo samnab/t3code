@@ -16,6 +16,8 @@ import {
   useRealtimeVoice,
 } from "../../src/components/voice/RealtimeVoiceProvider";
 import { harnessOwner } from "./owner";
+import pausePhraseUrl from "./fixtures/pause-phrase.wav?url";
+import resumePhraseUrl from "./fixtures/resume-phrase.wav?url";
 import { providerHooks, randomUUID } from "./stubs";
 
 declare global {
@@ -123,6 +125,73 @@ function setMarker(next: Marker) {
     }
   }
 }
+
+// The transport's gate is the connection into the sender's destination node. Switching the
+// marker inside that call puts the B/C boundary at the real enable instant, for transports the
+// harness does not construct itself (the provider's).
+const nativeConnect = AudioNode.prototype.connect;
+AudioNode.prototype.connect = function (this: AudioNode, ...args: Array<never>) {
+  const [target] = args as Array<unknown>;
+  if (markerOnEnable !== null && target instanceof MediaStreamAudioDestinationNode) {
+    note(`gate connect at generator ${generator.currentTime.toFixed(4)}`);
+    setMarker(markerOnEnable);
+    markerOnEnable = null;
+  }
+  return Reflect.apply(nativeConnect, this, args);
+} as typeof AudioNode.prototype.connect;
+
+/**
+ * Speaks a synthetic TTS phrase (macOS `say`, not human) into the synthetic microphone until
+ * `heard()`, at most three times. The detector misses some utterances (REPORT.md: 40/48 on the
+ * TTS set); attempts are reported, never hidden.
+ */
+async function sayUntil(url: string, markerGain: number, heard: () => boolean) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await speak(url, markerGain);
+    try {
+      await until(heard, "keyword", 2_500);
+      return attempt;
+    } catch {}
+  }
+  throw new Error(`keyword not detected in 3 utterances of ${url}`);
+}
+
+/** Plays a synthetic TTS phrase (macOS `say`, not human) into the synthetic microphone. */
+async function speak(url: string, markerGain: number) {
+  const buffer = await generator.decodeAudioData(await (await fetch(url)).arrayBuffer());
+  note(`decoded ${buffer.duration.toFixed(2)}s`);
+  const voice = generator.createBufferSource();
+  voice.buffer = buffer;
+  const level = generator.createGain();
+  level.gain.value = 0.8;
+  voice.connect(level).connect(microphoneOut);
+  amplitude.gain.setValueAtTime(markerGain, generator.currentTime);
+  note(`speak ${url}`);
+  voice.start();
+  await new Promise((resolve) => voice.addEventListener("ended", resolve, { once: true }));
+  note(`spoken; keyword blocks ${keywordWorkerStats.processed}`);
+  if (marker !== null) amplitude.gain.setValueAtTime(0.5, generator.currentTime);
+}
+
+// Observes the keyword worker's replies (commands and acks only) for the timeline.
+const keywordWorkerStats = { processed: 0, commands: [] as Array<string>, failed: 0, ready: 0 };
+const NativeWorker = window.Worker;
+window.Worker = class extends NativeWorker {
+  constructor(url: string | URL, options?: WorkerOptions) {
+    super(url, options);
+    this.addEventListener("message", (event: MessageEvent<{ type: string; command?: string }>) => {
+      const { type, command } = event.data;
+      if (type === "processed") keywordWorkerStats.processed += 1;
+      else if (type === "command") {
+        keywordWorkerStats.commands.push(command ?? "");
+        note(`keyword ${command}`);
+      } else if (type === "failed" || type === "ready") {
+        keywordWorkerStats[type] += 1;
+        note(`keyword worker ${type}`);
+      }
+    });
+  }
+};
 
 const realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 let microphoneGate: Promise<void> | null = null;
@@ -1121,6 +1190,71 @@ async function probe() {
   return result;
 }
 
+/**
+ * Keywords on: a spoken pause, B through local-only listening, a spoken resume that only arms
+ * (and expires), an untrusted confirm that stays private, then a trusted confirm. C starts at the
+ * real gate connect, so any B found was emitted before the new call's gate opened.
+ */
+async function caseKeywords(): Promise<CaseResult> {
+  return withCase("6. keywords: spoken pause, private listening, armed resume", async (checks) => {
+    Reflect.deleteProperty(window, "desktopBridge");
+    const unmount = mountProvider();
+    const snapshot = () => exposed!.snapshot;
+    try {
+      await until(() => exposed !== null, "provider");
+      exposed!.setKeywords(true);
+      await until(() => snapshot().keywords, "keywords on");
+      exposed!.start(owner.environmentId, owner.threadId);
+      await until(() => providerMode() === "transmitting", "transmitting");
+      setMarker("A");
+      await sleep(1_500);
+      const attempts: Record<string, number> = {};
+      attempts.pause = await sayUntil(pausePhraseUrl, 0, () => providerMode() === "paused");
+      setMarker("B");
+      await until(() => snapshot().listening === "listening", "local listening");
+      checks.push({ name: "spoken pause pauses and listens locally", ok: startCalls === 1 });
+      await sleep(3_000);
+      attempts.resume = await sayUntil(resumePhraseUrl, 0, () => snapshot().listening === "armed");
+      checks.push({
+        name: "spoken resume only arms",
+        ok: providerMode() === "paused" && startCalls === 1,
+      });
+      await until(() => snapshot().listening === "listening", "arm expiry", 12_000);
+      checks.push({ name: "arming expires", ok: providerMode() === "paused" });
+      attempts.rearm = await sayUntil(resumePhraseUrl, 0, () => snapshot().listening === "armed");
+      syntheticChord();
+      syntheticChord();
+      await sleep(1_000);
+      checks.push({
+        name: "untrusted confirm stays armed and private",
+        ok: snapshot().listening === "armed" && providerMode() === "paused" && startCalls === 1,
+        detail: { mode: providerMode(), listening: snapshot().listening, startCalls },
+      });
+      if (!window.voicePrivacyPressTrusted)
+        throw new Error("runner did not supply a trusted key press");
+      markerOnEnable = "C";
+      await window.voicePrivacyPressTrusted();
+      await until(() => providerMode() === "transmitting", "transmitting after trusted confirm");
+      await sleep(1_000);
+      checks.push({
+        name: "A at rx0, C at rx1",
+        ok:
+          (byLabel(recordings.map(analyze), "rx0")?.a ?? 0) > 10 &&
+          (byLabel(recordings.map(analyze), "rx1")?.c ?? 0) > 10,
+      });
+      exposed!.end();
+      await until(() => providerMode() === "off", "off");
+      checks.push({ name: "mic off ends local listening", ok: snapshot().listening === "off" });
+      checks.push({ name: "utterances needed per keyword", ok: true, detail: attempts });
+    } finally {
+      markerOnEnable = null;
+      exposed?.setKeywords(false);
+      unmount();
+      await sleep(300);
+    }
+  });
+}
+
 async function runAll(): Promise<HarnessReport> {
   await generator.resume();
   await analysisContext.resume();
@@ -1134,6 +1268,7 @@ async function runAll(): Promise<HarnessReport> {
   cases.push(await caseShortcutTrustDesktop());
   cases.push(...(await caseErrors()));
   cases.push(await caseCycles());
+  cases.push(await caseKeywords());
   return {
     userAgent: navigator.userAgent,
     nonce: NONCE,

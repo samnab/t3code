@@ -37,6 +37,8 @@ function stubAppState(): Plugin {
 export default defineConfig({
   root: here,
   base: "./",
+  // The shipped keyword detector assets (voice/kws) live in the web public dir.
+  publicDir: NodePath.resolve(here, "../../public"),
   plugins: [stubAppState(), react()],
   resolve: { tsconfigPaths: true, dedupe: ["react", "react-dom"] },
   build: {

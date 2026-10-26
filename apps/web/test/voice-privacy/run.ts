@@ -13,6 +13,10 @@ import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 
 const here = import.meta.dirname;
+const WORKER_CSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'";
+// Every request the keyword detector path may make; anything else under voice/kws is a finding.
+const KEYWORD_ASSETS =
+  /\/voice\/kws\/(kws\.worker\.js|capture\.worklet\.js|manifest\.json|vendor\/[\w.-]+)$/;
 const webDir = NodePath.resolve(here, "../..");
 const out = process.env.VOICE_PRIVACY_ARTIFACTS ?? "/tmp/t3-voice-privacy-egress";
 const dist = NodePath.join(out, "dist");
@@ -37,7 +41,11 @@ const server = NodeHttp.createServer((request, response) => {
     : file.endsWith(".html")
       ? "text/html"
       : "application/octet-stream";
-  response.writeHead(200, { "content-type": type }).end(NodeFS.readFileSync(file));
+  const headers: Record<string, string> = { "content-type": type };
+  // Same worker-only policy as apps/desktop/src/electron/ElectronProtocol.ts.
+  if (pathname.endsWith("/voice/kws/kws.worker.js"))
+    headers["content-security-policy"] = WORKER_CSP;
+  response.writeHead(200, headers).end(NodeFS.readFileSync(file));
 });
 await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 const address = server.address();
@@ -136,7 +144,14 @@ for (const [name, run] of runs) {
   const report = await run();
   const foreign = (report.requests ?? []).filter((url) => !url.startsWith(origin));
   const findings = nonceFindings(report, report.consoleMessages ?? []);
-  results[name] = { ...report, foreignRequests: foreign, nonceFindings: findings };
+  const keywordRequests = (report.requests ?? []).filter((url) => url.includes("/voice/kws/"));
+  const unexpectedKeyword = keywordRequests.filter((url) => !KEYWORD_ASSETS.test(url));
+  results[name] = {
+    ...report,
+    foreignRequests: foreign,
+    nonceFindings: findings,
+    keywordRequests,
+  };
   console.log(`\n== ${name} ==`);
   if (report.error) console.log(`ERROR ${report.error}`);
   const informational = (title: string) => title.includes("(measurement)");
@@ -149,12 +164,17 @@ for (const [name, run] of runs) {
     `${foreign.length === 0 ? "PASS" : "FAIL"} no requests outside the harness origin (${report.requests?.length ?? 0} total)`,
   );
   console.log(
+    `${unexpectedKeyword.length === 0 && keywordRequests.length > 0 ? "PASS" : "FAIL"} keyword path requested only its pinned assets (${keywordRequests.length} requests)`,
+  );
+  console.log(
     `${findings.length === 0 ? "PASS" : "FAIL"} B nonce absent from ${report.egress?.length ?? 0} captured payloads and console`,
   );
   if (
     report.error ||
     foreign.length > 0 ||
     findings.length > 0 ||
+    unexpectedKeyword.length > 0 ||
+    keywordRequests.length === 0 ||
     (report.cases ?? []).some((result) => !result.ok && !informational(result.name)) ||
     (report.cases ?? []).length === 0
   )
