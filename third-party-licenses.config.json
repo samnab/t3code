@@ -222,7 +222,7 @@
     },
     {
       "bundles": ["desktop", "web"],
-      "license": "Apache-2.0 AND MIT AND BSD-3-Clause AND BSD-2-Clause AND MPL-2.0",
+      "license": "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND MIT AND NCSA AND BSD-3-Clause AND BSD-2-Clause AND MPL-2.0",
       "name": "sherpa-onnx keyword spotting (WebAssembly) and GigaSpeech 3.3M KWS model",
       "sourceUrl": "https://github.com/k2-fsa/sherpa-onnx/tree/v2.0.0",
       "noticeFile": "apps/web/public/voice/kws/THIRD_PARTY_NOTICES.txt"
