@@ -30,7 +30,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function fixture(holdAt?: Stage, requireMountedOwner = false) {
+function fixture(holdAt?: Stage, requireMountedOwner = false, keywordsEnabled = false) {
   const entered = deferred();
   const gate = deferred();
   const operations: string[] = [];
@@ -97,7 +97,19 @@ function fixture(holdAt?: Stage, requireMountedOwner = false) {
       };
     },
   );
+  const localListening = {
+    failStart: false,
+    start: vi.fn(() => {
+      operations.push("listen");
+      if (localListening.failStart) throw new Error("worklet failed");
+    }),
+    stop: vi.fn(() => {
+      operations.push("unlisten");
+    }),
+  };
   const controller = createRealtimeVoiceController({
+    keywordsEnabled,
+    localListening,
     createOperationId,
     validateOwner,
     now: () => now,
@@ -150,6 +162,7 @@ function fixture(holdAt?: Stage, requireMountedOwner = false) {
   });
   return {
     controller,
+    localListening,
     createOperationId,
     validateOwner,
     expiries,
@@ -893,5 +906,101 @@ describe("local privacy pause", () => {
     expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", owner: null, reason: null });
     await f.controller.resume(f.owner);
     expect(f.transports).toHaveLength(2);
+  });
+
+  describe("local keywords", () => {
+    const pausedWithKeywords = async () => {
+      const f = fixture(undefined, false, true);
+      await f.controller.start(f.owner);
+      f.controller.pause();
+      await whenMode(f.controller, "paused");
+      return f;
+    };
+
+    it("listens only after the call's capture closed and stops before resume opens a new one", async () => {
+      const f = await pausedWithKeywords();
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "listening" });
+      expect(f.operations.indexOf("close")).toBeLessThan(f.operations.indexOf("listen"));
+      await f.controller.resume(f.owner);
+      expect(f.operations.lastIndexOf("unlisten")).toBeLessThan(
+        f.operations.lastIndexOf("microphone"),
+      );
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", listening: "off" });
+    });
+
+    it("never opens sending from a keyword", async () => {
+      const f = await pausedWithKeywords();
+      f.setNow(f.initialNow + 5_000);
+      f.controller.armResume();
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "armed" });
+      expect(f.transports).toHaveLength(1);
+      expect(f.startProvider).toHaveBeenCalledOnce();
+    });
+
+    it("ignores the resume phrase during the echo tail after the call closed", async () => {
+      const f = await pausedWithKeywords();
+      f.controller.armResume();
+      expect(f.controller.getSnapshot().listening).toBe("listening");
+    });
+
+    it("disarms when the confirm window expires", async () => {
+      const f = await pausedWithKeywords();
+      f.setNow(f.initialNow + 5_000);
+      f.controller.armResume();
+      const arm = f.expiries.at(-1)!;
+      expect(arm.at).toBe(f.initialNow + 15_000);
+      arm.expire();
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "listening" });
+    });
+
+    it("ignores a second resume phrase as a confirm", async () => {
+      const f = await pausedWithKeywords();
+      f.setNow(f.initialNow + 5_000);
+      f.controller.armResume();
+      f.controller.armResume();
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "armed" });
+      expect(f.transports).toHaveLength(1);
+    });
+
+    it("denies on detector failure, paused or live, and never resumes", async () => {
+      const f = await pausedWithKeywords();
+      f.controller.localListeningFailed();
+      expect(f.controller.getSnapshot()).toMatchObject({
+        mode: "paused",
+        listening: "unavailable",
+      });
+      expect(f.localListening.stop).toHaveBeenCalledOnce();
+      f.controller.armResume();
+      expect(f.controller.getSnapshot().listening).toBe("unavailable");
+
+      const g = fixture(undefined, false, true);
+      await g.controller.start(g.owner);
+      g.controller.localListeningFailed();
+      expect(g.transports[0]?.sending).toBe(false);
+      await whenMode(g.controller, "paused");
+      expect(g.controller.getSnapshot()).toMatchObject({ listening: "unavailable" });
+      expect(g.localListening.start).not.toHaveBeenCalled();
+
+      const h = fixture(undefined, false, true);
+      h.localListening.failStart = true;
+      await h.controller.start(h.owner);
+      h.controller.pause();
+      await whenMode(h.controller, "paused");
+      expect(h.controller.getSnapshot().listening).toBe("unavailable");
+    });
+
+    it("stays exactly as before when keywords are off, and Mic off releases local listening", async () => {
+      const f = fixture();
+      await f.controller.start(f.owner);
+      f.controller.pause();
+      await whenMode(f.controller, "paused");
+      expect(f.controller.getSnapshot()).toMatchObject({ keywords: false, listening: "off" });
+      expect(f.localListening.start).not.toHaveBeenCalled();
+
+      const g = await pausedWithKeywords();
+      g.controller.end();
+      expect(g.controller.getSnapshot()).toMatchObject({ mode: "off", listening: "off" });
+      expect(g.localListening.stop).toHaveBeenCalledOnce();
+    });
   });
 });
