@@ -29,6 +29,8 @@ const MODEL_FILES = {
 } as const;
 // 25 blocks of 20 ms: half a second of audio the detector has not seen yet.
 const MAX_IN_FLIGHT = 25;
+// Fetching ~17 MB and compiling takes about a second locally; beyond this, report unavailable.
+const INIT_TIMEOUT_MS = 30_000;
 
 async function sha256(bytes: ArrayBuffer): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
@@ -48,7 +50,11 @@ async function loadVerified() {
     if (files[name] !== (await sha256(bytes))) throw new Error(`Keyword asset ${name} mismatch`);
     return bytes;
   };
-  const [wasm, encoder, decoder, joiner, tokens] = await Promise.all([
+  // The worker importScripts the two glue files itself; checking them here catches a corrupt or
+  // mismatched copy, not a hostile server (which serves this page's code too).
+  const [, , wasm, encoder, decoder, joiner, tokens] = await Promise.all([
+    load("sherpa-onnx-wasm-kws-main.js"),
+    load("sherpa-onnx-kws.js"),
     load(MODEL_FILES.wasm),
     load(MODEL_FILES.encoder),
     load(MODEL_FILES.decoder),
@@ -85,11 +91,14 @@ export function createKeywordDetector(events: {
       resolveReady = resolve;
       rejectReady = reject;
     });
+    const timeout = setTimeout(() => onError(), INIT_TIMEOUT_MS);
     next.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
       if (worker !== next) return;
       const message = event.data;
-      if (message.type === "ready") resolveReady();
-      else if (message.type === "failed") {
+      if (message.type === "ready") {
+        clearTimeout(timeout);
+        resolveReady();
+      } else if (message.type === "failed") {
         rejectReady(new Error("Local listening unavailable"));
         fail();
       } else if (message.generation !== generation) return;
@@ -97,6 +106,7 @@ export function createKeywordDetector(events: {
       else if (message.type === "command") events.command(message.command);
     });
     const onError = () => {
+      clearTimeout(timeout);
       rejectReady(new Error("Local listening unavailable"));
       if (worker === next) fail();
     };
@@ -209,6 +219,10 @@ export function createLocalListening(detector: KeywordDetector, failed: () => vo
           track.addEventListener("mute", fail);
         }
         await context.resume();
+        // A suspended or interrupted context hears nothing; say so instead of looking healthy.
+        context.addEventListener("statechange", () => {
+          if (context.state !== "running") fail();
+        });
         if (context.state !== "running") throw new Error("Local listening unavailable");
         detach = await detector.attach(context.createMediaStreamSource(stream));
         if (stopped) release();
