@@ -97,6 +97,19 @@ function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrationInpu
   ].join("; ");
 }
 
+// The voice keyword detector worker gets only what local inference needs: its own scripts, WASM
+// compilation, and no network. The page hands it the model bytes. See
+// apps/web/public/voice/kws/BUILD.md.
+const KEYWORD_WORKER_PATH = "/voice/kws/kws.worker.js";
+const KEYWORD_WORKER_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'";
+
+function contentSecurityPolicyFor(request: Request, policy: string): string {
+  return new URL(request.url).pathname === KEYWORD_WORKER_PATH
+    ? KEYWORD_WORKER_CONTENT_SECURITY_POLICY
+    : policy;
+}
+
 function withContentSecurityPolicy(response: Response, policy: string): Response {
   const headers = new Headers(response.headers);
   headers.set("Content-Security-Policy", policy);
@@ -199,7 +212,10 @@ const proxyRequest = Effect.fn("desktop.protocol.proxyRequest")(function* (
     request.method === "GET" || request.method === "HEAD"
       ? yield* fetchWithTransientRetry(targetUrl.toString(), init)
       : yield* netFetch(targetUrl.toString(), init);
-  return withContentSecurityPolicy(response, contentSecurityPolicy);
+  return withContentSecurityPolicy(
+    response,
+    contentSecurityPolicyFor(request, contentSecurityPolicy),
+  );
 });
 
 const serveDesktopAsset = Effect.fn("desktop.protocol.serveAsset")(function* (
@@ -259,7 +275,7 @@ export const make = Effect.gen(function* () {
               if ("assetDirectory" in input) {
                 return withContentSecurityPolicy(
                   await runPromise(serveDesktopAsset(request, input.assetDirectory)),
-                  contentSecurityPolicy,
+                  contentSecurityPolicyFor(request, contentSecurityPolicy),
                 );
               }
               return runPromise(

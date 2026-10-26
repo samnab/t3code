@@ -58,6 +58,14 @@ describe("ElectronProtocol", () => {
       assert.equal(yield* Effect.promise(() => script.text()), "export default 1;");
       assert.include(script.headers.get("content-type") ?? "", "javascript");
 
+      yield* fileSystem.makeDirectory(`${directory}/voice/kws`, { recursive: true });
+      yield* fileSystem.writeFileString(`${directory}/voice/kws/kws.worker.js`, "");
+      const keywordWorker = yield* request("/voice/kws/kws.worker.js");
+      assert.equal(
+        keywordWorker.headers.get("content-security-policy"),
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'",
+      );
+
       assert.equal((yield* request("/missing.js")).status, 404);
       assert.equal((yield* request("/%2e%2e%2fsecret.txt")).status, 404);
       assert.equal((yield* request("/%invalid")).status, 400);
