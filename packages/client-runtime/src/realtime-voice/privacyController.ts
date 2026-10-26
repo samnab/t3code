@@ -508,7 +508,15 @@ export function createRealtimeVoiceController(deps: {
       return;
     // Release the detector's capture first: the new call acquires its own microphone afterwards.
     stopListening();
-    await start(owner);
+    try {
+      await start(owner);
+    } finally {
+      // A refused start (blocked replacement, failed owner check) leaves voice paused.
+      if (attempt === null && snapshot.mode === "paused") {
+        startListening();
+        republish();
+      }
+    }
   };
   /** The spoken resume phrase. Opens only the local confirm prompt, and expires on its own. */
   const armResume = () => {

@@ -942,6 +942,17 @@ describe("local privacy pause", () => {
       }
     });
 
+    it("keeps listening honestly when a resume never starts a call", async () => {
+      const f = await pausedWithKeywords();
+      f.validateOwner.mockImplementation(() => {
+        throw new Error("grant revoked");
+      });
+      await expect(f.controller.resume(f.owner)).rejects.toThrow("grant revoked");
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "listening" });
+      expect(f.localListening.start).toHaveBeenCalledTimes(2);
+      expect(f.localListening.stop).toHaveBeenCalledOnce();
+    });
+
     it("never opens sending from a keyword", async () => {
       const f = await pausedWithKeywords();
       f.setNow(f.initialNow + 5_000);
