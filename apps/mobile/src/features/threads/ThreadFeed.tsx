@@ -1735,6 +1735,26 @@ function renderFeedEntry(
                   ·
                 </Text>
               ) : null}
+              {message.spokenInVoiceCall ? (
+                <>
+                  <View
+                    accessible
+                    accessibilityLabel="Spoken in a voice call"
+                    className="flex-row items-center gap-1"
+                  >
+                    <SymbolView name="mic" size={12} tintColor={iconSubtleColor} />
+                    <Text className="font-t3-medium text-xs text-foreground-secondary">Voice</Text>
+                  </View>
+                  <Text
+                    accessible={false}
+                    accessibilityElementsHidden
+                    importantForAccessibility="no"
+                    className="font-t3-medium text-xs text-foreground-secondary"
+                  >
+                    ·
+                  </Text>
+                </>
+              ) : null}
               <Text className="font-t3-medium text-xs tabular-nums text-foreground-secondary">
                 {entry.pendingMessage && !entry.acknowledged ? "Pending" : timestampLabel}
               </Text>

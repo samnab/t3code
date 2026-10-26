@@ -307,7 +307,8 @@ describe("historical voice timeline", () => {
     });
   });
 
-  it("links a spoken request to the coding message it became and shows uncommitted tails", () => {
+  it("shows a promoted spoken request once, as its coding message marked as voice", () => {
+    const started = voiceProjectedItem("voice-started", { type: "realtimeSessionStarted" }, 0);
     const spoken = voiceProjectedItem(
       "voice-request",
       { type: "transcriptSegment", role: "user", text: "Please work" },
@@ -346,12 +347,11 @@ describe("historical voice timeline", () => {
       ...tailSource,
       item: { ...tailItem, status: "interrupted", captureState: "interrupted" },
     };
-    const result = rows([spoken, promoted, promotedCoding, tail]);
-    const codingRow = result.find((row) => row.kind === "message");
-    expect(codingRow).toBeDefined();
-    expect(result[0]).toMatchObject({ kind: "event", voicePromotedToRowId: codingRow!.id });
+    const result = rows([started, spoken, promoted, promotedCoding, tail]);
+    const userRows = result.filter((row) => row.kind === "message" && row.message.role === "user");
+    expect(userRows).toEqual([expect.objectContaining({ spokenInVoiceCall: true })]);
+    expect(result.some((row) => row.id === spoken.item.id)).toBe(false);
     expect(result.at(-1)).toMatchObject({ kind: "event", id: tail.item.id });
-    expect(result.filter((row) => "voicePromotedToRowId" in row)).toHaveLength(1);
   });
 });
 

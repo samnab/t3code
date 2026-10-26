@@ -9,7 +9,8 @@ import { ThreadContextDivider } from "./thread-context-divider";
 
 /**
  * Spoken lines look like messages but stay history: plain selectable text, copy only, no edit,
- * fork, or markdown actions. The entry that opens a call also carries the call divider.
+ * fork, or markdown actions. The entry that opens a call also carries the call divider. A request
+ * promoted into a coding message shows as that message, so its entry keeps only the divider.
  */
 export function ThreadVoiceTranscriptRow({
   entry,
@@ -53,7 +54,7 @@ export function ThreadVoiceTranscriptRow({
       </View>
     );
   const content = item.content;
-  if (content.type !== "transcriptSegment") return divider;
+  if (content.type !== "transcriptSegment" || entry.promotedToCodingRequest) return divider;
 
   const isUser = content.role === "user";
   const capture = describeRealtimeVoiceCapture(item);
@@ -85,7 +86,6 @@ export function ThreadVoiceTranscriptRow({
       </View>
       <Text className="font-t3-medium text-xs tabular-nums text-foreground-secondary">
         · {timestampLabel}
-        {entry.promotedToCodingRequest ? " · Sent as coding request" : ""}
       </Text>
       <CopyTextButton
         accessibilityLabel="Copy voice transcript"
