@@ -15,6 +15,7 @@ import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { createBrowserVoiceTransport } from "../../voice/browserVoiceTransport";
+import { createKeywordDetector, createLocalListening } from "../../voice/kws/keywordDetector";
 import {
   isVoiceShortcutCommand,
   voiceShortcutAction,
@@ -77,6 +78,16 @@ function runVoiceShortcut(
   else if (action === "resume") resumeVoice(controller);
 }
 
+// Opt-in, device-local. Off unless the user turned keywords on in this browser.
+const KEYWORDS_STORAGE_KEY = "t3code:voice-keywords";
+function readKeywordsEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(KEYWORDS_STORAGE_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
+
 interface VoiceContext {
   readonly snapshot: VoiceSnapshot;
   readonly start: (environmentId: EnvironmentId, threadId: ThreadId) => void;
@@ -84,6 +95,8 @@ interface VoiceContext {
   readonly pause: () => void;
   readonly resume: () => void;
   readonly end: () => void;
+  readonly cancelResume: () => void;
+  readonly setKeywords: (enabled: boolean) => void;
   readonly returnToOwner: (owner: VoiceOwner) => void;
 }
 const Context = createContext<VoiceContext | null>(null);
@@ -101,9 +114,21 @@ export function RealtimeVoiceProvider({
   const stopProvider = useOrchestrationCommand(threadEnvironment.stopRealtimeVoice, {
     reportFailure: false,
   });
-  const [controller] = useState(() =>
-    createRealtimeVoiceController({
-      createTransport: createBrowserVoiceTransport,
+  const [{ controller, detector }] = useState(() => {
+    // Keyword commands come only from this device's microphone. A pause acts at once; a resume
+    // only arms the confirm prompt. Detector failure pauses a live call and never resumes.
+    const detector = createKeywordDetector({
+      command: (command) => (command === "pause" ? controller.pause() : controller.armResume()),
+      failed: () => controller.localListeningFailed(),
+    });
+    const controller: RealtimeVoiceController = createRealtimeVoiceController({
+      keywordsEnabled: readKeywordsEnabled(),
+      localListening: createLocalListening(detector, () => controller.localListeningFailed()),
+      createTransport: (events) =>
+        createBrowserVoiceTransport(
+          events,
+          controller.getSnapshot().keywords ? (source) => detector.attach(source) : undefined,
+        ),
       createOperationId: randomUUID,
       validateOwner: validateVoiceOwner,
       now: () => Date.now(),
@@ -134,8 +159,9 @@ export function RealtimeVoiceProvider({
       },
       describeError,
       watchOwner: watchVoiceOwner,
-    }),
-  );
+    });
+    return { controller, detector };
+  });
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   useEffect(() => {
     let previous = controller.getSnapshot();
@@ -179,6 +205,7 @@ export function RealtimeVoiceProvider({
     document.addEventListener("visibilitychange", hidden);
     return () => {
       end();
+      detector.close();
       stopDesktopPause?.();
       stopForwarded?.();
       window.removeEventListener("pagehide", end);
@@ -186,7 +213,7 @@ export function RealtimeVoiceProvider({
       document.removeEventListener("freeze", end);
       document.removeEventListener("visibilitychange", hidden);
     };
-  }, [controller]);
+  }, [controller, detector]);
   // Separate from the lifecycle effect, whose cleanup ends voice, so remapping never ends a call.
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   useEffect(() => {
@@ -220,6 +247,13 @@ export function RealtimeVoiceProvider({
         pause: () => controller.pause(),
         resume: () => resumeVoice(controller),
         end: () => controller.end(),
+        cancelResume: () => controller.cancelResume(),
+        setKeywords: (enabled) => {
+          try {
+            window.localStorage.setItem(KEYWORDS_STORAGE_KEY, enabled ? "on" : "off");
+          } catch {}
+          controller.setKeywords(enabled);
+        },
         returnToOwner,
       }}
     >

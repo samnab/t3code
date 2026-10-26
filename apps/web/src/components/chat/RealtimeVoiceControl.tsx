@@ -24,17 +24,22 @@ export function RealtimeVoiceControl({
     owner !== null
       ? isOwner
         ? paused
-          ? "Voice paused · nothing is sent. Resume voice in this conversation"
+          ? snapshot.listening === "listening" || snapshot.listening === "armed"
+            ? "Private: listening on this device; not sending. Resume voice in this conversation"
+            : snapshot.listening === "unavailable"
+              ? "Paused: local listening unavailable. Resume voice in this conversation"
+              : "Voice paused · nothing is sent. Resume voice in this conversation"
           : "End voice in this conversation"
         : `${paused ? "Voice paused" : "Voice"} in ${owner.threadTitle} · Return to conversation`
       : snapshot.replacementBlocked
         ? [snapshot.reason, VOICE_REPLACEMENT_GATE].filter(Boolean).join(" ")
         : (snapshot.reason ?? "Talk with Codex by voice");
-  const activate = () => {
+  const activate = (trusted: boolean) => {
     if (owner !== null) {
       if (!isOwner) returnToOwner(owner);
-      else if (paused) resume();
-      else end();
+      else if (paused) {
+        if (trusted) resume();
+      } else end();
     } else start(environmentId, threadId);
   };
   return (
@@ -51,7 +56,7 @@ export function RealtimeVoiceControl({
                 (isOwner && (settling || (paused && snapshot.replacementBlocked))) ||
                 (owner === null && snapshot.replacementBlocked)
               }
-              onClick={activate}
+              onClick={(event) => activate(event.isTrusted)}
               aria-label={tooltip}
             />
           }

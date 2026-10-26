@@ -59,6 +59,7 @@ import {
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
+  MicIcon,
   MicOffIcon,
   PaletteIcon,
   PauseIcon,
@@ -1216,7 +1217,11 @@ function OpenCommandPaletteDialog(props: {
       kind: "action",
       value: paused ? "action:voice-resume" : "action:voice-pause",
       searchTerms: ["voice", "microphone", "mic", "privacy", paused ? "resume" : "pause"],
-      title: paused ? "Resume voice" : "Pause voice",
+      title: paused
+        ? voice.snapshot.listening === "armed"
+          ? "Confirm voice resume"
+          : "Resume voice"
+        : "Pause voice",
       icon: paused ? (
         <PlayIcon className={ITEM_ICON_CLASS} />
       ) : (
@@ -1226,6 +1231,24 @@ function OpenCommandPaletteDialog(props: {
       run: async () => (paused ? voice.resume() : voice.pause()),
     });
   }
+  if (voice.snapshot.listening === "armed") {
+    actionItems.push({
+      kind: "action",
+      value: "action:voice-cancel-resume",
+      searchTerms: ["voice", "cancel", "resume", "keyword"],
+      title: "Cancel voice resume",
+      icon: <MicOffIcon className={ITEM_ICON_CLASS} />,
+      run: async () => voice.cancelResume(),
+    });
+  }
+  actionItems.push({
+    kind: "action",
+    value: "action:voice-keywords",
+    searchTerms: ["voice", "keywords", "privacy", "pause", "resume", "listening"],
+    title: voice.snapshot.keywords ? "Turn voice keywords off" : "Turn voice keywords on",
+    icon: <MicIcon className={ITEM_ICON_CLASS} />,
+    run: async () => voice.setKeywords(!voice.snapshot.keywords),
+  });
   if (voiceMode !== "off") {
     actionItems.push({
       kind: "action",

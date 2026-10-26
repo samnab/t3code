@@ -148,12 +148,10 @@ function readOwnership(
   });
 }
 
-/** The shared mode/generation/owner authority. Platform transports enforce local teardown.
- * Pause releases the call's microphone. With keywords on, a paused conversation then starts
- * `localListening`, a separate capture that feeds only the on-device detector; it is stopped
- * before Resume creates the new call, so nothing it heard can reach that call's sender.
- * Keyword commands are local: a pause acts at once, a resume only arms the confirm prompt.
- * No remote input can call `resume`. */
+/** The shared mode/generation/owner authority; platform transports enforce local teardown.
+ * Paused with keywords on, `localListening` is a separate detector-only capture, stopped before
+ * Resume creates the new call. A keyword pause acts at once; a keyword resume only arms the
+ * confirm prompt. No remote input can call `resume`. */
 export function createRealtimeVoiceController(deps: {
   readonly createTransport: (events: {
     connected(): void;

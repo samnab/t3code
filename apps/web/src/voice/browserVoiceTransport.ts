@@ -4,11 +4,20 @@ import type { VoiceTransport } from "@t3tools/client-runtime/realtime-voice";
  * A single peer and sink; closing also releases a microphone granted after cancellation.
  * The peer sends a Web Audio destination track. The microphone reaches it only while the gate
  * (the source → destination connection) is open, so the sender never holds the raw track.
+ * `tapKeywords`, when given, also feeds the microphone to the local keyword detector.
  */
-export function createBrowserVoiceTransport(events: {
-  connected(): void;
-  failed(reason: string): void;
-}): VoiceTransport {
+// Audio already in the track pipeline at gate-open predates it. Holding 8 quanta still leaked in
+// 1-2 of 50 synthetic trials; 12 leaked none (Chromium, Electron 44); 24 none in 100 each.
+// Re-measure on physical and Bluetooth mics: apps/web/test/voice-privacy/cutoff-benchmark.html.
+const GATE_DISCARD_QUANTA = 24;
+
+export function createBrowserVoiceTransport(
+  events: {
+    connected(): void;
+    failed(reason: string): void;
+  },
+  tapKeywords?: (source: MediaStreamAudioSourceNode) => Promise<() => void>,
+): VoiceTransport {
   // Created and resumed inside the user gesture that starts or resumes voice, so autoplay policy
   // lets it run. Until it runs the transport reports not connected and the gate stays shut.
   // Created first: if this constructor throws, no peer exists yet to leak.
@@ -111,6 +120,14 @@ export function createBrowserVoiceTransport(events: {
       }
       navigator.mediaDevices.addEventListener("devicechange", fail);
       cleanups.push(() => navigator.mediaDevices.removeEventListener("devicechange", fail));
+      if (tapKeywords !== undefined) {
+        const source = graph.source;
+        // The detector reports its own failures; the call does not wait on it.
+        void tapKeywords(source).then(
+          (detach) => (closed ? detach() : cleanups.push(detach)),
+          () => {},
+        );
+      }
     },
     async createOffer() {
       const offer = await peer.createOffer();
@@ -154,7 +171,14 @@ export function createBrowserVoiceTransport(events: {
       if (closed || graph === null || context.state !== "running") return;
       gateOpen = true;
       for (const track of microphone?.getTracks() ?? []) track.enabled = true;
-      graph.source.connect(graph.output);
+      const opening = context.createGain();
+      opening.gain.value = 0;
+      opening.gain.setValueAtTime(
+        1,
+        context.currentTime + (GATE_DISCARD_QUANTA * 128) / context.sampleRate,
+      );
+      graph.source.connect(opening);
+      opening.connect(graph.output);
     },
     close() {
       if (closed) return;

@@ -1,17 +1,10 @@
-// Local voice-privacy keyword detector. Classic worker so it can importScripts the pinned
-// sherpa-onnx glue. The parent (apps/web/src/voice/kws/keywordDetector.ts) supplies the WASM and
-// model bytes after checking their SHA-256, so this worker needs no network. It returns only
-// { command: "pause" | "resume" }; it never posts recognised text or audio.
-//
-// Protocol, parent -> worker:
-//   { type: "init", wasm, encoder, decoder, joiner, tokens }  (ArrayBuffers)
-//   { type: "reset", generation, sampleRate }   new capture: drop all buffered audio and decoder state
-//   { type: "audio", generation, samples }   Float32Array at inputSampleRate, transferred
-// worker -> parent:
-//   { type: "ready" } | { type: "failed" }
-//   { type: "processed", generation, endSample }   one per audio message, for backpressure
-//   { type: "command", command, generation, endSample }
-// endSample counts input-rate samples since the generation's reset.
+// Classic worker so it can importScripts the pinned sherpa-onnx glue. The parent
+// (apps/web/src/voice/kws/keywordDetector.ts) supplies hash-checked WASM and model bytes, so no
+// network is needed. It posts only commands and acks, never recognised text or audio.
+
+// In: init {wasm, encoder, decoder, joiner, tokens}; reset {generation, sampleRate}; audio
+// {generation, samples}. Out: ready | failed; processed and command {generation, endSample}, one
+// processed per audio message. endSample counts capture-rate samples since the reset.
 "use strict";
 
 // Belt and braces under the worker CSP (connect-src 'none'): nothing below may reach the network.
@@ -149,7 +142,7 @@ function onAudio(message) {
 }
 
 let queue = Promise.resolve();
-self.onmessage = (event) => {
+self.addEventListener("message", (event) => {
   const message = event.data;
   queue = queue.then(async () => {
     if (failed) return;
@@ -172,4 +165,4 @@ self.onmessage = (event) => {
       fail();
     }
   });
-};
+});
