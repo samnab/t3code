@@ -2990,6 +2990,60 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
+  it.effect("releases a dispatched realtime turn that is never adopted", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "voice-dispatched-unadopted";
+      const nativeTurnId = "held-turn";
+      const interrupted = yield* Deferred.make<void>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "voice-dispatched-unadopted",
+          entries: [
+            ...heldVoiceEntries(nativeThreadId, nativeTurnId, false),
+            {
+              type: "expect_outbound",
+              frame: { id: "held-approval", result: { decision: "decline" } },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "turn/interrupt",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+          ],
+        }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (method) =>
+          method === "turn/interrupt"
+            ? Deferred.succeed(interrupted, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      });
+      const offer = harness.continuationRequests[0]!;
+      assert.isTrue(Option.isSome(yield* offer.dispatchIfCurrent!(Effect.void)));
+      // The first deadline sees a settled dispatch and restarts; the second expires.
+      yield* TestClock.adjust("30 seconds");
+      yield* TestClock.adjust("30 seconds");
+      yield* Deferred.await(interrupted);
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect.each([
     "voice",
     "steered-user",

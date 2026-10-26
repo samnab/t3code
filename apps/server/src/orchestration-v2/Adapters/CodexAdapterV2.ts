@@ -5290,15 +5290,26 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               });
               const held = realtimeTurns.get(payload.turn.id)!;
               // Covers dropped dispatches, cancelled queues and provider switches
-              // without coupling the adapter to every orchestration exit. A
-              // dispatch in flight owns the turn: a slow commit must not strand
-              // the run it is about to start, and failed dispatches clear it.
-              yield* Deferred.await(held.ready).pipe(
+              // without coupling the adapter to every orchestration exit. A slow
+              // commit must not strand the run it starts, so the deadline restarts
+              // once the dispatch settles; failed dispatches clear the turn.
+              // Codex opens voice turns only on an idle native thread, so a run
+              // queued past the restarted deadline is rare and fails adoption.
+              const expire = Effect.suspend(() =>
+                held.adopting ? Effect.void : releaseRealtimeTurn(payload.turn.id),
+              );
+              const deadline = Deferred.await(held.ready).pipe(
                 Effect.timeout("30 seconds"),
+                Effect.asVoid,
+              );
+              yield* deadline.pipe(
                 Effect.catch(() =>
-                  held.adopting || held.dispatching
-                    ? Effect.void
-                    : releaseRealtimeTurn(payload.turn.id),
+                  held.dispatching
+                    ? Deferred.await(held.dispatched).pipe(
+                        Effect.andThen(deadline),
+                        Effect.catch(() => expire),
+                      )
+                    : expire,
                 ),
                 Effect.forkIn(scope),
               );
