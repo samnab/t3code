@@ -25,6 +25,7 @@ import {
   EyeIcon,
   type LucideIcon,
   MessagesSquareIcon,
+  MicIcon,
   Redo2Icon,
   Undo2Icon,
 } from "lucide-react";
@@ -441,6 +442,16 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       {row.message.inputIntent === "steer" ||
       row.message.inputIntent === "promoted_queued_to_steer" ? (
         <UserMessageIntentMarker intent={row.message.inputIntent} />
+      ) : null}
+      {row.spokenInVoiceCall ? (
+        <TimelineMessageMarker
+          icon={MicIcon}
+          label="Voice"
+          ariaLabel="Spoken in a voice call"
+          align="end"
+          dataAttributes={{ "data-user-message-spoken": "true" }}
+          tooltip="Spoken in a voice call and sent as a coding request"
+        />
       ) : null}
       <div
         className={cn(

@@ -392,7 +392,8 @@ describe("historical voice feed", () => {
     expect(buildThreadFeed([started, closed])).toEqual([]);
   });
 
-  it("marks a spoken request promoted into a coding message and shows uncommitted tails", () => {
+  it("shows a promoted spoken request once, as its coding message marked as voice", () => {
+    const started = projected(voiceItem("voice-started", { type: "realtimeSessionStarted" }), 0);
     const spoken = projected(
       voiceItem("voice-request", { type: "transcriptSegment", role: "user", text: "Please work" }),
       0,
@@ -425,13 +426,14 @@ describe("historical voice feed", () => {
       },
       3,
     );
-    const feed = buildThreadFeed([spoken, promoted, coding, tail]);
+    const feed = buildThreadFeed([started, spoken, promoted, coding, tail]);
     expect(feed.map((entry) => entry.type)).toEqual([
       "realtime-voice",
       "message",
       "realtime-voice",
     ]);
-    expect(feed[0]).toMatchObject({ promotedToCodingRequest: true });
+    expect(feed[0]).toMatchObject({ projectedItem: started });
+    expect(feed[1]).toMatchObject({ message: { role: "user", spokenInVoiceCall: true } });
     expect(feed[2]).toMatchObject({ projectedItem: tail, promotedToCodingRequest: false });
   });
 });

@@ -612,6 +612,8 @@ type MessagesTimelineRowContent =
       assistantCopyStreaming: boolean;
       assistantTurnDiffSummary?: TurnDiffSummary | undefined;
       revertTurnCount?: number | undefined;
+      /** A spoken request promoted into this message; its voice line is not shown separately. */
+      spokenInVoiceCall?: true;
     }
   | {
       kind: "assistant-meta";
@@ -629,7 +631,10 @@ type MessagesTimelineRowContent =
       projectedItem: OrchestrationV2ProjectedTurnItem;
       subagents?: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
       resourceSummary?: boolean;
-      /** Row of the coding instruction this spoken request was promoted into. */
+      /**
+       * Row of the coding message this spoken request became. That message shows the line, so
+       * this row renders only the call divider it hosts.
+       */
       voicePromotedToRowId?: string;
       /** Divider for the realtime voice call this row opens. */
       voiceCall?: RealtimeVoiceCall;
@@ -1474,6 +1479,7 @@ export function deriveMessagesTimelineRows(input: {
 }): MessagesTimelineRow[] {
   const { entries: timelineEntries, voiceCalls } = timelineRowEntries(input.timelineEntries);
   const voicePromotions = voicePromotionTargets(input.timelineEntries);
+  const voicePromotedMessageRowIds = new Set(voicePromotions.values());
   const turnDiffSummaryByAssistantMessageId = new Map<MessageId, TurnDiffSummary>();
   for (const summary of input.turnDiffSummaries) {
     if (summary.assistantMessageId) {
@@ -2029,6 +2035,7 @@ export function deriveMessagesTimelineRows(input: {
       }
       const voicePromotedToRowId = voicePromotions.get(timelineEntry.id);
       const voiceCall = voiceCalls.get(timelineEntry.projectedItem);
+      if (voicePromotedToRowId !== undefined && voiceCall === undefined) continue;
       nextRows.push({
         kind: "event",
         id: timelineEntry.id,
@@ -2095,6 +2102,7 @@ export function deriveMessagesTimelineRows(input: {
         timelineEntry.message.role === "user"
           ? revertTurnCountByUserMessageId.get(timelineEntry.message.id)
           : undefined,
+      ...(voicePromotedMessageRowIds.has(timelineEntry.id) ? { spokenInVoiceCall: true } : {}),
     });
   }
 
@@ -2535,7 +2543,8 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.showAssistantCopyButton === bm.showAssistantCopyButton &&
         a.assistantCopyStreaming === bm.assistantCopyStreaming &&
         a.assistantTurnDiffSummary === bm.assistantTurnDiffSummary &&
-        a.revertTurnCount === bm.revertTurnCount
+        a.revertTurnCount === bm.revertTurnCount &&
+        a.spokenInVoiceCall === bm.spokenInVoiceCall
       );
     }
   }

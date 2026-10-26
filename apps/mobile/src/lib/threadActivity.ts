@@ -157,6 +157,8 @@ export interface ThreadFeedMessage {
   readonly updatedAt: string;
   readonly projectedItem?: OrchestrationV2ProjectedTurnItem;
   readonly checkpointSummary?: ThreadCheckpointSummary;
+  /** A spoken request promoted into this message; its voice line is not shown separately. */
+  readonly spokenInVoiceCall?: true;
 }
 
 export interface LocalThreadMessage {
@@ -178,7 +180,10 @@ type RawThreadFeedEntry =
       readonly runId: null;
       readonly messageId: null;
       readonly projectedItem: OrchestrationV2ProjectedTurnItem;
-      /** This spoken request was promoted into a coding message in this feed. */
+      /**
+       * This spoken request was promoted into a coding message in this feed. That message shows
+       * the line, so the entry stays only to host its call divider.
+       */
       readonly promotedToCodingRequest: boolean;
       /** Divider for the realtime voice call this entry opens. */
       readonly call?: RealtimeVoiceCall;
@@ -2058,7 +2063,7 @@ interface ThreadFeedBuild {
   readonly checkpointSummaries: ReadonlyArray<ThreadCheckpointSummary> | undefined;
   readonly foldedAnswerMessageIds: ReadonlySet<string>;
   readonly delegatedChildrenByRun: ReadonlyMap<RunId, ReadonlySet<string>>;
-  readonly promotedVoiceRequests: ReadonlySet<string>;
+  readonly promotedVoice: PromotedVoiceRequests;
   readonly voiceCalls: RealtimeVoiceCallLayout<OrchestrationV2ProjectedTurnItem>;
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
   /** Grouping is empty before `row`: the rows before it produced `feed.slice(0, feedLength)`. */
@@ -2140,19 +2145,27 @@ function voiceCallLayoutsEqual(
   return true;
 }
 
+interface PromotedVoiceRequests {
+  /** `sourceThreadId:sourceItemId` of each promoted spoken request. */
+  readonly requests: ReadonlySet<string>;
+  /** Native ids of the coding messages those requests became. */
+  readonly codingItems: ReadonlySet<string>;
+}
+
 /**
  * A promotion record names the native coding item a spoken request became. Marks the latest
  * spoken user segment of that realtime session before the record when the coding item is here.
  */
 function promotedVoiceRequestKeys(
   rows: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
-): ReadonlySet<string> {
+): PromotedVoiceRequests {
   const codingNativeItems = new Set<string>();
   for (const { item } of rows) {
     if (item.type === "user_message" && item.nativeItemRef?.nativeId != null)
       codingNativeItems.add(item.nativeItemRef.nativeId);
   }
   const promoted = new Set<string>();
+  const promotedCoding = new Set<string>();
   const latestRequest = new Map<string, string>();
   for (const row of rows) {
     const item = row.item;
@@ -2162,9 +2175,12 @@ function promotedVoiceRequestKeys(
       latestRequest.set(session, `${row.sourceThreadId}:${row.sourceItemId}`);
     if (item.content.type !== "bemItemPromoted") continue;
     const request = latestRequest.get(session);
-    if (request !== undefined && codingNativeItems.has(item.content.item_id)) promoted.add(request);
+    if (request !== undefined && codingNativeItems.has(item.content.item_id)) {
+      promoted.add(request);
+      promotedCoding.add(item.content.item_id);
+    }
   }
-  return promoted;
+  return { requests: promoted, codingItems: promotedCoding };
 }
 
 export function buildThreadFeed(
@@ -2202,7 +2218,7 @@ export function buildThreadFeed(
   // is reused only while these match the build that produced it.
   const foldedAnswerMessageIds = new Set<string>();
   const delegatedChildrenByRun = new Map<RunId, Set<string>>();
-  const promotedVoiceRequests = promotedVoiceRequestKeys(visibleTurnItems);
+  const promotedVoice = promotedVoiceRequestKeys(visibleTurnItems);
   const voiceCalls = layoutRealtimeVoiceCalls(visibleTurnItems);
   for (const { item } of visibleTurnItems) {
     if (item.type === "user_input_request" && item.questionAnswer) {
@@ -2224,7 +2240,8 @@ export function buildThreadFeed(
     previous.nodes === options?.nodes &&
     checkpointSummariesEqual(previous.checkpointSummaries, options?.checkpointSummaries) &&
     setsEqual(previous.foldedAnswerMessageIds, foldedAnswerMessageIds) &&
-    setsEqual(previous.promotedVoiceRequests, promotedVoiceRequests) &&
+    setsEqual(previous.promotedVoice.requests, promotedVoice.requests) &&
+    setsEqual(previous.promotedVoice.codingItems, promotedVoice.codingItems) &&
     voiceCallLayoutsEqual(previous.voiceCalls, voiceCalls) &&
     setMapsEqual(previous.delegatedChildrenByRun, delegatedChildrenByRun)
   ) {
@@ -2256,9 +2273,10 @@ export function buildThreadFeed(
       // Uncommitted tails are interrupted items; they render with their capture state.
       if (call === undefined && !isDisplayedRealtimeVoiceLine(item)) continue;
       const cachedVoice = projectedEntriesCache.get(row)?.entry;
-      const promotedToCodingRequest = promotedVoiceRequests.has(
+      const promotedToCodingRequest = promotedVoice.requests.has(
         `${row.sourceThreadId}:${row.sourceItemId}`,
       );
+      if (promotedToCodingRequest && call === undefined) continue;
       const entry: RawThreadFeedEntry =
         cachedVoice?.type === "realtime-voice" &&
         cachedVoice.promotedToCodingRequest === promotedToCodingRequest &&
@@ -2281,7 +2299,15 @@ export function buildThreadFeed(
     }
     const attemptId = resolveAttemptId(item);
     const cached = projectedEntriesCache.get(row);
-    if (cached?.attemptId === attemptId) {
+    const spokenInVoiceCall =
+      item.type === "user_message" &&
+      item.nativeItemRef?.nativeId != null &&
+      promotedVoice.codingItems.has(item.nativeItemRef.nativeId);
+    if (
+      cached?.attemptId === attemptId &&
+      (cached.entry.type !== "message" ||
+        (cached.entry.message.spokenInVoiceCall === true) === spokenInVoiceCall)
+    ) {
       entries.push(cached.entry);
       entryRows.push(index);
       continue;
@@ -2353,6 +2379,7 @@ export function buildThreadFeed(
           createdAt,
           updatedAt,
           projectedItem: row,
+          ...(spokenInVoiceCall ? { spokenInVoiceCall: true } : {}),
         },
       };
       projectedEntriesCache.set(row, { attemptId, entry });
@@ -2444,7 +2471,7 @@ export function buildThreadFeed(
             checkpointSummaries: options?.checkpointSummaries,
             foldedAnswerMessageIds,
             delegatedChildrenByRun,
-            promotedVoiceRequests,
+            promotedVoice,
             voiceCalls,
             feed,
             restarts,

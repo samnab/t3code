@@ -18,12 +18,12 @@ import {
   USER_MESSAGE_ACTIONS_CLASS_NAME,
   USER_MESSAGE_BUBBLE_CLASS_NAME,
 } from "./TimelineUserMessageRow";
-import { Button } from "../ui/button";
 import { cn } from "~/lib/utils";
 
 /**
  * Spoken lines look like messages but stay history: plain text, copy only, no edit, revert,
- * fork, or markdown actions. The row that opens a call also carries the call divider.
+ * fork, or markdown actions. The row that opens a call also carries the call divider. A request
+ * promoted into a coding message shows as that message, so its row keeps only the divider.
  */
 export function VoiceTranscriptTimelineRow({
   row,
@@ -33,7 +33,8 @@ export function VoiceTranscriptTimelineRow({
   const { item } = row.projectedItem;
   if (item.type !== "realtime_voice") return null;
   const divider = row.voiceCall ? <VoiceCallDivider call={row.voiceCall} /> : null;
-  if (item.content.type !== "transcriptSegment") return divider;
+  if (item.content.type !== "transcriptSegment" || row.voicePromotedToRowId !== undefined)
+    return divider;
   return (
     <>
       {divider}
@@ -104,23 +105,8 @@ function VoiceLine({ row }: { row: Extract<TimelineRow, { kind: "event" }> }) {
       }
     />
   );
-  const promotedTo = row.voicePromotedToRowId;
   const actions = (
     <>
-      {promotedTo === undefined ? null : (
-        <Button
-          variant="link"
-          size="xs"
-          data-voice-promoted-to={promotedTo}
-          onClick={() =>
-            document
-              .querySelector(`[data-timeline-row-id="${CSS.escape(promotedTo)}"]`)
-              ?.scrollIntoView({ block: "center" })
-          }
-        >
-          Sent as coding request
-        </Button>
-      )}
       <TimelineRowTimestamp
         createdAt={row.createdAt}
         timestampFormat={ctx.timestampFormat}
