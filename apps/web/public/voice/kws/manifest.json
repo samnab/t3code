@@ -1,0 +1,24 @@
+{
+  "engine": {
+    "name": "sherpa-onnx",
+    "version": "2.0.0",
+    "source": "https://github.com/k2-fsa/sherpa-onnx/tree/v2.0.0 (commit 8abb7c8f87eae85b2e75f9a4115236c978980add)",
+    "build": "build-wasm-simd-kws.sh with emsdk 4.0.23; wasm/kws/CMakeLists.txt patched to drop --preload-file and export FS (model bytes come from the parent page)",
+    "license": "Apache-2.0"
+  },
+  "model": {
+    "name": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01",
+    "archive": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2",
+    "archiveSha256": "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a",
+    "license": "Apache-2.0"
+  },
+  "files": {
+    "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx": "e40ff43297abe815e8898494c17e71bba2152d9d40fa3eb803f75d0f7533329a",
+    "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx": "1e721676515bcd42a186979733981213c66c80db680e1cc582dfedf3be76e678",
+    "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx": "eae9da0c7e1e6c6a3f4cc42d167899c388f6c6701b94cb96320e4f55df79624c",
+    "sherpa-onnx-kws.js": "03b44e372795fd907e84eecd29419e1d052dc6704ac06935c9bf9fe19b3e3434",
+    "sherpa-onnx-wasm-kws-main.js": "759dbac67b3917ef9c432727aeabb960af21d6430976d516ab958ba02b8e5828",
+    "sherpa-onnx-wasm-kws-main.wasm": "e52e776f11d3a58428739de77c9fc832a7db047b4dd813bd976ac7dfc0e48ac9",
+    "tokens.txt": "fd2ded4050a55d2b1578870ba8697d02371980217806b7558bd0a5cc60f3ba53"
+  }
+}

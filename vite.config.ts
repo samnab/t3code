@@ -173,6 +173,8 @@ export default defineConfig({
       // Vendored and generated C.
       "apps/mobile/modules/t3-highlights/Vendor/**",
       "apps/mobile/modules/t3-highlights/cpp/generated/**",
+      // Vendored, minified sherpa-onnx build; pinned by SHA-256 in its manifest.json.
+      "apps/web/public/voice/kws/vendor/**",
       "*.icon/**",
     ],
     sortPackageJson: {},
@@ -202,6 +204,7 @@ export default defineConfig({
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/mobile/uniwind-types.d.ts",
+      "apps/web/public/voice/kws/vendor/**",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
     jsPlugins: ["./oxlint-plugin-t3code/index.ts", "@shadcn/lint"],
