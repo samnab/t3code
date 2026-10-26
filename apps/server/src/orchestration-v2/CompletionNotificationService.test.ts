@@ -23,6 +23,7 @@ import * as Option from "effect/Option";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as Settings from "../serverSettings.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as CloudLink from "../cloud/CloudLink.ts";
 import type { Tool } from "effect/ai";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
@@ -332,6 +333,7 @@ const tools = Layer.mergeAll(
   Layer.provideMerge(layerTest),
   Layer.provideMerge(Settings.layerTest()),
   Layer.provideMerge(ThreadCommandExecutor.layer),
+  Layer.provideMerge(Layer.mock(CloudLink.CloudLink)({})),
   Layer.provideMerge(
     Layer.mock(ServerEnvironment.ServerEnvironment)({
       getDescriptor: Effect.succeed({
