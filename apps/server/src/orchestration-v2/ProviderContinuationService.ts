@@ -294,6 +294,10 @@ export const layer = Layer.effectDiscard(
               }
             }),
           ),
+          // A spoken request holds a native Codex turn on a short deadline.
+          // One slow commit must not hold later requests until theirs expire.
+          (handled) =>
+            request.origin === "voice" ? Effect.asVoid(Effect.forkScoped(handled)) : handled,
         ),
       ),
       Effect.forever,

@@ -5289,11 +5289,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               });
               const held = realtimeTurns.get(payload.turn.id)!;
               // Covers dropped dispatches, cancelled queues and provider switches
-              // without coupling the adapter to every orchestration exit.
+              // without coupling the adapter to every orchestration exit. A
+              // dispatch in flight owns the turn: a slow commit must not strand
+              // the run it is about to start, and failed dispatches clear it.
               yield* Deferred.await(held.ready).pipe(
                 Effect.timeout("30 seconds"),
                 Effect.catch(() =>
-                  held.adopting ? Effect.void : releaseRealtimeTurn(payload.turn.id),
+                  held.adopting || held.dispatching
+                    ? Effect.void
+                    : releaseRealtimeTurn(payload.turn.id),
                 ),
                 Effect.forkIn(scope),
               );

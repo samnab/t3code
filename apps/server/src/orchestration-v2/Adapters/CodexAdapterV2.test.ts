@@ -3187,6 +3187,99 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  // Regression: a dispatch blocked on the DB writer outlived the 30 s hold, so
+  // the hold interrupted a turn Codex had already completed and adoption failed.
+  it.effect("keeps a held realtime turn while its dispatch outlives the hold deadline", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "voice-slow-dispatch";
+      const nativeTurnId = "held-slow-dispatch";
+      const approvalDeclined = yield* Deferred.make<void>();
+      const runtimeReady = yield* Deferred.make<ProviderAdapter.ProviderAdapterV2SessionRuntime>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "voice-slow-dispatch",
+          entries: [
+            ...heldVoiceEntries(nativeThreadId, nativeTurnId, true),
+            {
+              type: "expect_outbound",
+              frame: { id: "held-approval", result: { decision: "decline" } },
+            },
+            {
+              type: "emit_inbound",
+              label: "approval-declined",
+              frame: {
+                method: "thread/realtime/sdp",
+                params: { threadId: nativeThreadId, sdp: "answer" },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/realtime/stop",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+          ],
+        }),
+        (event) =>
+          event.type === "runtime_request.updated"
+            ? Deferred.await(runtimeReady).pipe(
+                Effect.flatMap((runtime) =>
+                  runtime.respondToRuntimeRequest({
+                    requestId: event.runtimeRequest.id,
+                    decision: "decline",
+                  }),
+                ),
+                Effect.orDie,
+              )
+            : Effect.void,
+        undefined,
+        undefined,
+        (entry) =>
+          entry.label === "approval-declined"
+            ? Deferred.succeed(approvalDeclined, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* Deferred.succeed(runtimeReady, harness.runtime);
+      yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      });
+      const offer = harness.continuationRequests[0]!;
+      const commitAllowed = yield* Deferred.make<void>();
+      const dispatch = yield* offer.dispatchIfCurrent!(Deferred.await(commitAllowed)).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* TestClock.adjust("2 minutes");
+      yield* Deferred.succeed(commitAllowed, undefined);
+      assert.isTrue(Option.isSome(yield* Fiber.join(dispatch)));
+      const turnInput = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("slow-dispatch"),
+        text: offer.detail!,
+      });
+      yield* harness.runtime.startTurn({
+        ...turnInput,
+        message: { ...turnInput.message, messageId: offer.messageId!, creationSource: "provider" },
+      });
+      yield* harness.firstTerminal;
+      yield* Deferred.await(approvalDeclined);
+      assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect.each(["voice", "typed-race"] as const)(
     "adopts a realtime handoff for %s with streamed items, approvals and a checkpoint",
     (owner) =>
