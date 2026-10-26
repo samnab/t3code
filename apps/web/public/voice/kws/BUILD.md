@@ -1,6 +1,6 @@
 # Local keyword detector assets
 
-These files serve the opt-in voice privacy keywords. `kws.worker.js` is ours. Everything in `vendor/` is third-party and pinned by SHA-256 in `manifest.json`, which the page checks before passing the bytes to the worker. Notices are in `THIRD_PARTY_NOTICES.txt`.
+These files serve the opt-in voice privacy keywords. `kws.worker.js` and `capture.worklet.js` are ours. Everything in `vendor/` is third-party and pinned by SHA-256 in `manifest.json`. The page checks every vendor file against it, including the two glue scripts the worker loads with `importScripts`, before starting the worker. The manifest is served from the same origin, so this catches corruption and version skew, not a tampered host. Notices are in `THIRD_PARTY_NOTICES.txt`.
 
 ## Engine: `vendor/sherpa-onnx-wasm-kws-main.{js,wasm}` and `vendor/sherpa-onnx-kws.js`
 
@@ -59,4 +59,12 @@ These come from https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-mode
 
 ## Worker CSP
 
-When the worker is loaded, its response should carry `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'`. `'wasm-unsafe-eval'` is needed only to compile the engine, and is scoped to this worker. The worker also replaces `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource` and `WebTransport` with `undefined`.
+The worker's response carries `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'`. `'wasm-unsafe-eval'` is there only to compile the engine, and it applies to this worker alone. Three places send this policy:
+
+- the desktop protocol in `apps/desktop/src/electron/ElectronProtocol.ts`;
+- the T3 server's static handler in `apps/server/src/http.ts`;
+- the hosted web app in `apps/web/vercel.ts`.
+
+The Vite dev server does not send it, so dev is unenforced.
+
+Once initialised, the worker also replaces `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `WebTransport`, `importScripts` and `Worker` with `undefined`.

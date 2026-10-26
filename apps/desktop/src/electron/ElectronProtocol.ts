@@ -102,7 +102,7 @@ function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrationInpu
 // apps/web/public/voice/kws/BUILD.md.
 const KEYWORD_WORKER_PATH = "/voice/kws/kws.worker.js";
 const KEYWORD_WORKER_CONTENT_SECURITY_POLICY =
-  "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'";
+  "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'";
 
 function contentSecurityPolicyFor(request: Request, policy: string): string {
   return new URL(request.url).pathname === KEYWORD_WORKER_PATH

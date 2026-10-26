@@ -63,7 +63,7 @@ describe("ElectronProtocol", () => {
       const keywordWorker = yield* request("/voice/kws/kws.worker.js");
       assert.equal(
         keywordWorker.headers.get("content-security-policy"),
-        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'",
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'",
       );
 
       assert.equal((yield* request("/missing.js")).status, 404);

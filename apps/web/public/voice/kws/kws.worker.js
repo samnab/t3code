@@ -149,6 +149,9 @@ self.addEventListener("message", (event) => {
     try {
       if (message.type === "init") {
         await init(message);
+        // Same-origin script loads and nested workers are the last ways out once running.
+        self.importScripts = undefined;
+        self.Worker = undefined;
         self.postMessage({ type: "ready" });
       } else if (kws === null) {
         fail();

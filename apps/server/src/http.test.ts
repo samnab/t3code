@@ -209,6 +209,25 @@ it.layer(
     }),
   );
 
+  it.effect("serves the voice keyword worker with its no-network policy only", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-kws-" });
+      yield* fs.makeDirectory(path.join(staticDir, "voice/kws"), { recursive: true });
+      yield* fs.writeFileString(path.join(staticDir, "voice/kws/kws.worker.js"), "");
+      yield* fs.writeFileString(path.join(staticDir, "app.js"), "");
+      const request = yield* makeStaticRequest(staticDir);
+
+      const worker = yield* request("/voice/kws/kws.worker.js");
+      expect(worker.headers["content-security-policy"]).toBe(
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'none'; worker-src 'none'",
+      );
+      const app = yield* request("/app.js");
+      expect(app.headers["content-security-policy"]).toBeUndefined();
+    }),
+  );
+
   it.effect("serves static files without handles and skips fallback reads for HEAD and 304", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
