@@ -76,7 +76,8 @@ function queueHoldReason(
       item.status === "failed" &&
       item.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   );
-  if (failure?.type !== "error") return null;
+  // An interrupted setup leaves no failure item but still holds the queue.
+  if (failure?.type !== "error") return "Worktree setup did not finish.";
   return Array.from(failure.failure.message).slice(0, QUEUE_HOLD_REASON_CHARS).join("");
 }
 const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
@@ -482,16 +483,17 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           const runs = queuedRunsInDeliveryOrder(projection);
           const cursor = input.cursor ?? 0;
           const end = cursor + (input.limit ?? 20);
+          const queueHeld = projection.runs.some(
+            (run) => run.status === "queued" && run.queueHeld === true,
+          );
           return {
             items: runs.slice(cursor, end).flatMap((run) => {
               const entry = queueEntry(projection, run.id, 1000);
               return entry === undefined ? [] : [entry];
             }),
             nextCursor: end < runs.length ? end : null,
-            queueHeld: projection.runs.some(
-              (run) => run.status === "queued" && run.queueHeld === true,
-            ),
-            holdReason: queueHoldReason(projection),
+            queueHeld,
+            holdReason: queueHeld ? queueHoldReason(projection) : null,
           };
         }
         const queuedRunId = yield* required(input.queuedRunId, "queuedRunId");
