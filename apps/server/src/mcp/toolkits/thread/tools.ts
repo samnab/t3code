@@ -292,7 +292,7 @@ const ThreadTransferTool = Tool.make("t3_thread_transfer", {
 const ThreadSearchTool = Tool.make("t3_thread_search", {
   ...commandTool,
   description:
-    "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive. With `threadId`: search only that transcript; a match's `entryId` reads via t3_thread_read.",
+    "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive. With `threadId`: search only that transcript (first/last 17 matching entries); `entryId` is the message id, or item id for plans.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     ...OrchestrationSearchThreadsInput.fields,
@@ -300,6 +300,20 @@ const ThreadSearchTool = Tool.make("t3_thread_search", {
     threadId: Schema.optional(ThreadId),
   }),
   success: Schema.Union([
+    // Per-thread first: a zero-match result also fits the cross-thread shape,
+    // which would strip threadId and totalMatches on encode.
+    Schema.Struct({
+      threadId: ThreadId,
+      totalMatches: NonNegativeInt,
+      matches: Schema.Array(
+        Schema.Struct({
+          entryId: TrimmedNonEmptyString,
+          runId: Schema.NullOr(RunId),
+          startIndex: NonNegativeInt,
+          count: NonNegativeInt,
+        }),
+      ),
+    }),
     Schema.Struct({
       matches: Schema.Array(
         Schema.Struct({
@@ -310,18 +324,6 @@ const ThreadSearchTool = Tool.make("t3_thread_search", {
           source: Schema.Literals(["title", "user", "assistant"]),
           snippet: Schema.optional(OrchestrationThreadSearchMatch.fields.snippet),
           messageCreatedAt: Schema.optional(OrchestrationThreadSearchMatch.fields.messageCreatedAt),
-        }),
-      ),
-    }),
-    Schema.Struct({
-      threadId: ThreadId,
-      totalMatches: NonNegativeInt,
-      matches: Schema.Array(
-        Schema.Struct({
-          entryId: TrimmedNonEmptyString,
-          runId: Schema.NullOr(RunId),
-          startIndex: NonNegativeInt,
-          count: NonNegativeInt,
         }),
       ),
     }),

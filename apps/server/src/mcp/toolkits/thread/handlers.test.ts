@@ -670,9 +670,15 @@ it.effect("t3_thread_search with threadId finds matches in that transcript only"
     });
 
     // The other thread holds this match; searching here must not return it.
-    expect(
-      yield* last(toolkit.handle("t3_thread_search", { threadId, query: "needle-in-other" })),
-    ).toEqual({ threadId, totalMatches: 0, matches: [] });
+    // Checked encoded: an empty result once lost threadId and totalMatches on the wire.
+    const empty = yield* toolkit
+      .handle("t3_thread_search", { threadId, query: "needle-in-other" })
+      .pipe(
+        Stream.unwrap,
+        Stream.runCollect,
+        Effect.map((results) => results.at(-1)?.encodedResult),
+      );
+    expect(empty).toEqual({ threadId, totalMatches: 0, matches: [] });
   }).pipe(Effect.provide(layerTest)),
 );
 
