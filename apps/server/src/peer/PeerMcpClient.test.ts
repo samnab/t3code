@@ -36,19 +36,25 @@ interface FakeRequest extends Schema.Schema.Type<typeof JsonRpcRequest> {}
 /**
  * The peer's `/mcp` as an older T3 Code would answer it: it serves one tool,
  * `t3_thing`, whose schema declares a single `declared` argument. Every
- * request is recorded.
+ * request is recorded. Once `restarted` is set, it forgets the old session
+ * and serves an older `t3_thing` that declares only `other`.
  */
-const serveFakePeer = (requests: Ref.Ref<ReadonlyArray<FakeRequest>>) =>
+const serveFakePeer = (
+  requests: Ref.Ref<ReadonlyArray<FakeRequest>>,
+  restarted?: Ref.Ref<boolean>,
+) =>
   Effect.gen(function* () {
     yield* HttpRouter.serve(
       HttpRouter.add("POST", "/mcp", () =>
         Effect.gen(function* () {
           const body = yield* HttpServerRequest.schemaBodyJson(JsonRpcRequest);
           yield* Ref.update(requests, (seen) => [...seen, body]);
+          const isRestarted = restarted === undefined ? false : yield* Ref.get(restarted);
+          const sessionId = isRestarted ? "session-new" : "session-fake";
           if (body.method === "initialize") {
             return HttpServerResponse.empty({
               status: 200,
-              headers: { "mcp-session-id": "session-fake" },
+              headers: { "mcp-session-id": sessionId },
             });
           }
           if (body.method === "notifications/initialized") return HttpServerResponse.empty();
@@ -62,7 +68,9 @@ const serveFakePeer = (requests: Ref.Ref<ReadonlyArray<FakeRequest>>) =>
                     name: "t3_thing",
                     inputSchema: {
                       type: "object",
-                      properties: { declared: { type: "number" } },
+                      properties: isRestarted
+                        ? { other: { type: "number" } }
+                        : { declared: { type: "number" } },
                     },
                   },
                 ],
@@ -70,6 +78,10 @@ const serveFakePeer = (requests: Ref.Ref<ReadonlyArray<FakeRequest>>) =>
             });
           }
           if (body.method === "tools/call") {
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            if (request.headers["mcp-session-id"] !== sessionId) {
+              return HttpServerResponse.empty({ status: 404 });
+            }
             return yield* HttpServerResponse.json({
               jsonrpc: "2.0",
               id: body.id,
@@ -161,6 +173,29 @@ it.effect("forwards arguments the linked environment's tool declares, once per s
 
       const seen = yield* Ref.get(requests);
       expect(methodsOf(seen, "tools/list")).toHaveLength(1);
+      expect(methodsOf(seen, "tools/call")).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("checks again after the linked environment restarts on an older version", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const requests = yield* Ref.make<ReadonlyArray<FakeRequest>>([]);
+      const restarted = yield* Ref.make(false);
+      const url = yield* serveFakePeer(requests, restarted);
+      const callThing = yield* clientAt(url);
+
+      expect(yield* callThing({ declared: 1 })).toEqual({ ok: true });
+      yield* Ref.set(restarted, true);
+      const failure = yield* callThing({ declared: 2 }).pipe(Effect.flip);
+      expect(failure.message).toBe(
+        "The linked environment does not support `declared` on `t3_thing`. Update it, or omit that field.",
+      );
+
+      // The second call reached only the forgotten session, which applied nothing.
+      const seen = yield* Ref.get(requests);
+      expect(methodsOf(seen, "tools/list")).toHaveLength(2);
       expect(methodsOf(seen, "tools/call")).toHaveLength(2);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),

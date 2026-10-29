@@ -107,6 +107,20 @@ const linkedEnvironmentsOffThere = new OrchestratorMcpFailure({
 });
 
 /** The body of an MCP response: JSON, or a single server-sent event carrying JSON. */
+const statusFailure = (status: number) =>
+  status === 401
+    ? new OrchestratorMcpFailure({
+        code: "capability_denied",
+        message:
+          "The linked environment no longer accepts this link. It may have been revoked there; link it again.",
+      })
+    : status === 403
+      ? linkedEnvironmentsOffThere
+      : new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: `The linked environment answered HTTP ${status}.`,
+        });
+
 const responseJson = (contentType: string | undefined, text: string) =>
   contentType?.includes("text/event-stream") === true
     ? text
@@ -211,20 +225,7 @@ const make = Effect.gen(function* () {
         },
         headers,
       );
-      if (response.status === 401) {
-        return yield* new OrchestratorMcpFailure({
-          code: "capability_denied",
-          message:
-            "The linked environment no longer accepts this link. It may have been revoked there; link it again.",
-        });
-      }
-      if (response.status === 403) return yield* linkedEnvironmentsOffThere;
-      if (response.status !== 200) {
-        return yield* new OrchestratorMcpFailure({
-          code: "orchestration_error",
-          message: `The linked environment answered HTTP ${response.status}.`,
-        });
-      }
+      if (response.status !== 200) return yield* statusFailure(response.status);
       const body = yield* decodeToolsListResponse(
         responseJson(response.headers["content-type"], yield* response.text),
       ).pipe(
@@ -243,7 +244,10 @@ const make = Effect.gen(function* () {
         });
       }
       for (const tool of body.result.tools) {
-        toolArgs.set(tool.name, new Set(Object.keys(tool.inputSchema?.properties ?? {})));
+        // A schema without top-level properties (a union, a record) can't be
+        // checked by key, so it stays unlisted and forwards unchecked.
+        const properties = tool.inputSchema?.properties;
+        if (properties !== undefined) toolArgs.set(tool.name, new Set(Object.keys(properties)));
       }
       cursor = body.result.nextCursor;
     } while (cursor !== undefined);
@@ -280,46 +284,41 @@ const make = Effect.gen(function* () {
           },
           { ...limitHeader, "mcp-session-id": sessionId, "mcp-protocol-version": PROTOCOL_VERSION },
         );
+      // The peer's decode silently drops keys its version doesn't know, so the
+      // rest would apply and only our reply decode would fail: a partial write.
+      // Refuse undeclared top-level arguments before anything leaves; keys
+      // nested inside an object argument are not checked.
+      const refuseUndeclared = (toolArgs: ReadonlyMap<string, ReadonlySet<string>>) => {
+        const declared = toolArgs.get(input.tool);
+        const unsupported =
+          declared === undefined
+            ? undefined
+            : Object.keys(input.arguments).find(
+                (key) => input.arguments[key] !== undefined && !declared.has(key),
+              );
+        return unsupported === undefined
+          ? Effect.void
+          : Effect.fail(
+              new OrchestratorMcpFailure({
+                code: "invalid_request",
+                message: `The linked environment does not support \`${unsupported}\` on \`${input.tool}\`. Update it, or omit that field.`,
+              }),
+            );
+      };
       const existing = (yield* Ref.get(sessions)).get(sessionKey);
       const session = existing ?? (yield* startSession(resolved.url, resolved.token, limitHeader));
-      // The peer's own Schema decode silently drops keys its version does not
-      // know: the remaining arguments would apply there, and only our decode
-      // of its reply would fail here, after a partial write. Refuse any
-      // argument the peer's tool does not declare before anything leaves.
-      const declared = session.toolArgs.get(input.tool);
-      if (declared !== undefined) {
-        const unsupported = Object.keys(input.arguments).find(
-          (key) => input.arguments[key] !== undefined && !declared.has(key),
-        );
-        if (unsupported !== undefined) {
-          return yield* new OrchestratorMcpFailure({
-            code: "invalid_request",
-            message: `The linked environment does not support \`${unsupported}\` on \`${input.tool}\`. Update it, or omit that field.`,
-          });
-        }
-      }
+      yield* refuseUndeclared(session.toolArgs);
       let response = yield* callOnce(session.sessionId);
       if (response.status === 404) {
         const renewed = yield* startSession(resolved.url, resolved.token, limitHeader);
         yield* Ref.update(sessions, (current) => new Map(current).set(sessionKey, renewed));
+        // A restart is how a peer usually changes version, so check again.
+        yield* refuseUndeclared(renewed.toolArgs);
         response = yield* callOnce(renewed.sessionId);
       } else if (existing === undefined) {
         yield* Ref.update(sessions, (current) => new Map(current).set(sessionKey, session));
       }
-      if (response.status === 401) {
-        return yield* new OrchestratorMcpFailure({
-          code: "capability_denied",
-          message:
-            "The linked environment no longer accepts this link. It may have been revoked there; link it again.",
-        });
-      }
-      if (response.status === 403) return yield* linkedEnvironmentsOffThere;
-      if (response.status !== 200) {
-        return yield* new OrchestratorMcpFailure({
-          code: "orchestration_error",
-          message: `The linked environment answered HTTP ${response.status}.`,
-        });
-      }
+      if (response.status !== 200) return yield* statusFailure(response.status);
       const body = yield* decodeToolCallResponse(
         responseJson(response.headers["content-type"], yield* response.text),
       ).pipe(
