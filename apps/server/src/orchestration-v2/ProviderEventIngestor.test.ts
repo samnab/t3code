@@ -157,9 +157,10 @@ const modelSelection = {
   model: "gpt-5.4",
 } satisfies ModelSelection;
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
+const decodeProviderEvent = Schema.decodeSync(ProviderAdapterV2Event);
 
 it("decodes account usage-limit updates on the v2 provider event boundary", () => {
-  const event = Schema.decodeUnknownSync(ProviderAdapterV2Event)({
+  const event = decodeProviderEvent({
     type: "account.rate-limits.updated",
     driver: "codex",
     payload: {

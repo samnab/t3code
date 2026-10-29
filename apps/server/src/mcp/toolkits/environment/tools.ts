@@ -5,6 +5,7 @@ import {
   EnvironmentConnectReachabilityCause,
   ExecutionEnvironmentDescriptor,
   IdleCompactionMode,
+  OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -80,6 +81,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
   ...shared,
   description:
     "Read this server's identity and preferences. Providers and models: `orchestrator_capabilities`. Completion audio defaults apply to future top-level threads; Sound needs a web/desktop client. Also model `favorites`/`providerModelPreferences`, `idleCompaction`, `providerInstances`, and `connect` (null if unknown; Connect changes stay in Settings).",
+  parameters: Schema.Struct({ environmentId: OrchestratorMcpEnvironmentTarget }),
   success: Schema.Struct({
     environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
     label: Schema.String,
@@ -111,6 +113,7 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
   description:
     "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental; provider instance ids come from `orchestrator_capabilities`. Global model defaults apply where a project sets none. `snoozeLimitedThreads` never resumes threads. `defaultRuntimeMode` can only be lowered; raise it in Settings. Per-project values: `t3_project_settings_update`.",
   parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
     completionAudio: ServerSettingsPatch.fields.completionAudio,
     defaultThreadEnvMode: ServerSettingsPatch.fields.defaultThreadEnvMode,
     newWorktreesStartFromOrigin: ServerSettingsPatch.fields.newWorktreesStartFromOrigin,

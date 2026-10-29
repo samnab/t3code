@@ -29,7 +29,7 @@ import * as Settings from "../../../serverSettings.ts";
 import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { resolveRuntimeMode } from "../../OrchestratorMcpService.ts";
+import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import { readCaller, unavailable } from "../../threadAccess.ts";
 import { EnvironmentToolkit } from "./tools.ts";
 

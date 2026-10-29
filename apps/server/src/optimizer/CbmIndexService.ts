@@ -343,20 +343,3 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(CbmIndexService, make);
-
-export const layerTest = () =>
-  Layer.succeed(
-    CbmIndexService,
-    CbmIndexService.of({
-      ensureIndexed: ({ projectId, cwd }) =>
-        Effect.succeed({
-          projectId,
-          repoPath: cwd,
-          state: "ready",
-          checkedAt: "1970-01-01T00:00:00.000Z",
-          nodeCount: 0,
-          edgeCount: 0,
-        }),
-      listStatuses: Effect.succeed([]),
-    }),
-  );

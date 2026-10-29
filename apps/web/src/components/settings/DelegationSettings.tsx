@@ -15,12 +15,7 @@ import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionState,
 } from "../../modelSelection";
-import {
-  applyProviderInstanceSettings,
-  deriveProviderInstanceEntries,
-  sortProviderInstanceEntries,
-  type ProviderInstanceEntry,
-} from "../../providerInstances";
+import { providerInstanceEntriesFor, type ProviderInstanceEntry } from "../../providerInstances";
 import { useEnvironmentProviders } from "../../state/environments";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
@@ -111,7 +106,7 @@ function CandidateRow({
             value={headroom}
             disabled={disabled}
             aria-label={`Minimum headroom percent for ${entry?.displayName ?? candidate.providerInstanceId} ${candidate.model}`}
-            placeholder="—"
+            placeholder="-"
             onChange={(event) => setHeadroomDraft(event.currentTarget.value)}
             onBlur={commitHeadroom}
             onKeyDown={(event) => {
@@ -167,13 +162,7 @@ export function DelegationSettingsPanel() {
   const textGenerationProviders = serverProviders.filter(
     (provider) => provider.supportsTextGeneration !== false,
   );
-  const instanceEntries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(
-      deriveProviderInstanceEntries(textGenerationProviders),
-      settings,
-      null,
-    ),
-  );
+  const instanceEntries = providerInstanceEntriesFor(textGenerationProviders, settings, null);
   // The picker keeps its own highlighted row across tiers; it starts on the
   // environment's default selection and follows the last candidate added.
   const defaultSelection = resolveAppModelSelectionState(settings, textGenerationProviders);
