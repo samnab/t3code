@@ -12,7 +12,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   ThreadId,
   type OrchestrationV2ThreadShell,
-  type ServerSettingsPatch,
+  ServerSettingsPatch,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -20,6 +20,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
@@ -594,6 +595,141 @@ it.layer(
       expect(yield* stored).toMatchObject({ ...expected, defaultRuntimeMode: "approval-required" });
     }),
   );
+});
+
+// The patch schemas the update tool reuses, so null resets stay possible
+// exactly where contracts make a selection nullable.
+const nullResetsSelections = {
+  defaultModelSelection: Schema.is(ServerSettingsPatch.fields.defaultModelSelection)(null),
+  sourceControlWriterModelSelection: Schema.is(
+    ServerSettingsPatch.fields.sourceControlWriterModelSelection,
+  )(null),
+  reviewGuideModelSelection: Schema.is(ServerSettingsPatch.fields.reviewGuideModelSelection)(null),
+  textGenerationModelSelection: Schema.is(ServerSettingsPatch.fields.textGenerationModelSelection)(
+    null,
+  ),
+};
+
+it.layer(
+  Layer.mergeAll(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3code-environment-global-defaults-test-" }),
+    SqlitePersistence.layerMemory,
+  ).pipe(Layer.provideMerge(NodeServices.layer)),
+)("global model defaults", (it) => {
+  it.effect("reads, writes, resets, and persists them", () =>
+    Effect.gen(function* () {
+      const scope = threadScope();
+      const caller = liveThreadShell(threadId);
+      const claude = ProviderInstanceId.make("claudeAgent");
+      const codex = ProviderInstanceId.make("codex");
+      const update = (
+        patch: Pick<
+          ServerSettingsPatch,
+          | "defaultModelSelection"
+          | "textGenerationModelSelection"
+          | "sourceControlWriterModelSelection"
+          | "reviewGuideModelSelection"
+          | "defaultThreadEnvMode"
+        >,
+      ) =>
+        Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+          finalResult(toolkit.handle("t3_environment_preferences_update", patch)),
+        ).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+      const read = Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+        finalResult(toolkit.handle("t3_environment_read", {})),
+      ).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
+      const stored = reloadSettings.pipe(Effect.provide(restartedSettings()));
+
+      const written = yield* update({
+        defaultModelSelection: {
+          instanceId: claude,
+          model: "claude-fable-5-1",
+          options: [{ id: "thinking", value: false }],
+        },
+        textGenerationModelSelection: {
+          instanceId: codex,
+          model: "gpt-5.4",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        },
+        sourceControlWriterModelSelection: { instanceId: codex, model: "gpt-5.4-mini" },
+        reviewGuideModelSelection: { instanceId: claude, model: "claude-opus-4-6" },
+      });
+      const expected = {
+        defaultModelSelection: {
+          instanceId: claude,
+          model: "claude-fable-5-1",
+          options: [{ id: "thinking", value: false }],
+        },
+        textGenerationModelSelection: {
+          instanceId: codex,
+          model: "gpt-5.4",
+          options: [{ id: "reasoningEffort", value: "high" }],
+        },
+        sourceControlWriterModelSelection: { instanceId: codex, model: "gpt-5.4-mini" },
+        reviewGuideModelSelection: { instanceId: claude, model: "claude-opus-4-6" },
+      };
+      expect(written?.encodedResult).toMatchObject(expected);
+      expect(yield* stored).toMatchObject(expected);
+      expect((yield* read)?.encodedResult).toMatchObject({ preferences: expected });
+
+      // Omitting the fields preserves every default.
+      const omitted = yield* update({ defaultThreadEnvMode: "worktree" });
+      expect(omitted?.encodedResult).toMatchObject(expected);
+      expect(yield* stored).toMatchObject({ ...expected, defaultThreadEnvMode: "worktree" });
+
+      // Two independent patches preserve each other's fields; null resets only
+      // the nullable selections.
+      yield* update({ sourceControlWriterModelSelection: null });
+      const second = yield* update({ reviewGuideModelSelection: null });
+      expect(second?.encodedResult).toMatchObject({
+        defaultModelSelection: expected.defaultModelSelection,
+        textGenerationModelSelection: expected.textGenerationModelSelection,
+        sourceControlWriterModelSelection: null,
+        reviewGuideModelSelection: null,
+      });
+      expect(yield* stored).toMatchObject({
+        defaultModelSelection: expected.defaultModelSelection,
+        sourceControlWriterModelSelection: null,
+        reviewGuideModelSelection: null,
+      });
+      expect((yield* read)?.encodedResult).toMatchObject({
+        preferences: {
+          defaultModelSelection: expected.defaultModelSelection,
+          sourceControlWriterModelSelection: null,
+          reviewGuideModelSelection: null,
+        },
+      });
+    }),
+  );
+
+  it.effect("rejects an invalid text-generation patch before writing", () =>
+    Effect.gen(function* () {
+      const updates = yield* Ref.make(0);
+      const result = yield* Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        return yield* finalResult(
+          toolkit.handle("t3_environment_preferences_update", {
+            textGenerationModelSelection: { model: "" },
+          }),
+        );
+      }).pipe(
+        Effect.provide(
+          environmentLayer(threadScope(), liveThreadShell(threadId), countingSettings(updates)),
+        ),
+      );
+      expect(result).toMatchObject({ isFailure: true, failureOrigin: "parameters" });
+      expect(yield* Ref.get(updates)).toBe(0);
+    }),
+  );
+
+  it("keeps null resets where the patch schema allows them", () => {
+    expect(nullResetsSelections).toEqual({
+      defaultModelSelection: true,
+      sourceControlWriterModelSelection: true,
+      reviewGuideModelSelection: true,
+      textGenerationModelSelection: false,
+    });
+  });
 });
 
 // The real secret store, so stored API keys and sensitive environment values
