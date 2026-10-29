@@ -406,10 +406,11 @@ export interface ThreadManagementServiceShape {
     Orchestrator.OrchestratorV2Error
   >;
   readonly getThreadShell: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
-  /** Omit `projectId` to list every project's threads. */
+  /** Omit `projectId` to list every project's threads. Default location is active threads. */
   readonly listProjectThreads: (input: {
     readonly projectId?: ProjectId | undefined;
     readonly includeSubagents: boolean;
+    readonly location?: "active" | "archive" | undefined;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, ThreadManagementError>;
   readonly sendToThread: (
     input: ThreadManagementSendInput,
@@ -755,7 +756,7 @@ const make = Effect.gen(function* () {
   const listProjectThreads: ThreadManagementServiceShape["listProjectThreads"] = (input) =>
     orchestrator
       .getShellSnapshot({
-        location: "active",
+        location: input.location ?? "active",
         ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
       })
       .pipe(

@@ -3171,6 +3171,85 @@ describe("OrchestratorMcpService thread list", () => {
   );
 });
 
+describe("OrchestratorMcpService thread organization readback", () => {
+  const client: McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment:thread-org"),
+    requestNamespace: "client:thread-org",
+    thread: undefined,
+    client: { sessionId: "thread-org", label: "Claude Code", access: "full-access" },
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  };
+  const pinnedAt = DateTime.makeUnsafe("2026-01-01T03:00:00.000Z");
+  const pinnedThreadId = ThreadId.make("thread:org-pinned");
+  const archivedThreadId = ThreadId.make("thread:org-archived");
+  const pinnedShell: OrchestrationV2ThreadShell = {
+    ...liveThreadShell(pinnedThreadId),
+    pinnedAt,
+    autoSettleDisabledAt: pinnedAt,
+  };
+  const archivedShell: OrchestrationV2ThreadShell = {
+    ...liveThreadShell(archivedThreadId),
+    archivedAt: pinnedAt,
+  };
+  // Stands in for the projection store's active/archive locations.
+  const service = layerOrchestratorService.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          listProjectThreads: (input) =>
+            Effect.succeed(input.location === "archive" ? [archivedShell] : [pinnedShell]),
+          getThreadShell: () => Effect.succeed(pinnedShell),
+          getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(pinnedShell)),
+          getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        unusedDelegationPolicyLayer,
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      ),
+    ),
+  );
+
+  it.effect("reads pin and auto-settle state back into list and detail", () =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const listed = yield* mcp.listThreads(client, { allProjects: true });
+      assert.equal(listed.threads.length, 1);
+      assert.equal(listed.threads[0]?.pinned, true);
+      assert.equal(listed.threads[0]?.autoSettle, false);
+      assert.equal(listed.threads[0]?.archived, false);
+      const read = yield* mcp.readThread(client, { threadId: pinnedThreadId });
+      assert.equal(read.thread.pinned, true);
+      assert.equal(read.thread.autoSettle, false);
+    }).pipe(Effect.provide(service)),
+  );
+
+  it.effect("lists archived threads only when asked", () =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const active = yield* mcp.listThreads(client, { allProjects: true });
+      assert.deepStrictEqual(
+        active.threads.map((thread) => thread.threadId),
+        [pinnedThreadId],
+      );
+      const archive = yield* mcp.listThreads(client, { allProjects: true, archived: true });
+      assert.deepStrictEqual(
+        archive.threads.map((thread) => thread.threadId),
+        [archivedThreadId],
+      );
+      assert.equal(archive.threads[0]?.archived, true);
+    }).pipe(Effect.provide(service)),
+  );
+});
+
 describe("OrchestratorMcpService thread stop", () => {
   const driver = ProviderDriverKind.make("codex");
   const instanceId = ProviderInstanceId.make("codex");
