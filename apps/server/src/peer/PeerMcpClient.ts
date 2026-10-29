@@ -76,6 +76,29 @@ const fromLinkError = (error: PeerLinkError) =>
     message: error.message,
   });
 
+/** A peer's answer to `tools/list`: each tool and the arguments it declares. */
+const ToolsListResponse = Schema.Struct({
+  result: Schema.optional(
+    Schema.Struct({
+      tools: Schema.Array(
+        Schema.Struct({
+          name: Schema.String,
+          inputSchema: Schema.optional(
+            Schema.Struct({
+              properties: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+            }),
+          ),
+        }),
+      ),
+      nextCursor: Schema.optional(Schema.String),
+    }),
+  ),
+  error: Schema.optional(Schema.Struct({ code: Schema.Number, message: Schema.String })),
+});
+const decodeToolsListResponse = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ToolsListResponse),
+);
+
 /** Not final, so a task already running there resumes once the beta is on there again. */
 const linkedEnvironmentsOffThere = new OrchestratorMcpFailure({
   code: "orchestration_error",
@@ -93,12 +116,22 @@ const responseJson = (contentType: string | undefined, text: string) =>
         .join("")
     : text;
 
+/**
+ * One peer MCP session, with the top-level argument keys each of its tools
+ * declares there. Kept alongside the session id, so a renewed session
+ * rediscovers what that peer's version supports.
+ */
+interface PeerSession {
+  readonly sessionId: string;
+  readonly toolArgs: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
 const make = Effect.gen(function* () {
   const links = yield* PeerLinks.PeerLinks;
   const httpClient = yield* HttpClient.HttpClient;
   // One MCP session per peer and address, reused across calls. The peer keeps
   // sessions in memory, so a restart there answers 404 and we start a new one.
-  const sessions = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
+  const sessions = yield* Ref.make<ReadonlyMap<string, PeerSession>>(new Map());
 
   const post = (url: string, token: string, body: unknown, headers: Record<string, string>) =>
     httpClient.execute(
@@ -152,6 +185,80 @@ const make = Effect.gen(function* () {
     return sessionId;
   });
 
+  /** Every tool the peer serves, with the argument keys each one declares. */
+  const listTools = Effect.fn("PeerMcpClient.listTools")(function* (
+    url: string,
+    token: string,
+    limitHeader: Record<string, string>,
+    sessionId: string,
+  ) {
+    const headers = {
+      ...limitHeader,
+      "mcp-session-id": sessionId,
+      "mcp-protocol-version": PROTOCOL_VERSION,
+    };
+    const toolArgs = new Map<string, ReadonlySet<string>>();
+    let cursor: string | undefined;
+    do {
+      const response = yield* post(
+        url,
+        token,
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list",
+          params: cursor === undefined ? {} : { cursor },
+        },
+        headers,
+      );
+      if (response.status === 401) {
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message:
+            "The linked environment no longer accepts this link. It may have been revoked there; link it again.",
+        });
+      }
+      if (response.status === 403) return yield* linkedEnvironmentsOffThere;
+      if (response.status !== 200) {
+        return yield* new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: `The linked environment answered HTTP ${response.status}.`,
+        });
+      }
+      const body = yield* decodeToolsListResponse(
+        responseJson(response.headers["content-type"], yield* response.text),
+      ).pipe(
+        Effect.mapError(
+          () =>
+            new OrchestratorMcpFailure({
+              code: "orchestration_error",
+              message: "The linked environment answered in an unexpected shape.",
+            }),
+        ),
+      );
+      if (body.result === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: body.error?.message ?? "The linked environment returned no tool list.",
+        });
+      }
+      for (const tool of body.result.tools) {
+        toolArgs.set(tool.name, new Set(Object.keys(tool.inputSchema?.properties ?? {})));
+      }
+      cursor = body.result.nextCursor;
+    } while (cursor !== undefined);
+    return toolArgs;
+  });
+
+  const startSession = Effect.fn("PeerMcpClient.startSession")(function* (
+    url: string,
+    token: string,
+    limitHeader: Record<string, string>,
+  ) {
+    const sessionId = yield* openSession(url, token, limitHeader);
+    return { sessionId, toolArgs: yield* listTools(url, token, limitHeader, sessionId) };
+  });
+
   const call: PeerMcpClient["Service"]["call"] = Effect.fn("PeerMcpClient.call")(
     function* (input) {
       const resolved = yield* links
@@ -174,14 +281,30 @@ const make = Effect.gen(function* () {
           { ...limitHeader, "mcp-session-id": sessionId, "mcp-protocol-version": PROTOCOL_VERSION },
         );
       const existing = (yield* Ref.get(sessions)).get(sessionKey);
-      const sessionId = existing ?? (yield* openSession(resolved.url, resolved.token, limitHeader));
-      let response = yield* callOnce(sessionId);
+      const session = existing ?? (yield* startSession(resolved.url, resolved.token, limitHeader));
+      // The peer's own Schema decode silently drops keys its version does not
+      // know: the remaining arguments would apply there, and only our decode
+      // of its reply would fail here, after a partial write. Refuse any
+      // argument the peer's tool does not declare before anything leaves.
+      const declared = session.toolArgs.get(input.tool);
+      if (declared !== undefined) {
+        const unsupported = Object.keys(input.arguments).find(
+          (key) => input.arguments[key] !== undefined && !declared.has(key),
+        );
+        if (unsupported !== undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: `The linked environment does not support \`${unsupported}\` on \`${input.tool}\`. Update it, or omit that field.`,
+          });
+        }
+      }
+      let response = yield* callOnce(session.sessionId);
       if (response.status === 404) {
-        const renewed = yield* openSession(resolved.url, resolved.token, limitHeader);
+        const renewed = yield* startSession(resolved.url, resolved.token, limitHeader);
         yield* Ref.update(sessions, (current) => new Map(current).set(sessionKey, renewed));
-        response = yield* callOnce(renewed);
+        response = yield* callOnce(renewed.sessionId);
       } else if (existing === undefined) {
-        yield* Ref.update(sessions, (current) => new Map(current).set(sessionKey, sessionId));
+        yield* Ref.update(sessions, (current) => new Map(current).set(sessionKey, session));
       }
       if (response.status === 401) {
         return yield* new OrchestratorMcpFailure({
