@@ -8,6 +8,7 @@ import {
   NodeId,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   type OrchestratorMcpCapabilitiesResult,
+  type OrchestratorMcpFailure,
   OrchestratorMcpTarget,
   type OrchestrationV2ThreadShell,
   type ScheduledTask,
@@ -3000,6 +3001,79 @@ describe("OrchestratorMcpService thread lookup", () => {
       const { read, send } = yield* failuresFor([deletedLaunched]);
       assert.equal(read.message, `Thread ${bareId} is no longer available.`);
       assert.equal(send.message, `Thread ${bareId} was not found.`);
+    }),
+  );
+});
+
+describe("OrchestratorMcpService thread read state", () => {
+  const readStateThreadId = ThreadId.make("thread:mcp-read-state");
+  const client: McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment:read-state"),
+    requestNamespace: "client:read-state",
+    thread: undefined,
+    client: { sessionId: "read-state", label: "Claude Code", access: "full-access" },
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  };
+  const readStateShell = (visited: boolean): OrchestrationV2ThreadShell => ({
+    ...liveThreadShell(readStateThreadId),
+    lastVisitedAt: visited ? DateTime.makeUnsafe("2026-01-01T02:00:00.000Z") : null,
+    latestRunCompletedAt: DateTime.makeUnsafe("2026-01-01T01:00:00.000Z"),
+  });
+  const serviceWithShell = (shell: OrchestrationV2ThreadShell) =>
+    layerOrchestratorService.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          unusedDelegationPolicyLayer,
+          NodeServices.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadShell: () => Effect.succeed(shell),
+            listProjectThreads: () => Effect.succeed([shell]),
+            getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(shell)),
+            getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
+          }),
+          ServerSettings.layerTest(),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+            list: () => Effect.succeed([]),
+          }),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ),
+      ),
+    );
+  const call = <A>(
+    shell: OrchestrationV2ThreadShell,
+    handle: (
+      mcp: Pick<OrchestratorMcpService.OrchestratorMcpServiceShape, "listThreads" | "readThread">,
+    ) => Effect.Effect<A, OrchestratorMcpFailure>,
+  ) =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* handle(mcp);
+    }).pipe(Effect.provide(serviceWithShell(shell)));
+
+  it.effect("projects the shell watermark and completion time into list and detail", () =>
+    Effect.gen(function* () {
+      const read = yield* call(readStateShell(true), (mcp) =>
+        mcp.readThread(client, { threadId: readStateThreadId }),
+      );
+      assert.equal(read.thread.lastVisitedAt, "2026-01-01T02:00:00.000Z");
+      assert.equal(read.thread.latestRunCompletedAt, "2026-01-01T01:00:00.000Z");
+      const listed = yield* call(readStateShell(true), (mcp) =>
+        mcp.listThreads(client, { projectId: read.thread.projectId }),
+      );
+      assert.equal(listed.threads.length, 1);
+      assert.equal(listed.threads[0]?.threadId, readStateThreadId);
+      assert.equal(listed.threads[0]?.lastVisitedAt, "2026-01-01T02:00:00.000Z");
+      assert.equal(listed.threads[0]?.latestRunCompletedAt, "2026-01-01T01:00:00.000Z");
+      // An unread thread keeps both fields empty instead of a derived badge.
+      const unread = yield* call(readStateShell(false), (mcp) =>
+        mcp.listThreads(client, { projectId: read.thread.projectId }),
+      );
+      assert.equal(unread.threads[0]?.lastVisitedAt, null);
+      assert.equal(unread.threads[0]?.latestRunCompletedAt, "2026-01-01T01:00:00.000Z");
     }),
   );
 });
