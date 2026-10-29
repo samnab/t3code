@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type RunId,
   OrchestratorMcpFailure,
+  ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -31,6 +32,10 @@ import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import { ThreadToolkit } from "./tools.ts";
 
+// Bounded read output: metadata only, never attachment bytes or URLs.
+const QUEUE_ATTACHMENTS_LIMIT = 10;
+const QUEUE_HOLD_REASON_CHARS = 500;
+
 function queueEntry(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
   runId: RunId,
@@ -44,7 +49,35 @@ function queueEntry(
     queuedRunId: run.id,
     text: characters.slice(0, limit).join(""),
     truncated: characters.length > limit,
+    queueHeld: run.queueHeld === true,
+    attachmentCount: message.attachments.length,
+    attachments: message.attachments
+      .slice(0, QUEUE_ATTACHMENTS_LIMIT)
+      .map(({ name, type, mimeType, sizeBytes }) => ({ name, type, mimeType, sizeBytes })),
   };
+}
+
+// The queue stays held while failed worktree setup has left no worktree; that
+// preparation error is the reason the apps show for a held queue.
+function queueHoldReason(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "turnItems">,
+): string | null {
+  const worktreeSetupUnresolved =
+    projection.thread.worktreePath === null &&
+    projection.runs.some(
+      (run) =>
+        (run.status === "failed" || run.status === "interrupted") &&
+        run.workspacePreparation?.type === "worktree",
+    );
+  if (!worktreeSetupUnresolved) return null;
+  const failure = projection.turnItems.findLast(
+    (item) =>
+      item.type === "error" &&
+      item.status === "failed" &&
+      item.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+  );
+  if (failure?.type !== "error") return null;
+  return Array.from(failure.failure.message).slice(0, QUEUE_HOLD_REASON_CHARS).join("");
 }
 const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
   threadId: ThreadId | undefined,
@@ -444,7 +477,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     (input) => input.action === "list" || input.action === "read",
     McpToolAccess.reads((input) =>
       Effect.gen(function* () {
-        const { projection } = yield* readThread(input.threadId, ["runs", "messages"]);
+        const { projection } = yield* readThread(input.threadId, ["runs", "messages", "turnItems"]);
         if (input.action === "list") {
           const runs = queuedRunsInDeliveryOrder(projection);
           const cursor = input.cursor ?? 0;
@@ -455,16 +488,21 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
               return entry === undefined ? [] : [entry];
             }),
             nextCursor: end < runs.length ? end : null,
+            queueHeld: projection.runs.some(
+              (run) => run.status === "queued" && run.queueHeld === true,
+            ),
+            holdReason: queueHoldReason(projection),
           };
         }
         const queuedRunId = yield* required(input.queuedRunId, "queuedRunId");
-        return (
-          queueEntry(projection, queuedRunId, 16000) ??
-          (yield* new OrchestratorMcpFailure({
+        const entry = queueEntry(projection, queuedRunId, 16000);
+        if (entry === undefined) {
+          return yield* new OrchestratorMcpFailure({
             code: "invalid_request",
             message: "The queued message was not found.",
-          }))
-        );
+          });
+        }
+        return { ...entry, holdReason: queueHoldReason(projection) };
       }),
     ),
     writesThread((input) =>
