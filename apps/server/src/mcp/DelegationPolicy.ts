@@ -37,7 +37,9 @@ export class DelegationCandidateHeadroom extends Context.Service<
 >()("t3/mcp/DelegationPolicy/DelegationCandidateHeadroom") {
   static readonly allowAll = Layer.succeed(
     DelegationCandidateHeadroom,
-    DelegationCandidateHeadroom.of({ allows: () => Effect.succeed(true) }),
+    DelegationCandidateHeadroom.of({
+      allows: Effect.fn("DelegationCandidateHeadroom.allows")(() => Effect.succeed(true)),
+    }),
   );
 }
 
@@ -70,6 +72,8 @@ function providerUnavailableReason(
   return undefined;
 }
 
+const isDelegationTierId = Schema.is(DelegationTierId);
+
 export const layer = Layer.effect(
   DelegationPolicy,
   Effect.gen(function* () {
@@ -80,7 +84,7 @@ export const layer = Layer.effect(
 
     return DelegationPolicy.of({
       resolve: Effect.fn("DelegationPolicy.resolve")(function* (tier, options) {
-        if (!Schema.is(DelegationTierId)(tier)) {
+        if (!isDelegationTierId(tier)) {
           return yield* new DelegationPolicyError({
             code: "unknown_tier",
             message: `Unknown delegation tier "${tier}".`,

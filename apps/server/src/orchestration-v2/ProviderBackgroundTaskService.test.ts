@@ -11,7 +11,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 
 import type { ProviderAdapterV2SessionRuntime } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderBackgroundTaskService from "./ProviderBackgroundTaskService.ts";
@@ -39,7 +38,7 @@ function testLayer(runtime: ProviderAdapterV2SessionRuntime) {
           getThreadProjection: () => Effect.succeed(projection),
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-          get: () => Effect.succeed(Option.some(runtime)),
+          get: () => Effect.succeedSome(runtime),
         }),
       ),
     ),

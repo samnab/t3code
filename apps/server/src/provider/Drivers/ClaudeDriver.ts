@@ -151,11 +151,10 @@ const CLAUDE_UPDATE = makePackageManagedProviderMaintenanceResolver({
 
 export function makeClaudeMaintenanceResolver(): ProviderMaintenanceCapabilitiesResolver {
   return {
-    resolve: (context) =>
-      Effect.gen(function* () {
-        const resolvedContext = yield* resolveClaudeMaintenanceContext(context);
-        return yield* CLAUDE_UPDATE.resolve(resolvedContext);
-      }),
+    resolve: Effect.fn("ClaudeMaintenanceResolver.resolve")(function* (context) {
+      const resolvedContext = yield* resolveClaudeMaintenanceContext(context);
+      return yield* CLAUDE_UPDATE.resolve(resolvedContext);
+    }),
   };
 }
 

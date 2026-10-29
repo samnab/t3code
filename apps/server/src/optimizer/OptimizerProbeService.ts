@@ -29,6 +29,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import { isWindowsCommandNotFound } from "@t3tools/provider-core/server/snapshotProbe";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CbmIndexService } from "./CbmIndexService.ts";
@@ -423,50 +424,51 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
     return { optimizers, savings, savingsHistory } satisfies OptimizerDiscoverySnapshot;
   });
 
-  const getStatus: OptimizerProbeService["Service"]["getStatus"] = (input) =>
-    Effect.gen(function* () {
-      const cbmBinaryPath = yield* dependencies.getCbmBinaryPath.pipe(
-        Effect.catchCause(() => Effect.succeed(DEFAULT_CBM_BINARY_PATH)),
-      );
-      const configuredHeadroomProxyUrl = yield* dependencies.getHeadroomProxyUrl.pipe(
-        Effect.catchCause(() => Effect.succeed(DEFAULT_HEADROOM_PROXY_URL)),
-      );
-      const headroomProxyUrl =
-        normalizeHeadroomProxyUrl(configuredHeadroomProxyUrl) ?? DEFAULT_HEADROOM_PROXY_URL;
-      const nowMs = yield* dependencies.nowMs;
-      const observedRevision = (yield* Ref.get(cache)).revision;
-      const snapshot = yield* refreshLock.withPermit(
-        Effect.gen(function* () {
-          const current = yield* Ref.get(cache);
-          const sameCbmBinary = current.cbmBinaryPath === cbmBinaryPath;
-          const sameHeadroomProxy = current.headroomProxyUrl === headroomProxyUrl;
-          const refreshIsCoolingDown =
-            current.refreshedAtMs !== null && nowMs - current.refreshedAtMs < REFRESH_COOLDOWN_MS;
-          if (
-            current.snapshot !== null &&
-            sameCbmBinary &&
-            sameHeadroomProxy &&
-            !input.force &&
-            (!input.refresh || current.revision !== observedRevision || refreshIsCoolingDown)
-          ) {
-            return current.snapshot;
-          }
-          const next = yield* discover(cbmBinaryPath, headroomProxyUrl);
-          yield* Ref.set(cache, {
-            revision: current.revision + 1,
-            snapshot: next,
-            cbmBinaryPath,
-            headroomProxyUrl,
-            refreshedAtMs: nowMs,
-          });
-          return next;
-        }),
-      );
-      const cbmIndexes = yield* dependencies.listCbmIndexes.pipe(
-        Effect.catchCause(() => Effect.succeed([])),
-      );
-      return { ...snapshot, cbmIndexes, attachments: [] } satisfies OptimizerStatusSnapshot;
-    });
+  const getStatus = Effect.fn("OptimizerProbeService.getStatus")(function* (
+    input: Parameters<OptimizerProbeService["Service"]["getStatus"]>[0],
+  ) {
+    const cbmBinaryPath = yield* dependencies.getCbmBinaryPath.pipe(
+      Effect.catchCause(() => Effect.succeed(DEFAULT_CBM_BINARY_PATH)),
+    );
+    const configuredHeadroomProxyUrl = yield* dependencies.getHeadroomProxyUrl.pipe(
+      Effect.catchCause(() => Effect.succeed(DEFAULT_HEADROOM_PROXY_URL)),
+    );
+    const headroomProxyUrl =
+      normalizeHeadroomProxyUrl(configuredHeadroomProxyUrl) ?? DEFAULT_HEADROOM_PROXY_URL;
+    const nowMs = yield* dependencies.nowMs;
+    const observedRevision = (yield* Ref.get(cache)).revision;
+    const snapshot = yield* refreshLock.withPermit(
+      Effect.gen(function* () {
+        const current = yield* Ref.get(cache);
+        const sameCbmBinary = current.cbmBinaryPath === cbmBinaryPath;
+        const sameHeadroomProxy = current.headroomProxyUrl === headroomProxyUrl;
+        const refreshIsCoolingDown =
+          current.refreshedAtMs !== null && nowMs - current.refreshedAtMs < REFRESH_COOLDOWN_MS;
+        if (
+          current.snapshot !== null &&
+          sameCbmBinary &&
+          sameHeadroomProxy &&
+          !input.force &&
+          (!input.refresh || current.revision !== observedRevision || refreshIsCoolingDown)
+        ) {
+          return current.snapshot;
+        }
+        const next = yield* discover(cbmBinaryPath, headroomProxyUrl);
+        yield* Ref.set(cache, {
+          revision: current.revision + 1,
+          snapshot: next,
+          cbmBinaryPath,
+          headroomProxyUrl,
+          refreshedAtMs: nowMs,
+        });
+        return next;
+      }),
+    );
+    const cbmIndexes = yield* dependencies.listCbmIndexes.pipe(
+      Effect.catchCause(() => Effect.succeed([])),
+    );
+    return { ...snapshot, cbmIndexes, attachments: [] } satisfies OptimizerStatusSnapshot;
+  });
 
   const waitForHeadroom = Effect.fn("OptimizerProbeService.waitForHeadroom")(function* (
     proxyUrl: string,
@@ -604,7 +606,7 @@ export const make = Effect.gen(function* () {
   return yield* makeWith({
     run: processRunner.run,
     isMissingResult: (result) =>
-      ProcessRunner.isWindowsCommandNotFound(Number(result.code), result.stderr).pipe(
+      isWindowsCommandNotFound(Number(result.code), result.stderr).pipe(
         Effect.provideService(HostProcess.Platform, hostPlatform),
       ),
     fetchHeadroomStats: (proxyUrl) =>
@@ -678,51 +680,3 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(OptimizerProbeService, make);
-
-const TEST_CHECKED_AT = "1970-01-01T00:00:00.000Z";
-
-export const layerTest = (snapshot?: OptimizerStatusSnapshot) =>
-  Layer.succeed(
-    OptimizerProbeService,
-    OptimizerProbeService.of({
-      getStatus: () =>
-        Effect.succeed(
-          snapshot ?? {
-            optimizers: [
-              {
-                id: "rtk",
-                installed: false,
-                version: null,
-                mode: "cli-wrapper",
-                checkedAt: TEST_CHECKED_AT,
-              },
-              {
-                id: "headroom",
-                installed: false,
-                version: null,
-                running: false,
-                mode: "detected-proxy",
-                checkedAt: TEST_CHECKED_AT,
-              },
-              {
-                id: "cbm",
-                installed: false,
-                version: null,
-                mode: "stdio-mcp",
-                checkedAt: TEST_CHECKED_AT,
-              },
-            ],
-            savings: [],
-            savingsHistory: [],
-            cbmIndexes: [],
-            attachments: [],
-          },
-        ),
-      startHeadroom: () =>
-        Effect.fail(
-          new OptimizerStartError({
-            message: "Headroom startup is unavailable in this test layer.",
-          }),
-        ),
-    }),
-  );
