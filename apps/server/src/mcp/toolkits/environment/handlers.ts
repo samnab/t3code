@@ -1,6 +1,8 @@
 import {
   type CustomModelSetting,
   CustomModelSetting as CustomModelSettingSchema,
+  type DelegationCandidate,
+  DelegationTierId,
   globalIdleCompaction,
   KeybindingCommand,
   type KeybindingsConfigError,
@@ -24,10 +26,14 @@ import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as Keybindings from "../../../keybindings.ts";
 import { runtimeModeRank } from "../../../orchestration-v2/DispatchModeLimit.ts";
+import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as DatabaseStorage from "../../../persistence/DatabaseStorage.ts";
 import { BUILT_IN_DRIVERS } from "../../../provider/builtInDrivers.ts";
 import { deriveProviderInstanceConfigMap } from "../../../provider/ProviderInstanceRegistryHydration.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import { providerUnavailableReason } from "../../DelegationPolicy.ts";
+import { hiddenModelMessage } from "../../ModelVisibility.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -121,6 +127,7 @@ export function preferences(settings: ServerSettings) {
     continueThreadsAfterServerUpdate,
     responseStreamingMode,
     defaultRuntimeMode,
+    delegationTiers,
   } = settings;
   const characters = Array.from(sourceControlWritingStyle.customInstructions);
   return {
@@ -149,6 +156,7 @@ export function preferences(settings: ServerSettings) {
     continueThreadsAfterServerUpdate,
     responseStreamingMode,
     defaultRuntimeMode,
+    delegationTiers,
     providerInstances: Record.map(
       deriveProviderInstanceConfigMap(settings),
       (instance, instanceId) => providerInstanceView(settings, instanceId, instance),
@@ -242,6 +250,21 @@ const keybindingsWrite = Effect.fn("EnvironmentToolkit.keybindingsWrite")(functi
   const keybindings = yield* write(service).pipe(Effect.mapError(keybindingsFailure));
   return { keybindings, issues: [] };
 });
+// A tier's quota guard is its candidates' minimum headroom; absent means 0.
+const headroomThreshold = (candidate: DelegationCandidate) => candidate.minHeadroomPercent ?? 0;
+const findsHeadroomLowering = (
+  candidates: ReadonlyArray<DelegationCandidate>,
+  stored: ReadonlyArray<DelegationCandidate>,
+) =>
+  candidates.some((candidate) => {
+    const previous = stored.find(
+      (entry) =>
+        entry.providerInstanceId === candidate.providerInstanceId &&
+        entry.model === candidate.model,
+    );
+    return previous !== undefined && headroomThreshold(candidate) < headroomThreshold(previous);
+  });
+
 export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
   t3_environment_read: McpToolAccess.reads(() =>
     Effect.gen(function* () {
@@ -276,20 +299,111 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
             ),
           );
         }
+        const { setDelegationTier, ...rest } = patch;
+        // Validated before the lock against live provider snapshots; only the
+        // threshold guard is re-checked inside the write, where it must stay sync.
+        const tierOp =
+          setDelegationTier === undefined
+            ? undefined
+            : yield* Effect.gen(function* () {
+                const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
+                const candidates = setDelegationTier.candidates ?? [];
+                const tier: DelegationTierId = setDelegationTier.tier;
+                const registry = yield* ProviderRegistry.ProviderRegistry;
+                const providers = yield* Effect.mapError(registry.getProviders, unavailable);
+                const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+                const orchestrationCapable = new Set(
+                  yield* Effect.mapError(adapters.list(), unavailable),
+                );
+                for (const candidate of candidates) {
+                  const provider = providers.find(
+                    (entry) => entry.instanceId === candidate.providerInstanceId,
+                  );
+                  const reason = providerUnavailableReason(
+                    provider,
+                    orchestrationCapable.has(candidate.providerInstanceId),
+                  );
+                  if (reason !== undefined)
+                    return yield* new OrchestratorMcpFailure({
+                      code: "invalid_request",
+                      message: `Delegation tier "${tier}" candidate ${candidate.providerInstanceId}/${candidate.model}: ${reason}. Pick a provider from orchestrator_capabilities.`,
+                    });
+                  if (
+                    provider !== undefined &&
+                    provider.models.length > 0 &&
+                    !provider.models.some((model) => model.slug === candidate.model)
+                  )
+                    return yield* new OrchestratorMcpFailure({
+                      code: "invalid_request",
+                      message: `Delegation tier "${tier}" candidate ${candidate.providerInstanceId}/${candidate.model}: model is not advertised. Pick a model from orchestrator_capabilities.`,
+                    });
+                  const hidden = hiddenModelMessage({
+                    settings: current,
+                    providers,
+                    selection: {
+                      instanceId: candidate.providerInstanceId,
+                      model: candidate.model,
+                    },
+                  });
+                  if (hidden !== null)
+                    return yield* new OrchestratorMcpFailure({
+                      code: "invalid_request",
+                      message: hidden,
+                    });
+                }
+                if (findsHeadroomLowering(candidates, current.delegationTiers[tier]))
+                  return yield* new OrchestratorMcpFailure({
+                    code: "invalid_request",
+                    message: `Delegation tier "${tier}": lowering a candidate's minimum headroom needs Settings; agents can only raise or keep it.`,
+                  });
+                return { tier, candidates, before: current.delegationTiers[tier] };
+              });
         // The rank check repeats under the settings write lock so a human
         // lowering the default between the check above and the write is kept.
+        // The headroom guard repeats for the same reason.
+        const tierApplied: Array<{
+          tier: DelegationTierId;
+          before: ReadonlyArray<DelegationCandidate>;
+          after: ReadonlyArray<DelegationCandidate>;
+        }> = [];
         const updated = yield* settings
           .modifySettings((current) => {
-            if (
+            const rankKept =
               requested === undefined ||
-              runtimeModeRank[requested] <= runtimeModeRank[current.defaultRuntimeMode]
-            )
-              return patch;
-            const { defaultRuntimeMode: _raised, ...rest } = patch;
-            return rest;
+              runtimeModeRank[requested] <= runtimeModeRank[current.defaultRuntimeMode];
+            const tierDropped =
+              tierOp === undefined ||
+              findsHeadroomLowering(tierOp.candidates, current.delegationTiers[tierOp.tier]);
+            if (rankKept && !tierDropped)
+              tierApplied.push({
+                tier: tierOp.tier,
+                before: tierOp.before,
+                after: tierOp.candidates,
+              });
+            const tierPatch =
+              tierOp === undefined || tierDropped
+                ? undefined
+                : {
+                    ...current.delegationTiers,
+                    small:
+                      tierOp.tier === "small" ? tierOp.candidates : current.delegationTiers.small,
+                    medium:
+                      tierOp.tier === "medium" ? tierOp.candidates : current.delegationTiers.medium,
+                    large:
+                      tierOp.tier === "large" ? tierOp.candidates : current.delegationTiers.large,
+                  };
+            if (!rankKept) {
+              const { defaultRuntimeMode: _raised, ...lowered } = rest;
+              return tierPatch === undefined ? lowered : { ...lowered, delegationTiers: tierPatch };
+            }
+            return tierPatch === undefined ? rest : { ...rest, delegationTiers: tierPatch };
           })
           .pipe(Effect.mapError(unavailable));
-        return preferences(updated);
+        const change = tierApplied.at(0);
+        return {
+          ...preferences(updated),
+          ...(change === undefined ? {} : { delegationTierChange: change }),
+        };
       }),
     ),
   ),
