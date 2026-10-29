@@ -271,8 +271,18 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     projectId: task.projectId,
     boundThreadId: task.threadId,
     schedule: task.schedule,
+    workspaceStrategy: task.workspaceStrategy,
+    providerInstanceId: task.modelSelection.instanceId,
+    model: task.modelSelection.model,
+    ...(task.modelSelection.options === undefined ? {} : { options: task.modelSelection.options }),
+    runtimeMode: task.runtimeMode,
+    interactionMode: task.interactionMode,
     nextRunAt: task.nextRunAt,
     lastRunStatus: task.lastRunStatus,
+    lastRunAt: task.lastRunAt,
+    // Stored as Cause.pretty: stack frames and server paths follow the first line.
+    lastRunError: task.lastRunError?.split("\n", 1)[0]?.slice(0, 500) ?? null,
+    runCount: task.runCount,
     ...(task.webhook?.url == null || !mayRun ? {} : { webhookUrl: task.webhook.url }),
     ...(task.webhook === undefined
       ? {}
