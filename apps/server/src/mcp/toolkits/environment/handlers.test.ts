@@ -20,7 +20,6 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
-import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
@@ -597,19 +596,6 @@ it.layer(
   );
 });
 
-// The patch schemas the update tool reuses, so null resets stay possible
-// exactly where contracts make a selection nullable.
-const nullResetsSelections = {
-  defaultModelSelection: Schema.is(ServerSettingsPatch.fields.defaultModelSelection)(null),
-  sourceControlWriterModelSelection: Schema.is(
-    ServerSettingsPatch.fields.sourceControlWriterModelSelection,
-  )(null),
-  reviewGuideModelSelection: Schema.is(ServerSettingsPatch.fields.reviewGuideModelSelection)(null),
-  textGenerationModelSelection: Schema.is(ServerSettingsPatch.fields.textGenerationModelSelection)(
-    null,
-  ),
-};
-
 it.layer(
   Layer.mergeAll(
     ServerConfig.layerTest(process.cwd(), { prefix: "t3code-environment-global-defaults-test-" }),
@@ -692,24 +678,30 @@ it.layer(
         sourceControlWriterModelSelection: null,
         reviewGuideModelSelection: null,
       });
+
+      // Null resets the environment default model and reads back as null.
+      const reset = yield* update({ defaultModelSelection: null });
+      expect(reset?.encodedResult).toMatchObject({
+        defaultModelSelection: null,
+        sourceControlWriterModelSelection: null,
+        reviewGuideModelSelection: null,
+      });
+      expect(yield* stored).toMatchObject({ defaultModelSelection: null });
       expect((yield* read)?.encodedResult).toMatchObject({
-        preferences: {
-          defaultModelSelection: expected.defaultModelSelection,
-          sourceControlWriterModelSelection: null,
-          reviewGuideModelSelection: null,
-        },
+        preferences: { defaultModelSelection: null },
       });
     }),
   );
 
-  it.effect("rejects an invalid text-generation patch before writing", () =>
+  it.effect("rejects a null text-generation selection before writing", () =>
     Effect.gen(function* () {
       const updates = yield* Ref.make(0);
       const result = yield* Effect.gen(function* () {
         const toolkit = yield* EnvironmentToolkit;
         return yield* finalResult(
           toolkit.handle("t3_environment_preferences_update", {
-            textGenerationModelSelection: { model: "" },
+            // @ts-expect-error null is exactly the invalid value under test
+            textGenerationModelSelection: null,
           }),
         );
       }).pipe(
@@ -721,15 +713,6 @@ it.layer(
       expect(yield* Ref.get(updates)).toBe(0);
     }),
   );
-
-  it("keeps null resets where the patch schema allows them", () => {
-    expect(nullResetsSelections).toEqual({
-      defaultModelSelection: true,
-      sourceControlWriterModelSelection: true,
-      reviewGuideModelSelection: true,
-      textGenerationModelSelection: false,
-    });
-  });
 });
 
 // The real secret store, so stored API keys and sensitive environment values
