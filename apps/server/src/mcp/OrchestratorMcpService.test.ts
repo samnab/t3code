@@ -2336,6 +2336,62 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect("reads back the stored execution details", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const listed = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.listScheduledTasks(supervisedClient, { projectId })),
+          Effect.provide(
+            service(
+              [
+                task({
+                  workspaceStrategy: { type: "worktree", baseRef: "dev", startFromOrigin: true },
+                  modelSelection: {
+                    instanceId: ProviderInstanceId.make("codex"),
+                    model: "gpt-5",
+                    options: [{ id: "reasoningEffort", value: "high" }],
+                  },
+                  runtimeMode: "auto",
+                  interactionMode: "plan",
+                  runCount: 3,
+                  lastRunAt: "2026-10-06T12:00:00.000Z",
+                  lastRunStatus: "failed",
+                  lastRunError: "Provider unavailable",
+                  nextRunAt: "2026-10-07T00:00:00.000Z",
+                }),
+              ],
+              null,
+              upserted,
+            ),
+          ),
+        );
+        assert.deepEqual(listed.tasks[0], {
+          scheduledTaskId: ScheduledTaskId.make("scheduled-task:webhook"),
+          title: "On push",
+          prompt: "Do {{body.instruction}}",
+          enabled: true,
+          projectId,
+          boundThreadId: null,
+          schedule: { type: "webhook", signature: null },
+          workspaceStrategy: { type: "worktree", baseRef: "dev", startFromOrigin: true },
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5",
+            options: [{ id: "reasoningEffort", value: "high" }],
+          },
+          runtimeMode: "auto",
+          interactionMode: "plan",
+          nextRunAt: "2026-10-07T00:00:00.000Z",
+          lastRunStatus: "failed",
+          lastRunAt: "2026-10-06T12:00:00.000Z",
+          lastRunError: "Provider unavailable",
+          runCount: 3,
+          // The task runs at a mode above the caller's, so the URL stays withheld.
+          webhookSignature: "none",
+        });
+      }),
+    );
+
     it.effect("hides a webhook URL from a thread whose turn has ended", () =>
       Effect.gen(function* () {
         const callerId = ThreadId.make("thread:scheduled-ended");

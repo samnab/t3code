@@ -39,6 +39,7 @@ import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
+  OrchestrationV2ThreadLaunchWorkspaceStrategy,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
@@ -702,8 +703,20 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   projectId: ProjectId,
   boundThreadId: Schema.NullOr(ThreadId),
   schedule: ScheduledTaskSchedule,
+  /** Workspace each run starts in; `existing_worktree` pins a path, `worktree` a base ref. */
+  workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  modelSelection: Schema.Struct({
+    instanceId: ProviderInstanceId,
+    model: Schema.String,
+    options: Schema.optional(Schema.Array(ProviderOptionSelection)),
+  }),
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
   nextRunAt: Schema.NullOr(IsoDateTime),
   lastRunStatus: ScheduledTaskRunStatus,
+  lastRunAt: Schema.NullOr(IsoDateTime),
+  lastRunError: Schema.NullOr(Schema.String),
+  runCount: NonNegativeInt,
   webhookUrl: Schema.optional(Schema.String).annotate({
     description:
       "Public URL for the sender. Absent: no T3 Connect tunnel. The user must enable T3 Connect remote access.",
