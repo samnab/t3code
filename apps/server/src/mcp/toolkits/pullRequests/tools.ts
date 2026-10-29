@@ -1,11 +1,20 @@
 import {
+  IsoDateTime,
   McpCapabilityUnavailableError,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
   PositiveInt,
+  ProjectId,
+  PullRequestCapabilities,
+  PullRequestCheckStatus,
+  PullRequestChecksState,
+  PullRequestListState,
+  PullRequestMergeability,
+  PullRequestReviewDecision,
   PullRequestReviewGuide,
   PullRequestReviewGuideRun,
   PullRequestState,
+  SourceControlProviderKind,
   ThreadPullRequestLinkSource,
   TrimmedNonEmptyString,
   ThreadId,
@@ -20,6 +29,7 @@ import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
+import * as PullRequestService from "../../../pullRequest/PullRequestService.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -31,6 +41,13 @@ const dependencies = [
 const guideDependencies = [
   ...dependencies,
   PullRequestReviewGuideService.PullRequestReviewGuideService,
+];
+
+// Observation tools bind to a project, never to a thread, so external read-only clients can use them.
+const readDependencies = [
+  McpInvocationContext.McpInvocationContext,
+  ProjectService.ProjectService,
+  PullRequestService.PullRequestService,
 ];
 
 export const PullRequestTargetInput = Schema.Struct({
@@ -185,6 +202,39 @@ export class PullRequestGuideFailedError extends Schema.TaggedError<PullRequestG
   }
 }
 
+export class PullRequestProjectUnknownError extends Schema.TaggedError<PullRequestProjectUnknownError>()(
+  "PullRequestProjectUnknownError",
+  { projectId: ProjectId },
+) {
+  override get message(): string {
+    return `Project ${this.projectId} was not found, so its pull requests cannot be read here.`;
+  }
+}
+
+export class PullRequestProjectMismatchError extends Schema.TaggedError<PullRequestProjectMismatchError>()(
+  "PullRequestProjectMismatchError",
+  {
+    projectId: ProjectId,
+    repository: Schema.String,
+    host: Schema.optional(Schema.String),
+  },
+) {
+  override get message(): string {
+    const where = this.host === undefined ? this.repository : `${this.host}/${this.repository}`;
+    return `Project ${this.projectId} is not a checkout of ${where}.`;
+  }
+}
+
+export class PullRequestReadFailedError extends Schema.TaggedError<PullRequestReadFailedError>()(
+  "PullRequestReadFailedError",
+  // Only the service's own sanitized message crosses MCP; its cause stays server-side.
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export const PullRequestToolError = Schema.Union([
   OrchestratorMcpFailure,
   McpCapabilityUnavailableError,
@@ -202,6 +252,9 @@ export const PullRequestToolError = Schema.Union([
   PullRequestWatchFromSubagentError,
   PullRequestProjectNotFoundError,
   PullRequestGuideFailedError,
+  PullRequestProjectUnknownError,
+  PullRequestProjectMismatchError,
+  PullRequestReadFailedError,
 ]);
 export type PullRequestToolError = typeof PullRequestToolError.Type;
 
@@ -374,6 +427,110 @@ export const ReadPullRequestGuideResult = Schema.Struct({
 });
 export type ReadPullRequestGuideResult = typeof ReadPullRequestGuideResult.Type;
 
+const PullRequestActorView = Schema.Struct({
+  login: TrimmedNonEmptyString,
+  name: Schema.NullOr(Schema.String),
+});
+
+const PullRequestLabelView = Schema.Struct({ name: TrimmedNonEmptyString });
+
+export const PullRequestListItem = Schema.Struct({
+  projectId: ProjectId,
+  projectTitle: TrimmedNonEmptyString,
+  host: TrimmedNonEmptyString,
+  repository: TrimmedNonEmptyString,
+  number: PositiveInt,
+  url: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  state: PullRequestState,
+  isDraft: Schema.Boolean,
+  headBranch: TrimmedNonEmptyString,
+  baseBranch: TrimmedNonEmptyString,
+  mergeability: PullRequestMergeability,
+  author: Schema.NullOr(PullRequestActorView),
+  labels: Schema.Array(PullRequestLabelView),
+  reviewDecision: Schema.optional(PullRequestReviewDecision),
+  checksState: Schema.optional(PullRequestChecksState),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  observedAt: Schema.optional(Schema.Finite),
+});
+export type PullRequestListItem = typeof PullRequestListItem.Type;
+
+export const ListPullRequestsResult = Schema.Struct({
+  pullRequests: Schema.Array(PullRequestListItem),
+  providers: Schema.Array(
+    Schema.Struct({
+      host: TrimmedNonEmptyString,
+      kind: SourceControlProviderKind,
+      configured: Schema.Boolean,
+      detail: Schema.NullOr(TrimmedNonEmptyString),
+    }),
+  ),
+  errors: Schema.Array(
+    Schema.Struct({
+      projectId: ProjectId,
+      projectTitle: TrimmedNonEmptyString,
+      message: TrimmedNonEmptyString,
+    }),
+  ),
+  errorsTruncated: Schema.Boolean,
+  truncated: Schema.Boolean,
+});
+export type ListPullRequestsResult = typeof ListPullRequestsResult.Type;
+
+export const PullRequestChecksView = Schema.Struct({
+  observedAt: Schema.NullOr(Schema.Finite),
+  state: PullRequestState,
+  items: Schema.Array(
+    Schema.Struct({
+      name: TrimmedNonEmptyString,
+      status: PullRequestCheckStatus,
+      required: Schema.optional(Schema.Boolean),
+    }),
+  ),
+  truncated: Schema.Boolean,
+});
+export type PullRequestChecksView = typeof PullRequestChecksView.Type;
+
+export const ReadPullRequestResult = Schema.Struct({
+  projectId: ProjectId,
+  projectTitle: TrimmedNonEmptyString,
+  host: TrimmedNonEmptyString,
+  repository: TrimmedNonEmptyString,
+  number: PositiveInt,
+  url: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  body: Schema.String,
+  bodyTruncated: Schema.Boolean,
+  state: PullRequestState,
+  isDraft: Schema.Boolean,
+  mergeability: PullRequestMergeability,
+  headSha: Schema.NullOr(Schema.String).annotate({
+    description:
+      "Null when the host does not report it. Compare against later reads for staleness.",
+  }),
+  headBranch: TrimmedNonEmptyString,
+  baseBranch: TrimmedNonEmptyString,
+  author: Schema.NullOr(PullRequestActorView),
+  reviewers: Schema.Array(PullRequestActorView),
+  labels: Schema.Array(PullRequestLabelView),
+  checks: Schema.NullOr(PullRequestChecksView).annotate({
+    description: "Null when the host reports no checks, not that none ran.",
+  }),
+  checksError: Schema.NullOr(Schema.String).annotate({
+    description:
+      "Set when the checks read itself failed. Null checks without this mean the host reports none.",
+  }),
+  capabilities: PullRequestCapabilities,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  mergedAt: Schema.NullOr(IsoDateTime),
+  closedAt: Schema.NullOr(IsoDateTime),
+  observedAt: Schema.NullOr(Schema.Finite),
+});
+export type ReadPullRequestResult = typeof ReadPullRequestResult.Type;
+
 const WritePullRequestGuidesTool = Tool.make("write_pull_request_guides", {
   description:
     "Write review guides for up to 20 PRs (the tour in the PR Guide tab). Returns once runs start. Each run takes minutes in a temporary checkout. A run for the same head is joined. Read with `read_pull_request_guide`. Fails while guides are off.",
@@ -408,6 +565,58 @@ const ReadPullRequestGuideTool = Tool.make("read_pull_request_guide", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, true);
 
+const ListPullRequestsTool = Tool.make("t3_pull_request_list", {
+  description:
+    "List pull requests for the environment or one project, read-only. Hosts that cannot be read stay visible under `providers` and `errors`. Read one with `t3_pull_request_read`.",
+  parameters: Schema.Struct({
+    projectId: Schema.optional(
+      ProjectId.annotate({
+        description: "One project. Default: every project on a supported host.",
+      }),
+    ),
+    host: Schema.optional(TrimmedNonEmptyString.annotate({ description: "One host." })),
+    state: Schema.optional(PullRequestListState.annotate({ description: "Default: open." })),
+    limit: Schema.optional(
+      Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 })).annotate({
+        description: "Default: 20.",
+      }),
+    ),
+  }),
+  success: ListPullRequestsResult,
+  failure: PullRequestToolError,
+  dependencies: readDependencies,
+})
+  .annotate(Tool.Title, "List pull requests")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, true);
+
+const ReadPullRequestTool = Tool.make("t3_pull_request_read", {
+  description:
+    "Read one pull request through its project: safe fields, a bounded body, the check list, and what the host supports. `checks` is null when the host reports none. `headSha` and `observedAt` date the read. Read-only; never mutates.",
+  parameters: Schema.Struct({
+    projectId: ProjectId.annotate({
+      description: "Project whose checkout holds the repository.",
+    }),
+    repository: TrimmedNonEmptyString.annotate({
+      description: "With `number`. Owner and repo, or the host's own repository path.",
+    }),
+    number: PositiveInt,
+    host: Schema.optional(
+      TrimmedNonEmptyString.annotate({ description: "Default: the project's host." }),
+    ),
+  }),
+  success: ReadPullRequestResult,
+  failure: PullRequestToolError,
+  dependencies: readDependencies,
+})
+  .annotate(Tool.Title, "Read pull request")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, true);
+
 export const PullRequestsToolkit = Toolkit.make(
   LinkPullRequestTool,
   UnlinkPullRequestTool,
@@ -416,4 +625,6 @@ export const PullRequestsToolkit = Toolkit.make(
   UnwatchPullRequestTool,
   WritePullRequestGuidesTool,
   ReadPullRequestGuideTool,
+  ListPullRequestsTool,
+  ReadPullRequestTool,
 );
