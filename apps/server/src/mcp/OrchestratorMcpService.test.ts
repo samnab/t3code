@@ -2356,7 +2356,8 @@ describe("OrchestratorMcpService provider resolution", () => {
                   runCount: 3,
                   lastRunAt: "2026-10-06T12:00:00.000Z",
                   lastRunStatus: "failed",
-                  lastRunError: "Provider unavailable",
+                  lastRunError:
+                    "Provider unavailable\n    at run (/srv/t3/ScheduledTaskService.ts:858)",
                   nextRunAt: "2026-10-07T00:00:00.000Z",
                 }),
               ],
@@ -2374,16 +2375,15 @@ describe("OrchestratorMcpService provider resolution", () => {
           boundThreadId: null,
           schedule: { type: "webhook", signature: null },
           workspaceStrategy: { type: "worktree", baseRef: "dev", startFromOrigin: true },
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5",
-            options: [{ id: "reasoningEffort", value: "high" }],
-          },
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5",
+          options: [{ id: "reasoningEffort", value: "high" }],
           runtimeMode: "auto",
           interactionMode: "plan",
           nextRunAt: "2026-10-07T00:00:00.000Z",
           lastRunStatus: "failed",
           lastRunAt: "2026-10-06T12:00:00.000Z",
+          // Stack frames and server paths stay out of the agent's context.
           lastRunError: "Provider unavailable",
           runCount: 3,
           // The task runs at a mode above the caller's, so the URL stays withheld.

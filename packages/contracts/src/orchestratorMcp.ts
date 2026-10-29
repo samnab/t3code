@@ -705,16 +705,16 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   schedule: ScheduledTaskSchedule,
   /** Workspace each run starts in; `existing_worktree` pins a path, `worktree` a base ref. */
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
-  modelSelection: Schema.Struct({
-    instanceId: ProviderInstanceId,
-    model: Schema.String,
-    options: Schema.optional(Schema.Array(ProviderOptionSelection)),
-  }),
+  /** Seeds fresh threads only; a bound task runs with its thread's current model and workspace. */
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.String,
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   nextRunAt: Schema.NullOr(IsoDateTime),
   lastRunStatus: ScheduledTaskRunStatus,
   lastRunAt: Schema.NullOr(IsoDateTime),
+  /** First line of the last failure, at most 500 chars. */
   lastRunError: Schema.NullOr(Schema.String),
   runCount: NonNegativeInt,
   webhookUrl: Schema.optional(Schema.String).annotate({
