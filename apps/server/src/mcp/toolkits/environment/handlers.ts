@@ -5,6 +5,7 @@ import {
   KeybindingCommand,
   type KeybindingsConfigError,
   OrchestratorMcpFailure,
+  MAX_SCRIPT_ID_LENGTH,
   STATIC_KEYBINDING_COMMANDS,
   type ProviderDriverKind,
   type ProviderInstanceConfig,
@@ -227,7 +228,7 @@ const keybindingCommand = (command: string) =>
           // The ids come straight from the contract's static set, so the message
           // cannot drift from what the schema accepts; the set is closed, which
           // keeps the message bounded.
-          message: `Unknown keybinding command \`${command}\`. Valid commands: ${STATIC_KEYBINDING_COMMANDS.join(", ")}, or \`script.<id>.run\` for a project script.`,
+          message: `Unknown keybinding command \`${command}\`. Valid commands: ${STATIC_KEYBINDING_COMMANDS.join(", ")}, or \`script.<id>.run\` for a project script (\`<id>\`: lowercase letters, digits and hyphens, at most ${MAX_SCRIPT_ID_LENGTH} characters).`,
         }),
     ),
   );

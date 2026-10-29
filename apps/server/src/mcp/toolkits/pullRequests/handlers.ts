@@ -280,6 +280,7 @@ const make = Effect.gen(function* () {
     }
     const thread = yield* engine.getThreadShell(threadId).pipe(
       Effect.map(Option.fromNullishOr),
+      Effect.tapError(logFailure),
       Effect.mapError(() => new Failure()),
     );
     if (Option.isNone(thread) || thread.value.deletedAt !== null) {
@@ -287,6 +288,10 @@ const make = Effect.gen(function* () {
     }
     return thread.value;
   });
+
+  // Agents get a fixed message, so the server log is the only place the cause survives.
+  const logFailure = (cause: unknown) =>
+    Effect.logWarning("pull request tool failed", { cause: Cause.pretty(Cause.fail(cause)) });
 
   const projectOf = (
     thread: OrchestrationV2ThreadShell,
@@ -297,6 +302,7 @@ const make = Effect.gen(function* () {
   ) =>
     projects.getShell(thread.projectId).pipe(
       Effect.map(Option.getOrUndefined),
+      Effect.tapError(logFailure),
       Effect.mapError(() => new Failure()),
     );
 
@@ -315,7 +321,9 @@ const make = Effect.gen(function* () {
     > =>
       Cause.hasInterruptsOnly(cause)
         ? Effect.failCause(cause as Cause.Cause<never>)
-        : Effect.fail(new Failure());
+        : Effect.logWarning("pull request tool failed", { cause: Cause.pretty(cause) }).pipe(
+            Effect.andThen(Effect.fail(new Failure())),
+          );
 
   const setWatching = Effect.fn("PullRequestsToolkit.setWatching")(function* (
     input: PullRequestTargetInput,
@@ -369,9 +377,10 @@ const make = Effect.gen(function* () {
             Effect.orElseSucceed(() => null),
             Effect.map((shell) => shell ?? undefined),
           );
-    const known = yield* projects
-      .listShells()
-      .pipe(Effect.mapError(() => new PullRequestListFailedError()));
+    const known = yield* projects.listShells().pipe(
+      Effect.tapError(logFailure),
+      Effect.mapError(() => new PullRequestListFailedError()),
+    );
     const callerProject = known.find((project) => project.id === callerThread?.projectId);
     // A pull request named by host and repository builds its URL through the project that holds
     // it, which need not be the caller's.

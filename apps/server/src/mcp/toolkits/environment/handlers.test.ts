@@ -1006,7 +1006,7 @@ it.layer(
             code: "invalid_request",
             // The message must carry the contract's static ids so an agent can
             // pick a valid command without another discovery round-trip.
-            message: `Unknown keybinding command \`script.Not Valid.run\`. Valid commands: ${STATIC_KEYBINDING_COMMANDS.join(", ")}, or \`script.<id>.run\` for a project script.`,
+            message: `Unknown keybinding command \`script.Not Valid.run\`. Valid commands: ${STATIC_KEYBINDING_COMMANDS.join(", ")}, or \`script.<id>.run\` for a project script (\`<id>\`: lowercase letters, digits and hyphens, at most 24 characters).`,
           },
         });
       }
