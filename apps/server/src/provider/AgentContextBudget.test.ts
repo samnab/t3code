@@ -8,6 +8,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { McpServer } from "effect/ai";
 
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import { CheckpointDiffQuery } from "../checkpointing/CheckpointDiffQuery.ts";
 import { CloudLink } from "../cloud/CloudLink.ts";
 import { ServerConfig } from "../config.ts";
 import { DeviceService } from "../device/DeviceService.ts";
@@ -52,6 +53,7 @@ import budget from "./agentContextBudget.json" with { type: "json" };
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
+  Layer.mock(CheckpointDiffQuery)({}),
   Layer.mock(CloudLink)({}),
   Layer.mock(CompletionNotificationService)({}),
   Layer.mock(DatabaseStorage)({}),

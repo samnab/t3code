@@ -19,6 +19,8 @@ import * as TestClock from "effect/testing/TestClock";
 
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
+import * as CheckpointDiffQuery from "../../../checkpointing/CheckpointDiffQuery.ts";
+import { CheckpointTurnRangeUnavailableError } from "../../../checkpointing/Errors.ts";
 import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "../../../orchestration-v2/CommandReceiptStore.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
@@ -70,18 +72,25 @@ const handlersOverDatabase = Layer.mergeAll(
   // Merged so the regression can seed runs the way completed runs persist.
   layerDatabase,
 );
-const layerTest = McpToolAccess.HandlersLayer.layer(ThreadHandlers.layer).pipe(
-  Layer.provideMerge(handlersOverDatabase),
-  Layer.provideMerge(
-    Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope("full-access")),
-  ),
-);
-const layerReadOnly = McpToolAccess.HandlersLayer.layer(ThreadHandlers.layer).pipe(
-  Layer.provideMerge(handlersOverDatabase),
-  Layer.provideMerge(
-    Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope("read-only")),
-  ),
-);
+const layerHandlers = (access: "full-access" | "read-only") =>
+  McpToolAccess.HandlersLayer.layer(ThreadHandlers.layer).pipe(
+    Layer.provideMerge(handlersOverDatabase),
+    Layer.provideMerge(
+      Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope(access)),
+    ),
+    Layer.provideMerge(layerDiffStub),
+  );
+// Handlers other than t3_thread_diff never touch checkpoint diffs.
+const layerDiffStub = Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
+  getThreadDiff: () => Effect.die("No CheckpointDiffQuery stub for this MCP thread control test"),
+});
+const layerTest = layerHandlers("full-access");
+const layerReadOnly = layerHandlers("read-only");
+
+/** A t3_thread_diff handler over a specific CheckpointDiffQuery, shadowing the stub. */
+const diffOver = (
+  getThreadDiff: CheckpointDiffQuery.CheckpointDiffQuery["Service"]["getThreadDiff"],
+) => Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({ getThreadDiff });
 
 const last = <A, E, R, E2, R2>(
   handled: Effect.Effect<Stream.Stream<{ readonly result: A }, E, R>, E2, R2>,
@@ -451,5 +460,146 @@ it.effect("lowers a thread's modes and refuses to raise them, recording nothing"
       ),
     ).toMatchObject({ code: "interaction_mode_escalation_denied", message });
     expect((yield* readThread).thread).toEqual(lowered);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+const queriedDiff = {
+  fromTurnCount: 1,
+  toTurnCount: 2,
+  latestTurnCount: 3,
+  diff: "diff --git a/file.ts b/file.ts",
+};
+
+it.effect("reads one turn's checkpoint diff", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    const calls: Array<CheckpointDiffQuery.ThreadDiffInput> = [];
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_diff", { threadId, turn: 2 }).pipe(
+          Effect.provide(
+            diffOver((input) =>
+              Effect.sync(() => {
+                calls.push(input);
+                return queriedDiff;
+              }),
+            ),
+          ),
+        ),
+      ),
+    ).toEqual({ threadId, ...queriedDiff, truncated: false, totalChars: queriedDiff.diff.length });
+    expect(calls).toEqual([{ threadId, turn: 2, ignoreWhitespace: undefined }]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reads the whole thread up to the latest ready turn without a turn", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    const calls: Array<CheckpointDiffQuery.ThreadDiffInput> = [];
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_diff", { threadId }).pipe(
+          Effect.provide(
+            diffOver((input) =>
+              Effect.sync(() => {
+                calls.push(input);
+                return queriedDiff;
+              }),
+            ),
+          ),
+        ),
+      ),
+    ).toEqual({ threadId, ...queriedDiff, truncated: false, totalChars: queriedDiff.diff.length });
+    expect(calls).toEqual([{ threadId, turn: undefined, ignoreWhitespace: undefined }]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("truncates the diff to maxChars and flags it", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    const long = { ...queriedDiff, diff: "x".repeat(30) };
+    expect(
+      yield* last(
+        toolkit
+          .handle("t3_thread_diff", { threadId, maxChars: 10 })
+          .pipe(Effect.provide(diffOver(() => Effect.succeed(long)))),
+      ),
+    ).toEqual({
+      threadId,
+      fromTurnCount: long.fromTurnCount,
+      toTurnCount: long.toTurnCount,
+      latestTurnCount: long.latestTurnCount,
+      diff: "x".repeat(10),
+      truncated: true,
+      totalChars: 30,
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses a turn above the thread's ready turns", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_diff", { threadId, turn: 5 }).pipe(
+          Effect.provide(
+            diffOver(() =>
+              Effect.fail(
+                new CheckpointTurnRangeUnavailableError({
+                  operation: "CheckpointDiffQuery.getTurnDiff",
+                  threadId,
+                  requestedTurnCount: 5,
+                  availableTurnCount: 3,
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      code: "invalid_request",
+      message: "Turn 5 is not available: the thread has 3 ready turns.",
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses a thread this client cannot read", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    expect(
+      yield* last(toolkit.handle("t3_thread_diff", { threadId: ThreadId.make("thread:gone") })),
+    ).toMatchObject({ code: "thread_not_found" });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("returns an empty diff for a thread with no ready turns", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    expect(
+      yield* last(
+        toolkit
+          .handle("t3_thread_diff", { threadId })
+          .pipe(
+            Effect.provide(
+              diffOver(() =>
+                Effect.succeed({ fromTurnCount: 0, toTurnCount: 0, latestTurnCount: 0, diff: "" }),
+              ),
+            ),
+          ),
+      ),
+    ).toEqual({
+      threadId,
+      fromTurnCount: 0,
+      toTurnCount: 0,
+      latestTurnCount: 0,
+      diff: "",
+      truncated: false,
+      totalChars: 0,
+    });
   }).pipe(Effect.provide(layerTest)),
 );

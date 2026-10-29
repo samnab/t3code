@@ -14,10 +14,12 @@ import {
   ProviderUserInputAnswers,
   IsoDateTime,
   OrchestratorMcpFailure,
+  clampedPositiveInt,
   OrchestrationV2DispatchCommandResult,
   ThreadId,
   RunId,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ThreadGoal,
   ThreadGoalLoopClientCommand,
@@ -30,6 +32,7 @@ import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as CheckpointDiffQuery from "../../../checkpointing/CheckpointDiffQuery.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -316,9 +319,43 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadDiffTool = Tool.make("t3_thread_diff", {
+  description:
+    "Read a thread's checkpoint diff, the same one the app's diff panel shows. `turn`: that one turn's diff; omit for the whole thread up to the latest ready turn.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+    turn: Schema.optional(PositiveInt),
+    ignoreWhitespace: Schema.optional(Schema.Boolean),
+    maxChars: Schema.optional(clampedPositiveInt(200_000)).annotate({
+      description: "Max chars of diff, 1 to 200000.",
+    }),
+  }),
+  success: Schema.Struct({
+    threadId: ThreadId,
+    fromTurnCount: NonNegativeInt,
+    toTurnCount: NonNegativeInt,
+    latestTurnCount: NonNegativeInt,
+    diff: Schema.String,
+    truncated: Schema.Boolean,
+    totalChars: NonNegativeInt,
+  }),
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    CheckpointDiffQuery.CheckpointDiffQuery,
+  ],
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,
   ThreadSearchTool,
+  ThreadDiffTool,
   ThreadConfigurationTool,
   ThreadConfigureTool,
   ThreadLowerModesTool,

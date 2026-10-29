@@ -23,6 +23,8 @@ import {
 } from "../../threadAccess.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as CheckpointDiffQuery from "../../../checkpointing/CheckpointDiffQuery.ts";
+import type { CheckpointServiceError } from "../../../checkpointing/Errors.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { hiddenModelMessage } from "../../ModelVisibility.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
@@ -83,6 +85,15 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
 });
 const refuse = (message: string) =>
   new OrchestratorMcpFailure({ code: "invalid_request", message });
+
+const DEFAULT_DIFF_CHARS = 20_000;
+
+const diffFailure = (error: CheckpointServiceError) =>
+  error._tag === "CheckpointTurnRangeUnavailableError"
+    ? refuse(
+        `Turn ${error.requestedTurnCount} is not available: the thread has ${error.availableTurnCount} ready turns.`,
+      )
+    : unavailable();
 
 /** A field the chosen action needs. `null` counts as given, as in `beforeRunId: null`. */
 const required = <A>(value: A | undefined, name: string) =>
@@ -252,6 +263,30 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return { sequence: result.sequence };
       }),
     ),
+  ),
+  t3_thread_diff: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+      const queried = yield* checkpointDiffQuery
+        .getThreadDiff({
+          threadId: projection.thread.id,
+          turn: input.turn,
+          ignoreWhitespace: input.ignoreWhitespace,
+        })
+        .pipe(Effect.mapError(diffFailure));
+      const chars = Array.from(queried.diff);
+      const maxChars = input.maxChars ?? DEFAULT_DIFF_CHARS;
+      return {
+        threadId: projection.thread.id,
+        fromTurnCount: queried.fromTurnCount,
+        toTurnCount: queried.toTurnCount,
+        latestTurnCount: queried.latestTurnCount,
+        diff: chars.slice(0, maxChars).join(""),
+        truncated: chars.length > maxChars,
+        totalChars: chars.length,
+      };
+    }),
   ),
   t3_thread_configuration: McpToolAccess.reads((input) => readConfiguration(input.threadId)),
   t3_thread_configure: McpToolAccess.either(
