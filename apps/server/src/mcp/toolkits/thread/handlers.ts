@@ -93,7 +93,9 @@ const diffFailure = (error: CheckpointServiceError) =>
     ? refuse(
         `Turn ${error.requestedTurnCount} is not available: the thread has ${error.availableTurnCount} ready turns.`,
       )
-    : unavailable();
+    : error._tag === "CheckpointRefUnavailableError"
+      ? refuse(`Turn ${error.turnCount} has no ready checkpoint; try another turn.`)
+      : unavailable();
 
 /** A field the chosen action needs. `null` counts as given, as in `beforeRunId: null`. */
 const required = <A>(value: A | undefined, name: string) =>
@@ -275,16 +277,20 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           ignoreWhitespace: input.ignoreWhitespace,
         })
         .pipe(Effect.mapError(diffFailure));
-      const chars = Array.from(queried.diff);
       const maxChars = input.maxChars ?? DEFAULT_DIFF_CHARS;
+      // Diffs reach 10 MB; slice UTF-16 units instead of materializing code points,
+      // stepping back so a surrogate pair is never split.
+      let end = Math.min(maxChars, queried.diff.length);
+      const lastUnit = queried.diff.charCodeAt(end - 1);
+      if (end < queried.diff.length && lastUnit >= 0xd800 && lastUnit <= 0xdbff) end -= 1;
       return {
         threadId: projection.thread.id,
         fromTurnCount: queried.fromTurnCount,
         toTurnCount: queried.toTurnCount,
         latestTurnCount: queried.latestTurnCount,
-        diff: chars.slice(0, maxChars).join(""),
-        truncated: chars.length > maxChars,
-        totalChars: chars.length,
+        diff: queried.diff.slice(0, end),
+        truncated: end < queried.diff.length,
+        totalChars: queried.diff.length,
       };
     }),
   ),

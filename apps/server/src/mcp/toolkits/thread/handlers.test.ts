@@ -20,7 +20,10 @@ import * as TestClock from "effect/testing/TestClock";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 import * as CheckpointDiffQuery from "../../../checkpointing/CheckpointDiffQuery.ts";
-import { CheckpointTurnRangeUnavailableError } from "../../../checkpointing/Errors.ts";
+import {
+  CheckpointRefUnavailableError,
+  CheckpointTurnRangeUnavailableError,
+} from "../../../checkpointing/Errors.ts";
 import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "../../../orchestration-v2/CommandReceiptStore.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
@@ -563,6 +566,34 @@ it.effect("refuses a turn above the thread's ready turns", () =>
     ).toMatchObject({
       code: "invalid_request",
       message: "Turn 5 is not available: the thread has 3 ready turns.",
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses a turn with no ready checkpoint", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_diff", { threadId, turn: 2 }).pipe(
+          Effect.provide(
+            diffOver(() =>
+              Effect.fail(
+                new CheckpointRefUnavailableError({
+                  operation: "CheckpointDiffQuery.getTurnDiff",
+                  threadId,
+                  turnCount: 2,
+                  checkpoint: "to",
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      code: "invalid_request",
+      message: "Turn 2 has no ready checkpoint; try another turn.",
     });
   }).pipe(Effect.provide(layerTest)),
 );

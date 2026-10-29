@@ -112,7 +112,7 @@ export const make = Effect.gen(function* () {
       Effect.mapError(
         () =>
           new CheckpointThreadNotFoundError({
-            // Every caller resolves the diff through getTurnDiff, which raises with this tag.
+            // getThreadDiff reuses getTurnDiff's operation name so both report one not-found error.
             operation: "CheckpointDiffQuery.getTurnDiff",
             threadId,
           }),
