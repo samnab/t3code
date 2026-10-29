@@ -7,6 +7,7 @@ import {
   type PullRequestCapabilities,
   type PullRequestChecks,
   type PullRequestDetail,
+  type PullRequestListEntry,
   PullRequestOperationError,
   type PullRequestListResult,
   PullRequestUnavailableError,
@@ -247,6 +248,32 @@ const READ_TARGET = { projectId: PROJECT_ID, repository: "t3tools/t3code", numbe
 
 const isReadFailure = Schema.is(PullRequestReadFailedError);
 
+function makeListEntry(number: number): PullRequestListEntry {
+  return {
+    provider: SourceControlProviderKind.make("github"),
+    host: "github.com",
+    projectId: PROJECT_ID,
+    projectTitle: "Project",
+    repository: "t3tools/t3code",
+    number,
+    title: `PR ${number}`,
+    url: `https://github.com/t3tools/t3code/pull/${number}`,
+    author: null,
+    headBranch: `feat-${number}`,
+    baseBranch: "main",
+    state: "open",
+    isDraft: false,
+    mergeability: "mergeable",
+    additions: 0,
+    deletions: 0,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-02T00:00:00.000Z",
+    observedAt: 1000,
+    viewerReviewRequested: false,
+    labels: [],
+  };
+}
+
 const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
   options: HarnessOptions = {},
 ) {
@@ -294,11 +321,6 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
               }),
           ),
         ),
-    }),
-    Layer.mock(Orchestrator.OrchestratorV2)({
-      getThreadShell: (id) =>
-        Effect.succeed(id === THREAD_ID && thread ? v2PullRequestThread(thread) : null),
-      dispatch,
     }),
     Layer.mock(PullRequestService.PullRequestService)({
       list: (input) =>
@@ -807,6 +829,46 @@ describe("pull request guide tools", () => {
 });
 
 describe("pull request observation tools", () => {
+  it.effect("bounds an environment-wide list to the limit across repository batches", () =>
+    Effect.gen(function* () {
+      const batch = Array.from({ length: 30 }, (_, index) => makeListEntry(index + 1));
+      const harness = yield* makeHarness({
+        service: {
+          // The service applies `limit` per repository read, so two repositories yield 60 rows.
+          list: () =>
+            Effect.succeed({
+              ...EMPTY_PULL_REQUEST_LIST,
+              entries: [
+                ...batch,
+                ...batch.map((entry, index) => ({ ...entry, number: 100 + index })),
+              ],
+            }),
+        },
+      });
+      const result = yield* harness.call("t3_pull_request_list", { limit: 50 });
+      expect(result.pullRequests).toHaveLength(50);
+      expect(result.truncated).toBe(true);
+    }),
+  );
+
+  it.effect("bounds and flags over-long error lists", () =>
+    Effect.gen(function* () {
+      const errors = Array.from({ length: 25 }, (_, index) => ({
+        projectId: ProjectId.make(`project-${index}`),
+        projectTitle: `Project ${index}`,
+        message: "The host could not be read.",
+      }));
+      const harness = yield* makeHarness({
+        service: {
+          list: () => Effect.succeed({ ...EMPTY_PULL_REQUEST_LIST, errors }),
+        },
+      });
+      const result = yield* harness.call("t3_pull_request_list", {});
+      expect(result.errors).toHaveLength(20);
+      expect(result.errorsTruncated).toBe(true);
+    }),
+  );
+
   it.effect(
     "reads a project-bound pull request for read-only, supervised and full-access clients",
     () =>
@@ -853,6 +915,138 @@ describe("pull request observation tools", () => {
           });
         }
       }),
+  );
+
+  it.effect("keeps a failed checks read visible instead of equating it with no checks", () =>
+    Effect.gen(function* () {
+      const failing = yield* makeHarness({
+        service: {
+          checks: () =>
+            Effect.fail(
+              new PullRequestOperationError({
+                operation: "getChangeRequestChecks",
+                detail: "The host rate-limited the checks read.",
+              }),
+            ),
+        },
+      });
+      const failed = yield* failing.call("t3_pull_request_read", READ_TARGET);
+      expect(failed.checks).toBeNull();
+      expect(failed.checksError).toBe(
+        "Pull request operation getChangeRequestChecks failed: The host rate-limited the checks read.",
+      );
+
+      const clean = yield* makeHarness({ service: { checks: () => Effect.succeed(null) } });
+      const none = yield* clean.call("t3_pull_request_read", READ_TARGET);
+      expect(none.checks).toBeNull();
+      expect(none.checksError).toBeNull();
+    }),
+  );
+
+  it.effect("binds a GitLab nested-group checkout and a GitCafe checkout", () =>
+    Effect.gen(function* () {
+      const seen: Array<PullRequestRef> = [];
+      const capture = (input: PullRequestRef) => {
+        seen.push(input);
+        return Effect.succeed(makePullRequestDetail());
+      };
+      const gitlab = {
+        ...makeProject({
+          canonicalKey: "gitlab.com/group/sub/project",
+          locator: {
+            source: "git-remote",
+            remoteName: "origin",
+            remoteUrl: "git@gitlab.com:group/sub/project.git",
+          },
+          provider: SourceControlProviderKind.make("gitlab"),
+          displayName: "group/sub/project",
+        }),
+        id: ProjectId.make("project-gitlab"),
+      };
+      const gitlabHarness = yield* makeHarness({ project: gitlab, service: { detail: capture } });
+      yield* gitlabHarness.call("t3_pull_request_read", {
+        projectId: gitlab.id,
+        repository: "group/sub/project",
+        number: 7,
+      });
+      expect(seen[0]).toMatchObject({
+        projectId: gitlab.id,
+        host: "gitlab.com",
+        repository: "group/sub/project",
+        number: 7,
+      });
+
+      const cafe = {
+        ...makeProject({
+          canonicalKey: "git.cafe/pingdotgg/t3code",
+          locator: {
+            source: "git-remote",
+            remoteName: "origin",
+            remoteUrl: "git@git.cafe:pingdotgg/t3code.git",
+          },
+          provider: SourceControlProviderKind.make("gitcafe"),
+          displayName: "pingdotgg/t3code",
+        }),
+        id: ProjectId.make("project-gitcafe"),
+      };
+      const cafeHarness = yield* makeHarness({ project: cafe, service: { detail: capture } });
+      yield* cafeHarness.call("t3_pull_request_read", {
+        projectId: cafe.id,
+        host: "git.cafe",
+        repository: "pingdotgg/t3code",
+        number: 9,
+      });
+      expect(seen[1]).toMatchObject({
+        projectId: cafe.id,
+        host: "git.cafe",
+        repository: "pingdotgg/t3code",
+        number: 9,
+      });
+    }),
+  );
+
+  it.effect("reports each read's own head and freshness so staleness is detectable", () =>
+    Effect.gen(function* () {
+      let read = 0;
+      const harness = yield* makeHarness({
+        service: {
+          detail: () => {
+            read += 1;
+            return Effect.succeed(
+              makePullRequestDetail({ headSha: `head-${read}`, observedAt: 1000 * read }),
+            );
+          },
+        },
+      });
+      const first = yield* harness.call("t3_pull_request_read", READ_TARGET);
+      const second = yield* harness.call("t3_pull_request_read", READ_TARGET);
+      expect(first.headSha).toBe("head-1");
+      expect(first.observedAt).toBe(1000);
+      expect(second.headSha).toBe("head-2");
+      expect(second.observedAt).toBe(2000);
+    }),
+  );
+
+  it.effect("lists pull requests for a read-only client", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        service: {
+          list: () =>
+            Effect.succeed({
+              ...EMPTY_PULL_REQUEST_LIST,
+              entries: [makeListEntry(3)],
+            }),
+        },
+      });
+      const result = yield* harness.call(
+        "t3_pull_request_list",
+        {},
+        ["pull-requests"],
+        clientScope("read-only"),
+      );
+      expect(result.pullRequests).toHaveLength(1);
+      expect(result.errorsTruncated).toBe(false);
+    }),
   );
 
   it.effect("denies reads without the pull-requests capability", () =>

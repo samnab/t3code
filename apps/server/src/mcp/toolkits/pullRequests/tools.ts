@@ -466,6 +466,7 @@ export const ListPullRequestsResult = Schema.Struct({
       message: TrimmedNonEmptyString,
     }),
   ),
+  errorsTruncated: Schema.Boolean,
   truncated: Schema.Boolean,
 });
 export type ListPullRequestsResult = typeof ListPullRequestsResult.Type;
@@ -508,6 +509,10 @@ export const ReadPullRequestResult = Schema.Struct({
   labels: Schema.Array(PullRequestLabelView),
   checks: Schema.NullOr(PullRequestChecksView).annotate({
     description: "Null when the host reports no checks, not that none ran.",
+  }),
+  checksError: Schema.NullOr(Schema.String).annotate({
+    description:
+      "Set when the checks read itself failed. Null checks without this mean the host reports none.",
   }),
   capabilities: PullRequestCapabilities,
   createdAt: IsoDateTime,

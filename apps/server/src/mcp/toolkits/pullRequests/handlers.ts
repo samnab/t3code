@@ -66,6 +66,7 @@ interface ResolvedTarget {
 
 const PULL_REQUEST_BODY_MAX = 4000;
 const PULL_REQUEST_CHECKS_MAX = 50;
+const PULL_REQUEST_ERRORS_MAX = 20;
 
 // Service failures cross MCP as their own sanitized message; causes and defects stay server-side.
 const sanitizedFailure = (error: PullRequestService.PullRequestError) =>
@@ -574,24 +575,27 @@ const make = Effect.gen(function* () {
     t3_pull_request_list: McpToolAccess.reads((input) =>
       Effect.gen(function* () {
         yield* McpInvocationContext.requireMcpCapability("pull-requests");
+        const limit = input.limit ?? 20;
         const result = yield* pullRequestReads
           .list({
             state: input.state ?? "open",
-            limit: input.limit ?? 20,
+            limit,
             ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
             ...(input.host === undefined ? {} : { host: input.host }),
           })
           .pipe(Effect.mapError(sanitizedFailure));
+        // The service applies `limit` per repository read and concatenates, so bound the total here.
         return {
-          pullRequests: result.entries.map(listItemOf),
+          pullRequests: result.entries.slice(0, limit).map(listItemOf),
           providers: result.providers.map((provider) => ({
             host: provider.host,
             kind: provider.kind,
             configured: provider.configured,
             detail: provider.detail,
           })),
-          errors: result.errors,
-          truncated: result.truncated,
+          errors: result.errors.slice(0, PULL_REQUEST_ERRORS_MAX),
+          errorsTruncated: result.errors.length > PULL_REQUEST_ERRORS_MAX,
+          truncated: result.truncated || result.entries.length > limit,
         };
       }),
     ),
@@ -645,11 +649,12 @@ const make = Effect.gen(function* () {
         const detail = yield* pullRequestReads
           .detail(reference)
           .pipe(Effect.mapError(sanitizedFailure));
-        // A host without a check concept answers null; a failed checks read stays null rather
-        // than failing the whole read, so the unsupported state stays visible.
-        const checks = yield* pullRequestReads
-          .checks(reference)
-          .pipe(Effect.mapError(sanitizedFailure), Effect.option, Effect.map(Option.getOrNull));
+        // Null checks with no error mean the host reports none. A failed checks read keeps the
+        // read alive but says so, so it is not mistaken for a host without a check concept.
+        const checksOutcome = yield* pullRequestReads.checks(reference).pipe(
+          Effect.map((checks) => ({ checks, checksError: null })),
+          Effect.catch((error) => Effect.succeed({ checks: null, checksError: error.message })),
+        );
         return {
           projectId: detail.projectId,
           projectTitle: detail.projectTitle,
@@ -672,7 +677,8 @@ const make = Effect.gen(function* () {
             name: reviewer.name,
           })),
           labels: labelsView(detail.labels),
-          checks: checks === null ? null : checksViewOf(checks),
+          checks: checksOutcome.checks === null ? null : checksViewOf(checksOutcome.checks),
+          checksError: checksOutcome.checksError,
           capabilities: detail.capabilities,
           createdAt: detail.createdAt,
           updatedAt: detail.updatedAt,
