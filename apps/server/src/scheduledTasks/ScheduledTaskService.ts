@@ -1330,6 +1330,7 @@ export const layer = Layer.effect(
           WHERE p.delivery_id = d.delivery_id AND p.state IN ('pending', 'dispatching')) AS pending_window
         FROM scheduled_task_webhook_deliveries d WHERE task_id = ${input.id}
         ORDER BY received_at DESC, rowid DESC
+        LIMIT ${input.limit ?? -1}
       `.pipe(
         NodeSqliteClient.readOnly,
         Effect.map((rows) => ({

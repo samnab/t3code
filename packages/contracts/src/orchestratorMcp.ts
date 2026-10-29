@@ -685,12 +685,27 @@ export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
 });
 export type OrchestratorMcpScheduleTaskInput = typeof OrchestratorMcpScheduleTaskInput.Type;
 
+/**
+ * Task edits an agent may pass on an update; creation derives all of these from
+ * the caller instead. Server-side guardrails keep each edit within what the
+ * caller could launch itself.
+ */
+const OrchestratorMcpScheduledTaskEdits = {
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  model: Schema.optional(Schema.String),
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
+  workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
+  runtimeMode: Schema.optional(RuntimeMode),
+  interactionMode: Schema.optional(ProviderInteractionMode),
+};
+
 /** `schedule_task` creates a task, or updates one when `scheduledTaskId` is given. */
 export const OrchestratorMcpSaveScheduledTaskInput = Schema.Struct({
   ...OrchestratorMcpScheduleTaskInput.fields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
   prompt: Schema.optional(OrchestratorMcpPrompt),
   schedule: Schema.optional(OrchestratorMcpSchedule),
+  ...OrchestratorMcpScheduledTaskEdits,
 });
 export type OrchestratorMcpSaveScheduledTaskInput =
   typeof OrchestratorMcpSaveScheduledTaskInput.Type;
@@ -722,6 +737,14 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
       "Public URL for the sender. Absent: no T3 Connect tunnel. The user must enable T3 Connect remote access.",
   }),
   webhookSignature: Schema.optional(Schema.Literals(["none", "set"])),
+  webhookDeliveries: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        receivedAt: IsoDateTime,
+        outcome: Schema.String,
+      }),
+    ),
+  ).annotate({ description: "Last webhook deliveries, newest first. Metadata only." }),
 });
 export type OrchestratorMcpScheduledTask = typeof OrchestratorMcpScheduledTask.Type;
 
@@ -753,6 +776,7 @@ export const OrchestratorMcpUpdateScheduledTaskInput = Schema.Struct({
   schedule: Schema.optional(OrchestratorMcpSchedule),
   enabled: Schema.optional(Schema.Boolean),
   bindToCurrentThread: Schema.optional(Schema.Boolean),
+  ...OrchestratorMcpScheduledTaskEdits,
 });
 export type OrchestratorMcpUpdateScheduledTaskInput =
   typeof OrchestratorMcpUpdateScheduledTaskInput.Type;

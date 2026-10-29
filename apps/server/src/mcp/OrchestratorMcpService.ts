@@ -77,6 +77,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -120,6 +121,7 @@ import {
   taskPrompt,
 } from "./delegatedTaskModes.ts";
 import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import { assertProjectWorktree } from "./toolkits/project/handlers.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -262,7 +264,11 @@ function scheduledTaskWorkspaceStrategy(
     : { type: "worktree", baseRef: "main", startFromOrigin: true };
 }
 
-function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {
+function scheduledTaskSummary(
+  task: ScheduledTask,
+  mayRun: boolean,
+  deliveries?: OrchestratorMcpScheduledTask["webhookDeliveries"],
+): OrchestratorMcpScheduledTask {
   return {
     scheduledTaskId: task.id,
     title: task.title,
@@ -287,6 +293,9 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     ...(task.webhook === undefined
       ? {}
       : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
+    ...(deliveries === undefined || deliveries.length === 0
+      ? {}
+      : { webhookDeliveries: deliveries }),
   };
 }
 
@@ -994,6 +1003,7 @@ const make = Effect.gen(function* () {
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
+  const fileSystem = yield* FileSystem.FileSystem;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const delegationPolicy = yield* DelegationPolicy.DelegationPolicy;
@@ -1278,7 +1288,12 @@ const make = Effect.gen(function* () {
   };
 
   const resolveTarget = Effect.fn("OrchestratorMcpService.resolveTarget")(function* (input: {
-    readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
+    readonly parent: {
+      readonly thread: Pick<
+        OrchestrationV2ThreadProjection["thread"],
+        "projectId" | "modelSelection"
+      >;
+    };
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
     /** Receipt replays bypass current settings and the hidden-model check because they start no work. Dispatch must reuse the checked command ID. */
@@ -1846,17 +1861,32 @@ const make = Effect.gen(function* () {
         };
       },
       task: ScheduledTask,
+      includeDeliveries = false,
     ) {
       const live =
         caller.parent === undefined
           ? scope.client?.access !== "read-only"
           : Exit.isSuccess(yield* Effect.exit(assertLiveCaller(scope, caller.parent)));
       const modes = yield* scheduledTaskRunModes(task).pipe(Effect.option);
+      // Delivery status is read-only decoration: a failed read omits the
+      // field instead of failing the task read it decorates.
+      const deliveries =
+        includeDeliveries && task.webhook !== undefined
+          ? yield* scheduledTasks
+              .listWebhookDeliveries({ id: task.id, acceptAnyOutcome: true, limit: 3 })
+              .pipe(
+                Effect.map(({ deliveries }) =>
+                  deliveries.map(({ receivedAt, outcome }) => ({ receivedAt, outcome })),
+                ),
+                Effect.option,
+              )
+          : Option.none();
       return scheduledTaskSummary(
         task,
         live &&
           Option.isSome(modes) &&
           modes.value.every((mode) => withinLimits(caller.limits, mode)),
+        Option.isSome(deliveries) ? deliveries.value : undefined,
       );
     },
   );
@@ -1961,7 +1991,16 @@ const make = Effect.gen(function* () {
         return {
           tasks: yield* Effect.forEach(
             tasks.filter((task) => projectId === undefined || task.projectId === projectId),
-            (task) => summarizeScheduledTask(scope, { parent, limits }, task),
+            (task) =>
+              summarizeScheduledTask(
+                scope,
+                { parent, limits },
+                task,
+                // Deliveries need one query per webhook task, so
+                // single-project lists carry them and whole-environment
+                // lists skip them.
+                projectId !== undefined,
+              ),
           ),
         };
       },
@@ -1971,6 +2010,64 @@ const make = Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
+        // Modes only go down from the task's stored ones: the user raises
+        // them in the app, so an agent cannot widen what a later prompt may
+        // run at.
+        if (input.runtimeMode !== undefined) {
+          yield* resolveRuntimeMode(existing.runtimeMode, input.runtimeMode).pipe(
+            Effect.catch(() =>
+              failure(
+                "invalid_request",
+                `Runtime mode ${input.runtimeMode} is broader than the task's ${existing.runtimeMode}. Agents can only lower a task's modes; the user raises them in Settings.`,
+              ),
+            ),
+          );
+        }
+        if (input.interactionMode !== undefined) {
+          yield* resolveInteractionMode(existing.interactionMode, input.interactionMode).pipe(
+            Effect.catch(() =>
+              failure(
+                "invalid_request",
+                `Interaction mode ${input.interactionMode} is broader than the task's ${existing.interactionMode}. Agents can only lower a task's modes; the user raises them in Settings.`,
+              ),
+            ),
+          );
+        }
+        if (input.providerInstanceId !== undefined) {
+          const enabled = yield* threadManagement.isProviderInstanceEnabledForProject({
+            projectId: existing.projectId,
+            instanceId: input.providerInstanceId,
+          });
+          if (!enabled) {
+            return yield* failure(
+              "invalid_request",
+              `Provider ${input.providerInstanceId} is not enabled for this project. Enable it in Settings, or pick one from orchestrator_capabilities.`,
+            );
+          }
+        }
+        const modelSelection =
+          input.providerInstanceId === undefined &&
+          input.model === undefined &&
+          input.options === undefined
+            ? existing.modelSelection
+            : (yield* resolveTargetRechecking({
+                // Validate against the task's project and selection, not
+                // the caller's: the task launches there, so the new model
+                // must be launchable there right now, and unspecified parts
+                // inherit what the task already runs.
+                parent: {
+                  thread: {
+                    projectId: existing.projectId,
+                    modelSelection: existing.modelSelection,
+                  },
+                },
+                target: {
+                  providerInstanceId: input.providerInstanceId,
+                  model: input.model,
+                  options: input.options,
+                },
+                providers: yield* loadProviders,
+              })).modelSelection;
         if (
           input.bindToCurrentThread === true &&
           (parent === undefined || parent.thread.projectId !== existing.projectId)
@@ -1988,11 +2085,22 @@ const make = Effect.gen(function* () {
             : input.bindToCurrentThread && parent !== undefined
               ? parent.thread.id
               : null;
-        // Update workspace strategy on rebinding so unbound root tasks cannot run in the shared checkout.
+        // An explicit strategy wins over the one derived from rebinding; the
+        // membership check keeps a task from running outside its project.
+        if (input.workspaceStrategy?.type === "existing_worktree") {
+          const project = yield* requireProject(existing.projectId);
+          yield* assertProjectWorktree({
+            git: gitDriver,
+            fileSystem,
+            workspaceRoot: project.workspaceRoot,
+            worktreePath: input.workspaceStrategy.worktreePath,
+          });
+        }
         const workspaceStrategy =
-          input.bindToCurrentThread === undefined
+          input.workspaceStrategy ??
+          (input.bindToCurrentThread === undefined
             ? existing.workspaceStrategy
-            : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+            : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread));
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -2002,9 +2110,9 @@ const make = Effect.gen(function* () {
           projectId: existing.projectId,
           threadId,
           workspaceStrategy,
-          modelSelection: existing.modelSelection,
-          runtimeMode: existing.runtimeMode,
-          interactionMode: existing.interactionMode,
+          modelSelection,
+          runtimeMode: input.runtimeMode ?? existing.runtimeMode,
+          interactionMode: input.interactionMode ?? existing.interactionMode,
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
         };
@@ -2015,7 +2123,7 @@ const make = Effect.gen(function* () {
               failure("orchestration_error", `Could not update scheduled task: ${error.message}`),
             ),
           );
-        return yield* summarizeScheduledTask(scope, { parent, limits }, task);
+        return yield* summarizeScheduledTask(scope, { parent, limits }, task, true);
       },
     ),
     deleteScheduledTask: Effect.fn("OrchestratorMcpService.deleteScheduledTask")(
@@ -3186,6 +3294,7 @@ export const layer: Layer.Layer<
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver
+  | FileSystem.FileSystem
   | ProviderRegistry.ProviderRegistry
   | ProviderAdapterRegistry.ProviderAdapterRegistryV2
   | ServerSettings.ServerSettingsService
