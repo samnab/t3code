@@ -2,6 +2,10 @@ import {
   CommandId,
   type OrchestrationProjectShell,
   type OrchestrationV2ThreadShell,
+  type PullRequestActor,
+  type PullRequestChecks,
+  type PullRequestLabel,
+  type PullRequestListEntry,
   type SourceControlProviderKind,
   type ThreadId,
   type ThreadPullRequestLink,
@@ -15,6 +19,7 @@ import * as Option from "effect/Option";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
+import * as PullRequestService from "../../../pullRequest/PullRequestService.ts";
 import { pullRequestSyncKey } from "../../../pullRequest/pullRequestSyncKey.ts";
 import { sourceControlDefinitions } from "../../../sourceControl/sourceControlDefinitions.ts";
 import {
@@ -29,7 +34,11 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
   type ListThreadPullRequestsResult,
+  type PullRequestChecksView,
   PullRequestLinkFailedError,
+  PullRequestProjectMismatchError,
+  PullRequestProjectUnknownError,
+  PullRequestReadFailedError,
   PullRequestUrlInvalidError,
   PullRequestTargetIncompleteError,
   PullRequestHostRequiredError,
@@ -54,6 +63,52 @@ interface ResolvedTarget {
   readonly number: number;
   readonly url: string;
 }
+
+const PULL_REQUEST_BODY_MAX = 4000;
+const PULL_REQUEST_CHECKS_MAX = 50;
+
+// Service failures cross MCP as their own sanitized message; causes and defects stay server-side.
+const sanitizedFailure = (error: PullRequestService.PullRequestError) =>
+  new PullRequestReadFailedError({ detail: error.message });
+
+const actorView = (actor: PullRequestActor | null) =>
+  actor === null ? null : { login: actor.login, name: actor.name };
+
+const labelsView = (labels: ReadonlyArray<PullRequestLabel>) =>
+  labels.map((label) => ({ name: label.name }));
+
+const listItemOf = (entry: PullRequestListEntry) => ({
+  projectId: entry.projectId,
+  projectTitle: entry.projectTitle,
+  host: entry.host,
+  repository: entry.repository,
+  number: entry.number,
+  url: entry.url,
+  title: entry.title,
+  state: entry.state,
+  isDraft: entry.isDraft,
+  headBranch: entry.headBranch,
+  baseBranch: entry.baseBranch,
+  mergeability: entry.mergeability,
+  author: actorView(entry.author),
+  labels: labelsView(entry.labels),
+  ...(entry.reviewDecision === undefined ? {} : { reviewDecision: entry.reviewDecision }),
+  ...(entry.checksState === undefined ? {} : { checksState: entry.checksState }),
+  createdAt: entry.createdAt,
+  updatedAt: entry.updatedAt,
+  ...(entry.observedAt === undefined ? {} : { observedAt: entry.observedAt }),
+});
+
+const checksViewOf = (checks: PullRequestChecks): PullRequestChecksView => ({
+  observedAt: checks.observedAt ?? null,
+  state: checks.state,
+  items: checks.checks.slice(0, PULL_REQUEST_CHECKS_MAX).map((check) => ({
+    name: check.name,
+    status: check.status,
+    ...(check.required === undefined ? {} : { required: check.required }),
+  })),
+  truncated: checks.checks.length > PULL_REQUEST_CHECKS_MAX,
+});
 
 function projectHostAndProvider(project: OrchestrationProjectShell | undefined): {
   readonly host: string | null;
@@ -197,6 +252,7 @@ function projectForPullRequest(
 const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
+  const pullRequestReads = yield* PullRequestService.PullRequestService;
 
   const projects = yield* ProjectService.ProjectService;
   const crypto = yield* Crypto.Crypto;
@@ -512,6 +568,117 @@ const make = Effect.gen(function* () {
             result.guide !== null &&
             result.currentHeadSha !== null &&
             result.guide.headSha !== result.currentHeadSha,
+        };
+      }),
+    ),
+    t3_pull_request_list: McpToolAccess.reads((input) =>
+      Effect.gen(function* () {
+        yield* McpInvocationContext.requireMcpCapability("pull-requests");
+        const result = yield* pullRequestReads
+          .list({
+            state: input.state ?? "open",
+            limit: input.limit ?? 20,
+            ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+            ...(input.host === undefined ? {} : { host: input.host }),
+          })
+          .pipe(Effect.mapError(sanitizedFailure));
+        return {
+          pullRequests: result.entries.map(listItemOf),
+          providers: result.providers.map((provider) => ({
+            host: provider.host,
+            kind: provider.kind,
+            configured: provider.configured,
+            detail: provider.detail,
+          })),
+          errors: result.errors,
+          truncated: result.truncated,
+        };
+      }),
+    ),
+    t3_pull_request_read: McpToolAccess.reads((input) =>
+      Effect.gen(function* () {
+        yield* McpInvocationContext.requireMcpCapability("pull-requests");
+        const project = yield* projects.getShell(input.projectId).pipe(
+          Effect.map(Option.getOrUndefined),
+          Effect.mapError(
+            () => new PullRequestReadFailedError({ detail: "Could not read the project." }),
+          ),
+        );
+        if (project === undefined) {
+          return yield* new PullRequestProjectUnknownError({ projectId: input.projectId });
+        }
+        const mismatch = () =>
+          new PullRequestProjectMismatchError({
+            projectId: input.projectId,
+            repository: input.repository,
+            ...(input.host === undefined ? {} : { host: input.host }),
+          });
+        const host: string | undefined =
+          input.host ?? projectHostAndProvider(project).host ?? undefined;
+        if (host === undefined) {
+          return yield* mismatch();
+        }
+        const matches = pullRequestSyncKey(
+          {
+            projectId: input.projectId,
+            host,
+            repository: input.repository,
+            number: input.number,
+          },
+          project.repositoryIdentity,
+        );
+        // pullRequestSyncKey keys any host and repository; only the project whose own checkout is
+        // that repository (the guide tools' routing) may answer the read.
+        if (
+          matches === null ||
+          projectForPullRequest([project], { host, repository: input.repository }, project) ===
+            undefined
+        ) {
+          return yield* mismatch();
+        }
+        const reference = {
+          projectId: input.projectId,
+          host,
+          repository: input.repository,
+          number: input.number,
+        };
+        const detail = yield* pullRequestReads
+          .detail(reference)
+          .pipe(Effect.mapError(sanitizedFailure));
+        // A host without a check concept answers null; a failed checks read stays null rather
+        // than failing the whole read, so the unsupported state stays visible.
+        const checks = yield* pullRequestReads
+          .checks(reference)
+          .pipe(Effect.mapError(sanitizedFailure), Effect.option, Effect.map(Option.getOrNull));
+        return {
+          projectId: detail.projectId,
+          projectTitle: detail.projectTitle,
+          host: matches.host,
+          repository: detail.repository,
+          number: detail.number,
+          url: detail.url,
+          title: detail.title,
+          body: detail.body.slice(0, PULL_REQUEST_BODY_MAX),
+          bodyTruncated: detail.body.length > PULL_REQUEST_BODY_MAX,
+          state: detail.state,
+          isDraft: detail.isDraft,
+          mergeability: detail.mergeability,
+          headSha: detail.headSha ?? null,
+          headBranch: detail.headBranch,
+          baseBranch: detail.baseBranch,
+          author: actorView(detail.author),
+          reviewers: detail.reviewers.map((reviewer) => ({
+            login: reviewer.login,
+            name: reviewer.name,
+          })),
+          labels: labelsView(detail.labels),
+          checks: checks === null ? null : checksViewOf(checks),
+          capabilities: detail.capabilities,
+          createdAt: detail.createdAt,
+          updatedAt: detail.updatedAt,
+          mergedAt: detail.mergedAt,
+          closedAt: detail.closedAt,
+          observedAt: detail.observedAt ?? null,
         };
       }),
     ),

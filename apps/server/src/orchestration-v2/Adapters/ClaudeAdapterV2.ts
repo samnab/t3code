@@ -1542,6 +1542,10 @@ export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__t3-code__t3_environment_storage_report",
   "mcp__t3-code__t3_queue_list",
   "mcp__t3-code__t3_queue_read",
+  "mcp__t3-code__list_thread_pull_requests",
+  "mcp__t3-code__read_pull_request_guide",
+  "mcp__t3-code__t3_pull_request_list",
+  "mcp__t3-code__t3_pull_request_read",
   "mcp__t3-code__html_preview",
   "mcp__t3-code__html_render",
 ];
