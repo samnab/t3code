@@ -263,54 +263,119 @@ const sendMessage = (
     });
   });
 
-it.effect(
-  "mark_read records a read receipt at the observed version and reads never advance it",
-  () =>
-    Effect.gen(function* () {
-      const toolkit = yield* ThreadToolkit;
-      yield* TestClock.adjust("2 hours");
-      yield* createThread;
-      yield* insertCompletedRun(1, "1970-01-01T01:00:00.000Z");
-      expect(yield* readState).toEqual({
-        lastVisitedAt: null,
-        updatedAt: "1970-01-01T02:00:00.000Z",
-        latestRunCompletedAt: "1970-01-01T01:00:00.000Z",
-      });
-      // The test clock moves an hour past the thread's last edit: a receipt
-      // stamped from the handler's own clock would land at 03:00, not 02:00.
-      yield* TestClock.adjust("1 hour");
+it.effect("mark_read records a read receipt at the observed version", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* TestClock.adjust("2 hours");
+    yield* createThread;
+    yield* insertCompletedRun(1, "1970-01-01T01:00:00.000Z");
+    expect(yield* readState).toEqual({
+      lastVisitedAt: null,
+      updatedAt: "1970-01-01T02:00:00.000Z",
+      latestRunCompletedAt: "1970-01-01T01:00:00.000Z",
+    });
+    // The test clock moves an hour past the thread's last edit: a receipt
+    // stamped from the handler's own clock would land at 03:00, not 02:00.
+    yield* TestClock.adjust("1 hour");
 
-      expect(
-        yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_unread" })),
-      ).toHaveProperty("sequence");
-      expect(yield* readState).toMatchObject({ lastVisitedAt: "1970-01-01T00:59:59.999Z" });
+    expect(
+      yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_unread" })),
+    ).toHaveProperty("sequence");
+    expect(yield* readState).toMatchObject({ lastVisitedAt: "1970-01-01T00:59:59.999Z" });
 
-      expect(
-        yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_read" })),
-      ).toHaveProperty("sequence");
-      expect(yield* readState).toEqual({
-        lastVisitedAt: "1970-01-01T02:00:00.000Z",
-        updatedAt: "1970-01-01T02:00:00.000Z",
-        latestRunCompletedAt: "1970-01-01T01:00:00.000Z",
-      });
+    const beforeReceipt = (yield* readThread).thread;
+    expect(
+      yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_read" })),
+    ).toHaveProperty("sequence");
+    expect(yield* readState).toEqual({
+      lastVisitedAt: "1970-01-01T02:00:00.000Z",
+      updatedAt: "1970-01-01T02:00:00.000Z",
+      latestRunCompletedAt: "1970-01-01T01:00:00.000Z",
+    });
+    // The receipt leaves the thread record byte-identical apart from the
+    // watermark: no open or search stats, no settlement, pin, goal or edits.
+    const afterReceipt = (yield* readThread).thread;
+    expect({ ...afterReceipt, lastVisitedAt: null }).toEqual({
+      ...beforeReceipt,
+      lastVisitedAt: null,
+    });
 
-      // Reading again changes nothing: no watermark movement and no settlement,
-      // snooze, pin, goal, queue, open-count or search-stat edits.
-      const settled = yield* readThread;
-      yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_read" }));
-      expect(yield* readThread).toEqual(settled);
+    // A repeat mark_read changes nothing.
+    const settled = yield* readThread;
+    yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_read" }));
+    expect(yield* readThread).toEqual(settled);
 
-      // A completion newer than the captured version stays unread, and the next
-      // mark_unread rewinds to it instead of the stale receipt.
-      yield* insertCompletedRun(2, "1970-01-01T04:00:00.000Z");
-      expect(yield* readState).toEqual({
-        lastVisitedAt: "1970-01-01T02:00:00.000Z",
-        updatedAt: "1970-01-01T02:00:00.000Z",
-        latestRunCompletedAt: "1970-01-01T04:00:00.000Z",
-      });
-      yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_unread" }));
-      expect(yield* readState).toMatchObject({ lastVisitedAt: "1970-01-01T03:59:59.999Z" });
-    }).pipe(Effect.provide(layerTest)),
+    // A completion newer than the captured version stays unread, and the next
+    // mark_unread rewinds to it instead of the stale receipt.
+    yield* insertCompletedRun(2, "1970-01-01T04:00:00.000Z");
+    expect(yield* readState).toEqual({
+      lastVisitedAt: "1970-01-01T02:00:00.000Z",
+      updatedAt: "1970-01-01T02:00:00.000Z",
+      latestRunCompletedAt: "1970-01-01T04:00:00.000Z",
+    });
+    // Synthetic: a real newer completion would leave the thread unread. This
+    // only shows a receipt never moves the watermark backwards.
+    yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_read" }));
+    expect(yield* readState).toMatchObject({ lastVisitedAt: "1970-01-01T02:00:00.000Z" });
+    yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_unread" }));
+    expect(yield* readState).toMatchObject({ lastVisitedAt: "1970-01-01T03:59:59.999Z" });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("mark_read clears a passed snooze wake by stamping it instead of the older version", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* TestClock.adjust("2 hours");
+    yield* createThread;
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_organize", {
+          threadId,
+          action: "snooze",
+          snoozedUntil: "1970-01-01T03:00:00.000Z",
+        }),
+      ),
+    ).toHaveProperty("sequence");
+    // The wake passes: the badge the clients show is snoozedUntil, so the
+    // receipt must stamp it rather than the older updatedAt. The clock is
+    // only consulted for this passed-wake comparison, never as the stamp.
+    yield* TestClock.adjust("1 hour");
+    expect(
+      yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_read" })),
+    ).toHaveProperty("sequence");
+    expect(yield* readState).toEqual({
+      lastVisitedAt: "1970-01-01T03:00:00.000Z",
+      updatedAt: "1970-01-01T02:00:00.000Z",
+      latestRunCompletedAt: null,
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("mark_read keeps a future snooze out of the receipt stamp", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* TestClock.adjust("2 hours");
+    yield* createThread;
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_organize", {
+          threadId,
+          action: "snooze",
+          snoozedUntil: "1970-01-01T05:00:00.000Z",
+        }),
+      ),
+    ).toHaveProperty("sequence");
+    expect(
+      yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_read" })),
+    ).toHaveProperty("sequence");
+    // The snooze is still ahead of the clock, so the stamp stays at the
+    // observed version instead of jumping to the not-yet-reached wake.
+    expect(yield* readState).toEqual({
+      lastVisitedAt: "1970-01-01T02:00:00.000Z",
+      updatedAt: "1970-01-01T02:00:00.000Z",
+      latestRunCompletedAt: null,
+    });
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("denies a read-only client's mark_read and records nothing", () =>

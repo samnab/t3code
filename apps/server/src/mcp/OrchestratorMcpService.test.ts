@@ -3068,7 +3068,7 @@ describe("OrchestratorMcpService thread read state", () => {
       assert.equal(listed.threads[0]?.threadId, readStateThreadId);
       assert.equal(listed.threads[0]?.lastVisitedAt, "2026-01-01T02:00:00.000Z");
       assert.equal(listed.threads[0]?.latestRunCompletedAt, "2026-01-01T01:00:00.000Z");
-      // An unread thread keeps both fields empty instead of a derived badge.
+      // A never-visited thread reports a null watermark; no derived badge.
       const unread = yield* call(readStateShell(false), (mcp) =>
         mcp.listThreads(client, { projectId: read.thread.projectId }),
       );

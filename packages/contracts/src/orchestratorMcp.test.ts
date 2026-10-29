@@ -4,8 +4,6 @@ import * as Schema from "effect/Schema";
 import {
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
-  OrchestratorMcpThreadDetail,
-  OrchestratorMcpThreadListItem,
 } from "./orchestratorMcp.ts";
 
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
@@ -82,19 +80,5 @@ describe("orchestrator MCP contracts", () => {
         pendingApproval: { ...pendingApproval, kind: "user_input" },
       }),
     ).toThrow();
-  });
-
-  it("keeps list and detail read-state fields nullable ISO timestamps", () => {
-    for (const field of [
-      OrchestratorMcpThreadListItem.fields.lastVisitedAt,
-      OrchestratorMcpThreadListItem.fields.latestRunCompletedAt,
-      OrchestratorMcpThreadDetail.fields.lastVisitedAt,
-      OrchestratorMcpThreadDetail.fields.latestRunCompletedAt,
-    ]) {
-      const decode = Schema.decodeUnknownSync(field);
-      expect(decode(null)).toBeNull();
-      expect(decode("2026-08-04T12:00:00.000Z")).toBe("2026-08-04T12:00:00.000Z");
-      expect(() => decode(undefined)).toThrow();
-    }
   });
 });

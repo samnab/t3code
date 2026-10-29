@@ -455,15 +455,25 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         case "unsettle":
           command = { ...common, type: `thread.${input.action}`, reason: "user" };
           break;
-        case "mark_read":
-          // A read receipt at the version observed by readThread above, never
-          // the handler's own clock and never an open or search event.
-          command = {
-            ...common,
-            type: "thread.visit",
-            visitedAt: DateTime.formatIso(projection.thread.updatedAt),
-          };
+        case "mark_read": {
+          // A read receipt at the version observed above, never the handler's
+          // own clock and never an open or search event. A passed snooze wake
+          // is stamped (mirroring the clients) only when it is newer, so the
+          // clock serves that one comparison and never becomes the stamp.
+          const observedAt = projection.thread.updatedAt;
+          const snoozedUntil = projection.thread.snoozedUntil;
+          const wokeAt =
+            snoozedUntil != null &&
+            DateTime.toEpochMillis(snoozedUntil) <= DateTime.toEpochMillis(yield* DateTime.now)
+              ? snoozedUntil
+              : null;
+          const visitedAt =
+            wokeAt != null && DateTime.toEpochMillis(wokeAt) > DateTime.toEpochMillis(observedAt)
+              ? wokeAt
+              : observedAt;
+          command = { ...common, type: "thread.visit", visitedAt: DateTime.formatIso(visitedAt) };
           break;
+        }
         case "mark_unread":
           command = { ...common, type: "thread.mark-unread" };
           break;
