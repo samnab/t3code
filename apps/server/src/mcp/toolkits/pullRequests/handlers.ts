@@ -280,7 +280,7 @@ const make = Effect.gen(function* () {
     }
     const thread = yield* engine.getThreadShell(threadId).pipe(
       Effect.map(Option.fromNullishOr),
-      Effect.mapError((cause) => new Failure({ cause })),
+      Effect.mapError(() => new Failure()),
     );
     if (Option.isNone(thread) || thread.value.deletedAt !== null) {
       return yield* new PullRequestThreadNotFoundError({ threadId });
@@ -297,7 +297,7 @@ const make = Effect.gen(function* () {
   ) =>
     projects.getShell(thread.projectId).pipe(
       Effect.map(Option.getOrUndefined),
-      Effect.mapError((cause) => new Failure({ cause })),
+      Effect.mapError(() => new Failure()),
     );
 
   const dispatchFailure =
@@ -315,7 +315,7 @@ const make = Effect.gen(function* () {
     > =>
       Cause.hasInterruptsOnly(cause)
         ? Effect.failCause(cause as Cause.Cause<never>)
-        : Effect.fail(new Failure({ cause }));
+        : Effect.fail(new Failure());
 
   const setWatching = Effect.fn("PullRequestsToolkit.setWatching")(function* (
     input: PullRequestTargetInput,
@@ -371,7 +371,7 @@ const make = Effect.gen(function* () {
           );
     const known = yield* projects
       .listShells()
-      .pipe(Effect.mapError((cause) => new PullRequestListFailedError({ cause })));
+      .pipe(Effect.mapError(() => new PullRequestListFailedError()));
     const callerProject = known.find((project) => project.id === callerThread?.projectId);
     // A pull request named by host and repository builds its URL through the project that holds
     // it, which need not be the caller's.
@@ -558,7 +558,6 @@ const make = Effect.gen(function* () {
             (error) =>
               new PullRequestGuideFailedError({
                 detail: guideFailureDetail(error),
-                cause: error,
               }),
           ),
         );
