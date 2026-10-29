@@ -5,7 +5,6 @@ import {
   DEFAULT_SERVER_SETTINGS,
   type EnvironmentCloudLinkStateResult,
   EnvironmentId,
-  type KeybindingCommand,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -916,7 +915,7 @@ it.layer(
     ),
   );
   const upsert = (
-    params: { readonly key: string; readonly command: KeybindingCommand },
+    params: { readonly key: string; readonly command: string },
     scope?: McpInvocationContext.McpInvocationScope,
   ) =>
     provide(
@@ -954,11 +953,61 @@ it.layer(
     }),
   );
 
-  it.effect("rejects a command the keybindings contract does not accept before writing", () =>
+  it.effect("rejects an unknown command with a typed failure and zero writes", () =>
     Effect.gen(function* () {
       const before = (yield* list)?.encodedResult;
-      const result = yield* upsert({ key: "mod+shift+8", command: "script.Not Valid.run" });
-      expect(result).toMatchObject({ isFailure: true, failureOrigin: "parameters" });
+      const writes = yield* Ref.make(0);
+      const refused = (
+        tool: "t3_keybinding_upsert" | "t3_keybinding_remove",
+        params:
+          | { readonly key: string; readonly command: string }
+          | {
+              readonly key: string;
+              readonly command: string;
+              readonly replace: { readonly key: string; readonly command: string };
+            },
+      ) =>
+        Effect.flatMap(EnvironmentToolkit, (toolkit) =>
+          finalResult(toolkit.handle(tool, params)),
+        ).pipe(
+          Effect.provide(
+            environmentLayer(
+              threadScope(),
+              liveThreadShell(threadId),
+              Layer.merge(
+                staticSettings,
+                Layer.mock(Keybindings.Keybindings)({
+                  upsertKeybindingRule: () =>
+                    Ref.update(writes, (count) => count + 1).pipe(Effect.as([])),
+                  removeKeybindingRule: () =>
+                    Ref.update(writes, (count) => count + 1).pipe(Effect.as([])),
+                }),
+              ),
+            ),
+          ),
+        );
+      for (const [tool, params] of [
+        ["t3_keybinding_upsert", { key: "mod+shift+8", command: "script.Not Valid.run" }],
+        [
+          "t3_keybinding_upsert",
+          {
+            key: "mod+shift+8",
+            command: "chat.new",
+            replace: { key: "mod+shift+8", command: "script.Not Valid.run" },
+          },
+        ],
+        ["t3_keybinding_remove", { key: "mod+shift+8", command: "script.Not Valid.run" }],
+      ] as const) {
+        const result = yield* refused(tool, params);
+        expect(result).toMatchObject({
+          isFailure: true,
+          result: {
+            code: "invalid_request",
+            message: expect.stringContaining("Unknown keybinding command"),
+          },
+        });
+      }
+      expect(yield* Ref.get(writes)).toBe(0);
       expect((yield* list)?.encodedResult).toEqual(before);
     }),
   );
@@ -994,7 +1043,7 @@ it.layer(
       const before = (yield* list)?.encodedResult;
       const handle = (
         tool: "t3_keybinding_upsert" | "t3_keybinding_remove",
-        params: { readonly key: string; readonly command: KeybindingCommand },
+        params: { readonly key: string; readonly command: string },
       ) =>
         provide(
           Effect.flatMap(EnvironmentToolkit, (toolkit) =>
