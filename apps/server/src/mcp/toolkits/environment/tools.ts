@@ -110,7 +110,7 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
 const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update", {
   ...shared,
   description:
-    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental; provider instance ids come from `orchestrator_capabilities`. Global model defaults apply where a project sets none. `snoozeLimitedThreads` never resumes threads. `defaultRuntimeMode` can only be lowered; raise it in Settings. Per-project values: `t3_project_settings_update`.",
+    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental; provider instance ids come from `orchestrator_capabilities`. `null` resets a model default. Global model defaults apply where a project sets none. `snoozeLimitedThreads` never resumes threads. `defaultRuntimeMode` can only be lowered; raise it in Settings. Per-project values: `t3_project_settings_update`.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     completionAudio: ServerSettingsPatch.fields.completionAudio,

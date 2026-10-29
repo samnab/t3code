@@ -132,7 +132,7 @@ export class PullRequestThreadNotFoundError extends Schema.TaggedError<PullReque
 
 export class PullRequestLinkFailedError extends Schema.TaggedError<PullRequestLinkFailedError>()(
   "PullRequestLinkFailedError",
-  { cause: Schema.Defect() },
+  {},
 ) {
   override get message(): string {
     return "Could not link the pull request.";
@@ -141,7 +141,7 @@ export class PullRequestLinkFailedError extends Schema.TaggedError<PullRequestLi
 
 export class PullRequestUnlinkFailedError extends Schema.TaggedError<PullRequestUnlinkFailedError>()(
   "PullRequestUnlinkFailedError",
-  { cause: Schema.Defect() },
+  {},
 ) {
   override get message(): string {
     return "Could not unlink the pull request.";
@@ -150,7 +150,7 @@ export class PullRequestUnlinkFailedError extends Schema.TaggedError<PullRequest
 
 export class PullRequestWatchFailedError extends Schema.TaggedError<PullRequestWatchFailedError>()(
   "PullRequestWatchFailedError",
-  { cause: Schema.Defect() },
+  {},
 ) {
   override get message(): string {
     return "Could not change whether the pull request is watched.";
@@ -177,7 +177,7 @@ export class PullRequestWatchFromSubagentError extends Schema.TaggedError<PullRe
 
 export class PullRequestListFailedError extends Schema.TaggedError<PullRequestListFailedError>()(
   "PullRequestListFailedError",
-  { cause: Schema.Defect() },
+  {},
 ) {
   override get message(): string {
     return "Could not list the pull request.";
@@ -195,7 +195,7 @@ export class PullRequestProjectNotFoundError extends Schema.TaggedError<PullRequ
 
 export class PullRequestGuideFailedError extends Schema.TaggedError<PullRequestGuideFailedError>()(
   "PullRequestGuideFailedError",
-  { detail: Schema.String, cause: Schema.optional(Schema.Defect()) },
+  { detail: Schema.String },
 ) {
   override get message(): string {
     return this.detail;
