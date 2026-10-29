@@ -3060,6 +3060,7 @@ describe("OrchestratorMcpService thread read state", () => {
           }),
           ServerSettings.layerTest(),
           Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
           Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
             list: () => Effect.succeed([]),
           }),
