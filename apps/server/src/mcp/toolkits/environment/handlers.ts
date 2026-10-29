@@ -2,6 +2,7 @@ import {
   type CustomModelSetting,
   CustomModelSetting as CustomModelSettingSchema,
   globalIdleCompaction,
+  KeybindingCommand,
   type KeybindingsConfigError,
   OrchestratorMcpFailure,
   type ProviderDriverKind,
@@ -213,6 +214,19 @@ const keybindingsFailure = (error: KeybindingsConfigError) =>
     code: "orchestration_error",
     message: `Keybindings config: ${error.detail}.`,
   });
+// Tool parameters accept any non-empty command string; the contract schema is
+// the source of truth and is checked here, before any write.
+const decodeKeybindingCommand = Schema.decodeUnknownEffect(KeybindingCommand);
+const keybindingCommand = (command: string) =>
+  decodeKeybindingCommand(command).pipe(
+    Effect.mapError(
+      () =>
+        new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: `Unknown keybinding command \`${command}\`. Use an id from t3_keybindings_list, or script.<id>.run for a script.`,
+        }),
+    ),
+  );
 const keybindingsWrite = Effect.fn("EnvironmentToolkit.keybindingsWrite")(function* (
   write: (
     service: Keybindings.Keybindings["Service"],
@@ -344,13 +358,36 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
   t3_keybinding_upsert: McpToolAccess.writesEnvironment((rule, check) =>
     underCallerLock(
       check,
-      keybindingsWrite((service) => service.upsertKeybindingRule(rule)),
+      Effect.gen(function* () {
+        const command = yield* keybindingCommand(rule.command);
+        const replace =
+          rule.replace === undefined
+            ? undefined
+            : { ...rule.replace, command: yield* keybindingCommand(rule.replace.command) };
+        return yield* keybindingsWrite((service) =>
+          service.upsertKeybindingRule({
+            key: rule.key,
+            command,
+            ...(rule.when === undefined ? {} : { when: rule.when }),
+            ...(replace === undefined ? {} : { replace }),
+          }),
+        );
+      }),
     ),
   ),
   t3_keybinding_remove: McpToolAccess.writesEnvironment((rule, check) =>
     underCallerLock(
       check,
-      keybindingsWrite((service) => service.removeKeybindingRule(rule)),
+      Effect.gen(function* () {
+        const command = yield* keybindingCommand(rule.command);
+        return yield* keybindingsWrite((service) =>
+          service.removeKeybindingRule({
+            key: rule.key,
+            command,
+            ...(rule.when === undefined ? {} : { when: rule.when }),
+          }),
+        );
+      }),
     ),
   ),
   // Totals only: cleanup entries carry paths and thread titles, and the

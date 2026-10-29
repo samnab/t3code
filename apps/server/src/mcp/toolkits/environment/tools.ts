@@ -10,7 +10,6 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ServerSettings,
-  ServerRemoveKeybindingInput,
   ServerSettingsPatch,
   ServerUpsertKeybindingInput,
   ServerUpsertKeybindingResult,
@@ -164,17 +163,28 @@ const KeybindingsListTool = Tool.make("t3_keybindings_list", {
 })
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false);
+// The contract's keybinding command enum costs ~1.7KB of JSON schema per
+// occurrence, so the advertised parameters take any non-empty string and the
+// handlers validate each command against the contract schema instead.
+const keybindingRuleParams = {
+  key: ServerUpsertKeybindingInput.fields.key,
+  command: TrimmedNonEmptyString,
+  when: ServerUpsertKeybindingInput.fields.when,
+};
 const KeybindingUpsertTool = Tool.make("t3_keybinding_upsert", {
   ...keybindings,
   description:
-    "Add or replace one custom keybinding. `command` is a keybinding command or `script.<id>.run`; `replace` names the rule to swap. Returns effective keybindings.",
-  parameters: ServerUpsertKeybindingInput,
+    "Add or replace one custom keybinding. `command` is an id from `t3_keybindings_list` or `script.<id>.run`; `replace` names the rule to swap. Returns effective keybindings.",
+  parameters: Schema.Struct({
+    ...keybindingRuleParams,
+    replace: Schema.optional(Schema.Struct(keybindingRuleParams)),
+  }),
 }).annotate(Tool.Destructive, true);
 const KeybindingRemoveTool = Tool.make("t3_keybinding_remove", {
   ...keybindings,
   description:
-    "Remove the custom keybinding with exactly this `key`, `command`, and `when`. Defaults cannot be removed. Returns effective keybindings.",
-  parameters: ServerRemoveKeybindingInput,
+    "Remove the custom keybinding with exactly this `key`, `command` (an id from `t3_keybindings_list`), and `when`. Defaults cannot be removed. Returns effective keybindings.",
+  parameters: Schema.Struct(keybindingRuleParams),
 }).annotate(Tool.Destructive, true);
 const StorageReportTool = Tool.make("t3_environment_storage_report", {
   ...shared,
