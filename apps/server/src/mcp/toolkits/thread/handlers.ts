@@ -23,6 +23,8 @@ import {
 } from "../../threadAccess.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as CheckpointDiffQuery from "../../../checkpointing/CheckpointDiffQuery.ts";
+import type { CheckpointServiceError } from "../../../checkpointing/Errors.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { hiddenModelMessage } from "../../ModelVisibility.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
@@ -83,6 +85,17 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
 });
 const refuse = (message: string) =>
   new OrchestratorMcpFailure({ code: "invalid_request", message });
+
+const DEFAULT_DIFF_CHARS = 20_000;
+
+const diffFailure = (error: CheckpointServiceError) =>
+  error._tag === "CheckpointTurnRangeUnavailableError"
+    ? refuse(
+        `Turn ${error.requestedTurnCount} is not available: the thread has ${error.availableTurnCount} ready turns.`,
+      )
+    : error._tag === "CheckpointRefUnavailableError"
+      ? refuse(`Turn ${error.turnCount} has no ready checkpoint; try another turn.`)
+      : unavailable();
 
 /** A field the chosen action needs. `null` counts as given, as in `beforeRunId: null`. */
 const required = <A>(value: A | undefined, name: string) =>
@@ -252,6 +265,34 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return { sequence: result.sequence };
       }),
     ),
+  ),
+  t3_thread_diff: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+      const queried = yield* checkpointDiffQuery
+        .getThreadDiff({
+          threadId: projection.thread.id,
+          turn: input.turn,
+          ignoreWhitespace: input.ignoreWhitespace,
+        })
+        .pipe(Effect.mapError(diffFailure));
+      const maxChars = input.maxChars ?? DEFAULT_DIFF_CHARS;
+      // Diffs reach 10 MB; slice UTF-16 units instead of materializing code points,
+      // stepping back so a surrogate pair is never split.
+      let end = Math.min(maxChars, queried.diff.length);
+      const lastUnit = queried.diff.charCodeAt(end - 1);
+      if (end < queried.diff.length && lastUnit >= 0xd800 && lastUnit <= 0xdbff) end -= 1;
+      return {
+        threadId: projection.thread.id,
+        fromTurnCount: queried.fromTurnCount,
+        toTurnCount: queried.toTurnCount,
+        latestTurnCount: queried.latestTurnCount,
+        diff: queried.diff.slice(0, end),
+        truncated: end < queried.diff.length,
+        totalChars: queried.diff.length,
+      };
+    }),
   ),
   t3_thread_configuration: McpToolAccess.reads((input) => readConfiguration(input.threadId)),
   t3_thread_configure: McpToolAccess.either(

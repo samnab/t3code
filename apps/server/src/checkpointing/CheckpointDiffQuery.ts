@@ -49,6 +49,20 @@ function batchFilePaths(files: ReadonlyArray<TurnDiffFileSummary>) {
   return batches;
 }
 
+/** One turn's diff, or the whole thread up to the latest ready turn when `turn` is omitted. */
+export interface ThreadDiffInput {
+  readonly threadId: ThreadId;
+  readonly turn?: number | undefined;
+  readonly ignoreWhitespace?: boolean | undefined;
+}
+
+export interface ThreadDiffResult {
+  readonly fromTurnCount: number;
+  readonly toTurnCount: number;
+  readonly latestTurnCount: number;
+  readonly diff: string;
+}
+
 export class CheckpointDiffQuery extends Context.Service<
   CheckpointDiffQuery,
   {
@@ -59,6 +73,10 @@ export class CheckpointDiffQuery extends Context.Service<
     readonly getFullThreadDiff: (
       input: OrchestrationGetFullThreadDiffInput,
     ) => Effect.Effect<OrchestrationGetFullThreadDiffResult, CheckpointServiceError>;
+
+    readonly getThreadDiff: (
+      input: ThreadDiffInput,
+    ) => Effect.Effect<ThreadDiffResult, CheckpointServiceError>;
   }
 >()("t3/checkpointing/CheckpointDiffQuery") {}
 
@@ -86,6 +104,38 @@ export const make = Effect.gen(function* () {
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const crypto = yield* Crypto.Crypto;
 
+  // Shared by every diff entry point, so the ready-checkpoint rule lives in one place.
+  const loadReadyTurns = Effect.fn("CheckpointDiffQuery.loadReadyTurns")(function* (
+    threadId: ThreadId,
+  ) {
+    const projection = yield* threads.getCheckpointContext(threadId).pipe(
+      Effect.mapError(
+        () =>
+          new CheckpointThreadNotFoundError({
+            // getThreadDiff reuses getTurnDiff's operation name so both report one not-found error.
+            operation: "CheckpointDiffQuery.getTurnDiff",
+            threadId,
+          }),
+      ),
+      Effect.withSpan("checkpoint.turnDiff.lookupContext"),
+    );
+    const completedRunIds = new Set(
+      projection.runs.filter((run) => run.status === "completed").map((run) => run.id),
+    );
+    const readyCheckpoints = projection.checkpoints.filter(
+      (checkpoint) =>
+        checkpoint.status === "ready" &&
+        checkpoint.appRunOrdinal !== null &&
+        checkpoint.runId !== null &&
+        completedRunIds.has(checkpoint.runId),
+    );
+    const maxTurnCount = readyCheckpoints.reduce(
+      (max, checkpoint) => Math.max(max, checkpoint.appRunOrdinal ?? 0),
+      0,
+    );
+    return { projection, readyCheckpoints, maxTurnCount } as const;
+  });
+
   const getTurnDiff: CheckpointDiffQuery["Service"]["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
       const operation = "CheckpointDiffQuery.getTurnDiff";
@@ -108,30 +158,7 @@ export const make = Effect.gen(function* () {
         return emptyDiff;
       }
 
-      const projection = yield* threads.getCheckpointContext(input.threadId).pipe(
-        Effect.mapError(
-          () =>
-            new CheckpointThreadNotFoundError({
-              operation,
-              threadId: input.threadId,
-            }),
-        ),
-        Effect.withSpan("checkpoint.turnDiff.lookupContext"),
-      );
-      const completedRunIds = new Set(
-        projection.runs.filter((run) => run.status === "completed").map((run) => run.id),
-      );
-      const readyCheckpoints = projection.checkpoints.filter(
-        (checkpoint) =>
-          checkpoint.status === "ready" &&
-          checkpoint.appRunOrdinal !== null &&
-          checkpoint.runId !== null &&
-          completedRunIds.has(checkpoint.runId),
-      );
-      const maxTurnCount = readyCheckpoints.reduce(
-        (max, checkpoint) => Math.max(max, checkpoint.appRunOrdinal ?? 0),
-        0,
-      );
+      const { projection, readyCheckpoints, maxTurnCount } = yield* loadReadyTurns(input.threadId);
       if (input.toTurnCount > maxTurnCount) {
         return yield* new CheckpointTurnRangeUnavailableError({
           operation,
@@ -311,9 +338,37 @@ export const make = Effect.gen(function* () {
     return turnDiff satisfies OrchestrationGetFullThreadDiffResult;
   });
 
+  const getThreadDiff: CheckpointDiffQuery["Service"]["getThreadDiff"] = Effect.fn(
+    "CheckpointDiffQuery.getThreadDiff",
+  )(function* (input) {
+    const { maxTurnCount } = yield* loadReadyTurns(input.threadId);
+    const ignoreWhitespace =
+      input.ignoreWhitespace === undefined ? {} : { ignoreWhitespace: input.ignoreWhitespace };
+    const diff =
+      input.turn === undefined
+        ? yield* getFullThreadDiff({
+            threadId: input.threadId,
+            toTurnCount: maxTurnCount,
+            ...ignoreWhitespace,
+          })
+        : yield* getTurnDiff({
+            threadId: input.threadId,
+            fromTurnCount: input.turn - 1,
+            toTurnCount: input.turn,
+            ...ignoreWhitespace,
+          });
+    return {
+      fromTurnCount: diff.fromTurnCount,
+      toTurnCount: diff.toTurnCount,
+      latestTurnCount: maxTurnCount,
+      diff: diff.diff,
+    };
+  });
+
   return CheckpointDiffQuery.of({
     getTurnDiff,
     getFullThreadDiff,
+    getThreadDiff,
   });
 });
 
