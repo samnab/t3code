@@ -31,6 +31,7 @@ import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ProviderReplayHarness from "../../../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
@@ -83,6 +84,8 @@ const layerHandlers = (access: "full-access" | "read-only") =>
       Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope(access)),
     ),
     Layer.provideMerge(layerDiffStub),
+    // Only the cross-thread t3_thread_search path calls it; the threadId path never does.
+    Layer.provideMerge(Layer.mock(ThreadSearch.ThreadSearch)({})),
   );
 // Handlers other than t3_thread_diff never touch checkpoint diffs.
 const layerDiffStub = Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
@@ -105,22 +108,38 @@ const last = <A, E, R, E2, R2>(
     Effect.map((results) => results.at(-1)?.result),
   );
 
-const createThread = Effect.gen(function* () {
-  const orchestrator = yield* Orchestrator.OrchestratorV2;
-  yield* orchestrator.dispatch({
-    type: "thread.create",
-    commandId: CommandId.make("mcp-thread-controls:create"),
-    threadId,
-    projectId: ProjectId.make("project:mcp-thread-controls"),
-    title: "Thread controls",
-    modelSelection: { instanceId, model: "gpt-5" },
-    runtimeMode: "full-access",
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
-    createdBy: "user",
-    creationSource: "web",
+const createThreadOn = (id: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`mcp-thread-controls:create:${id}`),
+      threadId: id,
+      projectId: ProjectId.make("project:mcp-thread-controls"),
+      title: "Thread controls",
+      modelSelection: { instanceId, model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
   });
+const createThread = createThreadOn(threadId);
+
+// t3_thread_search resolves a thread's cwd through its project row, which the
+// orchestrator's thread.create does not make.
+const seedProject = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    INSERT INTO projection_projects (
+      project_id, title, workspace_root, scripts_json, created_at, updated_at
+    ) VALUES (
+      'project:mcp-thread-controls', 'Thread controls', '/tmp/mcp-thread-controls', '[]',
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+    )
+  `;
 });
 
 const readThread = Effect.gen(function* () {
@@ -328,13 +347,14 @@ it.effect("refuses to start work that does not match the expected run", () =>
 const sendMessage = (
   id: string,
   dispatchMode: { readonly type: "start_immediately" | "queue_after_active" },
+  target: ThreadId = threadId,
 ) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     yield* orchestrator.dispatch({
       type: "message.dispatch",
       commandId: CommandId.make(`mcp-thread-controls:${id}`),
-      threadId,
+      threadId: target,
       messageId: MessageId.make(`message:${id}`),
       text: id,
       attachments: [],
@@ -627,6 +647,55 @@ it.effect("reads queued attachment metadata without attachment content", () =>
       "mimeType",
       "sizeBytes",
     ]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("t3_thread_search with threadId finds matches in that transcript only", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* seedProject;
+    yield* createThreadOn(threadId);
+    const other = ThreadId.make("thread:mcp-thread-controls-other");
+    yield* createThreadOn(other);
+    yield* sendMessage("needle-in-target", { type: "start_immediately" });
+    yield* sendMessage("needle-in-other", { type: "start_immediately" }, other);
+
+    const found = yield* last(
+      toolkit.handle("t3_thread_search", { threadId, query: "needle-in-target" }),
+    );
+    expect(found).toMatchObject({
+      threadId,
+      totalMatches: 1,
+      matches: [{ entryId: expect.any(String), count: 1 }],
+    });
+
+    // The other thread holds this match; searching here must not return it.
+    // Checked encoded: an empty result once lost threadId and totalMatches on the wire.
+    const empty = yield* toolkit
+      .handle("t3_thread_search", { threadId, query: "needle-in-other" })
+      .pipe(
+        Stream.unwrap,
+        Stream.runCollect,
+        Effect.map((results) => results.at(-1)?.encodedResult),
+      );
+    expect(empty).toEqual({ threadId, totalMatches: 0, matches: [] });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses to search a deleted thread", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    const gone = ThreadId.make("thread:mcp-thread-controls-deleted");
+    yield* createThreadOn(gone);
+    yield* sendMessage("needle-in-gone", { type: "start_immediately" }, gone);
+    yield* (yield* Orchestrator.OrchestratorV2).dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("mcp-thread-controls:delete"),
+      threadId: gone,
+    });
+    expect(
+      yield* last(toolkit.handle("t3_thread_search", { threadId: gone, query: "needle-in-gone" })),
+    ).toMatchObject({ code: "thread_not_found" });
   }).pipe(Effect.provide(layerTest)),
 );
 

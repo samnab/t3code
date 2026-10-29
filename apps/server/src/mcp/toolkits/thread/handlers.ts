@@ -191,11 +191,27 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_search: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
+      if (input.threadId !== undefined) {
+        // readThread is the t3_thread_read rule: existing and not deleted; archived stays readable.
+        const { threads, projection } = yield* readThread(input.threadId);
+        const result = yield* threads
+          .searchThread({ threadId: projection.thread.id, query: input.query })
+          .pipe(Effect.mapError(unavailable));
+        return {
+          threadId: projection.thread.id,
+          totalMatches: result.totalMatches,
+          matches: result.navigation ?? [],
+        };
+      }
       const { caller } = yield* readCaller();
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const { matches } = yield* threadSearch
-        .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
+        .searchThreads({
+          query: input.query,
+          projectId: input.projectId ?? caller?.projectId,
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        })
         .pipe(Effect.mapError(unavailable));
       return {
         matches: matches.map((match) => ({
@@ -263,7 +279,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     ),
   ),
   t3_pending_request: McpToolAccess.either(
-    (input) => input.action !== "respond",
+    (input) => input.action === "list" || input.action === "read",
     McpToolAccess.reads((input) =>
       Effect.gen(function* () {
         if (input.action === "list") {
@@ -282,19 +298,29 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     writesThread((input) =>
       Effect.gen(function* () {
         const requestId = yield* required(input.requestId, "requestId");
-        const answers = yield* required(input.answers, "answers");
+        // readQuestion refuses anything but a pending user-input question, so approvals and
+        // already-resolved requests are turned away before any command dispatches.
         const { threads, projection } = yield* readQuestion({
           threadId: input.threadId,
           requestId,
         });
         const result = yield* threads
-          .dispatch({
-            type: "runtime-request.respond",
-            threadId: projection.thread.id,
-            commandId: yield* newCommandId(),
-            requestId,
-            answers,
-          })
+          .dispatch(
+            input.action === "dismiss"
+              ? {
+                  type: "thread.user-input.dismiss",
+                  threadId: projection.thread.id,
+                  commandId: yield* newCommandId(),
+                  requestId,
+                }
+              : {
+                  type: "runtime-request.respond",
+                  threadId: projection.thread.id,
+                  commandId: yield* newCommandId(),
+                  requestId,
+                  answers: yield* required(input.answers, "answers"),
+                },
+          )
           .pipe(Effect.mapError(dispatchFailure));
         return { sequence: result.sequence };
       }),
