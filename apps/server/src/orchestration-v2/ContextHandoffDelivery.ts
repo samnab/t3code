@@ -1,8 +1,10 @@
-import type {
-  OrchestrationV2ContextHandoff,
-  OrchestrationV2ConversationMessage,
-  OrchestrationV2ProviderThread,
-  OrchestrationV2Run,
+import {
+  isCompactionCommandMessage,
+  parseGoalCommand,
+  type OrchestrationV2ContextHandoff,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ProviderThread,
+  type OrchestrationV2Run,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { ContextHandoffBudgetError } from "@t3tools/provider-core/server/failure";
@@ -16,8 +18,8 @@ import {
 
 /**
  * A ready handoff stays `ready` after delivery. The next turn on its provider thread redelivers it
- * only when its target run failed, was interrupted, or was a completed `/compact` that never
- * recorded a delivery.
+ * only when its target run failed, was interrupted, or was a completed compaction or `/goal` turn
+ * that never recorded a delivery: those turns defer history to the next turn.
  */
 export const isContextHandoffRedeliverable = (
   handoff: OrchestrationV2ContextHandoff,
@@ -34,8 +36,7 @@ export const isContextHandoffRedeliverable = (
           messages.some(
             (message) =>
               message.id === source.userMessageId &&
-              message.attachments.length === 0 &&
-              message.text.trim().toLowerCase() === "/compact",
+              (isCompactionCommandMessage(message) || parseGoalCommand(message) !== null),
           ))),
   );
 

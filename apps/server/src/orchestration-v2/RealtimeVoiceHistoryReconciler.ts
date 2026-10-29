@@ -59,13 +59,9 @@ type ReadFrom =
     };
 
 /**
- * One reconciliation pass over the bound provider history. It resumes at the stored resume point
- * and reads at most 40 pages, so a pass costs the entries added since the last pass plus one
- * re-read page. Returns the canonical voice items the projection is missing, stitched against
- * recorded coding turns, the next resume point, and whether the pass reached the end.
- * Output is descriptive turn items only: nothing here starts, adopts, or queues provider work.
- * Call outside the provider's serial notification reader, write the items through the same
- * guarded ingestion as live voice, and store the resume point only after they are written.
+ * One pass over bound provider history from the stored resume point (at most 40 pages); returns
+ * missing canonical voice items, the next resume point, and completeness. Never starts provider
+ * work. Call outside the notification reader, and store the resume point only after the items land.
  */
 export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReconciler.reconcile")(
   function* (input: {
@@ -138,7 +134,7 @@ export const reconcileRealtimeVoiceHistory = Effect.fn("RealtimeVoiceHistoryReco
         ? undefined
         : yield* readFrom(stored).pipe(
             Effect.map((read) => (read.type === "stale" ? undefined : read)),
-            Effect.catch(() => Effect.succeed(undefined)),
+            Effect.orElseSucceed(() => undefined),
           );
     const read = resumed ?? (yield* readFrom(null));
     if (read.type !== "read") return { items: [], complete: true, resume: null };

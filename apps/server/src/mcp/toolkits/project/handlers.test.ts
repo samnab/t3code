@@ -7,10 +7,13 @@ import {
   type ModelSelection,
   type RuntimeMode,
   ThreadId,
+  type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
@@ -22,11 +25,13 @@ import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandE
 import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
+import * as DocumentText from "../../../provider/DocumentText.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -47,11 +52,16 @@ const clientLaunchHarness = (input: {
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
+  readonly webOrigin?: string;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
     instanceId: ProviderInstanceId.make("claudeAgent"),
     model: "claude-opus",
+  };
+  // The project's own default model, which a test can clear between launches.
+  const projectDefaults: { model: ModelSelection | null } = {
+    model: input.overrideModel === undefined ? modelSelection : null,
   };
   const layerDependencies = Layer.mergeAll(
     ServerSettings.layerTest({
@@ -76,11 +86,27 @@ const clientLaunchHarness = (input: {
         sessionId: "session-1",
         label: "Claude Code",
         access: input.runtimeModeCeiling,
+        webOrigin: input.webOrigin,
       },
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
     }),
-    Layer.mock(ThreadManagement.ThreadManagementService)({}),
+    Layer.mock(ThreadManagement.ThreadManagementService)({
+      // A thread exists once a launch started it.
+      getThreadShell: (threadId) => {
+        const launch = input.launched.find((candidate) => candidate.threadId === threadId);
+        return Effect.succeed(
+          launch === undefined
+            ? null
+            : ({
+                id: launch.threadId,
+                projectId: launch.projectId,
+                modelSelection: launch.modelSelection,
+                deletedAt: null,
+              } as unknown as OrchestrationV2ThreadShell),
+        );
+      },
+    }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
       launch: (launch) => {
@@ -107,14 +133,15 @@ const clientLaunchHarness = (input: {
             ? Option.some({
                 id,
                 workspaceRoot: input.workspaceRoot ?? "/projects/client-target",
-                defaultModelSelection: input.overrideModel === undefined ? modelSelection : null,
+                defaultModelSelection: projectDefaults.model,
               } as unknown as ProjectRecord)
             : Option.none(),
         ),
     }),
+    Layer.mock(PeerForwarding.PeerForwarding)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
     unusedProviderRegistryLayer,
-    NodeServices.layer,
+    DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer)),
   ).pipe(
     Layer.provideMerge(GitVcsDriver.layer),
     Layer.provideMerge(VcsProcess.layer),
@@ -125,7 +152,7 @@ const clientLaunchHarness = (input: {
     ),
     Layer.provideMerge(NodeServices.layer),
   );
-  return { projectId, modelSelection, dependencies: layerDependencies };
+  return { projectId, modelSelection, projectDefaults, dependencies: layerDependencies };
 };
 
 it.effect(
@@ -141,15 +168,17 @@ it.effect(
           readonly runtimeMode?: RuntimeMode;
           readonly targeted?: false;
           readonly overrideModel?: ModelSelection;
+          readonly webOrigin?: string;
         },
       ) {
-        const { targeted, overrideModel, ...input } = params;
+        const { targeted, overrideModel, webOrigin, ...input } = params;
         const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
         const { projectId, modelSelection, dependencies } = clientLaunchHarness({
           runtimeModeCeiling,
           defaultRuntimeMode,
           launched,
           ...(overrideModel === undefined ? {} : { overrideModel }),
+          ...(webOrigin === undefined ? {} : { webOrigin }),
         });
         const toolkit = yield* ProjectToolkit.pipe(
           Effect.provide(
@@ -171,13 +200,19 @@ it.effect(
       expect(belowCeiling.result).toMatchObject({
         projectId: belowCeiling.projectId,
         modelSelection: belowCeiling.modelSelection,
-        link: `[Fix](t3-thread://v1/${belowCeiling.launched[0]?.threadId})`,
+        link: `<t3-thread://v2/environment/${belowCeiling.launched[0]?.threadId}>`,
       });
       expect(belowCeiling.launched[0]?.runtimeMode).toBe("approval-required");
       expect(belowCeiling.launched[0]?.initialMessage?.senderThreadId).toBeUndefined();
 
-      const aboveCeiling = yield* launchWith("auto-accept-edits", "full-access", { title: "Fix" });
+      const aboveCeiling = yield* launchWith("auto-accept-edits", "full-access", {
+        title: "Fix",
+        webOrigin: "https://box.example.ts.net",
+      });
       expect(aboveCeiling.launched[0]?.runtimeMode).toBe("auto-accept-edits");
+      expect(aboveCeiling.result).toMatchObject({
+        link: `https://box.example.ts.net/environment/${encodeURIComponent(aboveCeiling.launched[0]?.threadId ?? "")}`,
+      });
 
       const requested = yield* launchWith("full-access", "approval-required", {
         title: "Fix",
@@ -208,6 +243,100 @@ it.effect(
       });
       expect(fromSettings.launched[0]?.modelSelection).toEqual(overrideModel);
     }),
+);
+
+it.effect("a launch retried with the same clientRequestId replays the first one", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const launch = (clientRequestId: string | undefined) =>
+      toolkit
+        .handle("t3_thread_launch", {
+          title: "Fix",
+          projectId,
+          message: "Fix the bug",
+          ...(clientRequestId === undefined ? {} : { clientRequestId }),
+        })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    yield* launch("fix-1");
+    yield* launch("fix-1");
+    yield* launch("fix-2");
+    yield* launch(undefined);
+    yield* launch(undefined);
+    const ids = launched.map((input) => [input.commandId, input.threadId]);
+    // The same key sends the same command and thread ids, which the launch
+    // service replays instead of starting a second thread.
+    expect(ids[0]).toEqual(ids[1]);
+    expect(ids[0]?.[0]).toMatch(/^mcp:launch:[0-9a-f]{64}$/);
+    expect(ids[2]).not.toEqual(ids[0]);
+    // Without a key every launch is new.
+    expect(ids[3]).not.toEqual(ids[4]);
+  }),
+);
+
+it.effect("a launch key of any length or content gives a short id and never a defect", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const launch = (clientRequestId: string) =>
+      toolkit
+        .handle("t3_thread_launch", { title: "Fix", projectId, clientRequestId })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    // Percent-encoding would grow this six times; scratch folders are named from the id.
+    yield* launch("\u00e9".repeat(256));
+    expect(launched.map((input) => input.commandId)).toEqual([
+      expect.stringMatching(/^mcp:launch:[0-9a-f]{64}$/),
+    ]);
+
+    const loneSurrogate = yield* launch("key-\ud800").pipe(Effect.exit);
+    expect(Exit.isFailure(loneSurrogate) && Cause.hasDies(loneSurrogate.cause)).toBe(false);
+    expect(launched).toHaveLength(1);
+  }),
+);
+
+it.effect("a retried launch replays after the project loses its default model", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, modelSelection, projectDefaults, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const launch = toolkit
+      .handle("t3_thread_launch", { title: "Fix", projectId, clientRequestId: "fix-1" })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    yield* launch;
+    projectDefaults.model = null;
+    const retried = (yield* launch).at(-1)?.result;
+    expect(retried).toMatchObject({ projectId, modelSelection });
+    expect(launched.map((input) => input.threadId)).toEqual([
+      launched[0]?.threadId,
+      launched[0]?.threadId,
+    ]);
+  }),
 );
 
 it.effect("a launch binds only an existing checkout that is one of the project's worktrees", () =>
@@ -499,4 +628,47 @@ it.effect("sibling provides of the thread lock layer share one lock in a build",
     expect(seen).toHaveLength(2);
     expect(seen[0]).toBe(seen[1]);
   }).pipe(Effect.scoped),
+);
+
+it.effect("a retried worktree launch replays after its base ref is gone", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const base = { exists: true };
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "auto",
+      launched,
+      checkWorktreeBase: ({ projectId, workspaceStrategy }) =>
+        base.exists || workspaceStrategy.type !== "worktree"
+          ? Effect.void
+          : Effect.fail(
+              new ThreadLaunch.ThreadLaunchBaseRefError({
+                projectId,
+                projectTitle: "Client target",
+                workspaceRoot: "/projects/client-target",
+                baseRef: workspaceStrategy.baseRef,
+              }),
+            ),
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const launch = toolkit
+      .handle("t3_thread_launch", {
+        title: "Fix",
+        projectId,
+        clientRequestId: "fix-worktree",
+        workspaceStrategy: { type: "worktree", baseRef: "feature", startFromOrigin: false },
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    yield* launch;
+    base.exists = false;
+    expect((yield* launch).at(-1)?.result).toMatchObject({ projectId });
+    expect(launched.map((input) => input.threadId)).toEqual([
+      launched[0]?.threadId,
+      launched[0]?.threadId,
+    ]);
+  }),
 );

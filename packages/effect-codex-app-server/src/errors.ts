@@ -113,16 +113,6 @@ export const CodexAppServerTransportOperation = Schema.Literals([
 ]);
 export type CodexAppServerTransportOperation = typeof CodexAppServerTransportOperation.Type;
 
-export const CodexAppServerIdentifierPurpose = Schema.Literals([
-  "provider-event",
-  "command-approval-request",
-  "file-change-approval-request",
-  "mcp-elicitation-request",
-  "app-permission-approval-request",
-  "user-input-request",
-]);
-export type CodexAppServerIdentifierPurpose = typeof CodexAppServerIdentifierPurpose.Type;
-
 export interface CodexAppServerProtocolErrorShape {
   readonly code: number;
   readonly message: string;
@@ -248,18 +238,6 @@ export class CodexAppServerTransportError extends Schema.TaggedError<CodexAppSer
   }
 }
 
-export class CodexAppServerIdentifierGenerationError extends Schema.TaggedError<CodexAppServerIdentifierGenerationError>()(
-  "CodexAppServerIdentifierGenerationError",
-  {
-    purpose: CodexAppServerIdentifierPurpose,
-    cause: Schema.Defect(),
-  },
-) {
-  override get message() {
-    return `Failed to generate Codex App Server identifier for ${this.purpose}.`;
-  }
-}
-
 export class CodexAppServerInputStreamEndedError extends Schema.TaggedError<CodexAppServerInputStreamEndedError>()(
   "CodexAppServerInputStreamEndedError",
   {},
@@ -318,22 +296,6 @@ export class CodexAppServerRequestError extends Schema.TaggedError<CodexAppServe
         cause: error,
       },
     );
-  }
-
-  static parseError(message = "Parse error", data?: unknown) {
-    return new CodexAppServerRequestError({
-      code: -32700,
-      errorMessage: message,
-      ...(data !== undefined ? { data } : {}),
-    });
-  }
-
-  static invalidRequest(message = "Invalid request", data?: unknown) {
-    return new CodexAppServerRequestError({
-      code: -32600,
-      errorMessage: message,
-      ...(data !== undefined ? { data } : {}),
-    });
   }
 
   static methodNotFound(method: string) {
@@ -425,7 +387,6 @@ export const CodexAppServerError = Schema.Union([
   CodexAppServerProcessExitedError,
   CodexAppServerProtocolParseError,
   CodexAppServerTransportError,
-  CodexAppServerIdentifierGenerationError,
   CodexAppServerInputStreamEndedError,
 ]);
 
