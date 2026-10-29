@@ -775,6 +775,9 @@ function listItemFromShell(
     pullRequests: threadPullRequests(shell.pullRequests),
     ...threadSettlement(shell),
     ...threadSnooze(shell, nowMs),
+    pinned: shell.pinnedAt != null,
+    archived: shell.archivedAt !== null,
+    autoSettle: shell.autoSettleDisabledAt == null,
     lastVisitedAt: shell.lastVisitedAt != null ? DateTime.formatIso(shell.lastVisitedAt) : null,
     latestRunCompletedAt:
       shell.latestRunCompletedAt != null ? DateTime.formatIso(shell.latestRunCompletedAt) : null,
@@ -829,6 +832,8 @@ function threadDetail(
       (request) => request.status === "pending",
     ).length,
     archived: projection.thread.archivedAt !== null,
+    pinned: projection.thread.pinnedAt != null,
+    autoSettle: projection.thread.autoSettleDisabledAt == null,
     ...threadSettlement(projection.thread),
     ...threadSnooze(shell, nowMs),
     lastVisitedAt: shell.lastVisitedAt != null ? DateTime.formatIso(shell.lastVisitedAt) : null,
@@ -2842,6 +2847,7 @@ const make = Effect.gen(function* () {
         .listProjectThreads({
           projectId: projectId ?? undefined,
           includeSubagents: input.includeSubagents !== false,
+          location: input.archived ? "archive" : "active",
         })
         .pipe(
           Effect.mapError((error) =>
