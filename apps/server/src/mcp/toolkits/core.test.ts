@@ -11,6 +11,7 @@ import {
   OrchestratorMcpThreadReadResult,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -213,6 +214,109 @@ it.effect("an answered question reports already answered instead of not found", 
                 ],
               }),
             dispatch: () => Effect.die("an answered question must not dispatch again"),
+          }),
+        ),
+      ),
+    ),
+  );
+});
+
+it.effect("dismiss drops a pending question but refuses approvals without dispatching", () => {
+  const shell = McpToolAccessTestkit.liveThreadShell(threadId);
+  const questionId = RuntimeRequestId.make("pending-question");
+  const approvalId = RuntimeRequestId.make("pending-approval");
+  const projection = McpToolAccessTestkit.idleThreadProjection(shell);
+  const dispatched: Array<unknown> = [];
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const dismiss = (id: string) =>
+      server
+        .callTool({ name: "t3_pending_request", arguments: { action: "dismiss", requestId: id } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const dismissed = yield* dismiss(questionId);
+    expect(dismissed.isError).not.toBe(true);
+    expect(dispatched).toEqual([
+      {
+        type: "thread.user-input.dismiss",
+        threadId,
+        commandId: expect.any(String),
+        requestId: questionId,
+      },
+    ]);
+    // An approval request is not a user-input question, so it is refused and nothing dispatches.
+    expect(declaredFailure(yield* dismiss(approvalId))).toMatchObject({
+      code: "invalid_request",
+      message: "The pending user-input request was not found.",
+    });
+    expect(dispatched).toHaveLength(1);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: () => Effect.succeed(shell),
+            getProjectThreadRecords: () =>
+              Effect.succeed({
+                ...projection,
+                runtimeRequests: [
+                  {
+                    id: questionId,
+                    nodeId: NodeId.make("root"),
+                    providerTurnId: null,
+                    nativeRequestRef: null,
+                    kind: "user_input",
+                    status: "pending",
+                    responseCapability: { type: "message" },
+                    createdAt: shell.createdAt,
+                    resolvedAt: null,
+                  },
+                  {
+                    id: approvalId,
+                    nodeId: NodeId.make("approval-root"),
+                    providerTurnId: null,
+                    nativeRequestRef: null,
+                    kind: "command",
+                    status: "pending",
+                    responseCapability: {
+                      type: "live",
+                      providerSessionId: ProviderSessionId.make("mcp-core-session"),
+                    },
+                    createdAt: shell.createdAt,
+                    resolvedAt: null,
+                  },
+                ],
+                turnItems: [
+                  {
+                    id: TurnItemId.make("pending-question-item"),
+                    threadId,
+                    runId: null,
+                    nodeId: null,
+                    providerThreadId: null,
+                    providerTurnId: null,
+                    nativeItemRef: null,
+                    parentItemId: null,
+                    ordinal: 0,
+                    status: "waiting",
+                    title: null,
+                    startedAt: shell.createdAt,
+                    completedAt: null,
+                    updatedAt: shell.updatedAt,
+                    type: "user_input_request",
+                    requestId: questionId,
+                    questions: [],
+                  },
+                ],
+              }),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(command);
+                return { sequence: 1 } as never;
+              }),
           }),
         ),
       ),

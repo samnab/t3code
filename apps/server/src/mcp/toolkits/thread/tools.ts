@@ -156,9 +156,9 @@ const question = Schema.Struct({
 const PendingRequestTool = Tool.make("t3_pending_request", {
   ...commandTool,
   description:
-    "Pending user questions in a thread. Omit `threadId` for this thread. list: their ids; approvals are not listed. read: one by `requestId`. respond: answer one with `answers`; this cannot approve a permission request.",
+    "Pending user questions in a thread. Omit `threadId` for this thread. list: their ids; approvals are not listed. read: one by `requestId`. respond: answer one with `answers`; this cannot approve a permission request. dismiss: drop a pending question; approvals cannot be dismissed.",
   parameters: Schema.Struct({
-    action: Schema.Literals(["list", "read", "respond"]),
+    action: Schema.Literals(["list", "read", "respond", "dismiss"]),
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
     requestId: Schema.optional(RuntimeRequestId),
@@ -292,25 +292,40 @@ const ThreadTransferTool = Tool.make("t3_thread_transfer", {
 const ThreadSearchTool = Tool.make("t3_thread_search", {
   ...commandTool,
   description:
-    "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive.",
+    "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive. With `threadId`: search only that transcript; a match's `entryId` reads via t3_thread_read.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     ...OrchestrationSearchThreadsInput.fields,
     projectId: Schema.optional(ProjectId),
+    threadId: Schema.optional(ThreadId),
   }),
-  success: Schema.Struct({
-    matches: Schema.Array(
-      Schema.Struct({
-        threadId: OrchestrationThreadSearchMatch.fields.threadId,
-        projectId: OrchestrationThreadSearchMatch.fields.projectId,
-        title: Schema.String,
-        link: Schema.optional(Schema.String),
-        source: Schema.Literals(["title", "user", "assistant"]),
-        snippet: Schema.optional(OrchestrationThreadSearchMatch.fields.snippet),
-        messageCreatedAt: Schema.optional(OrchestrationThreadSearchMatch.fields.messageCreatedAt),
-      }),
-    ),
-  }),
+  success: Schema.Union([
+    Schema.Struct({
+      matches: Schema.Array(
+        Schema.Struct({
+          threadId: OrchestrationThreadSearchMatch.fields.threadId,
+          projectId: OrchestrationThreadSearchMatch.fields.projectId,
+          title: Schema.String,
+          link: Schema.optional(Schema.String),
+          source: Schema.Literals(["title", "user", "assistant"]),
+          snippet: Schema.optional(OrchestrationThreadSearchMatch.fields.snippet),
+          messageCreatedAt: Schema.optional(OrchestrationThreadSearchMatch.fields.messageCreatedAt),
+        }),
+      ),
+    }),
+    Schema.Struct({
+      threadId: ThreadId,
+      totalMatches: NonNegativeInt,
+      matches: Schema.Array(
+        Schema.Struct({
+          entryId: TrimmedNonEmptyString,
+          runId: Schema.NullOr(RunId),
+          startIndex: NonNegativeInt,
+          count: NonNegativeInt,
+        }),
+      ),
+    }),
+  ]),
   dependencies: [...commandTool.dependencies, ThreadSearch.ThreadSearch],
 })
   .annotate(Tool.Readonly, true)
