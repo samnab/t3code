@@ -213,6 +213,25 @@ function useMarkThreadUnread() {
   };
 }
 
+/** Clears a row's Done/Woke marker by visiting now, and its Input marker by dismissing the question. */
+function useClearThreadStatus() {
+  const acknowledge = useAcknowledgeThreadWoke();
+  const dismissUserInput = useAtomCommand(threadEnvironment.dismissUserInput, {
+    label: "Failed to dismiss question",
+  });
+  return (target: ScopedThreadRef) => {
+    acknowledge(target, new Date().toISOString());
+    const thread = readThreadShell(target);
+    const request = thread?.source.pendingRuntimeRequest;
+    if (thread?.hasPendingUserInput && request?.kind === "user_input") {
+      void dismissUserInput({
+        environmentId: target.environmentId,
+        input: { threadId: target.threadId, requestId: request.id },
+      });
+    }
+  };
+}
+
 export function useAcknowledgeThreadWoke() {
   const visitThreadMutation = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
   const markThreadVisited = useUiStateStore((state) => state.markThreadVisited);
@@ -279,6 +298,7 @@ export function useThreadActions() {
     reportFailure: false,
   });
   const markThreadUnread = useMarkThreadUnread();
+  const clearThreadStatus = useClearThreadStatus();
   const stopThreadSession = useOrchestrationCommand(threadEnvironment.stopSession);
   const removeWorktree = useAtomCommand(vcsEnvironment.removeWorktree, {
     reportFailure: false,
@@ -924,6 +944,7 @@ export function useThreadActions() {
     reorderPinnedThread,
     reorderActiveThread,
     markThreadUnread,
+    clearThreadStatus,
     setThreadAutoSettle,
   };
 }

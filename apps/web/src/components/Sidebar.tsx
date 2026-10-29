@@ -923,6 +923,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     reorderPinnedThread,
     reorderActiveThread,
     markThreadUnread,
+    clearThreadStatus,
     archiveThread,
     deleteThread,
   } = useThreadActions();
@@ -2309,6 +2310,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 ]
               : []),
             { id: "mark-unread", label: `Mark unread (${count})` },
+            { id: "clear-status", label: `Clear status (${count})` },
             {
               id: "delete",
               label: `Delete (${count})`,
@@ -2417,10 +2419,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         clearSelection();
         return;
       }
-      if (clicked.value === "mark-unread") {
+      if (clicked.value === "mark-unread" || clicked.value === "clear-status") {
+        const apply = clicked.value === "mark-unread" ? markThreadUnread : clearThreadStatus;
         for (const threadKey of threadKeys) {
           const thread = threadByKeyRef.current.get(threadKey);
-          if (thread) markThreadUnread(scopeThreadRef(thread.environmentId, thread.id));
+          if (thread) apply(scopeThreadRef(thread.environmentId, thread.id));
         }
         clearSelection();
         return;
@@ -2714,6 +2717,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           }
           case "mark-unread":
             markThreadUnread(threadRef);
+            return;
+          case "clear-status":
+            clearThreadStatus(threadRef);
             return;
           case "reload-agent": {
             const result = await reloadAgent({

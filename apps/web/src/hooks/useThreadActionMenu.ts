@@ -84,6 +84,7 @@ export function useThreadActionMenu(input: {
     archiveThread,
     deleteThread,
     markThreadUnread,
+    clearThreadStatus,
   } = useThreadActions();
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -254,6 +255,9 @@ export function useThreadActionMenu(input: {
           return;
         case "mark-unread":
           markThreadUnread(threadRef);
+          return;
+        case "clear-status":
+          clearThreadStatus(threadRef);
           return;
         case "reload-agent": {
           const result = await reloadAgent({

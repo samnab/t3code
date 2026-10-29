@@ -18,6 +18,7 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "mark-unread"
+  | "clear-status"
   | "reload-agent"
   | "share-guest"
   | "copy"
@@ -172,6 +173,7 @@ export function buildThreadActionMenuItems(
         ]
       : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
+    { id: "clear-status", label: "Clear status", icon: "circle-check" },
     ...(state.canShareWithGuest
       ? [{ id: "share-guest" as const, label: "Share with guest", icon: "user-plus" }]
       : []),
