@@ -313,8 +313,10 @@ it.effect("mark_read records a read receipt at the observed version", () =>
       updatedAt: "1970-01-01T02:00:00.000Z",
       latestRunCompletedAt: "1970-01-01T04:00:00.000Z",
     });
-    // Synthetic: a real newer completion would leave the thread unread. This
-    // only shows a receipt never moves the watermark backwards.
+    // Synthetic: this completion does not bump updatedAt, so the receipt
+    // stamps 02:00 onto an identical 02:00 watermark — proof of equality,
+    // not of backwards protection. A real newer completion would bump
+    // updatedAt, and the next mark_read would stamp it, clearing the badge.
     yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_read" }));
     expect(yield* readState).toMatchObject({ lastVisitedAt: "1970-01-01T02:00:00.000Z" });
     yield* last(toolkit.handle("t3_thread_organize", { threadId, action: "mark_unread" }));
