@@ -456,12 +456,31 @@ describe("GitCafePullRequestProvider", () => {
     );
     return Effect.gen(function* () {
       const provider = yield* GitCafePullRequestProvider.make;
-      const summary = yield* provider.getChangeRequestSummary!({
+      const input = {
         ...target,
         host: "staging.git.cafe",
+      };
+      const preview = yield* provider.getChangeRequestPreview!(input);
+      assert.deepInclude(preview, {
+        number: 7,
+        title: "Change",
+        url: "https://staging.git.cafe/owner/repo/pulls/7",
+        author: { login: "alice", name: null, avatarUrl: "https://staging.git.cafe/avatars/one" },
+        state: "open",
+        isDraft: false,
+        createdAt: timestamp,
       });
+      const summary = yield* provider.getChangeRequestSummary!(input);
       assert.strictEqual(summary.url, "https://staging.git.cafe/owner/repo/pulls/7");
       assert.isTrue(server.sent.every((request) => request.host === "staging.git.cafe"));
+      assert.deepStrictEqual(
+        server.sent.map((request) => `${request.method} ${request.path}`),
+        [
+          "GET /repos/owner/repo/pulls/7",
+          "GET /repos/owner/repo/pulls/7",
+          "GET /repos/owner/repo/pulls/7/changes",
+        ],
+      );
     }).pipe(Effect.provide(server.layer));
   });
 
@@ -514,6 +533,41 @@ describe("GitCafePullRequestProvider", () => {
       Effect.provide(server.layer),
     );
   });
+
+  it.effect("follows a renumbered pull request's redirect only within the host's API", () =>
+    Effect.gen(function* () {
+      const moved = (location: string) =>
+        new Response(null, { status: 301, headers: { location } });
+      const renumbered = fakeGitCafe({
+        "GET /repos/owner/repo/pulls/7/stack": moved("/api/repos/owner/repo/pulls/8/stack"),
+        "GET /repos/owner/repo/pulls/8/stack": { stack: null },
+      });
+      yield* GitCafePullRequestProvider.make.pipe(
+        Effect.flatMap((provider) => provider.getChangeRequestStack!(target)),
+        Effect.provide(renumbered.layer),
+      );
+      assert.deepStrictEqual(
+        renumbered.sent.map((r) => `${r.host}${r.path}`),
+        ["git.cafe/repos/owner/repo/pulls/7/stack", "git.cafe/repos/owner/repo/pulls/8/stack"],
+      );
+
+      for (const location of [
+        "https://evil.example/api/repos/owner/repo/pulls/8/stack",
+        "//evil.example/api/repos/owner/repo/pulls/8/stack",
+        "https://staging.git.cafe/api/repos/owner/repo/pulls/8/stack",
+        "/repos/owner/repo/pulls/8/stack",
+      ]) {
+        const elsewhere = fakeGitCafe({ "GET /repos/owner/repo/pulls/7/stack": moved(location) });
+        const error = yield* GitCafePullRequestProvider.make.pipe(
+          Effect.flatMap((provider) => provider.getChangeRequestStack!(target)),
+          Effect.flip,
+          Effect.provide(elsewhere.layer),
+        );
+        assert.strictEqual(error.detail, "GitCafe answered HTTP 301.");
+        assert.strictEqual(elsewhere.sent.length, 1);
+      }
+    }),
+  );
 
   it.effect("reads the stack a pull request belongs to, with each open layer's head", () => {
     const { "GET /repos/owner/repo/pulls/6": _merged, ...routes } = stack([

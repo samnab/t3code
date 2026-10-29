@@ -132,8 +132,9 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
 
     return TurnItemPositionStoreV2.of({
       allocate,
-      normalize: (item, runOrdinal) =>
-        allocate({
+      // Per-event normalization shares the enclosing orchestration span.
+      normalize: Effect.fnUntraced(function* (item, runOrdinal) {
+        return yield* allocate({
           threadId: item.threadId,
           turnItemId: item.id,
           runId: item.runId,
@@ -155,10 +156,11 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
               ? item
               : // A stitched slot taken by a concurrent receipt keeps receipt order, and says so.
                 item.type === "realtime_voice" && item.sourceOrder === "provider_anchored"
-                ? { ...item, ordinal, sourceOrder: "unreconciled" }
+                ? { ...item, ordinal, sourceOrder: "unreconciled" as const }
                 : { ...item, ordinal },
           ),
-        ),
+        );
+      }),
     });
   }),
 );

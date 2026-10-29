@@ -45,6 +45,8 @@ import { toastManager } from "./ui/toast";
 import { useRealtimeVoiceActive } from "./voice/RealtimeVoiceProvider";
 
 const PREVIEW_FORWARDED_LAYOUT_COMMANDS = [
+  "workspace.focusNext",
+  "workspace.focusPrevious",
   "sidebar.toggle",
   "rightPanel.toggle",
   "rightPanel.toggleMaximized",
@@ -146,6 +148,7 @@ export function ReopenClosedViewShortcut() {
       });
   });
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to window keydown and the desktop menu action for the reopen closed view shortcut
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -181,9 +184,10 @@ export function ReopenClosedViewShortcut() {
   }, [keybindings, previewOpen, terminalOpen]);
 
   const voiceActive = useRealtimeVoiceActive();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers forwarded shortcut chords with the desktop preview bridge and clears them on cleanup
   useEffect(() => {
     const preview = window.desktopBridge?.preview;
-    if (!preview?.setForwardedShortcuts) return;
+    if (!preview) return;
     const options = {
       context: {
         voiceActive,
@@ -215,7 +219,7 @@ export function ReopenClosedViewShortcut() {
       )
       .catch(() => undefined);
     return () => {
-      void preview.setForwardedShortcuts?.([]).catch(() => undefined);
+      void preview.setForwardedShortcuts([]).catch(() => undefined);
     };
   }, [hasHistory, keybindings, terminalOpen, voiceActive]);
 
