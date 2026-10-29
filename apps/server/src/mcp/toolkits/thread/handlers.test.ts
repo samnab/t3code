@@ -4,6 +4,7 @@ import {
   CommandId,
   EnvironmentId,
   MessageId,
+  ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -126,6 +127,74 @@ const readThread = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   return yield* projections.getThreadProjection(threadId);
 });
+
+// A worktree launch whose preparation failed persists the run and its error
+// turn item; the queue stays held until a worktree exists.
+const insertFailedPreparationRun = (ordinal: number, failedAt: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const runId = RunId.make(`run:api13-queue-prep-${ordinal}`);
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_runs (
+        run_id, thread_id, ordinal, provider, provider_instance_id, provider_thread_id,
+        status, requested_at, completed_at, payload_json
+      )
+      VALUES (
+        ${runId}, ${threadId}, ${ordinal}, ${instanceId}, ${instanceId}, NULL,
+        'failed', ${failedAt}, ${failedAt}, ${JSON.stringify({
+          id: runId,
+          threadId,
+          ordinal,
+          providerInstanceId: instanceId,
+          modelSelection: { instanceId, model: "gpt-5" },
+          providerThreadId: null,
+          userMessageId: MessageId.make(`message:api13-queue-prep-${ordinal}`),
+          rootNodeId: null,
+          activeAttemptId: null,
+          status: "failed",
+          requestedAt: failedAt,
+          startedAt: failedAt,
+          completedAt: failedAt,
+          checkpointId: null,
+          contextHandoffId: null,
+          workspacePreparation: { type: "worktree", baseRef: "main" },
+        })}
+      )
+    `;
+    const itemId = `turn-item:api13-queue-prep-${ordinal}`;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_turn_items (
+        turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
+        parent_item_id, ordinal, type, status, updated_at, payload_json
+      )
+      VALUES (
+        ${itemId}, ${threadId}, ${runId}, NULL, NULL, NULL, NULL, ${ordinal},
+        'error', 'failed', ${failedAt}, ${JSON.stringify({
+          id: itemId,
+          threadId,
+          runId,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal,
+          status: "failed",
+          title: "Workspace preparation failed",
+          startedAt: failedAt,
+          completedAt: failedAt,
+          updatedAt: failedAt,
+          type: "error",
+          failure: {
+            class: "unknown",
+            message: `Worktree setup failed: setup script exited 1. ${"x".repeat(600)}`,
+            code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+            retryable: true,
+          },
+        })}
+      )
+    `;
+  });
 
 // Mark-unread rewinds to a completed run, so the regression seeds one straight
 // into the projection store the way a finished provider run would leave it.
@@ -436,6 +505,129 @@ it.effect.each(["resume_queue", "start_queued"] as const)(
       ).toHaveProperty("sequence");
       expect((yield* readThread).runs.find((run) => run.id === queued.id)?.queueHeld).toBe(false);
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reads a held queue with each run's held flag", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* createThread;
+    yield* sendMessage("first", { type: "start_immediately" });
+    yield* sendMessage("second", { type: "queue_after_active" });
+    const runs = (yield* readThread).runs;
+    const active = runs.find((run) => run.status !== "queued");
+    const queued = runs.find((run) => run.status === "queued");
+    if (active === undefined || queued === undefined) return yield* Effect.die("runs missing");
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make("mcp-thread-controls:hold"),
+      threadId,
+      runId: active.id,
+      holdQueue: true,
+    });
+
+    expect(yield* last(toolkit.handle("t3_queue", { threadId, action: "list" }))).toMatchObject({
+      queueHeld: true,
+      holdReason: null,
+      nextCursor: null,
+      items: [
+        {
+          queuedRunId: queued.id,
+          text: "second",
+          truncated: false,
+          queueHeld: true,
+          attachmentCount: 0,
+          attachments: [],
+        },
+      ],
+    });
+    expect(
+      yield* last(toolkit.handle("t3_queue", { threadId, action: "read", queuedRunId: queued.id })),
+    ).toMatchObject({ queuedRunId: queued.id, queueHeld: true, holdReason: null });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reads the workspace-preparation reason behind a held queue, bounded", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* createThread;
+    yield* sendMessage("first", { type: "start_immediately" });
+    yield* sendMessage("second", { type: "queue_after_active" });
+    const [active, queued] = (yield* readThread).runs.toSorted((a, b) => a.ordinal - b.ordinal);
+    if (active === undefined || queued === undefined) return yield* Effect.die("runs missing");
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make("mcp-thread-controls:hold"),
+      threadId,
+      runId: active.id,
+      holdQueue: true,
+    });
+    yield* insertFailedPreparationRun(3, "1970-01-01T03:00:00.000Z");
+
+    const listed = yield* last(toolkit.handle("t3_queue", { threadId, action: "list" }));
+    if (listed === undefined || !("holdReason" in listed)) {
+      return yield* Effect.die("list result missing");
+    }
+    expect(listed).toMatchObject({ queueHeld: true });
+    // The error message is bounded instead of handed over whole.
+    expect(listed.holdReason?.startsWith("Worktree setup failed: setup script exited 1.")).toBe(
+      true,
+    );
+    expect(listed.holdReason).toHaveLength(500);
+    expect(
+      yield* last(toolkit.handle("t3_queue", { threadId, action: "read", queuedRunId: queued.id })),
+    ).toMatchObject({
+      queuedRunId: queued.id,
+      queueHeld: true,
+      holdReason: listed.holdReason,
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reads queued attachment metadata without attachment content", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* createThread;
+    yield* sendMessage("first", { type: "start_immediately" });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("mcp-thread-controls:attach"),
+      threadId,
+      messageId: MessageId.make("message:attached"),
+      text: "with attachment",
+      attachments: [
+        {
+          type: "file",
+          id: "attachment-notes",
+          name: "notes.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 1234,
+        },
+      ],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+
+    const listed = yield* last(toolkit.handle("t3_queue", { threadId, action: "list" }));
+    if (listed === undefined || !("items" in listed)) return yield* Effect.die("list missing");
+    expect(listed.items[0]).toMatchObject({
+      text: "with attachment",
+      attachmentCount: 1,
+      attachments: [
+        { name: "notes.pdf", type: "file", mimeType: "application/pdf", sizeBytes: 1234 },
+      ],
+    });
+    // Metadata only: exactly the four safe fields, no content bytes or URLs.
+    expect(Object.keys(listed.items[0]?.attachments[0] ?? {})).toEqual([
+      "name",
+      "type",
+      "mimeType",
+      "sizeBytes",
+    ]);
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("lowers a thread's modes and refuses to raise them, recording nothing", () =>

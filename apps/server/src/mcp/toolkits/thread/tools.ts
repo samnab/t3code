@@ -85,11 +85,21 @@ const commandTool = {
     Crypto.Crypto,
   ],
 };
+const queueAttachment = Schema.Struct({
+  name: Schema.String,
+  type: Schema.String,
+  mimeType: Schema.String,
+  sizeBytes: NonNegativeInt,
+});
 const queueEntry = Schema.Struct({
   queuedRunId: RunId,
   text: Schema.String,
   truncated: Schema.Boolean,
+  queueHeld: Schema.Boolean,
+  attachmentCount: NonNegativeInt,
+  attachments: Schema.Array(queueAttachment),
 });
+const queueHoldReason = Schema.NullOr(Schema.String.check(Schema.isMaxLength(500)));
 const QUEUE_READ_ACTIONS = ["list", "read"] as const;
 const QueueTool = Tool.make("t3_queue", {
   ...commandTool,
@@ -113,8 +123,16 @@ const QueueTool = Tool.make("t3_queue", {
     limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
   }),
   success: Schema.Union([
-    Schema.Struct({ items: Schema.Array(queueEntry), nextCursor: Schema.NullOr(NonNegativeInt) }),
-    queueEntry,
+    Schema.Struct({
+      items: Schema.Array(queueEntry),
+      nextCursor: Schema.NullOr(NonNegativeInt),
+      queueHeld: Schema.Boolean,
+      holdReason: queueHoldReason,
+    }),
+    Schema.Struct({
+      ...queueEntry.fields,
+      holdReason: queueHoldReason,
+    }),
     OrchestrationV2DispatchCommandResult,
   ]),
 }).annotate(Tool.Destructive, true);
