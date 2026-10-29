@@ -3497,6 +3497,107 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  // A capacity retry sends turn/start, which spoken requests must never use.
+  it.effect("fails an adopted realtime turn at capacity instead of retrying it", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "voice-capacity";
+      const nativeTurnId = "held-capacity";
+      const failed = yield* Deferred.make<void>();
+      const runtimeReady = yield* Deferred.make<ProviderAdapter.ProviderAdapterV2SessionRuntime>();
+      const harness = yield* makeCodexReplayHarness(
+        makeCodexReplayTranscript({
+          scenario: "voice-capacity",
+          entries: [
+            ...heldVoiceEntries(nativeThreadId, nativeTurnId, false),
+            {
+              type: "expect_outbound",
+              frame: { id: "held-approval", result: { decision: "decline" } },
+            },
+            {
+              type: "emit_inbound",
+              label: "capacity-failed",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: {
+                    ...makeCodexReplayTurn({ id: nativeTurnId, status: "failed" }),
+                    error: {
+                      message: "Selected model is at capacity.",
+                      codexErrorInfo: "serverOverloaded",
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              frame: {
+                method: "thread/realtime/sdp",
+                params: { threadId: nativeThreadId, sdp: "answer" },
+              },
+            },
+            {
+              type: "expect_outbound",
+              frame: {
+                id: 4,
+                method: "thread/realtime/stop",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            { type: "emit_inbound", frame: { id: 4, result: {} } },
+          ],
+        }),
+        (event) =>
+          event.type === "runtime_request.updated"
+            ? Deferred.await(runtimeReady).pipe(
+                Effect.flatMap((runtime) =>
+                  runtime.respondToRuntimeRequest({
+                    requestId: event.runtimeRequest.id,
+                    decision: "decline",
+                  }),
+                ),
+                Effect.orDie,
+              )
+            : Effect.void,
+        undefined,
+        undefined,
+        (entry) =>
+          entry.label === "capacity-failed"
+            ? Deferred.succeed(failed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      );
+      yield* Deferred.succeed(runtimeReady, harness.runtime);
+      yield* harness.runtime.startRealtimeVoice!({
+        providerThread: harness.providerThread,
+        sdp: "offer",
+      });
+      const offer = harness.continuationRequests[0]!;
+      const turnInput = makeCodexTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now: yield* DateTime.now,
+        attemptId: RunAttemptId.make("voice-capacity"),
+        text: offer.detail!,
+      });
+      yield* harness.runtime.startTurn({
+        ...turnInput,
+        message: { ...turnInput.message, messageId: offer.messageId!, creationSource: "provider" },
+      });
+      yield* Deferred.await(failed);
+      yield* TestClock.adjust("1 minute");
+      yield* harness.runtime.stopRealtimeVoice!({ providerThread: harness.providerThread });
+      const replay = yield* Ref.get(harness.replayDriver.state);
+      assert.isNull(replay.failure);
+      assert.equal(replay.cursor, harness.replayDriver.transcript.entries.length);
+      assert.equal(harness.terminalEvents()[0]?.status, "failed");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
   it.effect.each(["voice", "typed-race"] as const)(
     "adopts a realtime handoff for %s with streamed items, approvals and a checkpoint",
     (owner) =>

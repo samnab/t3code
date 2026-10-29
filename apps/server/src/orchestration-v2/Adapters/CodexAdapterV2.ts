@@ -1192,6 +1192,8 @@ function withCodexManagedFailure(
 }
 
 interface ActiveCodexTurnContext {
+  /** Native realtime work owns this turn; turn/start must never re-run it. */
+  realtimeAdopted?: boolean;
   realtimeInputItemId?: string;
   realtimeInputMessageId?: ProviderAdapter.ProviderAdapterV2TurnMessage["messageId"];
   capacityRetryAttempt?: number;
@@ -2520,6 +2522,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeTurnId,
               startedAt: held.startedAt,
             });
+            context.realtimeAdopted = true;
             if (turnInput.message.messageId === held.messageId && held.userItemId !== undefined)
               context.realtimeInputItemId = held.userItemId;
             else if (held.userItemId !== undefined) context.realtimeInputMessageId = held.messageId;
@@ -7016,6 +7019,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             terminal.status !== "failed" ||
             code !== "serverOverloaded" ||
             context.subagent !== null ||
+            context.realtimeAdopted === true ||
             (context.input.message.attachments.length === 0 &&
               context.input.message.text.trim().toLowerCase() === "/compact")
           )
