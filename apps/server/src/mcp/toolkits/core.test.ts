@@ -1054,6 +1054,20 @@ it.effect("stops a background task on the caller's own thread and refuses anothe
     });
     const refusedOther = yield* call({ threadId: otherThread, backgroundTaskId: "bash_2" });
     expect(declaredFailure(refusedOther)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+    // A background task stop replaces the whole interrupt operation; the turn
+    // selectors must be refused instead of silently ignored.
+    const refusedStop = yield* call({
+      threadId: ownThread,
+      backgroundTaskId: "bash_1",
+      stop: true,
+    });
+    expect(declaredFailure(refusedStop)).toMatchObject({ code: "invalid_request" });
+    const refusedRunId = yield* call({
+      threadId: ownThread,
+      backgroundTaskId: "bash_1",
+      runId: "run-1",
+    });
+    expect(declaredFailure(refusedRunId)).toMatchObject({ code: "invalid_request" });
     expect(stopped).toEqual([{ threadId: ownThread, taskId: "bash_1" }]);
   }).pipe(
     Effect.provide(

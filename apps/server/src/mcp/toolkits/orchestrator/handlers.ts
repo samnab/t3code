@@ -257,6 +257,17 @@ const handlers = {
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {
+        // `stop` and `runId` select a turn; the background task id replaces
+        // that whole operation, so the ignored fields must not pass silently.
+        if (
+          input.backgroundTaskId !== undefined &&
+          (input.stop !== undefined || input.runId !== undefined)
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message:
+              "`backgroundTaskId` stops one background task and cannot be combined with `stop` or `runId`.",
+          });
         // Optional so compositions without the background-task runtime build;
         // production always provides it beside the session manager.
         if (input.backgroundTaskId !== undefined) {

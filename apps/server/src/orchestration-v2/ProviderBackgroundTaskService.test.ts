@@ -30,12 +30,12 @@ const projection = {
   runs: [],
 } as unknown as OrchestrationV2ThreadProjection;
 
-function testLayer(runtime: ProviderAdapterV2SessionRuntime) {
+function testLayer(runtime: ProviderAdapterV2SessionRuntime, forProjection = projection) {
   return ProviderBackgroundTaskService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
-          getThreadProjection: () => Effect.succeed(projection),
+          getThreadProjection: () => Effect.succeed(forProjection),
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           get: () => Effect.succeedSome(runtime),
@@ -93,3 +93,42 @@ it.effect("returns a typed unsupported error when the adapter cannot stop tasks"
     assert.instanceOf(error, OrchestrationV2BackgroundTaskUnsupportedError);
   }).pipe(Effect.provide(testLayer(runtime({})))),
 );
+
+it.effect("accepts the timeline item id and stops the native task it maps to", () => {
+  const stopBackgroundTask = vi.fn(
+    (_input: { readonly providerThread: OrchestrationV2ProviderThread; readonly taskId: string }) =>
+      Effect.void,
+  );
+  const withItem = {
+    ...projection,
+    turnItems: [
+      {
+        id: "item-9",
+        type: "command_execution",
+        status: "running",
+        title: "npm test",
+        providerThreadId: providerThread.id,
+        runId: null,
+        nativeItemRef: { driver: "codex", nativeId: "task-1", strength: "strong" },
+      },
+    ],
+  } as unknown as OrchestrationV2ThreadProjection;
+  return Effect.gen(function* () {
+    const service = yield* ProviderBackgroundTaskService.ProviderBackgroundTaskServiceV2;
+    yield* service.stop({ threadId, taskId: "item-9" });
+    assert.strictEqual(stopBackgroundTask.mock.calls.length, 1);
+    assert.strictEqual(stopBackgroundTask.mock.calls[0]?.[0].taskId, "task-1");
+    assert.strictEqual(stopBackgroundTask.mock.calls[0]?.[0].providerThread.id, providerThread.id);
+  }).pipe(
+    Effect.provide(
+      testLayer(
+        runtime({
+          listBackgroundTasks: () =>
+            Effect.succeed([{ taskId: "task-1", kind: "command" as const }]),
+          stopBackgroundTask,
+        }),
+        withItem,
+      ),
+    ),
+  );
+});

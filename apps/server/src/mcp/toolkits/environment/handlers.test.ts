@@ -24,6 +24,8 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
+
 import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
 import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as ServerConfig from "../../../config.ts";
@@ -1267,10 +1269,12 @@ const countingSeededSettings = (seed: Partial<ServerSettings>, updates: Ref.Ref<
       Ref.update(updates, (count) => count + 1).pipe(
         Effect.as({ ...DEFAULT_SERVER_SETTINGS, ...seed }),
       ),
-    modifySettings: () =>
-      Ref.update(updates, (count) => count + 1).pipe(
-        Effect.as({ ...DEFAULT_SERVER_SETTINGS, ...seed }),
-      ),
+    modifySettings: (patch) => {
+      const seeded = { ...DEFAULT_SERVER_SETTINGS, ...seed };
+      return Ref.update(updates, (count) => count + 1).pipe(
+        Effect.as(applyServerSettingsPatch(seeded, patch(seeded))),
+      );
+    },
     updateProviderInstance: () =>
       Ref.update(updates, (count) => count + 1).pipe(
         Effect.as({ ...DEFAULT_SERVER_SETTINGS, ...seed }),
@@ -1397,4 +1401,250 @@ it.effect("refuses lowering a tier's minimum headroom with no write", () =>
     });
     expect(yield* Ref.get(updates)).toBe(0);
   }),
+);
+
+it.effect(
+  "refuses clearing, swapping away, or undercutting a guarded candidate and allows reordering",
+  () =>
+    Effect.gen(function* () {
+      const updates = yield* Ref.make(0);
+      const candidate = (model: string, minHeadroomPercent?: number) => ({
+        providerInstanceId: codexInstance,
+        model,
+        ...(minHeadroomPercent === undefined ? {} : { minHeadroomPercent }),
+      });
+      const stored = [candidate("gpt-5.4", 30), candidate("gpt-5.3", 10)];
+      const run = (candidates: ReadonlyArray<ReturnType<typeof candidate>> | null) =>
+        Effect.gen(function* () {
+          const toolkit = yield* EnvironmentToolkit;
+          return yield* finalResult(
+            toolkit.handle("t3_environment_preferences_update", {
+              setDelegationTier: {
+                tier: "small",
+                candidates: candidates === null ? null : [...candidates],
+              },
+            }),
+          );
+        }).pipe(
+          Effect.provide(
+            environmentLayer(
+              threadScope(),
+              liveThreadShell(threadId),
+              countingSeededSettings(
+                { delegationTiers: { small: stored, medium: [], large: [] } },
+                updates,
+              ),
+              unlinkedCloud,
+              [
+                {
+                  ...codexProvider(),
+                  models: ["gpt-5.4", "gpt-5.3", "gpt-5.2"].map((slug) => ({
+                    slug,
+                    name: slug,
+                    isCustom: false,
+                    capabilities: null,
+                  })),
+                },
+              ],
+              [codexInstance],
+            ),
+          ),
+        );
+      const refusals = yield* Effect.all([
+        run(null),
+        run([candidate("gpt-5.4", 0)]),
+        run([candidate("gpt-5.2", 0), candidate("gpt-5.3", 10)]),
+        run([candidate("gpt-5.4", 30), candidate("gpt-5.3", 10), candidate("gpt-5.2", 0)]),
+      ]);
+      for (const refusal of refusals)
+        expect(refusal?.result).toMatchObject({
+          code: "invalid_request",
+          message: expect.stringContaining("Settings"),
+        });
+      expect(yield* Ref.get(updates)).toBe(0);
+      const reordered = yield* run([candidate("gpt-5.3", 10), candidate("gpt-5.4", 30)]);
+      expect(reordered?.encodedResult).toMatchObject({
+        delegationTierChange: {
+          tier: "small",
+          before: stored,
+          after: [candidate("gpt-5.3", 10), candidate("gpt-5.4", 30)],
+        },
+      });
+      expect(yield* Ref.get(updates)).toBe(1);
+    }),
+);
+
+it.effect("carries a stored candidate's options over a tier write that omits them", () => {
+  const options = [{ id: "reasoningEffort", value: "high" }];
+  return Effect.gen(function* () {
+    const toolkit = yield* EnvironmentToolkit;
+    const service = yield* Settings.ServerSettingsService;
+    const result = yield* finalResult(
+      toolkit.handle("t3_environment_preferences_update", {
+        setDelegationTier: { tier: "small", candidates: [tierCandidate(30)] },
+      }),
+    );
+    expect(result?.encodedResult).toMatchObject({
+      delegationTierChange: {
+        after: [{ providerInstanceId: codexInstance, model: "gpt-5.4", options }],
+      },
+    });
+    expect((yield* service.getSettings).delegationTiers.small).toEqual([
+      { providerInstanceId: codexInstance, model: "gpt-5.4", options, minHeadroomPercent: 30 },
+    ]);
+  }).pipe(
+    Effect.provide(
+      environmentLayer(
+        threadScope(),
+        liveThreadShell(threadId),
+        Settings.layerTest({
+          delegationTiers: {
+            small: [
+              {
+                providerInstanceId: codexInstance,
+                model: "gpt-5.4",
+                options,
+                minHeadroomPercent: 20,
+              },
+            ],
+            medium: [],
+            large: [],
+          },
+        }),
+        unlinkedCloud,
+        [codexProvider()],
+        [codexInstance],
+      ),
+    ),
+  );
+});
+
+it.effect("edits a stored tier candidate without its provider being available", () =>
+  Effect.gen(function* () {
+    const updates = yield* Ref.make(0);
+    const result = yield* Effect.gen(function* () {
+      const toolkit = yield* EnvironmentToolkit;
+      return yield* finalResult(
+        toolkit.handle("t3_environment_preferences_update", {
+          setDelegationTier: { tier: "small", candidates: [tierCandidate(30)] },
+        }),
+      );
+    }).pipe(
+      Effect.provide(
+        environmentLayer(
+          threadScope(),
+          liveThreadShell(threadId),
+          countingSeededSettings(
+            { delegationTiers: { small: [tierCandidate(20)], medium: [], large: [] } },
+            updates,
+          ),
+          unlinkedCloud,
+          [],
+          [codexInstance],
+        ),
+      ),
+    );
+    expect(result?.encodedResult).toMatchObject({
+      delegationTierChange: {
+        tier: "small",
+        before: [tierCandidate(20)],
+        after: [tierCandidate(30)],
+      },
+    });
+    expect(yield* Ref.get(updates)).toBe(1);
+  }),
+);
+
+/** The pre-lock check and the in-lock write see different settings, as after a human edit. */
+const shiftingSettings = (pre: Partial<ServerSettings>, during: Partial<ServerSettings>) =>
+  Layer.mock(Settings.ServerSettingsService)({
+    getSettings: Effect.succeed({ ...DEFAULT_SERVER_SETTINGS, ...pre }),
+    modifySettings: (patch: (current: ServerSettings) => ServerSettingsPatch) => {
+      const duringSettings = { ...DEFAULT_SERVER_SETTINGS, ...during };
+      return Effect.succeed(applyServerSettingsPatch(duringSettings, patch(duringSettings)));
+    },
+  });
+
+it.effect(
+  "keeps delegationTierChange when only a raised runtime mode is dropped under the lock",
+  () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        return yield* finalResult(
+          toolkit.handle("t3_environment_preferences_update", {
+            defaultRuntimeMode: "auto",
+            setDelegationTier: { tier: "small", candidates: [tierCandidate(40)] },
+          }),
+        );
+      }).pipe(
+        Effect.provide(
+          environmentLayer(
+            threadScope(),
+            liveThreadShell(threadId),
+            shiftingSettings(
+              {
+                defaultRuntimeMode: "full-access",
+                delegationTiers: { small: [tierCandidate(30)], medium: [], large: [] },
+              },
+              {
+                defaultRuntimeMode: "approval-required",
+                delegationTiers: { small: [tierCandidate(30)], medium: [], large: [] },
+              },
+            ),
+            unlinkedCloud,
+            [codexProvider()],
+            [codexInstance],
+          ),
+        ),
+      );
+      expect(result?.encodedResult).toMatchObject({
+        defaultRuntimeMode: "approval-required",
+        delegationTierChange: {
+          tier: "small",
+          before: [tierCandidate(30)],
+          after: [tierCandidate(40)],
+        },
+      });
+    }),
+);
+
+it.effect(
+  "rereads the tier under the write lock: fresh before, and a refusal when a guard rose",
+  () =>
+    Effect.gen(function* () {
+      const run = (duringTier: ReturnType<typeof tierCandidate>[]) =>
+        Effect.gen(function* () {
+          const toolkit = yield* EnvironmentToolkit;
+          return yield* finalResult(
+            toolkit.handle("t3_environment_preferences_update", {
+              setDelegationTier: { tier: "small", candidates: [tierCandidate(40)] },
+            }),
+          );
+        }).pipe(
+          Effect.provide(
+            environmentLayer(
+              threadScope(),
+              liveThreadShell(threadId),
+              shiftingSettings(
+                { delegationTiers: { small: [tierCandidate(30)], medium: [], large: [] } },
+                { delegationTiers: { small: duringTier, medium: [], large: [] } },
+              ),
+              unlinkedCloud,
+              [codexProvider()],
+              [codexInstance],
+            ),
+          ),
+        );
+      const lowered = yield* run([tierCandidate(20)]);
+      expect(lowered?.encodedResult).toMatchObject({
+        delegationTierChange: {
+          tier: "small",
+          before: [tierCandidate(20)],
+          after: [tierCandidate(40)],
+        },
+      });
+      const raised = yield* run([tierCandidate(50)]);
+      expect(raised?.result).toMatchObject({ code: "invalid_request" });
+    }),
 );

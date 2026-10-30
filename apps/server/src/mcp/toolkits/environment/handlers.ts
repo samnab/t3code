@@ -3,6 +3,7 @@ import {
   CustomModelSetting as CustomModelSettingSchema,
   type DelegationCandidate,
   DelegationTierId,
+  type DelegationTiers,
   globalIdleCompaction,
   KeybindingCommand,
   type KeybindingsConfigError,
@@ -252,17 +253,51 @@ const keybindingsWrite = Effect.fn("EnvironmentToolkit.keybindingsWrite")(functi
 });
 // A tier's quota guard is its candidates' minimum headroom; absent means 0.
 const headroomThreshold = (candidate: DelegationCandidate) => candidate.minHeadroomPercent ?? 0;
+// Headroom guards quota per provider instance, so agents may only raise it:
+// stored guarded candidates must survive the write (same provider+model, no
+// lower threshold), new candidates on a guarded instance cannot undercut it,
+// and reordering or candidates on fresh instances stay free.
 const findsHeadroomLowering = (
   candidates: ReadonlyArray<DelegationCandidate>,
   stored: ReadonlyArray<DelegationCandidate>,
 ) =>
-  candidates.some((candidate) => {
+  stored.some(
+    (previous) =>
+      headroomThreshold(previous) > 0 &&
+      !candidates.some(
+        (candidate) =>
+          candidate.providerInstanceId === previous.providerInstanceId &&
+          candidate.model === previous.model &&
+          headroomThreshold(candidate) >= headroomThreshold(previous),
+      ),
+  ) ||
+  candidates.some(
+    (candidate) =>
+      !stored.some(
+        (entry) =>
+          entry.providerInstanceId === candidate.providerInstanceId &&
+          entry.model === candidate.model,
+      ) &&
+      stored.some(
+        (previous) =>
+          previous.providerInstanceId === candidate.providerInstanceId &&
+          headroomThreshold(candidate) < headroomThreshold(previous),
+      ),
+  );
+/** The compact tool input omits `options`; keep the stored candidate's selection. */
+const withStoredOptions = (
+  candidates: ReadonlyArray<DelegationCandidate>,
+  stored: ReadonlyArray<DelegationCandidate>,
+): Array<DelegationCandidate> =>
+  candidates.map((candidate): DelegationCandidate => {
     const previous = stored.find(
       (entry) =>
         entry.providerInstanceId === candidate.providerInstanceId &&
         entry.model === candidate.model,
     );
-    return previous !== undefined && headroomThreshold(candidate) < headroomThreshold(previous);
+    return previous?.options === undefined
+      ? candidate
+      : { ...candidate, options: previous.options };
   });
 
 export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
@@ -309,6 +344,7 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
                 const current = yield* settings.getSettings.pipe(Effect.mapError(unavailable));
                 const candidates = setDelegationTier.candidates ?? [];
                 const tier: DelegationTierId = setDelegationTier.tier;
+                const stored = current.delegationTiers[tier];
                 const registry = yield* ProviderRegistry.ProviderRegistry;
                 const providers = yield* Effect.mapError(registry.getProviders, unavailable);
                 const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
@@ -316,6 +352,16 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
                   yield* Effect.mapError(adapters.list(), unavailable),
                 );
                 for (const candidate of candidates) {
+                  // Already stored: vetted when it was added, and a down or
+                  // changed provider must not freeze edits to this tier.
+                  if (
+                    stored.some(
+                      (entry) =>
+                        entry.providerInstanceId === candidate.providerInstanceId &&
+                        entry.model === candidate.model,
+                    )
+                  )
+                    continue;
                   const provider = providers.find(
                     (entry) => entry.instanceId === candidate.providerInstanceId,
                   );
@@ -351,16 +397,18 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
                       message: hidden,
                     });
                 }
-                if (findsHeadroomLowering(candidates, current.delegationTiers[tier]))
+                if (findsHeadroomLowering(candidates, stored))
                   return yield* new OrchestratorMcpFailure({
                     code: "invalid_request",
-                    message: `Delegation tier "${tier}": lowering a candidate's minimum headroom needs Settings; agents can only raise or keep it.`,
+                    message: `Delegation tier "${tier}": removing or lowering a guarded candidate's minimum headroom needs Settings; agents can only raise or keep it.`,
                   });
-                return { tier, candidates, before: current.delegationTiers[tier] };
+                return { tier, candidates };
               });
         // The rank check repeats under the settings write lock so a human
         // lowering the default between the check above and the write is kept.
-        // The headroom guard repeats for the same reason.
+        // The headroom guard repeats for the same reason; `before` reads the
+        // in-lock tier, not the pre-lock snapshot.
+        let tierRefused = false;
         const tierApplied: Array<{
           tier: DelegationTierId;
           before: ReadonlyArray<DelegationCandidate>;
@@ -371,34 +419,42 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
             const rankKept =
               requested === undefined ||
               runtimeModeRank[requested] <= runtimeModeRank[current.defaultRuntimeMode];
+            const storedTier =
+              tierOp === undefined ? undefined : current.delegationTiers[tierOp.tier];
             const tierDropped =
               tierOp === undefined ||
-              findsHeadroomLowering(tierOp.candidates, current.delegationTiers[tierOp.tier]);
-            if (rankKept && !tierDropped)
-              tierApplied.push({
-                tier: tierOp.tier,
-                before: tierOp.before,
-                after: tierOp.candidates,
-              });
-            const tierPatch =
-              tierOp === undefined || tierDropped
-                ? undefined
-                : {
-                    ...current.delegationTiers,
-                    small:
-                      tierOp.tier === "small" ? tierOp.candidates : current.delegationTiers.small,
-                    medium:
-                      tierOp.tier === "medium" ? tierOp.candidates : current.delegationTiers.medium,
-                    large:
-                      tierOp.tier === "large" ? tierOp.candidates : current.delegationTiers.large,
-                  };
+              storedTier === undefined ||
+              findsHeadroomLowering(tierOp.candidates, storedTier);
+            // A guard that rose while the write waited fails the whole call:
+            // silently writing the rest would hide the dropped tier from the
+            // agent, and the tool input has no way to re-ask in place.
+            if (tierOp !== undefined && tierDropped) {
+              tierRefused = true;
+              return {};
+            }
+            let tierTiers: DelegationTiers | undefined;
+            if (tierOp !== undefined && storedTier !== undefined) {
+              const after = withStoredOptions(tierOp.candidates, storedTier);
+              tierApplied.push({ tier: tierOp.tier, before: storedTier, after });
+              tierTiers = {
+                ...current.delegationTiers,
+                small: tierOp.tier === "small" ? after : current.delegationTiers.small,
+                medium: tierOp.tier === "medium" ? after : current.delegationTiers.medium,
+                large: tierOp.tier === "large" ? after : current.delegationTiers.large,
+              };
+            }
             if (!rankKept) {
               const { defaultRuntimeMode: _raised, ...lowered } = rest;
-              return tierPatch === undefined ? lowered : { ...lowered, delegationTiers: tierPatch };
+              return tierTiers === undefined ? lowered : { ...lowered, delegationTiers: tierTiers };
             }
-            return tierPatch === undefined ? rest : { ...rest, delegationTiers: tierPatch };
+            return tierTiers === undefined ? rest : { ...rest, delegationTiers: tierTiers };
           })
           .pipe(Effect.mapError(unavailable));
+        if (tierRefused && tierOp !== undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: `Delegation tier "${tierOp.tier}" was edited while the write waited for its lock; nothing was written, retry.`,
+          });
         const change = tierApplied.at(0);
         return {
           ...preferences(updated),
