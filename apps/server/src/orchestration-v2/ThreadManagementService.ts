@@ -767,8 +767,9 @@ const make = Effect.gen(function* () {
               cause,
             }),
         ),
+        // The snapshot keeps archived rows apart; `location` already picked which side is filled.
         Effect.map((snapshot) =>
-          snapshot.threads
+          [...snapshot.threads, ...snapshot.archivedThreads]
             .filter(
               (thread) =>
                 input.includeSubagents || thread.lineage.relationshipToParent !== "subagent",
