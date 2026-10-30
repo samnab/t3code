@@ -16,6 +16,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "vite-plus/test";
@@ -706,5 +707,59 @@ it("readThread returns canonical speech with bounded text continuation and no ex
             item.messageId === null && item.createdBy === null && item.creationSource === null,
         ),
     ).toBe(true);
+  }).pipe(Effect.provide(layer), Effect.runPromise);
+});
+
+it("scheduleTask from an MCP client uses the environment default model when the project has none", async () => {
+  const globalDefault = {
+    instanceId: ProviderInstanceId.make("claudeAgent"),
+    model: "claude-haiku",
+  };
+  const upserted: Array<unknown> = [];
+  const layer = layerOrchestratorService.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        unusedDelegationPolicyLayer,
+        ServerSettings.layerTest({ defaultModelSelection: globalDefault }),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () =>
+            Effect.succeed(Option.some({ id: projectId, defaultModelSelection: null } as never)),
+        }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+          upsert: (input) =>
+            Effect.sync(() => upserted.push(input.modelSelection)).pipe(
+              Effect.andThen(Effect.die("upsert recorded")),
+            ),
+        }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+
+  await Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    yield* service
+      .scheduleTask(
+        {
+          ...makeScope(),
+          thread: undefined,
+          client: { sessionId: "session-1", label: "Claude Code", access: "auto" },
+        },
+        {
+          projectId,
+          prompt: "check in later",
+          enabled: false,
+          schedule: { type: "interval", everyMs: 3_600_000 },
+        },
+      )
+      .pipe(Effect.exit);
+    expect(upserted).toEqual([globalDefault]);
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
