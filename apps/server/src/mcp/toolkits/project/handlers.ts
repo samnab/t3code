@@ -53,14 +53,27 @@ export const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(func
   readonly worktreePath: string;
 }): Effect.fn.Return<string, OrchestratorMcpFailure> {
   const { git, fileSystem, workspaceRoot, worktreePath } = input;
+  // A listed worktree that vanished falls back to its raw path; a resolvable
+  // request can never equal it, so the fallback admits nothing.
   const real = (path: string) => fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path));
   const worktrees = yield* git.listWorktreePaths(workspaceRoot).pipe(
     Effect.flatMap((paths) => Effect.forEach(paths, real)),
     Effect.orElseSucceed((): ReadonlyArray<string> => []),
   );
   // Callers store the resolved path: a symlink stored raw could be repointed
-  // elsewhere between this check and an unattended run.
-  const resolved = yield* real(worktreePath);
+  // elsewhere between this check and an unattended run. A path whose real
+  // path cannot be read does not exist, so refuse rather than compare the
+  // raw string.
+  const resolved = yield* fileSystem.realPath(worktreePath).pipe(
+    Effect.mapError(
+      () =>
+        new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message:
+            "worktreePath does not exist. t3_worktree_list shows the project's git worktrees.",
+        }),
+    ),
+  );
   if (!worktrees.includes(resolved))
     return yield* new OrchestratorMcpFailure({
       code: "invalid_request",
