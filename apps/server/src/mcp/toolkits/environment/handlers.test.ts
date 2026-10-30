@@ -256,6 +256,12 @@ it.layer(
             sidebarAutoSettleAfterDays: null,
             sidebarAutoSettleOnMerge: false,
             sidebarAutoSettleKeepPullRequests: true,
+            pullRequestMergeMethod: "squash",
+            branchNamingMode: "semantic",
+            reviewGuidesEnabled: true,
+            defaultAutoPull: true,
+            removeAgentCreditsOnMerge: true,
+            worktreeSubmodules: "recursive",
           }),
         );
         expect(disabled?.encodedResult).toMatchObject({
@@ -263,6 +269,12 @@ it.layer(
           sidebarAutoSettleAfterDays: null,
           sidebarAutoSettleOnMerge: false,
           sidebarAutoSettleKeepPullRequests: true,
+          pullRequestMergeMethod: "squash",
+          branchNamingMode: "semantic",
+          reviewGuidesEnabled: true,
+          defaultAutoPull: true,
+          removeAgentCreditsOnMerge: true,
+          worktreeSubmodules: "recursive",
         });
         const omitted = yield* finalResult(
           toolkit.handle("t3_environment_preferences_update", { defaultThreadEnvMode: "worktree" }),
@@ -272,6 +284,9 @@ it.layer(
           sidebarAutoSettleAfterDays: null,
           sidebarAutoSettleOnMerge: false,
           sidebarAutoSettleKeepPullRequests: true,
+          pullRequestMergeMethod: "squash",
+          defaultAutoPull: true,
+          worktreeSubmodules: "recursive",
         });
       }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
 
@@ -282,6 +297,12 @@ it.layer(
         sidebarAutoSettleAfterDays: null,
         sidebarAutoSettleOnMerge: false,
         sidebarAutoSettleKeepPullRequests: true,
+        pullRequestMergeMethod: "squash",
+        branchNamingMode: "semantic",
+        reviewGuidesEnabled: true,
+        defaultAutoPull: true,
+        removeAgentCreditsOnMerge: true,
+        worktreeSubmodules: "recursive",
       });
 
       yield* Effect.gen(function* () {
@@ -304,6 +325,12 @@ it.layer(
             sidebarAutoSettleAfterDays: 7,
             sidebarAutoSettleOnMerge: true,
             sidebarAutoSettleKeepPullRequests: false,
+            pullRequestMergeMethod: "squash",
+            branchNamingMode: "semantic",
+            reviewGuidesEnabled: true,
+            defaultAutoPull: true,
+            removeAgentCreditsOnMerge: true,
+            worktreeSubmodules: "recursive",
           },
         });
       }).pipe(Effect.provide(environmentLayer(scope, caller, restartedSettings())));
