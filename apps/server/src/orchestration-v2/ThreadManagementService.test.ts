@@ -596,3 +596,40 @@ it.effect.each([
     expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
   }),
 );
+
+it.effect("listProjectThreads returns archived threads for the archive location", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:thread-management:archived");
+    const archived = {
+      id: threadId,
+      updatedAt: DateTime.makeUnsafe(0),
+      lineage: { relationshipToParent: null },
+    };
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          // Mirrors ProjectionStore: an archive snapshot fills only `archivedThreads`.
+          getShellSnapshot: (input) =>
+            Effect.succeed(
+              (input?.location === "archive"
+                ? { threads: [], archivedThreads: [archived] }
+                : { threads: [], archivedThreads: [] }) as never,
+            ),
+        }),
+      ),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(layerReceiptsTest),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layerTest),
+    );
+
+    const threads = yield* service.listProjectThreads({
+      location: "archive",
+      includeSubagents: false,
+    });
+
+    expect(threads.map((thread) => thread.id)).toEqual([threadId]);
+  }),
+);
