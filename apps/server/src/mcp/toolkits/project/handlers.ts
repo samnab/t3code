@@ -46,23 +46,28 @@ function projectFailure(error: Project.ProjectServiceError) {
 }
 
 /** Require project worktrees so launches cannot target arbitrary host directories. */
-const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (
-  workspaceRoot: string,
-  worktreePath: string,
-) {
-  const git = yield* GitVcsDriver.GitVcsDriver;
-  const fileSystem = yield* FileSystem.FileSystem;
+export const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (input: {
+  readonly git: GitVcsDriver.GitVcsDriver["Service"];
+  readonly fileSystem: FileSystem.FileSystem;
+  readonly workspaceRoot: string;
+  readonly worktreePath: string;
+}): Effect.fn.Return<string, OrchestratorMcpFailure> {
+  const { git, fileSystem, workspaceRoot, worktreePath } = input;
   const real = (path: string) => fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path));
   const worktrees = yield* git.listWorktreePaths(workspaceRoot).pipe(
     Effect.flatMap((paths) => Effect.forEach(paths, real)),
     Effect.orElseSucceed((): ReadonlyArray<string> => []),
   );
-  if (!worktrees.includes(yield* real(worktreePath)))
+  // Callers store the resolved path: a symlink stored raw could be repointed
+  // elsewhere between this check and an unattended run.
+  const resolved = yield* real(worktreePath);
+  if (!worktrees.includes(resolved))
     return yield* new OrchestratorMcpFailure({
       code: "invalid_request",
       message:
         "worktreePath must be one of the project's git worktrees. t3_worktree_list shows them.",
     });
+  return resolved;
 });
 
 /** A fixed-length id, so a long key fits in the scratch folder name derived from it. */
@@ -206,7 +211,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               code: "invalid_request",
               message: "The project was not found.",
             });
-          yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
+          yield* assertProjectWorktree({
+            git: yield* GitVcsDriver.GitVcsDriver,
+            fileSystem: yield* FileSystem.FileSystem,
+            workspaceRoot: project.workspaceRoot,
+            worktreePath: input.workspaceStrategy.worktreePath,
+          });
         }
         // An agent-named model must be visible; inheriting the caller's or
         // project's selection stays allowed even when hidden (the user picked it).

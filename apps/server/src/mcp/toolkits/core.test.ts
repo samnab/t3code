@@ -65,6 +65,7 @@ import * as CheckpointDiffQuery from "../../checkpointing/CheckpointDiffQuery.ts
 const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(NodeServices.layer),
 );
 
 const declaredFailure = (result: McpSchema.CallToolResult) => {
@@ -689,6 +690,7 @@ it.effect("a read-only client reads threads and is refused every write before it
   ),
 );
 const dispatched: Array<string> = [];
+const scheduledTaskUpserts: Array<unknown> = [];
 
 it.effect("refuses act-as-caller tools to a client caller", () =>
   Effect.gen(function* () {
@@ -774,6 +776,61 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
               Effect.succeed({
                 task: { ...(scheduledTask(input.id ?? "task-auto", "auto") as object), ...input },
               } as never),
+          }),
+        ),
+        Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+        Layer.provide(Layer.mock(DelegationPolicy.DelegationPolicy)({})),
+        Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+        Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+        Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+        Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+      ),
+    ),
+  ),
+);
+
+it.effect("a scheduled task creation refuses the fields that only update accepts", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    scheduledTaskUpserts.length = 0;
+    const result = yield* server
+      .callTool({
+        name: "schedule_task",
+        arguments: {
+          prompt: "Run nightly",
+          schedule: { type: "interval", everyMs: 120_000 },
+          runtimeMode: "full-access",
+        },
+      })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, clientScope("auto")),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(declaredFailure(result)).toMatchObject({
+      code: "invalid_request",
+      message: expect.stringContaining("apply only with scheduledTaskId"),
+    });
+    expect(scheduledTaskUpserts).toEqual([]);
+  }).pipe(
+    Effect.provide(
+      layerOrchestratorToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+        Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+        Layer.provide(
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+            list: () => Effect.succeed({ tasks: [] }),
+            listWebhookDeliveries: () => Effect.succeed({ deliveries: [] }),
+            upsert: (input) => {
+              scheduledTaskUpserts.push(input);
+              return Effect.succeed({
+                task: { ...(scheduledTask("task-new", "auto") as object), ...input },
+              } as never);
+            },
           }),
         ),
         Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
