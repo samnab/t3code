@@ -2022,22 +2022,34 @@ const make = Effect.gen(function* () {
             );
           }
         }
+        // Validate against the task's project and selection, not the
+        // caller's: the task launches there, so the new model must be
+        // launchable there right now, and unspecified parts inherit what
+        // the task already runs.
+        const recheck = {
+          parent: {
+            thread: {
+              projectId: existing.projectId,
+              modelSelection: existing.modelSelection,
+            },
+          },
+        };
         const resolvedTarget =
           input.providerInstanceId === undefined &&
           input.model === undefined &&
           input.options === undefined
-            ? undefined
+            ? input.runtimeMode === undefined
+              ? undefined
+              : // A mode-only edit resolves the provider the task already
+                // runs, so resolveRuntimeMode can refuse a mode it does not
+                // offer instead of saving it to run later as approval-required.
+                yield* resolveTargetRechecking({
+                  ...recheck,
+                  target: undefined,
+                  providers: yield* loadProviders,
+                })
             : yield* resolveTargetRechecking({
-                // Validate against the task's project and selection, not
-                // the caller's: the task launches there, so the new model
-                // must be launchable there right now, and unspecified parts
-                // inherit what the task already runs.
-                parent: {
-                  thread: {
-                    projectId: existing.projectId,
-                    modelSelection: existing.modelSelection,
-                  },
-                },
+                ...recheck,
                 target: {
                   providerInstanceId: input.providerInstanceId,
                   model: input.model,
@@ -2111,12 +2123,38 @@ const make = Effect.gen(function* () {
         }
         // An explicit strategy wins over the one derived from rebinding; the
         // membership check keeps a task from running outside its project.
+        // Both run the same base-ref check a thread launch does, so a task
+        // does not discover a dead baseRef when it fires unattended.
+        const refuseUnresolvableWorktreeBase = (
+          strategy: Extract<OrchestrationV2ThreadLaunchWorkspaceStrategy, { type: "worktree" }>,
+        ) =>
+          threadLaunch
+            .checkWorktreeBase({ projectId: existing.projectId, workspaceStrategy: strategy })
+            .pipe(
+              Effect.mapError((error) =>
+                failure(
+                  "invalid_request",
+                  `${error.message} No task update was saved. Pass a branch, tag, or commit that exists there${
+                    strategy.startFromOrigin === true
+                      ? "; the project has no usable remote to fetch it from."
+                      : ", or set startFromOrigin:true if it exists only on a remote."
+                  }`,
+                ),
+              ),
+            );
         let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy;
         if (input.workspaceStrategy === undefined) {
-          workspaceStrategy =
-            input.bindToCurrentThread === undefined
-              ? existing.workspaceStrategy
-              : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+          if (input.bindToCurrentThread === undefined) {
+            workspaceStrategy = existing.workspaceStrategy;
+          } else {
+            // Unbinding derives a default worktree strategy; it gets the
+            // same base-ref check as an explicit one.
+            const derived = scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+            if (derived.type === "worktree") {
+              yield* refuseUnresolvableWorktreeBase(derived);
+            }
+            workspaceStrategy = derived;
+          }
         } else if (input.workspaceStrategy.type === "existing_worktree") {
           const project = yield* requireProject(existing.projectId);
           const worktreePath = yield* assertProjectWorktree({
@@ -2128,23 +2166,8 @@ const make = Effect.gen(function* () {
           workspaceStrategy = { ...input.workspaceStrategy, worktreePath };
         } else {
           const strategy = input.workspaceStrategy;
-          // The same base-ref check a thread launch runs, so a task does not
-          // discover a dead baseRef when it fires unattended.
           if (strategy.type === "worktree") {
-            yield* threadLaunch
-              .checkWorktreeBase({ projectId: existing.projectId, workspaceStrategy: strategy })
-              .pipe(
-                Effect.mapError((error) =>
-                  failure(
-                    "invalid_request",
-                    `${error.message} No task update was saved. Pass a branch, tag, or commit that exists there${
-                      strategy.startFromOrigin === true
-                        ? "; the project has no usable remote to fetch it from."
-                        : ", or set startFromOrigin:true if it exists only on a remote."
-                    }`,
-                  ),
-                ),
-              );
+            yield* refuseUnresolvableWorktreeBase(strategy);
           }
           workspaceStrategy = strategy;
         }
