@@ -574,7 +574,7 @@ export const OrchestratorMcpThreadInterruptInput = Schema.Struct({
    * watches and stop every task it delegated. `runId` is then not used.
    */
   stop: Schema.optional(Schema.Boolean),
-  /** Stop this one background task in the thread instead of its turn; the task ids are the provider's native ones. */
+  /** Stop this one background task in the thread instead of its turn; the id is the provider's native task id or its timeline item id. */
   backgroundTaskId: Schema.optional(TrimmedNonEmptyString),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });

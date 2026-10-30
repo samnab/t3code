@@ -1519,6 +1519,56 @@ it.effect("carries a stored candidate's options over a tier write that omits the
   );
 });
 
+it.effect("pairs repeated tier candidates by position for options and headroom", () => {
+  const high = [{ id: "reasoningEffort", value: "high" }];
+  const low = [{ id: "reasoningEffort", value: "low" }];
+  const entry = (minHeadroomPercent: number) => ({
+    providerInstanceId: codexInstance,
+    model: "gpt-5.4",
+    minHeadroomPercent,
+  });
+  return Effect.gen(function* () {
+    const toolkit = yield* EnvironmentToolkit;
+    const service = yield* Settings.ServerSettingsService;
+    // An unguarded copy put first would win delegation over the guarded one.
+    const undercut = yield* finalResult(
+      toolkit.handle("t3_environment_preferences_update", {
+        setDelegationTier: { tier: "small", candidates: [entry(0), entry(10)] },
+      }),
+    );
+    expect(undercut?.result).toMatchObject({ code: "invalid_request" });
+    yield* finalResult(
+      toolkit.handle("t3_environment_preferences_update", {
+        setDelegationTier: { tier: "small", candidates: [entry(10), entry(0)] },
+      }),
+    );
+    expect((yield* service.getSettings).delegationTiers.small).toEqual([
+      { ...entry(10), options: high },
+      { ...entry(0), options: low },
+    ]);
+  }).pipe(
+    Effect.provide(
+      environmentLayer(
+        threadScope(),
+        liveThreadShell(threadId),
+        Settings.layerTest({
+          delegationTiers: {
+            small: [
+              { ...entry(10), options: high },
+              { ...entry(0), options: low },
+            ],
+            medium: [],
+            large: [],
+          },
+        }),
+        unlinkedCloud,
+        [codexProvider()],
+        [codexInstance],
+      ),
+    ),
+  );
+});
+
 it.effect("edits a stored tier candidate without its provider being available", () =>
   Effect.gen(function* () {
     const updates = yield* Ref.make(0);
@@ -1609,42 +1659,36 @@ it.effect(
     }),
 );
 
-it.effect(
-  "rereads the tier under the write lock: fresh before, and a refusal when a guard rose",
-  () =>
-    Effect.gen(function* () {
-      const run = (duringTier: ReturnType<typeof tierCandidate>[]) =>
-        Effect.gen(function* () {
-          const toolkit = yield* EnvironmentToolkit;
-          return yield* finalResult(
-            toolkit.handle("t3_environment_preferences_update", {
-              setDelegationTier: { tier: "small", candidates: [tierCandidate(40)] },
-            }),
-          );
-        }).pipe(
-          Effect.provide(
-            environmentLayer(
-              threadScope(),
-              liveThreadShell(threadId),
-              shiftingSettings(
-                { delegationTiers: { small: [tierCandidate(30)], medium: [], large: [] } },
-                { delegationTiers: { small: duringTier, medium: [], large: [] } },
-              ),
-              unlinkedCloud,
-              [codexProvider()],
-              [codexInstance],
-            ),
-          ),
+it.effect("refuses a tier write when the tier changed while it waited for the write lock", () =>
+  Effect.gen(function* () {
+    const run = (duringTier: ReturnType<typeof tierCandidate>[]) =>
+      Effect.gen(function* () {
+        const toolkit = yield* EnvironmentToolkit;
+        return yield* finalResult(
+          toolkit.handle("t3_environment_preferences_update", {
+            setDelegationTier: { tier: "small", candidates: [tierCandidate(40)] },
+          }),
         );
-      const lowered = yield* run([tierCandidate(20)]);
-      expect(lowered?.encodedResult).toMatchObject({
-        delegationTierChange: {
-          tier: "small",
-          before: [tierCandidate(20)],
-          after: [tierCandidate(40)],
-        },
-      });
-      const raised = yield* run([tierCandidate(50)]);
-      expect(raised?.result).toMatchObject({ code: "invalid_request" });
-    }),
+      }).pipe(
+        Effect.provide(
+          environmentLayer(
+            threadScope(),
+            liveThreadShell(threadId),
+            shiftingSettings(
+              { delegationTiers: { small: [tierCandidate(30)], medium: [], large: [] } },
+              { delegationTiers: { small: duringTier, medium: [], large: [] } },
+            ),
+            unlinkedCloud,
+            [codexProvider()],
+            [codexInstance],
+          ),
+        ),
+      );
+    // Checks ran against the pre-lock tier, so any change meanwhile refuses.
+    expect((yield* run([tierCandidate(20)]))?.result).toMatchObject({ code: "invalid_request" });
+    expect((yield* run([tierCandidate(50)]))?.result).toMatchObject({ code: "invalid_request" });
+    expect((yield* run([tierCandidate(30)]))?.encodedResult).toMatchObject({
+      delegationTierChange: { before: [tierCandidate(30)], after: [tierCandidate(40)] },
+    });
+  }),
 );
