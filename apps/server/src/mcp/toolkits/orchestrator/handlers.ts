@@ -1,7 +1,9 @@
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
+import * as ProviderBackgroundTaskService from "../../../orchestration-v2/ProviderBackgroundTaskService.ts";
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../../peer/PeerLinks.ts";
@@ -255,6 +257,49 @@ const handlers = {
     (input) => [input.threadId],
     (input) =>
       Effect.gen(function* () {
+        // `stop` and `runId` select a turn; the background task id replaces
+        // that whole operation, so the ignored fields must not pass silently.
+        if (
+          input.backgroundTaskId !== undefined &&
+          (input.stop !== undefined || input.runId !== undefined)
+        )
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message:
+              "`backgroundTaskId` stops one background task and cannot be combined with `stop` or `runId`.",
+          });
+        // Optional so compositions without the background-task runtime build;
+        // production always provides it beside the session manager.
+        if (input.backgroundTaskId !== undefined) {
+          const tasks = yield* Effect.serviceOption(
+            ProviderBackgroundTaskService.ProviderBackgroundTaskServiceV2,
+          );
+          if (Option.isNone(tasks))
+            return yield* Effect.die("ProviderBackgroundTaskServiceV2 is not provided");
+          return yield* tasks.value
+            .stop({ threadId: input.threadId, taskId: input.backgroundTaskId })
+            .pipe(
+              Effect.as({
+                threadId: input.threadId,
+                runId: null,
+                status: "interrupt_requested" as const,
+              }),
+              Effect.mapError((cause) =>
+                "reason" in cause
+                  ? new OrchestratorMcpFailure({
+                      code:
+                        cause.reason === "provider-session-not-active"
+                          ? "orchestration_error"
+                          : "invalid_request",
+                      message: `Background task ${input.backgroundTaskId} could not be stopped on thread ${input.threadId} (${cause.reason}).`,
+                    })
+                  : new OrchestratorMcpFailure({
+                      code: "invalid_request",
+                      message: cause.message,
+                    }),
+              ),
+            );
+        }
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         return yield* service.interruptThread(scope, input);

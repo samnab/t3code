@@ -38,6 +38,7 @@ import {
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ProviderBackgroundTaskService from "../../orchestration-v2/ProviderBackgroundTaskService.ts";
 import * as ThreadLaunchService from "../../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
@@ -1014,6 +1015,85 @@ it.effect("discovers workflow stop targets and requires orchestration capability
                 stopped.push(input);
               }),
           }),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+        Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+        Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+        Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+        Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+        Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+        Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+        Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+        Layer.provide(Layer.mock(DelegationPolicy.DelegationPolicy)({})),
+        Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
+      ),
+    ),
+  );
+});
+
+it.effect("stops a background task on the caller's own thread and refuses another thread's", () => {
+  const ownThread = ThreadId.make("mcp-core-thread");
+  const otherThread = ThreadId.make("other-mode-thread");
+  const stopped: Array<{ readonly threadId: ThreadId; readonly taskId: string }> = [];
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const call = (args: Record<string, unknown>) =>
+      server
+        .callTool({ name: "t3_thread_interrupt", arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const stoppedOwn = yield* call({ threadId: ownThread, backgroundTaskId: "bash_1" });
+    expect(stoppedOwn.isError).toBe(false);
+    expect(stoppedOwn.structuredContent).toMatchObject({
+      threadId: ownThread,
+      runId: null,
+      status: "interrupt_requested",
+    });
+    const refusedOther = yield* call({ threadId: otherThread, backgroundTaskId: "bash_2" });
+    expect(declaredFailure(refusedOther)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+    // A background task stop replaces the whole interrupt operation; the turn
+    // selectors must be refused instead of silently ignored.
+    const refusedStop = yield* call({
+      threadId: ownThread,
+      backgroundTaskId: "bash_1",
+      stop: true,
+    });
+    expect(declaredFailure(refusedStop)).toMatchObject({ code: "invalid_request" });
+    const refusedRunId = yield* call({
+      threadId: ownThread,
+      backgroundTaskId: "bash_1",
+      runId: "run-1",
+    });
+    expect(declaredFailure(refusedRunId)).toMatchObject({ code: "invalid_request" });
+    expect(stopped).toEqual([{ threadId: ownThread, taskId: "bash_1" }]);
+  }).pipe(
+    Effect.provide(
+      layerOrchestratorToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) =>
+              Effect.succeed(
+                McpToolAccessTestkit.liveThreadShell(id, {
+                  runtimeMode: id === otherThread ? "full-access" : "auto",
+                }),
+              ),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(
+            ProviderBackgroundTaskService.ProviderBackgroundTaskServiceV2,
+            ProviderBackgroundTaskService.ProviderBackgroundTaskServiceV2.of({
+              stop: (input) =>
+                Effect.sync(() => {
+                  stopped.push(input);
+                }),
+            }),
+          ),
         ),
         Layer.provide(ServerSettings.layerTest()),
         Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),

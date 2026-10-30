@@ -54,7 +54,8 @@ export class DelegationPolicy extends Context.Service<DelegationPolicy, Delegati
   "t3/mcp/DelegationPolicy",
 ) {}
 
-function providerUnavailableReason(
+/** Why a candidate's provider cannot run a turn right now; reused by the environment settings write path. */
+export function providerUnavailableReason(
   provider: ServerProvider | undefined,
   orchestrationCapable: boolean,
 ): string | undefined {
