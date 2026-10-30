@@ -2010,29 +2010,6 @@ const make = Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
-        // Modes only go down from the task's stored ones: the user raises
-        // them in the app, so an agent cannot widen what a later prompt may
-        // run at.
-        if (input.runtimeMode !== undefined) {
-          yield* resolveRuntimeMode(existing.runtimeMode, input.runtimeMode).pipe(
-            Effect.catch(() =>
-              failure(
-                "invalid_request",
-                `Runtime mode ${input.runtimeMode} is broader than the task's ${existing.runtimeMode}. Agents can only lower a task's modes; the user raises them in Settings.`,
-              ),
-            ),
-          );
-        }
-        if (input.interactionMode !== undefined) {
-          yield* resolveInteractionMode(existing.interactionMode, input.interactionMode).pipe(
-            Effect.catch(() =>
-              failure(
-                "invalid_request",
-                `Interaction mode ${input.interactionMode} is broader than the task's ${existing.interactionMode}. Agents can only lower a task's modes; the user raises them in Settings.`,
-              ),
-            ),
-          );
-        }
         if (input.providerInstanceId !== undefined) {
           const enabled = yield* threadManagement.isProviderInstanceEnabledForProject({
             projectId: existing.projectId,
@@ -2045,12 +2022,12 @@ const make = Effect.gen(function* () {
             );
           }
         }
-        const modelSelection =
+        const resolvedTarget =
           input.providerInstanceId === undefined &&
           input.model === undefined &&
           input.options === undefined
-            ? existing.modelSelection
-            : (yield* resolveTargetRechecking({
+            ? undefined
+            : yield* resolveTargetRechecking({
                 // Validate against the task's project and selection, not
                 // the caller's: the task launches there, so the new model
                 // must be launchable there right now, and unspecified parts
@@ -2067,7 +2044,35 @@ const make = Effect.gen(function* () {
                   options: input.options,
                 },
                 providers: yield* loadProviders,
-              })).modelSelection;
+              });
+        // Modes only go down from the task's stored ones: the user raises
+        // them in the app. The resolved target rechecks a stored mode
+        // against a provider the task is being moved to, stepping down when
+        // the new provider does not offer it.
+        const runtimeMode = yield* resolveRuntimeMode(
+          existing.runtimeMode,
+          input.runtimeMode,
+          resolvedTarget,
+        ).pipe(
+          Effect.catch((error) =>
+            error.code === "runtime_mode_escalation_denied"
+              ? failure(
+                  "invalid_request",
+                  `Runtime mode ${input.runtimeMode} is broader than the task's ${existing.runtimeMode}. Agents can only lower a task's modes; the user raises them in Settings.`,
+                )
+              : error,
+          ),
+        );
+        if (input.interactionMode !== undefined) {
+          yield* resolveInteractionMode(existing.interactionMode, input.interactionMode).pipe(
+            Effect.catch(() =>
+              failure(
+                "invalid_request",
+                `Interaction mode ${input.interactionMode} is broader than the task's ${existing.interactionMode}. Agents can only lower a task's modes; the user raises them in Settings.`,
+              ),
+            ),
+          );
+        }
         if (
           input.bindToCurrentThread === true &&
           (parent === undefined || parent.thread.projectId !== existing.projectId)
@@ -2085,22 +2090,64 @@ const make = Effect.gen(function* () {
             : input.bindToCurrentThread && parent !== undefined
               ? parent.thread.id
               : null;
+        // A bound run follows the bound thread's own provider, workspace and
+        // modes, so accepting these edits would report success and change
+        // nothing at run time.
+        if (
+          threadId !== null &&
+          [
+            input.providerInstanceId,
+            input.model,
+            input.options,
+            input.workspaceStrategy,
+            input.runtimeMode,
+            input.interactionMode,
+          ].some((value) => value !== undefined)
+        ) {
+          return yield* failure(
+            "invalid_request",
+            "This task is bound to a thread, so it runs with that thread's provider, model, workspace and modes. Pass bindToCurrentThread:false to unbind it, or change the bound thread's own settings.",
+          );
+        }
         // An explicit strategy wins over the one derived from rebinding; the
         // membership check keeps a task from running outside its project.
-        if (input.workspaceStrategy?.type === "existing_worktree") {
+        let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy;
+        if (input.workspaceStrategy === undefined) {
+          workspaceStrategy =
+            input.bindToCurrentThread === undefined
+              ? existing.workspaceStrategy
+              : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+        } else if (input.workspaceStrategy.type === "existing_worktree") {
           const project = yield* requireProject(existing.projectId);
-          yield* assertProjectWorktree({
+          const worktreePath = yield* assertProjectWorktree({
             git: gitDriver,
             fileSystem,
             workspaceRoot: project.workspaceRoot,
             worktreePath: input.workspaceStrategy.worktreePath,
           });
+          workspaceStrategy = { ...input.workspaceStrategy, worktreePath };
+        } else {
+          const strategy = input.workspaceStrategy;
+          // The same base-ref check a thread launch runs, so a task does not
+          // discover a dead baseRef when it fires unattended.
+          if (strategy.type === "worktree") {
+            yield* threadLaunch
+              .checkWorktreeBase({ projectId: existing.projectId, workspaceStrategy: strategy })
+              .pipe(
+                Effect.mapError((error) =>
+                  failure(
+                    "invalid_request",
+                    `${error.message} No task update was saved. Pass a branch, tag, or commit that exists there${
+                      strategy.startFromOrigin === true
+                        ? "; the project has no usable remote to fetch it from."
+                        : ", or set startFromOrigin:true if it exists only on a remote."
+                    }`,
+                  ),
+                ),
+              );
+          }
+          workspaceStrategy = strategy;
         }
-        const workspaceStrategy =
-          input.workspaceStrategy ??
-          (input.bindToCurrentThread === undefined
-            ? existing.workspaceStrategy
-            : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread));
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -2110,8 +2157,8 @@ const make = Effect.gen(function* () {
           projectId: existing.projectId,
           threadId,
           workspaceStrategy,
-          modelSelection,
-          runtimeMode: input.runtimeMode ?? existing.runtimeMode,
+          modelSelection: resolvedTarget?.modelSelection ?? existing.modelSelection,
+          runtimeMode,
           interactionMode: input.interactionMode ?? existing.interactionMode,
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,

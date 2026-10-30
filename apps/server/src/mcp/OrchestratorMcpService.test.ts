@@ -31,6 +31,7 @@ import {
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -2601,7 +2602,10 @@ describe("OrchestratorMcpService provider resolution", () => {
       capabilities: new Set(["orchestration"]),
       issuedAt: 1,
     });
-    const provider = (models: ReadonlyArray<string>): ServerProvider => ({
+    const provider = (
+      models: ReadonlyArray<string>,
+      supportedRuntimeModes?: ServerProvider["supportedRuntimeModes"],
+    ): ServerProvider => ({
       instanceId: codex,
       driver: ProviderDriverKind.make("codex"),
       enabled: true,
@@ -2613,6 +2617,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       models: models.map((slug) => ({ slug, name: slug, isCustom: false, capabilities: null })),
       slashCommands: [],
       skills: [],
+      ...(supportedRuntimeModes === undefined ? {} : { supportedRuntimeModes }),
     });
     const layer = (input: {
       readonly task?: ScheduledTask;
@@ -2621,18 +2626,38 @@ describe("OrchestratorMcpService provider resolution", () => {
       readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
       readonly worktrees?: ReadonlyArray<string>;
       readonly saved?: Ref.Ref<ReadonlyArray<ScheduledTaskUpsertInput>>;
+      readonly realPath?: (path: string) => Effect.Effect<string>;
+      readonly baseRefError?: string;
     }) =>
       OrchestratorMcpService.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
             NodeServices.layer,
-            Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+            // Overrides the Node FileSystem above when the test needs a fixed realpath.
+            ...(input.realPath === undefined
+              ? []
+              : [Layer.succeed(FileSystem.FileSystem, { realPath: input.realPath } as never)]),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              checkWorktreeBase: () =>
+                input.baseRefError === undefined
+                  ? Effect.void
+                  : Effect.fail(
+                      new ThreadLaunchService.ThreadLaunchBaseRefError({
+                        projectId,
+                        projectTitle: "Edits",
+                        workspaceRoot: "/repo",
+                        baseRef: input.baseRefError,
+                      }),
+                    ),
+            }),
             Layer.mock(GitVcsDriver.GitVcsDriver)({
               listWorktreePaths: () => Effect.succeed([...(input.worktrees ?? [])]),
             }),
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               isProviderInstanceEnabledForProject: ({ instanceId }) =>
                 Effect.succeed(input.enabledInstances?.has(instanceId) ?? false),
+              // Null reads a bound thread as deleted, so its checks fall back to the task's own modes.
+              getThreadShell: () => Effect.succeed(null),
             }),
             Layer.mock(ProviderRegistry.ProviderRegistry)({
               getProviders: Effect.succeed(input.providers ?? []),
@@ -2835,6 +2860,111 @@ describe("OrchestratorMcpService provider resolution", () => {
           .pipe(Effect.flip);
         assert.equal(error.code, "invalid_request");
         assert.match(error.message, /one of the project's git worktrees/);
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect("refuses edits a bound task would ignore until it is unbound", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask({ threadId: ThreadId.make("thread:scheduled-bound") });
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              providers: [provider(["gpt-5", "gpt-5.4"])],
+              enabledInstances: new Set([codex]),
+              saved,
+            }),
+          ),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            model: "gpt-5.4",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /bindToCurrentThread:false/);
+        assert.deepEqual(yield* Ref.get(saved), []);
+        const updated = yield* mcp.updateScheduledTask(clientScope("approval-required"), {
+          scheduledTaskId: existing.id,
+          bindToCurrentThread: false,
+          model: "gpt-5.4",
+        });
+        assert.equal(updated.model, "gpt-5.4");
+        assert.equal((yield* Ref.get(saved))[0]?.threadId, null);
+      }),
+    );
+
+    it.effect("stores the worktree path it actually cleared", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              worktrees: ["/repo/wt-real"],
+              realPath: (path) => Effect.succeed(path === "/repo/wt-link" ? "/repo/wt-real" : path),
+              saved,
+            }),
+          ),
+        );
+        yield* mcp.updateScheduledTask(clientScope("approval-required"), {
+          scheduledTaskId: existing.id,
+          workspaceStrategy: { type: "existing_worktree", worktreePath: "/repo/wt-link" },
+        });
+        assert.deepEqual((yield* Ref.get(saved))[0]?.workspaceStrategy, {
+          type: "existing_worktree",
+          worktreePath: "/repo/wt-real",
+        });
+      }),
+    );
+
+    it.effect("steps a stored mode down when the moved-to provider lacks it", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask({ runtimeMode: "auto" });
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              providers: [provider(["gpt-5"], ["approval-required"])],
+              enabledInstances: new Set([codex]),
+              saved,
+            }),
+          ),
+        );
+        const updated = yield* mcp.updateScheduledTask(clientScope("auto"), {
+          scheduledTaskId: existing.id,
+          providerInstanceId: codex,
+          model: "gpt-5",
+        });
+        assert.equal(updated.runtimeMode, "approval-required");
+        assert.equal((yield* Ref.get(saved))[0]?.runtimeMode, "approval-required");
+      }),
+    );
+
+    it.effect("refuses a worktree base ref the project cannot resolve", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(layer({ task: existing, saved, baseRefError: "no-such-branch" })),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            workspaceStrategy: {
+              type: "worktree",
+              baseRef: "no-such-branch",
+              startFromOrigin: false,
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /no-such-branch/);
         assert.deepEqual(yield* Ref.get(saved), []);
       }),
     );

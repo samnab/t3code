@@ -93,6 +93,24 @@ const handlers = {
               message: "A new scheduled task needs `prompt` and `schedule`.",
             });
           }
+          // Creation derives provider, workspace and modes from the caller;
+          // silently dropping these would start a broader task than asked for.
+          const editFields = Object.entries({
+            providerInstanceId: input.providerInstanceId,
+            model: input.model,
+            options: input.options,
+            workspaceStrategy: input.workspaceStrategy,
+            runtimeMode: input.runtimeMode,
+            interactionMode: input.interactionMode,
+          })
+            .filter(([, value]) => value !== undefined)
+            .map(([field]) => field);
+          if (editFields.length > 0) {
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: `These fields apply only with scheduledTaskId: ${editFields.join(", ")}.`,
+            });
+          }
           const scope = yield* McpInvocationContext.McpInvocationContext;
           const service = yield* OrchestratorMcpService.OrchestratorMcpService;
           return yield* service.scheduleTask(scope, { ...input, prompt, schedule });

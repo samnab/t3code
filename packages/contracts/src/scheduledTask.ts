@@ -321,6 +321,7 @@ export const ScheduledTaskListWebhookDeliveriesInput = Schema.Struct({
    * rows with outcomes they don't know.
    */
   acceptAnyOutcome: Schema.optional(Schema.Boolean),
+  /** Counted in SQL before the outcome filter, so fewer rows can come back than asked. */
   limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
 });
 export type ScheduledTaskListWebhookDeliveriesInput =
