@@ -8,13 +8,13 @@ import { barColor } from "../usage/UsageLimits";
 import { useSidebar } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-// Claude 5h + weekly, Codex weekly. Pooled across accounts and environments like the Usage page.
+// Claude and Codex weekly. Pooled across accounts and environments like the Usage page.
 const SHOWN = [
-  { driver: "claudeAgent", label: "Claude", windows: ["five_hour", "seven_day"] },
+  { driver: "claudeAgent", label: "Claude", windows: ["seven_day"] },
   { driver: "codex", label: "Codex", windows: ["weekly"] },
 ] as const;
 
-const SHORT_LABEL: Record<string, string> = { five_hour: "5h", seven_day: "wk", weekly: "wk" };
+const SHORT_LABEL: Record<string, string> = { seven_day: "wk", weekly: "wk" };
 
 /** Compact remaining-quota readout for the sidebar footer; opens the Usage page. */
 export const SidebarUsageLimits = memo(function SidebarUsageLimits() {
