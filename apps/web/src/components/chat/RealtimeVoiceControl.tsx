@@ -27,7 +27,7 @@ export function RealtimeVoiceControl({
           ? snapshot.listening === "listening" || snapshot.listening === "armed"
             ? "Private: listening on this device; not sending. Resume voice in this conversation"
             : snapshot.listening === "unavailable"
-              ? "Paused: local listening unavailable. Resume voice in this conversation"
+              ? "Keywords unavailable · nothing is sent. Resume voice in this conversation"
               : "Voice paused · nothing is sent. Resume voice in this conversation"
           : "End voice in this conversation"
         : `${paused ? "Voice paused" : "Voice"} in ${owner.threadTitle} · Return to conversation`

@@ -388,7 +388,7 @@ setting is saved on this device.
 
 - Say "T3 privacy pause" to pause. Nothing is sent while paused.
 - To resume, say "T3 resume conversation", then say "confirm unpause". Wait about
-  two seconds after the first phrase, and say the second within ten seconds.
+  three seconds after the first phrase, and say the second within ten seconds.
   Otherwise voice stays paused. Saying "T3 privacy pause" or pressing **Cancel**
   between the two phrases keeps it paused.
 

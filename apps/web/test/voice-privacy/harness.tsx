@@ -1402,7 +1402,7 @@ async function caseKeywordFixtures(): Promise<CaseResult> {
 
 /**
  * Keywords on, hands-free: R plays under every spoken phrase. A confirm with no arm and one after
- * the arm expired stay paused; arm, wait past the gap, then confirm resumes. C starts at the real
+ * the arm expired stay paused; arm, wait past the 3 s gap, then confirm resumes. C starts at the real
  * gate connect, so neither the phrases (R) nor the private interval (B) may reach the new call.
  */
 async function caseSpokenConfirm(): Promise<CaseResult> {
@@ -1448,7 +1448,8 @@ async function caseSpokenConfirm(): Promise<CaseResult> {
         detail: { mode: providerMode(), listening: snapshot().listening, startCalls },
       });
       attempts.rearm = await sayOverR(resumePhraseUrl, () => snapshot().listening === "armed");
-      await sleep(2_500);
+      // Past the controller's 3 s confirm gap.
+      await sleep(3_500);
       // Every microphone grant after the first call's belongs to local listening.
       const detectorTracks = issuedTracks.slice(1);
       markerOnEnable = "C";

@@ -58,23 +58,16 @@ function reportUnavailable(error: unknown) {
   );
 }
 // Re-reads the paused conversation so Resume uses its current provider binding and grants.
-function resumeVoice(controller: RealtimeVoiceController) {
+// `spokenAt`: the confirm phrase's detector audio time; it reads an owner only while armed.
+function resumeVoice(controller: RealtimeVoiceController, spokenAt?: number) {
   const snapshot = controller.getSnapshot();
   if (snapshot.mode !== "paused") return;
+  if (spokenAt !== undefined && snapshot.listening !== "armed") return;
   try {
     const owner = readVoiceOwner(snapshot.owner.environmentId, snapshot.owner.threadId);
-    void controller.resume(owner).catch(reportUnavailable);
-  } catch (error) {
-    reportUnavailable(error);
-  }
-}
-// The spoken confirm phrase. Reads a fresh owner only while armed; anywhere else it does nothing.
-function confirmVoiceBySpeech(controller: RealtimeVoiceController) {
-  const snapshot = controller.getSnapshot();
-  if (snapshot.mode !== "paused" || snapshot.listening !== "armed") return;
-  try {
-    const owner = readVoiceOwner(snapshot.owner.environmentId, snapshot.owner.threadId);
-    void controller.spokenConfirm(owner).catch(reportUnavailable);
+    const resumed =
+      spokenAt === undefined ? controller.resume(owner) : controller.spokenConfirm(owner, spokenAt);
+    void resumed.catch(reportUnavailable);
   } catch (error) {
     reportUnavailable(error);
   }
@@ -133,10 +126,10 @@ export function RealtimeVoiceProvider({
     // only arms, and the confirm phrase resumes only while armed. Detector failure pauses a live
     // call and never resumes.
     const detector = createKeywordDetector({
-      command: (command) => {
+      command: (command, heardAt) => {
         if (command === "pause") controller.pause();
-        else if (command === "resume") controller.armResume();
-        else confirmVoiceBySpeech(controller);
+        else if (command === "resume") controller.armResume(heardAt);
+        else if (command === "confirm") resumeVoice(controller, heardAt);
       },
       failed: () => controller.localListeningFailed(),
     });

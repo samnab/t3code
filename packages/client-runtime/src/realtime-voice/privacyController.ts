@@ -68,9 +68,9 @@ const MAX_VOICE_LIFETIME_MS = 4 * 60 * 60 * 1_000;
 const LOCAL_LISTENING_UNAVAILABLE = "Paused: local listening unavailable";
 /** How long a spoken resume phrase keeps the confirm prompt open. */
 const RESUME_ARM_MS = 10_000;
-// ponytail: from offline TTS runs, not a real device. Long enough that one utterance cannot both arm
-// and confirm; calibrate against real speakers and rooms.
-const CONFIRM_MIN_GAP_MS = 2_000;
+// ponytail: from offline TTS runs, not a real device. One-breath "resume … confirm" chains fired both
+// up to 1.92 s apart in detector audio time; calibrate against real speakers and rooms.
+const CONFIRM_MIN_GAP_MS = 3_000;
 // ponytail: fixed, not measured on real speakers. The call's playback element is gone once paused,
 // so this only covers room echo and output latency. Calibrate with a physical speaker test.
 const RESUME_ECHO_TAIL_MS = 2_000;
@@ -199,6 +199,7 @@ export function createRealtimeVoiceController(deps: {
   let micMuted = false;
   let pausedAt = 0;
   let armedAt = 0;
+  let armedHeardAt = 0;
   let cancelArm: (() => void) | null = null;
   let snapshot: VoiceSnapshot = {
     mode: "off",
@@ -233,8 +234,8 @@ export function createRealtimeVoiceController(deps: {
   const republish = () => publish(snapshot);
   // Only from "paused": the call's capture is already closed, so this is a fresh, separate one.
   const startListening = () => {
-    if (!keywords || deps.localListening === undefined || listening === "listening") return;
-    if (listening === "armed") return;
+    const active = listening === "listening" || listening === "armed";
+    if (!keywords || deps.localListening === undefined || active) return;
     try {
       deps.localListening.start();
       listening = "listening";
@@ -549,25 +550,27 @@ export function createRealtimeVoiceController(deps: {
       }
     }
   };
-  /** The spoken resume phrase. Opens only the local confirm prompt, and expires on its own. */
-  const armResume = () => {
+  /** The spoken resume phrase. Opens only the local confirm prompt, and expires on its own.
+   * `heardAt` is the detector's audio time of the phrase, the clock `spokenConfirm`'s gap uses. */
+  const armResume = (heardAt: number) => {
     if (snapshot.mode !== "paused" || listening !== "listening") return;
     // Ignore the room's echo of the assistant's last words after the call closed.
     if (deps.now() < pausedAt + RESUME_ECHO_TAIL_MS) return;
     listening = "armed";
     armedAt = deps.now();
+    armedHeardAt = heardAt;
     cancelArm = deps.scheduleExpiry(armedAt + RESUME_ARM_MS, () => cancelResume());
     republish();
   };
   /**
-   * The spoken confirm phrase: resumes only while armed, at least CONFIRM_MIN_GAP_MS after the arm
-   * and before its deadline. Anywhere else it does nothing and nothing is queued. Pass a freshly
-   * read owner, as for `resume`; a refused start lands back in "listening" and needs a new arm.
+   * The spoken confirm phrase: resumes only while armed, at least CONFIRM_MIN_GAP_MS of detector
+   * audio after the arm (so a worker backlog cannot stretch one utterance past it) and before the
+   * wall-clock deadline. Anywhere else it does nothing and nothing is queued. Pass a freshly read
+   * owner, as for `resume`; a refused start lands back in "listening" and needs a new arm.
    */
-  const spokenConfirm = async (owner: VoiceOwner) => {
+  const spokenConfirm = async (owner: VoiceOwner, heardAt: number) => {
     if (snapshot.mode !== "paused" || attempt !== null || listening !== "armed") return;
-    const now = deps.now();
-    if (now < armedAt + CONFIRM_MIN_GAP_MS || now > armedAt + RESUME_ARM_MS) return;
+    if (heardAt < armedHeardAt + CONFIRM_MIN_GAP_MS || deps.now() > armedAt + RESUME_ARM_MS) return;
     await resume(owner);
   };
   const cancelResume = () => {

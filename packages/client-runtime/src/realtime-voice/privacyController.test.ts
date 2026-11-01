@@ -177,6 +177,8 @@ function fixture(holdAt?: Stage, requireMountedOwner = false, keywordsEnabled = 
     setNow: (value: number) => {
       now = value;
     },
+    // Detector audio time; tests keep it equal to elapsed wall time unless a backlog is modelled.
+    audioNow: () => now - initialNow,
     owner,
     other,
     entered,
@@ -963,7 +965,7 @@ describe("local privacy pause", () => {
     it("the resume phrase alone never opens sending", async () => {
       const f = await pausedWithKeywords();
       f.setNow(f.initialNow + 5_000);
-      f.controller.armResume();
+      f.controller.armResume(f.audioNow());
       expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "armed" });
       expect(f.transports).toHaveLength(1);
       expect(f.startProvider).toHaveBeenCalledOnce();
@@ -973,16 +975,16 @@ describe("local privacy pause", () => {
     const armed = async () => {
       const f = await pausedWithKeywords();
       f.setNow(f.initialNow + 5_000);
-      f.controller.armResume();
+      f.controller.armResume(f.audioNow());
       expect(f.controller.getSnapshot().listening).toBe("armed");
       return f;
     };
 
     it("resumes on a fresh call from a spoken confirm after the gap, listening stopped first", async () => {
       const f = await armed();
-      f.setNow(f.initialNow + 7_000);
+      f.setNow(f.initialNow + 8_000);
       f.operations.length = 0;
-      await f.controller.spokenConfirm(f.owner);
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
       expect(f.operations.indexOf("unlisten")).toBe(0);
       expect(f.operations.indexOf("unlisten")).toBeLessThan(f.operations.indexOf("microphone"));
       expect(f.controller.getSnapshot()).toMatchObject({
@@ -997,8 +999,8 @@ describe("local privacy pause", () => {
     it("ignores a confirm before any arm and queues nothing for a later arm", async () => {
       const f = await pausedWithKeywords();
       f.setNow(f.initialNow + 5_000);
-      await f.controller.spokenConfirm(f.owner);
-      f.controller.armResume();
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
+      f.controller.armResume(f.audioNow());
       f.setNow(f.initialNow + 8_000);
       expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "armed" });
       expect(f.startProvider).toHaveBeenCalledOnce();
@@ -1006,12 +1008,23 @@ describe("local privacy pause", () => {
 
     it("ignores a confirm inside the gap and stays armed for a later one", async () => {
       const f = await armed();
-      f.setNow(f.initialNow + 6_999);
-      await f.controller.spokenConfirm(f.owner);
+      f.setNow(f.initialNow + 7_999);
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
       expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "armed" });
       expect(f.startProvider).toHaveBeenCalledOnce();
-      f.setNow(f.initialNow + 7_000);
-      await f.controller.spokenConfirm(f.owner);
+      f.setNow(f.initialNow + 8_000);
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
+      expect(f.controller.getSnapshot().mode).toBe("transmitting");
+    });
+
+    it("measures the gap in detector audio, so a backlog cannot stretch one utterance past it", async () => {
+      const f = await armed();
+      // One breath: confirm ends 1.92 s of audio after the arm but arrives 4 s later in wall time.
+      f.setNow(f.initialNow + 9_000);
+      await f.controller.spokenConfirm(f.owner, 5_000 + 1_920);
+      expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "armed" });
+      expect(f.startProvider).toHaveBeenCalledOnce();
+      await f.controller.spokenConfirm(f.owner, 5_000 + 3_000);
       expect(f.controller.getSnapshot().mode).toBe("transmitting");
     });
 
@@ -1019,7 +1032,7 @@ describe("local privacy pause", () => {
       const f = await armed();
       f.setNow(f.initialNow + 15_000);
       f.expiries.at(-1)!.expire();
-      await f.controller.spokenConfirm(f.owner);
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
       expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "listening" });
       expect(f.startProvider).toHaveBeenCalledOnce();
     });
@@ -1028,28 +1041,33 @@ describe("local privacy pause", () => {
       const f = await armed();
       const scheduled = f.expiries.length;
       f.setNow(f.initialNow + 9_000);
-      f.controller.armResume();
+      f.controller.armResume(f.audioNow());
       expect(f.expiries).toHaveLength(scheduled);
       // Past the first deadline, even before its timer fires.
       f.setNow(f.initialNow + 15_001);
-      await f.controller.spokenConfirm(f.owner);
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
       expect(f.startProvider).toHaveBeenCalledOnce();
     });
 
     it("starts once for two confirms, and a refused start needs a new arm", async () => {
       const f = await armed();
-      f.setNow(f.initialNow + 7_000);
-      await Promise.all([f.controller.spokenConfirm(f.owner), f.controller.spokenConfirm(f.owner)]);
+      f.setNow(f.initialNow + 8_000);
+      await Promise.all([
+        f.controller.spokenConfirm(f.owner, f.audioNow()),
+        f.controller.spokenConfirm(f.owner, f.audioNow()),
+      ]);
       expect(f.startProvider).toHaveBeenCalledTimes(2);
 
       const g = await armed();
-      g.setNow(g.initialNow + 7_000);
+      g.setNow(g.initialNow + 8_000);
       g.validateOwner.mockImplementationOnce(() => {
         throw new Error("grant revoked");
       });
-      await expect(g.controller.spokenConfirm(g.owner)).rejects.toThrow("grant revoked");
+      await expect(g.controller.spokenConfirm(g.owner, g.audioNow())).rejects.toThrow(
+        "grant revoked",
+      );
       expect(g.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "listening" });
-      await g.controller.spokenConfirm(g.owner);
+      await g.controller.spokenConfirm(g.owner, g.audioNow());
       expect(g.startProvider).toHaveBeenCalledOnce();
     });
 
@@ -1058,16 +1076,16 @@ describe("local privacy pause", () => {
       f.controller.pause();
       expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "listening" });
       expect(f.expiries.at(-1)!.cancel).toHaveBeenCalled();
-      f.setNow(f.initialNow + 7_000);
-      await f.controller.spokenConfirm(f.owner);
+      f.setNow(f.initialNow + 8_000);
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
       expect(f.startProvider).toHaveBeenCalledOnce();
     });
 
     it("does nothing on a confirm outside pause", async () => {
       const f = fixture(undefined, false, true);
       await f.controller.start(f.owner);
-      f.setNow(f.initialNow + 7_000);
-      await f.controller.spokenConfirm(f.owner);
+      f.setNow(f.initialNow + 8_000);
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
       expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", listening: "off" });
       expect(f.transports).toHaveLength(1);
       expect(f.startProvider).toHaveBeenCalledOnce();
@@ -1081,9 +1099,9 @@ describe("local privacy pause", () => {
       f.controller.pause();
       await whenMode(f.controller, "paused");
       f.setNow(f.initialNow + 5_000);
-      f.controller.armResume();
-      f.setNow(f.initialNow + 7_000);
-      await f.controller.spokenConfirm(f.owner);
+      f.controller.armResume(f.audioNow());
+      f.setNow(f.initialNow + 8_000);
+      await f.controller.spokenConfirm(f.owner, f.audioNow());
       const call = f.transports.at(-1)!;
       call.capture("B");
       expect(call.sent).toEqual([]);
@@ -1092,14 +1110,14 @@ describe("local privacy pause", () => {
 
     it("ignores the resume phrase during the echo tail after the call closed", async () => {
       const f = await pausedWithKeywords();
-      f.controller.armResume();
+      f.controller.armResume(f.audioNow());
       expect(f.controller.getSnapshot().listening).toBe("listening");
     });
 
     it("disarms when the confirm window expires", async () => {
       const f = await pausedWithKeywords();
       f.setNow(f.initialNow + 5_000);
-      f.controller.armResume();
+      f.controller.armResume(f.audioNow());
       const arm = f.expiries.at(-1)!;
       expect(arm.at).toBe(f.initialNow + 15_000);
       arm.expire();
@@ -1109,8 +1127,8 @@ describe("local privacy pause", () => {
     it("ignores a second resume phrase as a confirm", async () => {
       const f = await pausedWithKeywords();
       f.setNow(f.initialNow + 5_000);
-      f.controller.armResume();
-      f.controller.armResume();
+      f.controller.armResume(f.audioNow());
+      f.controller.armResume(f.audioNow());
       expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", listening: "armed" });
       expect(f.transports).toHaveLength(1);
     });
@@ -1123,7 +1141,7 @@ describe("local privacy pause", () => {
         listening: "unavailable",
       });
       expect(f.localListening.stop).toHaveBeenCalledOnce();
-      f.controller.armResume();
+      f.controller.armResume(f.audioNow());
       expect(f.controller.getSnapshot().listening).toBe("unavailable");
 
       const g = fixture(undefined, false, true);

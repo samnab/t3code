@@ -506,7 +506,8 @@ async function init(message) {
     // Tuned on the synthetic TTS set in /tmp/t3-voice-kws (REPORT.md): the default score of 1.0
     // caught half the phrases; 3.0 caught 40/48 with no false resume in 14 minutes of near-misses.
     // With "confirm unpause" added (/tmp/t3-confirm/kws): 35/36 confirms over 12 Piper voices at 3
-    // rates, no cross-triggers with the other two phrases, no false hits in 12.6 minutes of negatives.
+    // rates, no cross-triggers with the other two phrases; in 12.6 minutes of negatives no false
+    // resume or confirm, and one false pause (neg__v11__19.wav).
     maxActivePaths: 8,
     numTrailingBlanks: 1,
     keywordsScore: 3.0,

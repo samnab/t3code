@@ -17,7 +17,12 @@ type WorkerMessage =
   | { readonly type: "ready" }
   | { readonly type: "failed" }
   | { readonly type: "processed"; readonly generation: number }
-  | { readonly type: "command"; readonly generation: number; readonly command: KeywordCommand };
+  | {
+      readonly type: "command";
+      readonly generation: number;
+      readonly command: KeywordCommand;
+      readonly endSample: number;
+    };
 
 const ASSETS = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/voice/kws/`;
 const MODEL_FILES = {
@@ -64,13 +69,16 @@ async function loadVerified() {
 }
 
 export function createKeywordDetector(events: {
-  command(command: KeywordCommand): void;
+  /** `heardAt`: ms of captured audio from this attach to the end of the phrase. Unlike arrival
+   * time, a worker backlog cannot stretch the interval between two commands. */
+  command(command: KeywordCommand, heardAt: number): void;
   failed(): void;
 }): KeywordDetector {
   let worker: Worker | null = null;
   let ready: Promise<void> | null = null;
   let generation = 0;
   let inFlight = 0;
+  let sampleRate = 48_000;
   let detachCurrent: (() => void) | null = null;
 
   const fail = () => {
@@ -102,7 +110,8 @@ export function createKeywordDetector(events: {
         fail();
       } else if (message.generation !== generation) return;
       else if (message.type === "processed") inFlight -= 1;
-      else if (message.type === "command") events.command(message.command);
+      else if (message.type === "command")
+        events.command(message.command, (message.endSample / sampleRate) * 1_000);
     });
     const onError = () => {
       clearTimeout(timeout);
@@ -130,7 +139,8 @@ export function createKeywordDetector(events: {
       const node = new AudioWorkletNode(context, "kws-capture", { outputChannelCount: [1] });
       const mine = ++generation;
       inFlight = 0;
-      target.postMessage({ type: "reset", generation: mine, sampleRate: context.sampleRate });
+      sampleRate = context.sampleRate;
+      target.postMessage({ type: "reset", generation: mine, sampleRate });
       detachCurrent?.();
       const onBlock = (event: MessageEvent<Float32Array>) => {
         if (generation !== mine || worker !== target) return;
