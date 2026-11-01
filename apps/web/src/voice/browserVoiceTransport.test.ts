@@ -61,6 +61,18 @@ function fixture(contextState: AudioContextState = "running") {
   const closeContext = vi.fn(async () => {});
   const resumeContext = vi.fn(async () => {});
   const contexts: FakeAudioContext[] = [];
+  // The zero source that keeps the sender's track producing frames; tracks what it feeds.
+  const silence = {
+    offset: { value: 1 },
+    feeds: 0,
+    connect: () => {
+      silence.feeds += 1;
+    },
+    disconnect: () => {
+      silence.feeds -= 1;
+    },
+    start: () => {},
+  };
   // Each analyser reports a steady level; the first created meters input, the second the assistant.
   const analysers: Array<{ level: number }> = [];
   const createAnalyser = () => {
@@ -79,7 +91,7 @@ function fixture(contextState: AudioContextState = "running") {
     createMediaStreamSource = (stream: object) => ("id" in stream ? { connect: () => {} } : source);
     createMediaStreamDestination = () => output;
     createGain = () => opening;
-    createConstantSource = () => ({ offset: { value: 1 }, connect: () => {}, start: () => {} });
+    createConstantSource = () => silence;
     createAnalyser = createAnalyser;
     currentTime = 0;
     sampleRate = 48_000;
@@ -135,6 +147,7 @@ function fixture(contextState: AudioContextState = "running") {
     resumeContext,
     connected,
     opening,
+    silence,
     context,
     setLevels: (input: number, output: number) => {
       analysers[0]!.level = input;
@@ -288,6 +301,15 @@ describe("browser voice microphone mute", () => {
     f.transport.setMicMuted?.(false);
     f.captureFrame("after-close");
     expect(f.sent).toEqual([]);
+  });
+
+  it("detaches the zero source from each replaced gate", async () => {
+    const f = await live();
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      f.transport.setMicMuted?.(true);
+      f.transport.setMicMuted?.(false);
+    }
+    expect(f.silence.feeds).toBe(1);
   });
 
   it("stops the session cleanly while muted", async () => {

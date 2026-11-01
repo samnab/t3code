@@ -210,16 +210,16 @@ export function createBrowserVoiceTransport(
       for (const track of microphone?.getTracks() ?? []) track.enabled = true;
       if (opening === null) openGate(graph);
     },
-    // Mute cuts the microphone from the gate; the peer keeps sending silence and playback continues.
-    // Unmute opens a fresh gate with the same discard. The microphone track stays enabled while muted: the keyword detector still hears a spoken
-    // privacy pause, and some browsers stop or re-acquire a disabled device, which would trip the
-    // `mute`/`ended` failure listeners. The gate alone keeps samples from the sender.
+    // Mute cuts the microphone from the gate while silence and playback continue; unmute opens a
+    // fresh gate with the same discard. The track stays enabled: the keyword detector must still
+    // hear a spoken pause, and some browsers re-acquire a disabled device, tripping `mute`/`ended`.
     setMicMuted(muted) {
       if (closed || muted === micMuted) return;
       micMuted = muted;
       if (graph === null || opening === null) return;
       if (muted) graph.source.disconnect(opening);
       else {
+        graph.silence.disconnect(opening);
         opening.disconnect();
         openGate(graph);
       }
