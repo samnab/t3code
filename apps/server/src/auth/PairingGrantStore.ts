@@ -229,6 +229,8 @@ export class PairingGrantStore extends Context.Service<
       input?: {
         readonly proofKeyThumbprint?: string;
         readonly requestedScopes?: ReadonlyArray<AuthEnvironmentScope>;
+        /** All scopes must be granted; requestedScopes only requires an overlap for OAuth. */
+        readonly requiredScopes?: ReadonlyArray<AuthEnvironmentScope>;
       },
     ) => Effect.Effect<BootstrapGrant, BootstrapCredentialError>;
   }
@@ -258,6 +260,10 @@ const PAIRING_TOKEN_REJECTION_LIMIT =
   Math.floor(256 / PAIRING_TOKEN_ALPHABET.length) * PAIRING_TOKEN_ALPHABET.length;
 
 const decodeDesktopSessionTtlDays = Schema.decodeEffect(AuthDesktopSessionTtlDays);
+const PAIRING_TOKEN_PATTERN = new RegExp(
+  `^[${PAIRING_TOKEN_ALPHABET}]{${PAIRING_TOKEN_LENGTH}}$`,
+  "i",
+);
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
@@ -500,8 +506,10 @@ const make = Effect.gen(function* () {
           }
 
           if (
-            input?.requestedScopes !== undefined &&
-            !input.requestedScopes.some((scope) => grant.scopes.includes(scope))
+            (input?.requestedScopes !== undefined &&
+              !input.requestedScopes.some((scope) => grant.scopes.includes(scope))) ||
+            (input?.requiredScopes !== undefined &&
+              !input.requiredScopes.every((scope) => grant.scopes.includes(scope)))
           ) {
             return [
               {
@@ -551,14 +559,20 @@ const make = Effect.gen(function* () {
         return yield* seededResult.error;
       }
 
+      // Only credentials in the issued pairing-code format are case-insensitive.
+      const pairingCredential = PAIRING_TOKEN_PATTERN.test(credential)
+        ? credential.toUpperCase()
+        : credential;
+
       // Check scopes in the UPDATE so rejected requests cannot spend one-time links.
       const consumed = yield* pairingLinks
         .consumeAvailable({
-          credential,
+          credential: pairingCredential,
           proofKeyThumbprint: input?.proofKeyThumbprint ?? null,
           ...(input?.requestedScopes !== undefined
             ? { requestedScopes: input.requestedScopes }
             : {}),
+          ...(input?.requiredScopes !== undefined ? { requiredScopes: input.requiredScopes } : {}),
           consumedAt: now,
           now,
         })
@@ -582,7 +596,7 @@ const make = Effect.gen(function* () {
       }
 
       const matching = yield* pairingLinks
-        .getByCredential({ credential })
+        .getByCredential({ credential: pairingCredential })
         .pipe(Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })));
       if (Option.isNone(matching)) {
         return yield* new UnknownBootstrapCredentialError({});
@@ -608,8 +622,10 @@ const make = Effect.gen(function* () {
       }
 
       if (
-        input?.requestedScopes !== undefined &&
-        !input.requestedScopes.some((scope) => matching.value.scopes.includes(scope))
+        (input?.requestedScopes !== undefined &&
+          !input.requestedScopes.some((scope) => matching.value.scopes.includes(scope))) ||
+        (input?.requiredScopes !== undefined &&
+          !input.requiredScopes.every((scope) => matching.value.scopes.includes(scope)))
       ) {
         return yield* new BootstrapCredentialScopeNotGrantedError({});
       }

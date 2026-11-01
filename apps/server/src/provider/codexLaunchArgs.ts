@@ -13,9 +13,7 @@ const CODEX_MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 const POSITIVE_INTEGER_PATTERN = /^[1-9]\d*$/;
 
 /** Append the child cap after user arguments so the structured setting wins. */
-export const codexSubagentConcurrencyArgs = (
-  maxConcurrentSubagents?: string,
-): ReadonlyArray<string> => {
+const codexSubagentConcurrencyArgs = (maxConcurrentSubagents?: string): ReadonlyArray<string> => {
   const value = maxConcurrentSubagents?.trim() ?? "";
   if (value === "" || !POSITIVE_INTEGER_PATTERN.test(value)) return [];
 

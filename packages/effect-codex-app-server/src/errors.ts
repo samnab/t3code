@@ -147,8 +147,7 @@ export class CodexAppServerProcessExitedError extends Schema.TaggedError<CodexAp
       this.code === undefined
         ? "Codex App Server process exited"
         : `Codex App Server process exited with code ${this.code}`;
-    const excerpt = this.stderr?.trim();
-    return excerpt && excerpt.length > 0 ? `${base}\n${excerpt}` : base;
+    return this.stderr ? `${base}: ${this.stderr}` : base;
   }
 }
 

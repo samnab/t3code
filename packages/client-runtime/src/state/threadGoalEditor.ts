@@ -51,7 +51,7 @@ function trimThreadGoalWhitespace(text: string): string {
     .replace(THREAD_GOAL_TRAILING_WHITESPACE, "");
 }
 
-export function hasVisibleThreadGoalText(text: string): boolean {
+function hasVisibleThreadGoalText(text: string): boolean {
   return !INVISIBLE_THREAD_GOAL_CHARS.test(text);
 }
 
@@ -72,7 +72,7 @@ export type ThreadGoalCommandBlockReason =
   | "unavailable"
   | "unsupported";
 
-export function resolveThreadGoalCommandBlockReason(input: {
+function resolveThreadGoalCommandBlockReason(input: {
   readonly isServerThread: boolean;
   readonly attachmentCount: number;
   readonly contextCount: number;
@@ -248,13 +248,6 @@ export function isThreadGoalLoopActionAvailable(
     case "reset":
       return loop.state === "completed";
   }
-}
-
-export function isThreadGoalBeingPursued(input: {
-  readonly goal: string | null;
-  readonly loop: ThreadGoalLoop | null | undefined;
-}): boolean {
-  return input.goal !== null && input.loop?.state === "running";
 }
 
 export type ThreadGoalDisplay = "control" | "passive" | "none";

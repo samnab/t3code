@@ -27,6 +27,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as DocumentText from "../../../provider/DocumentText.ts";
 import * as ServerConfig from "../../../config.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadLaunchService from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
@@ -34,8 +35,8 @@ import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 import * as ProjectService from "../../../project/ProjectService.ts";
+import * as ProjectCloneTracker from "../../../project/ProjectCloneTracker.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
-import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
@@ -106,6 +107,7 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
     projectId: ProjectId,
     force: Schema.optionalKey(Schema.Boolean),
   }),
+  dependencies: [...shared.dependencies, ProjectCloneTracker.ProjectCloneTracker],
 }).annotate(Tool.Destructive, true);
 const setting = <S extends Schema.Top>(value: S) =>
   Schema.Struct({ value, source: Schema.Literals(["project", "environment", "t3.json"]) });
@@ -268,6 +270,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     ServerConfig.ServerConfig,
     ProviderRegistry.ProviderRegistry,
     ServerSettings.ServerSettingsService,
+    ProviderRegistry.ProviderRegistry,
     DocumentText.DocumentText,
   ],
 })

@@ -11,8 +11,7 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { forkParked } from "../serverActivation.ts";
 
 /** Everything the hook reads lives directly under this directory, one file per native thread. */
-export const voiceDirectory = (stateDir: string, join: Path.Path["join"]) =>
-  join(stateDir, "voice");
+const voiceDirectory = (stateDir: string, join: Path.Path["join"]) => join(stateDir, "voice");
 
 /**
  * Native thread ids come from a provider, so only a plain basename reaches the
@@ -21,16 +20,9 @@ export const voiceDirectory = (stateDir: string, join: Path.Path["join"]) =>
 const safeNativeThreadId = (nativeThreadId: string): string | null =>
   /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(nativeThreadId) ? nativeThreadId : null;
 
-/**
- * Per-thread voice preferences for Codex, which runs one shared app-server per
- * provider instance: its process environment can only carry the first thread's
- * `T3_VOICE_NOTIFICATIONS`, so the preference travels through one file per
- * Codex native thread id instead. The notify hook looks up the `thread-id` in
- * the payload it is handed and reads "0" or "1".
- *
- * `start()` subscribes to committed domain events; `apply()` folds one event
- * into the directory and is the seam tests drive.
- */
+// One shared Codex app-server env can carry only the first thread's T3_VOICE_NOTIFICATIONS,
+// so each Codex native thread id gets a "0"/"1" file the notify hook reads by `thread-id`.
+// `start()` subscribes to committed domain events; `apply()` folds one event (tests drive it).
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const projections = yield* ProjectionStore.ProjectionStoreV2;

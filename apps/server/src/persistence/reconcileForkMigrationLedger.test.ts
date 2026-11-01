@@ -6,8 +6,8 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
-import DesktopPairingMigration from "./Migrations/073_AuthDesktopPairingSessionTtl.ts";
-import RealtimeVoiceHistoryResumeMigration from "./Migrations/074_RealtimeVoiceHistoryResume.ts";
+import DesktopPairingMigration from "./Migrations/077_AuthDesktopPairingSessionTtl.ts";
+import RealtimeVoiceHistoryResumeMigration from "./Migrations/078_RealtimeVoiceHistoryResume.ts";
 import { reconcileForkMigrationLedger } from "./reconcileForkMigrationLedger.ts";
 
 const forkHistory = [
@@ -394,7 +394,7 @@ describe("desktop pairing backport upgrade", () => {
           "ScheduledTaskWebhooks",
         );
         assert.strictEqual(
-          history.find((row) => row.migration_id === 73)?.name,
+          history.find((row) => row.migration_id === 77)?.name,
           "AuthDesktopPairingSessionTtl",
         );
         assert.strictEqual(history.length, migrationManifest.length);
@@ -422,58 +422,66 @@ const forkRenumberTail = [
   [70, "PeerLinks"],
   [71, "PeerLinkFence"],
   [72, "WaitingLinkRequestIndex"],
-  [73, "AuthDesktopPairingSessionTtl"],
-  [74, "RealtimeVoiceHistoryResume"],
+  [73, "ActiveTurnItemIndexes"],
+  [74, "ExcludeAttachmentPlaceholdersFromSearch"],
+  [75, "SubagentDeliveryState"],
+  [76, "ProjectionProjectsPinArchive"],
+  [77, "AuthDesktopPairingSessionTtl"],
+  [78, "RealtimeVoiceHistoryResume"],
 ];
 
 const readRenumberTail = Effect.map(readHistory, (history) =>
   history.filter((row) => row.migration_id >= 69).map((row) => [row.migration_id, row.name]),
 );
 
-// Upstream 070–072 must have run, not just been recorded.
-const assertUpstreamPeerLinkSchema = Effect.gen(function* () {
+// Upstream 070–076 must have run, not just been recorded.
+const assertUpstreamSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(peer_environment_links)`;
-  assert.isTrue(columns.some((column) => column.name === "fenced"));
+  const hasColumn = (table: string, column: string) =>
+    Effect.map(
+      sql<{ readonly name: string }>`SELECT name FROM pragma_table_info(${table})`,
+      (columns) => columns.some((row) => row.name === column),
+    );
+  assert.isTrue(yield* hasColumn("peer_environment_links", "fenced"));
+  assert.isTrue(
+    yield* hasColumn("orchestration_v2_projection_subagents", "completion_delivery_state"),
+  );
+  assert.isTrue(yield* hasColumn("projection_projects", "pinned_at"));
   const indexes = yield* sql`
     SELECT name FROM sqlite_master
-    WHERE type = 'index' AND name = 'orchestration_v2_projection_turn_items_waiting_link_idx'
+    WHERE type = 'index' AND name IN (
+      'orchestration_v2_projection_turn_items_waiting_link_idx',
+      'orchestration_v2_projection_turn_items_active_ordinal_idx'
+    )
   `;
-  assert.strictEqual(indexes.length, 1);
+  assert.strictEqual(indexes.length, 2);
 });
 
 describe("fork migration renumber", () => {
-  it.effect("reruns fork migrations recorded as 69/70 after upstream 069–072", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 68 });
-      yield* DesktopPairingMigration;
-      yield* RealtimeVoiceHistoryResumeMigration;
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (69, 'AuthDesktopPairingSessionTtl'), (70, 'RealtimeVoiceHistoryResume')`;
-      yield* runMigrations();
-      assert.deepStrictEqual(yield* readRenumberTail, forkRenumberTail);
-      yield* assertUpstreamPeerLinkSchema;
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
-  );
-
-  it.effect("runs upstream 070–072 on fork databases that recorded fork 70/71", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 69 });
-      yield* DesktopPairingMigration;
-      yield* RealtimeVoiceHistoryResumeMigration;
-      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (70, 'AuthDesktopPairingSessionTtl'), (71, 'RealtimeVoiceHistoryResume')`;
-      yield* sql`INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at, desktop_session_ttl_days)
-        VALUES ('kept-grant', 'test-credential', 'one-time-token', '[]', 'one-time-token', '2026-01-01T00:00:00Z', '2027-01-01T00:00:00Z', 30)`;
-      yield* runMigrations();
-      assert.deepStrictEqual(yield* readRenumberTail, forkRenumberTail);
-      yield* assertUpstreamPeerLinkSchema;
-      assert.deepStrictEqual(
-        yield* sql`SELECT desktop_session_ttl_days FROM auth_pairing_links WHERE id = 'kept-grant'`,
-        [{ desktop_session_ttl_days: 30 }],
-      );
-      assert.deepStrictEqual(yield* runMigrations(), []);
-    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  it.effect.each([
+    [68, 69, 70],
+    [69, 70, 71],
+    [72, 73, 74],
+  ] as const)(
+    "reruns fork migrations recorded after upstream migration %i",
+    ([throughId, pairingId, voiceId]) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: throughId });
+        yield* DesktopPairingMigration;
+        yield* RealtimeVoiceHistoryResumeMigration;
+        yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (${pairingId}, 'AuthDesktopPairingSessionTtl'), (${voiceId}, 'RealtimeVoiceHistoryResume')`;
+        yield* sql`INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at, desktop_session_ttl_days)
+          VALUES ('kept-grant', 'test-credential', 'one-time-token', '[]', 'one-time-token', '2026-01-01T00:00:00Z', '2027-01-01T00:00:00Z', 30)`;
+        yield* runMigrations();
+        assert.deepStrictEqual(yield* readRenumberTail, forkRenumberTail);
+        yield* assertUpstreamSchema;
+        assert.deepStrictEqual(
+          yield* sql`SELECT desktop_session_ttl_days FROM auth_pairing_links WHERE id = 'kept-grant'`,
+          [{ desktop_session_ttl_days: 30 }],
+        );
+        assert.deepStrictEqual(yield* runMigrations(), []);
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
   it.effect("applies the full manifest to a fresh database", () =>
@@ -483,20 +491,20 @@ describe("fork migration renumber", () => {
         (yield* readHistory).map((row) => [row.migration_id, row.name]),
         migrationManifest.map(([id, name]) => [id, name]),
       );
-      yield* assertUpstreamPeerLinkSchema;
+      yield* assertUpstreamSchema;
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect("adds only the fork migrations to an upstream database at 072", () =>
+  it.effect("adds only the fork migrations to an upstream database at 076", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 72 });
+      yield* runMigrations({ toMigrationInclusive: 76 });
       const before = yield* readHistory;
       const executed = yield* runMigrations();
       assert.deepStrictEqual(
         executed.map(([id, name]) => [id, name]),
         [
-          [73, "AuthDesktopPairingSessionTtl"],
-          [74, "RealtimeVoiceHistoryResume"],
+          [77, "AuthDesktopPairingSessionTtl"],
+          [78, "RealtimeVoiceHistoryResume"],
         ],
       );
       assert.deepStrictEqual((yield* readHistory).slice(0, before.length), before);

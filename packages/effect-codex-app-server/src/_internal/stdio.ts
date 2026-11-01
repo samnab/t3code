@@ -1,5 +1,7 @@
+import * as NodeUtil from "node:util";
+
 import * as Cause from "effect/Cause";
-import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -12,10 +14,14 @@ import * as CodexError from "../errors.ts";
 
 const encoder = new TextEncoder();
 
-export const makeChildStdio = (handle: ChildProcessSpawner.ChildProcessHandle) =>
+export const makeChildStdio = (
+  handle: Pick<ChildProcessSpawner.ChildProcessHandle, "stdin" | "stdout">,
+  stderrDrained: Effect.Effect<void>,
+) =>
   Stdio.make({
     args: Effect.succeed([]),
-    stdin: handle.stdout,
+    // Finish stderr separately from the protocol's exit-status deadline.
+    stdin: handle.stdout.pipe(Stream.onEnd(stderrDrained)),
     stdout: () =>
       Sink.mapInput(handle.stdin, (chunk: string | Uint8Array) =>
         typeof chunk === "string" ? encoder.encode(chunk) : chunk,
@@ -46,6 +52,50 @@ export const makeInMemoryStdio = Effect.fn("makeInMemoryStdio")(function* () {
   };
 });
 
+const STDERR_TAIL_MAX_CHARS = 8_192;
+const STDERR_EXCERPT_MAX_CHARS = 512;
+// `Error: …`, `TypeError: …`, `Error [ERR_MODULE_NOT_FOUND]: …`, `error: …`, `ERROR: …`, `fatal: …`
+const ERROR_LINE_PATTERN = /^(?:[a-z]*error|fatal)(?: ?\[[^\]]+\])?:\s*\S/i;
+
+// The thread/start MCP override carries a bearer token that Codex may echo to stderr.
+const BEARER_TOKEN_PATTERN = /\bBearer\s+[A-Za-z0-9._\-+=/]+/gi;
+
+export const appendStderrTail = (current: string, chunk: string): string => {
+  const next = `${current}${chunk.replaceAll("\0", "").replace(BEARER_TOKEN_PATTERN, "Bearer [redacted]")}`;
+  return next.length <= STDERR_TAIL_MAX_CHARS ? next : next.slice(-STDERR_TAIL_MAX_CHARS);
+};
+
+// Node launchers print the actionable error between a source excerpt and stack frames.
+export const stderrExcerpt = (tail: string): string | undefined => {
+  const lines = NodeUtil.stripVTControlCharacters(tail)
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/\s+/g, " "))
+    .filter((line) => line.length > 0);
+  const line = lines.findLast((candidate) => ERROR_LINE_PATTERN.test(candidate)) ?? lines.at(-1);
+  if (line === undefined) {
+    return undefined;
+  }
+  return line.length <= STDERR_EXCERPT_MAX_CHARS
+    ? line
+    : `${line.slice(0, STDERR_EXCERPT_MAX_CHARS - 1)}…`;
+};
+
+export const makeStderrTail = Effect.fn("makeStderrTail")(function* (
+  stderr: ChildProcessSpawner.ChildProcessHandle["stderr"],
+) {
+  const tail = yield* Ref.make("");
+  const drain = yield* stderr.pipe(
+    Stream.decodeText(),
+    Stream.runForEach((chunk) => Ref.update(tail, (current) => appendStderrTail(current, chunk))),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
+  return {
+    read: Ref.get(tail),
+    awaitDrained: Fiber.join(drain).pipe(Effect.timeout("250 millis"), Effect.ignore),
+  };
+});
+
 type ChildProcessTerminationHandle = Pick<
   ChildProcessSpawner.ChildProcessHandle,
   "exitCode" | "pid"
@@ -53,68 +103,24 @@ type ChildProcessTerminationHandle = Pick<
 
 export const makeTerminationError = (
   handle: ChildProcessTerminationHandle,
+  stderrTail: Effect.Effect<string>,
 ): Effect.Effect<CodexError.CodexAppServerError> =>
-  Effect.match(handle.exitCode, {
+  Effect.matchEffect(handle.exitCode, {
     onFailure: (cause) =>
-      new CodexError.CodexAppServerTransportError({
-        operation: "read-process-exit-status",
-        pid: handle.pid,
-        cause,
+      Effect.succeed(
+        new CodexError.CodexAppServerTransportError({
+          operation: "read-process-exit-status",
+          pid: handle.pid,
+          cause,
+        }),
+      ),
+    onSuccess: (code) =>
+      Effect.map(stderrTail, (tail) => {
+        const stderr = stderrExcerpt(tail);
+        return new CodexError.CodexAppServerProcessExitedError({
+          code,
+          pid: handle.pid,
+          ...(stderr ? { stderr } : {}),
+        });
       }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
   });
-
-/** Last few KiB of app-server stderr kept so an exit code carries its reason. */
-export const CODEX_STDERR_TAIL_MAX_CHARS = 4_096;
-
-const BEARER_TOKEN_PATTERN = /\bBearer\s+[A-Za-z0-9._\-+=/]+/gi;
-
-export const appendCodexStderrTail = (current: string, chunk: string): string => {
-  const next = `${current}${chunk.replaceAll("\0", "").replace(BEARER_TOKEN_PATTERN, "Bearer [redacted]")}`;
-  return next.length <= CODEX_STDERR_TAIL_MAX_CHARS
-    ? next
-    : next.slice(-CODEX_STDERR_TAIL_MAX_CHARS);
-};
-
-/**
- * Collects the child's stderr into a bounded tail. Pass the returned
- * `terminationError` to `make` so a process exit reports why the app-server
- * died instead of a bare exit code.
- */
-export const makeChildStderrTail = Effect.fn("makeChildStderrTail")(function* (
-  handle: ChildProcessSpawner.ChildProcessHandle,
-) {
-  const tail = yield* Ref.make("");
-  const drained = yield* Deferred.make<void>();
-
-  yield* handle.stderr.pipe(
-    Stream.decodeText(),
-    Stream.runForEach((chunk) =>
-      Ref.update(tail, (current) => appendCodexStderrTail(current, chunk)),
-    ),
-    Effect.ensuring(Deferred.succeed(drained, undefined)),
-    Effect.ignore,
-    Effect.forkScoped,
-  );
-
-  return Effect.flatMap(makeTerminationError(handle), (error) =>
-    error._tag !== "CodexAppServerProcessExitedError"
-      ? Effect.succeed<CodexError.CodexAppServerError>(error)
-      : Deferred.await(drained).pipe(
-          Effect.timeout("250 millis"),
-          Effect.ignore,
-          Effect.andThen(Ref.get(tail)),
-          Effect.map((text): CodexError.CodexAppServerError => {
-            const stderr = text.trim();
-            return stderr.length === 0
-              ? error
-              : new CodexError.CodexAppServerProcessExitedError({
-                  ...(error.code === undefined ? {} : { code: error.code }),
-                  ...(error.pid === undefined ? {} : { pid: error.pid }),
-                  stderr,
-                  ...(error.cause === undefined ? {} : { cause: error.cause }),
-                });
-          }),
-        ),
-  );
-});

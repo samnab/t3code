@@ -18,7 +18,7 @@ import {
 
 /**
  * A ready handoff stays `ready` after delivery. The next turn on its provider thread redelivers it
- * only when its target run failed, was interrupted, or was a completed compaction or `/goal` turn
+ * only when its target run failed, was interrupted or cancelled, or was a completed compaction or `/goal` turn
  * that never recorded a delivery: those turns defer history to the next turn.
  */
 export const isContextHandoffRedeliverable = (
@@ -31,6 +31,7 @@ export const isContextHandoffRedeliverable = (
       source.id === handoff.targetRunId &&
       (source.status === "failed" ||
         source.status === "interrupted" ||
+        source.status === "cancelled" ||
         (source.status === "completed" &&
           handoff.delivery === undefined &&
           messages.some(
@@ -39,6 +40,10 @@ export const isContextHandoffRedeliverable = (
               (isCompactionCommandMessage(message) || parseGoalCommand(message) !== null),
           ))),
   );
+
+/** The provider prompt for a turn that carries inline context ahead of the user's text. */
+export const withInlineContext = (context: string, userText: string): string =>
+  context === "" ? userText : `${context}\n\nUser message:\n${userText}`;
 
 /** Persist around injection; ambiguous delivery requires a fresh native thread. Call unsent if refused before prompt consumption. */
 export const deliverContextHandoffs = Effect.fn("orchestrationV2.deliverContextHandoffs")(

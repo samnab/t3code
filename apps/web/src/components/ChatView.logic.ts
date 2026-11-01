@@ -4,6 +4,7 @@ import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
 } from "@t3tools/client-runtime/state/thread-execution";
+import { checkpointFileTotals } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import {
   latestUnheldRun,
@@ -231,7 +232,7 @@ export function shouldOpenProactiveTurnDiff(input: {
 }
 
 export function resolveProactiveTurnDiffAction(input: {
-  checkpoint: Pick<TurnDiffSummary, "status" | "files"> | undefined;
+  checkpoint: Pick<TurnDiffSummary, "status" | "files" | "filesTotal"> | undefined;
   isGitRepo: boolean | undefined;
 }): "defer" | "ignore" | "open" {
   if (input.checkpoint === undefined || input.checkpoint.status === "missing") return "defer";
@@ -243,11 +244,8 @@ export function resolveProactiveTurnDiffAction(input: {
   ) {
     return "ignore";
   }
-  const changedLines = input.checkpoint.files.reduce(
-    (total, file) => total + file.additions + file.deletions,
-    0,
-  );
-  return input.checkpoint.files.length >= 3 || changedLines >= 50 ? "open" : "ignore";
+  const totals = checkpointFileTotals(input.checkpoint);
+  return totals.count >= 3 || totals.additions + totals.deletions >= 50 ? "open" : "ignore";
 }
 
 /** Mark reactivated Diff tabs to preserve review scope. Already-active tabs must not leave a marker for
@@ -546,6 +544,7 @@ export function resolveComposerProviderSelection(input: {
       : requestedInstanceId;
   return {
     selectedProviderEntry,
+    requestedInstanceId,
     requestedDriverKind,
     lockedContinuationGroupKey,
     unavailableProviderInstanceId,
@@ -763,6 +762,7 @@ export function cloneComposerImageForRetry(
 export function deriveComposerSendState(options: {
   prompt: string;
   imageCount: number;
+  existingAttachmentCount?: number;
   terminalContexts: ReadonlyArray<TerminalContextDraft>;
   elementContextCount?: number;
 }): {
@@ -783,6 +783,7 @@ export function deriveComposerSendState(options: {
     hasSendableContent:
       trimmedPrompt.length > 0 ||
       options.imageCount > 0 ||
+      (options.existingAttachmentCount ?? 0) > 0 ||
       sendableTerminalContexts.length > 0 ||
       elementContextCount > 0,
   };
@@ -794,15 +795,16 @@ export function buildExpiredTerminalContextToastCopy(
 ): { title: string; description: string } {
   const count = Math.max(1, Math.floor(expiredTerminalContextCount));
   const noun = count === 1 ? "Expired terminal context" : "Expired terminal contexts";
+  const pronoun = count === 1 ? "it" : "them";
   if (variant === "empty") {
     return {
       title: `${noun} won't be sent`,
-      description: "Remove it or re-add it to include terminal output.",
+      description: `Remove ${pronoun} or re-add ${pronoun} to include terminal output.`,
     };
   }
   return {
     title: `${noun} omitted from message`,
-    description: "Re-add it if you want that terminal output included.",
+    description: `Re-add ${pronoun} if you want that terminal output included.`,
   };
 }
 

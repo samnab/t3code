@@ -2,6 +2,7 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type ThreadGoalLoop,
+  type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -61,6 +62,7 @@ interface ChatHeaderProps {
   onOpenGoalEditor: () => void;
   currentSessionOptimizers: ReadonlyArray<string>;
   onOpenOptimizers: () => void;
+  onFindInThread?: ((threadRef: ScopedThreadRef) => void) | undefined;
 }
 
 function resolveRenameCommit(input: {
@@ -92,6 +94,7 @@ export const ChatHeader = memo(function ChatHeader({
   onOpenGoalEditor,
   currentSessionOptimizers,
   onOpenOptimizers,
+  onFindInThread,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -208,6 +211,7 @@ export const ChatHeader = memo(function ChatHeader({
     threadRef: isServerThread ? activeThreadRef : null,
     projectCwd: activeProjectCwd,
     onStartRename: startRename,
+    onFind: onFindInThread,
     canShareWithGuest,
   });
   const titleButtonRef = useRef<HTMLButtonElement | null>(null);

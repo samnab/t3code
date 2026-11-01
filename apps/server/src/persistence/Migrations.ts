@@ -76,8 +76,12 @@ import Migration0069 from "./Migrations/069_ThreadMessageSearch.ts";
 import Migration0070 from "./Migrations/070_PeerLinks.ts";
 import Migration0071 from "./Migrations/071_PeerLinkFence.ts";
 import Migration0072 from "./Migrations/072_WaitingLinkRequestIndex.ts";
-import Migration0073 from "./Migrations/073_AuthDesktopPairingSessionTtl.ts";
-import Migration0074 from "./Migrations/074_RealtimeVoiceHistoryResume.ts";
+import Migration0073 from "./Migrations/073_ActiveTurnItemIndexes.ts";
+import Migration0074 from "./Migrations/074_ExcludeAttachmentPlaceholdersFromSearch.ts";
+import Migration0075 from "./Migrations/075_SubagentDeliveryState.ts";
+import Migration0076 from "./Migrations/076_ProjectionProjectsPinArchive.ts";
+import Migration0077 from "./Migrations/077_AuthDesktopPairingSessionTtl.ts";
+import Migration0078 from "./Migrations/078_RealtimeVoiceHistoryResume.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -153,9 +157,13 @@ const migrationEntries = [
   [70, "PeerLinks", Migration0070],
   [71, "PeerLinkFence", Migration0071],
   [72, "WaitingLinkRequestIndex", Migration0072],
-  // Fork-only. Earlier fork builds recorded these as 69/70 and then 70/71.
-  [73, "AuthDesktopPairingSessionTtl", Migration0073],
-  [74, "RealtimeVoiceHistoryResume", Migration0074],
+  [73, "ActiveTurnItemIndexes", Migration0073],
+  [74, "ExcludeAttachmentPlaceholdersFromSearch", Migration0074],
+  [75, "SubagentDeliveryState", Migration0075],
+  [76, "ProjectionProjectsPinArchive", Migration0076],
+  // Fork-only. Earlier fork builds recorded these as 69/70, 70/71, then 73/74.
+  [77, "AuthDesktopPairingSessionTtl", Migration0077],
+  [78, "RealtimeVoiceHistoryResume", Migration0078],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -235,8 +243,8 @@ const reconcileDesktopPairingBackport = Effect.fn("reconcileDesktopPairingBackpo
 });
 
 // Fork databases recorded the fork-only migrations under ids upstream later
-// took (69/70, then 70/71). Dropping those rows lets upstream's migrations run
-// at their ids; both fork migrations are idempotent and rerun as 73/74.
+// took (69/70, 70/71, then 73/74). Dropping those rows lets upstream's migrations
+// run at their ids; both fork migrations are idempotent and rerun as 77/78.
 const reconcileForkRenumber = Effect.fn("reconcileForkRenumber")(function* () {
   const sql = yield* SqlClient.SqlClient;
   const tables = yield* sql<{ readonly name: string }>`
@@ -245,8 +253,8 @@ const reconcileForkRenumber = Effect.fn("reconcileForkRenumber")(function* () {
   if (tables.length === 0) return;
   yield* sql`
     DELETE FROM effect_sql_migrations
-    WHERE (migration_id IN (69, 70) AND name = 'AuthDesktopPairingSessionTtl')
-      OR (migration_id IN (70, 71) AND name = 'RealtimeVoiceHistoryResume')
+    WHERE (migration_id IN (69, 70, 73) AND name = 'AuthDesktopPairingSessionTtl')
+      OR (migration_id IN (70, 71, 74) AND name = 'RealtimeVoiceHistoryResume')
   `;
 });
 

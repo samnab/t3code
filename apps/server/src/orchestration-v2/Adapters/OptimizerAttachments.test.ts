@@ -131,6 +131,7 @@ describe("optimizer attachment projections", () => {
       const antigravity = acpMcpContext(
         undefined,
         { command: "t3", entrypoint: undefined },
+        undefined,
         readSessionOptimizerAttachments(threadId),
       );
       expect(antigravity.servers).toContainEqual({
@@ -154,11 +155,13 @@ describe("optimizer attachment projections", () => {
       acpMcpContext(
         undefined,
         { command: "t3", entrypoint: undefined },
+        undefined,
         readSessionOptimizerAttachments(threadId),
       ),
     ).toEqual({
       servers: [],
       acpServers: [],
+      httpServers: [],
     });
   });
 

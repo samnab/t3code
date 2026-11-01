@@ -24,9 +24,7 @@ import {
   type SessionOptimizerAttachmentDescriptor,
 } from "@t3tools/provider-core/server/sessionOptimizerAttachments";
 
-export function configuredOptimizerIds(
-  settings: ProjectOptimizerSettings,
-): ReadonlyArray<OptimizerId> {
+function configuredOptimizerIds(settings: ProjectOptimizerSettings): ReadonlyArray<OptimizerId> {
   return [
     ...(settings.rtk ? (["rtk"] satisfies OptimizerId[]) : []),
     ...(settings.headroom ? (["headroom"] satisfies OptimizerId[]) : []),
@@ -69,8 +67,10 @@ const make = Effect.gen(function* () {
   const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
 
-  const resolve: SessionOptimizerAttachments["Service"]["resolve"] = (input) =>
-    Effect.gen(function* () {
+  const resolve: SessionOptimizerAttachments["Service"]["resolve"] = Effect.fn(
+    "SessionOptimizerAttachments.resolve",
+  )(
+    function* (input: Parameters<SessionOptimizerAttachments["Service"]["resolve"]>[0]) {
       clearSessionOptimizerAttachments(input.threadId);
       if (input.cwd === null) return undefined;
 
@@ -140,14 +140,17 @@ const make = Effect.gen(function* () {
         );
       }
       return descriptor;
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("Could not resolve optimizer attachments for provider session.", {
-          threadId: input.threadId,
-          cause,
-        }).pipe(Effect.as(undefined)),
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not resolve optimizer attachments for provider session.", {
+            threadId: input.threadId,
+            cause,
+          }).pipe(Effect.as(undefined)),
+        ),
       ),
-    );
+  );
 
   const getStatus: SessionOptimizerAttachments["Service"]["getStatus"] = (input) =>
     optimizerProbe.getStatus(input).pipe(

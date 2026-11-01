@@ -134,7 +134,7 @@ export class OptimizerProbeService extends Context.Service<
 const safeTokenCount = (value: unknown): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 
-export function parseRtkSavings(stdout: string): number | null {
+function parseRtkSavings(stdout: string): number | null {
   const decoded = decodeRtkGain(stdout);
   return Option.isSome(decoded) ? safeTokenCount(decoded.value.summary.total_saved) : null;
 }
@@ -595,7 +595,7 @@ export const makeWith = Effect.fn("OptimizerProbeService.makeWith")(function* (
   return OptimizerProbeService.of({ getStatus, startHeadroom });
 });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const settings = yield* ServerSettings.ServerSettingsService;
   const cbmIndexes = yield* CbmIndexService;

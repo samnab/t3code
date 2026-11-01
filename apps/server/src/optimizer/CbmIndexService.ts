@@ -328,7 +328,7 @@ export const makeWith = Effect.fn("CbmIndexService.makeWith")(function* (
   return CbmIndexService.of({ ensureIndexed, listStatuses });
 });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const settings = yield* ServerSettingsService.ServerSettingsService;
   const path = yield* Path.Path;

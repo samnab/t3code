@@ -13,7 +13,7 @@ interface ProviderInputMessage {
 }
 
 /** Returns the provider-only goal block until a T3 goal is completed. */
-export function getT3GoalInjection(thread: ThreadGoalState): string | null {
+function getT3GoalInjection(thread: ThreadGoalState): string | null {
   if (
     thread.goal == null ||
     thread.goalLoop?.mode !== "t3" ||
@@ -28,7 +28,7 @@ export function getT3GoalInjection(thread: ThreadGoalState): string | null {
   });
 }
 
-export function formatThreadGoalInjection(input: {
+function formatThreadGoalInjection(input: {
   readonly goal: string;
   readonly iteration: number;
   readonly maxIterations: number;
