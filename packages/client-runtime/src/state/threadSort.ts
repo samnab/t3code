@@ -331,7 +331,7 @@ export function sortActiveThreadsByOrderKey<
 }
 
 /** Applies the user's thread sort to the active block on every client.
-    "created_at" (Default) keeps the saved arrangement; "updated_at" (Last
+    "created_at" (Manual) keeps the saved arrangement; "updated_at" (Last
     updated) ranks by the user's latest message, newest first. */
 export function sortActiveThreadsBySortOrder<
   T extends ThreadSortInput & {

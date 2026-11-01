@@ -335,7 +335,7 @@ const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
 const WORKING_SHELF_EXPANDED_KEY = "t3code:sidebar:working-expanded";
 const isSidebarThreadSortOrder = Schema.is(SidebarThreadSortOrder);
 const SIDEBAR_THREAD_SORT_LABELS: Record<SidebarThreadSortOrder, string> = {
-  created_at: "Default",
+  created_at: "Manual",
   updated_at: "Last updated",
 };
 
@@ -683,9 +683,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   }
   if (input.threadSortOrder === "updated_at") {
     for (const thread of active) {
-      const key = threadShellKey(thread);
-      draggableThreadKeys.delete(key);
-      activeReorderableThreadKeys.delete(key);
+      activeReorderableThreadKeys.delete(threadShellKey(thread));
     }
   }
   // Availability gates dragging only; sorting must stay consistent across clients.

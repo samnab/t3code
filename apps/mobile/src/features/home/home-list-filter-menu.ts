@@ -5,7 +5,7 @@ export const THREAD_SORT_OPTIONS: ReadonlyArray<{
   readonly value: SidebarThreadSortOrder;
   readonly label: string;
 }> = [
-  { value: "created_at", label: "Default" },
+  { value: "created_at", label: "Manual" },
   { value: "updated_at", label: "Last updated" },
 ];
 

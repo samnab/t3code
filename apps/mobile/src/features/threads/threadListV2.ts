@@ -248,7 +248,7 @@ function parseTimestampMs(isoDate: string): number {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-/** The active order shared by web and native. "created_at" (Default):
+/** The active order shared by web and native. "created_at" (Manual):
     new/reopened rows, then the saved arrangement, so activity does not move a
     thread. "updated_at" (Last updated): newest user message first. */
 export function sortThreadsForListV2<
