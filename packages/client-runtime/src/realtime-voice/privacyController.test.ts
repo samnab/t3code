@@ -139,6 +139,7 @@ function fixture(holdAt?: Stage, requireMountedOwner = false, keywordsEnabled = 
         capture: (frame: string) => {
           if (transport.sending && !transport.muted) transport.sent.push(frame);
         },
+        levels: () => ({ input: 0.3, output: 0.2 }),
         setMicMuted: (muted: boolean) => {
           operations.push(muted ? "mute" : "unmute");
           transport.muted = muted;
@@ -1020,7 +1021,7 @@ describe("local privacy pause", () => {
       expect(h.controller.getSnapshot().listening).toBe("unavailable");
     });
 
-    it("stays exactly as before when keywords are off, and Mic off releases local listening", async () => {
+    it("stays exactly as before when keywords are off, and Stop session releases local listening", async () => {
       const f = fixture();
       await f.controller.start(f.owner);
       f.controller.pause();
@@ -1085,5 +1086,19 @@ describe("microphone mute", () => {
     await f.controller.start(f.owner);
     expect(f.transports[1]!.muted).toBe(false);
     expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", micMuted: false });
+  });
+
+  it("reports levels only from a transmitting call", async () => {
+    const f = fixture("remote");
+    const starting = f.controller.start(f.owner);
+    await f.entered.promise;
+    expect(f.controller.levels()).toEqual({ input: 0, output: 0 });
+    f.gate.resolve();
+    await starting;
+    expect(f.controller.levels()).toEqual({ input: 0.3, output: 0.2 });
+    f.controller.pause();
+    expect(f.controller.levels()).toEqual({ input: 0, output: 0 });
+    await whenMode(f.controller, "paused");
+    expect(f.controller.levels()).toEqual({ input: 0, output: 0 });
   });
 });

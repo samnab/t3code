@@ -25,6 +25,7 @@ import { randomUUID } from "../../lib/utils";
 import {
   createRealtimeVoiceController,
   type RealtimeVoiceController,
+  type VoiceLevels,
   type VoiceOwner,
   type VoiceSnapshot,
 } from "@t3tools/client-runtime/realtime-voice";
@@ -96,6 +97,8 @@ interface VoiceContext {
   readonly resume: () => void;
   readonly end: () => void;
   readonly cancelResume: () => void;
+  readonly toggleMute: () => void;
+  readonly levels: () => VoiceLevels;
   readonly setKeywords: (enabled: boolean) => void;
   readonly returnToOwner: (owner: VoiceOwner) => void;
 }
@@ -163,6 +166,7 @@ export function RealtimeVoiceProvider({
     return { controller, detector };
   });
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- controller subscription that raises an imperative toast when a call ends
   useEffect(() => {
     let previous = controller.getSnapshot();
     return controller.subscribe(() => {
@@ -181,6 +185,7 @@ export function RealtimeVoiceProvider({
       }
     });
   }, [controller]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window, document and desktop listeners that pause or end voice
   useEffect(() => {
     const end = () => controller.end("Voice ended because the app is closing or suspended.");
     // Desktop voice outlives a hidden window; screen lock and sleep pause it instead.
@@ -216,6 +221,7 @@ export function RealtimeVoiceProvider({
   }, [controller, detector]);
   // Separate from the lifecycle effect, whose cleanup ends voice, so remapping never ends a call.
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window keydown listener for voice shortcuts
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.defaultPrevented || controller.getSnapshot().mode === "off") return;
@@ -248,6 +254,8 @@ export function RealtimeVoiceProvider({
         resume: () => resumeVoice(controller),
         end: () => controller.end(),
         cancelResume: () => controller.cancelResume(),
+        toggleMute: () => controller.setMicMuted(!controller.getSnapshot().micMuted),
+        levels: controller.levels,
         setKeywords: (enabled) => {
           try {
             window.localStorage.setItem(KEYWORDS_STORAGE_KEY, enabled ? "on" : "off");

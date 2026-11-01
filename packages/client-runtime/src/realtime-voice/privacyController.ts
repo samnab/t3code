@@ -48,8 +48,17 @@ export interface VoiceTransport {
   enableMicrophone(): void;
   /** Shuts or reopens the gate within the call; playback continues. Absent where unsupported. */
   setMicMuted?(muted: boolean): void;
+  /** Current levels, read on demand by a meter. Absent where unsupported. */
+  levels?(): VoiceLevels;
   close(): void;
 }
+
+/** RMS of the audio actually sent (after the gate and mute) and of the assistant's audio. */
+export interface VoiceLevels {
+  readonly input: number;
+  readonly output: number;
+}
+const SILENT: VoiceLevels = { input: 0, output: 0 };
 
 export const VOICE_REPLACEMENT_GATE =
   "Microphone off. The host has not confirmed that this call closed. New calls remain blocked.";
@@ -571,6 +580,12 @@ export function createRealtimeVoiceController(deps: {
     micMuted = muted;
     republish();
   };
+  /** Poll it from a meter; levels never go through `subscribe`. Zero outside a live call. */
+  const levels = (): VoiceLevels => {
+    const value = attempt;
+    if (snapshot.mode !== "transmitting" || value === null || !current(value)) return SILENT;
+    return value.transport?.levels?.() ?? SILENT;
+  };
   const setKeywords = (enabled: boolean) => {
     keywords = enabled && deps.localListening !== undefined;
     if (snapshot.mode === "paused" && attempt === null) {
@@ -590,6 +605,7 @@ export function createRealtimeVoiceController(deps: {
     localListeningFailed,
     setKeywords,
     setMicMuted,
+    levels,
     getSnapshot: () => snapshot,
     subscribe: (listener: () => void) => {
       listeners.add(listener);

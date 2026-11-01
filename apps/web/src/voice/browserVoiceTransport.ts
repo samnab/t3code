@@ -4,8 +4,6 @@ import type { VoiceTransport } from "@t3tools/client-runtime/realtime-voice";
  * A single peer and sink; closing also releases a microphone granted after cancellation.
  * The peer sends a Web Audio destination track. The microphone reaches it only while the gate
  * (the source → destination connection) is open, so the sender never holds the raw track.
- * `setMicMuted` shuts the same gate inside a live call while the peer keeps sending silence, so
- * playback and the call stay up; unmuting reopens it through the same fresh-frames discard.
  * `tapKeywords`, when given, also feeds the microphone to the local keyword detector.
  */
 // Audio already in the track pipeline at gate-open predates it. With synthetic tracks, holding 8
@@ -36,9 +34,20 @@ export function createBrowserVoiceTransport(
   const audio = document.createElement("audio");
   audio.autoplay = true;
   const channel = peer.createDataChannel("oai-events");
+  const inputMeter = context.createAnalyser();
+  const outputMeter = context.createAnalyser();
+  const meterFrame = new Float32Array(inputMeter.fftSize);
+  let assistant: MediaStreamAudioSourceNode | null = null;
+  const rms = (analyser: AnalyserNode) => {
+    analyser.getFloatTimeDomainData(meterFrame);
+    let sum = 0;
+    for (const sample of meterFrame) sum += sample * sample;
+    return Math.sqrt(sum / meterFrame.length);
+  };
   let microphone: MediaStream | null = null;
   let graph: {
     readonly source: MediaStreamAudioSourceNode;
+    readonly silence: ConstantSourceNode;
     readonly output: MediaStreamAudioDestinationNode;
   } | null = null;
   let gateOpen = false;
@@ -57,6 +66,11 @@ export function createBrowserVoiceTransport(
     void audio.play().catch(() => {
       if (!closed) events.failed("Voice playback is unavailable. Microphone off.");
     });
+    const stream = event.streams[0];
+    if (assistant === null && stream !== undefined) {
+      assistant = context.createMediaStreamSource(stream);
+      assistant.connect(outputMeter);
+    }
   };
   const onConnectionState = () => {
     if (closed) return;
@@ -99,6 +113,8 @@ export function createBrowserVoiceTransport(
     channel.removeEventListener("error", onChannelError);
     audio.removeEventListener("error", onAudioError);
   });
+  // A muted gate is still created and connected, without the microphone. The zero source keeps it
+  // live: with no active input, Chromium's destination emits no frames and the peer sends no RTP.
   const openGate = (open: NonNullable<typeof graph>) => {
     const gain = context.createGain();
     gain.gain.value = 0;
@@ -106,8 +122,10 @@ export function createBrowserVoiceTransport(
       1,
       context.currentTime + (GATE_DISCARD_QUANTA * 128) / context.sampleRate,
     );
-    open.source.connect(gain);
+    open.silence.connect(gain);
+    if (!micMuted) open.source.connect(gain);
     gain.connect(open.output);
+    gain.connect(inputMeter);
     opening = gain;
   };
   return {
@@ -129,8 +147,11 @@ export function createBrowserVoiceTransport(
       }
       graph = {
         source: context.createMediaStreamSource(stream),
+        silence: context.createConstantSource(),
         output: context.createMediaStreamDestination(),
       };
+      graph.silence.offset.value = 0;
+      graph.silence.start();
       for (const track of graph.output.stream.getAudioTracks()) {
         peer.addTrack(track, graph.output.stream);
       }
@@ -187,22 +208,31 @@ export function createBrowserVoiceTransport(
       if (closed || graph === null || context.state !== "running") return;
       gateOpen = true;
       for (const track of microphone?.getTracks() ?? []) track.enabled = true;
-      if (!micMuted && opening === null) openGate(graph);
+      if (opening === null) openGate(graph);
     },
-    // The microphone track stays enabled while muted: the keyword detector still hears a spoken
+    // Mute cuts the microphone from the gate; the peer keeps sending silence and playback continues.
+    // Unmute opens a fresh gate with the same discard. The microphone track stays enabled while muted: the keyword detector still hears a spoken
     // privacy pause, and some browsers stop or re-acquire a disabled device, which would trip the
     // `mute`/`ended` failure listeners. The gate alone keeps samples from the sender.
     setMicMuted(muted) {
       if (closed || muted === micMuted) return;
       micMuted = muted;
-      if (!gateOpen || graph === null) return;
-      if (!muted) openGate(graph);
-      else if (opening !== null) {
-        graph.source.disconnect(opening);
+      if (graph === null || opening === null) return;
+      if (muted) graph.source.disconnect(opening);
+      else {
         opening.disconnect();
-        opening = null;
+        openGate(graph);
       }
     },
+    // Meter-only analysers after the gate and on the remote stream; neither reaches the context
+    // destination. A shut gate reads zero outright: a disconnected analyser keeps its last frame.
+    levels: () =>
+      closed
+        ? { input: 0, output: 0 }
+        : {
+            input: opening === null || micMuted ? 0 : rms(inputMeter),
+            output: assistant === null ? 0 : rms(outputMeter),
+          },
     close() {
       if (closed) return;
       closed = true;

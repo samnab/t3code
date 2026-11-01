@@ -39,8 +39,9 @@ function fixture(contextState: AudioContextState = "running") {
   const opening = {
     target: null as typeof output | null,
     gain: { value: 1, setValueAtTime: vi.fn() },
-    connect: (target: typeof output) => {
-      opening.target = target;
+    // The gate also feeds the input meter; only the sender's destination carries frames here.
+    connect: (target: object) => {
+      if (target === output) opening.target = output;
     },
     disconnect: () => {
       opening.target = null;
@@ -60,12 +61,26 @@ function fixture(contextState: AudioContextState = "running") {
   const closeContext = vi.fn(async () => {});
   const resumeContext = vi.fn(async () => {});
   const contexts: FakeAudioContext[] = [];
+  // Each analyser reports a steady level; the first created meters input, the second the assistant.
+  const analysers: Array<{ level: number }> = [];
+  const createAnalyser = () => {
+    const analyser = {
+      level: 0,
+      fftSize: 4,
+      getFloatTimeDomainData: (frame: Float32Array) => frame.fill(analyser.level),
+    };
+    analysers.push(analyser);
+    return analyser;
+  };
   const context = () => contexts[0]!;
   class FakeAudioContext extends EventTarget {
     state = contextState;
-    createMediaStreamSource = () => source;
+    // The remote stream only feeds the assistant meter.
+    createMediaStreamSource = (stream: object) => ("id" in stream ? { connect: () => {} } : source);
     createMediaStreamDestination = () => output;
     createGain = () => opening;
+    createConstantSource = () => ({ offset: { value: 1 }, connect: () => {}, start: () => {} });
+    createAnalyser = createAnalyser;
     currentTime = 0;
     sampleRate = 48_000;
     resume = resumeContext;
@@ -121,6 +136,10 @@ function fixture(contextState: AudioContextState = "running") {
     connected,
     opening,
     context,
+    setLevels: (input: number, output: number) => {
+      analysers[0]!.level = input;
+      analysers[1]!.level = output;
+    },
     remoteStream: () => {
       const remote = { id: "remote" };
       peers[0]!.dispatchEvent(Object.assign(new Event("track"), { streams: [remote] }));
@@ -285,5 +304,26 @@ describe("browser voice microphone mute", () => {
     expect(f.audio.srcObject).toBeNull();
     expect(f.closeContext).toHaveBeenCalledOnce();
     expect(f.failed).not.toHaveBeenCalled();
+  });
+});
+
+describe("browser voice levels", () => {
+  it("reads input only through an open, unmuted gate and the assistant throughout a mute", async () => {
+    const f = fixture();
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    f.setLevels(0.5, 0.25);
+    expect(f.transport.levels?.()).toEqual({ input: 0, output: 0 });
+    f.remoteStream();
+    expect(f.transport.levels?.()).toEqual({ input: 0, output: 0.25 });
+    f.transport.enableMicrophone();
+    expect(f.transport.levels?.()).toEqual({ input: 0.5, output: 0.25 });
+    f.transport.setMicMuted?.(true);
+    expect(f.transport.levels?.()).toEqual({ input: 0, output: 0.25 });
+    f.transport.setMicMuted?.(false);
+    expect(f.transport.levels?.()).toEqual({ input: 0.5, output: 0.25 });
+    f.transport.close();
+    expect(f.transport.levels?.()).toEqual({ input: 0, output: 0 });
   });
 });

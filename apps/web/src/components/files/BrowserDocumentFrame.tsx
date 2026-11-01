@@ -47,7 +47,7 @@ import { primaryServerKeybindingsAtom, serverEnvironment } from "~/state/server"
 /**
  * The page reports the keys, and a page script can report any key it likes,
  * so only commands that change what the reader sees are here, never one that
- * changes a thread. Voice Pause and Mic off only revoke the microphone: a
+ * changes a thread. Voice Pause and Stop session only revoke the microphone: a
  * replayed key is untrusted, and the voice owner never resumes on one.
  */
 const HTML_RENDER_SHORTCUT_COMMANDS: ReadonlySet<KeybindingCommand> = new Set([

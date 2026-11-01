@@ -1204,12 +1204,25 @@ function OpenCommandPaletteDialog(props: {
       icon: <MicIcon className={ITEM_ICON_CLASS} />,
       run: async () => voice.setKeywords(!voice.snapshot.keywords),
     });
+  if (voiceMode === "transmitting")
+    actionItems.push({
+      kind: "action",
+      value: "action:voice-mute",
+      searchTerms: ["voice", "microphone", "mute", "unmute"],
+      title: voice.snapshot.micMuted ? "Unmute microphone" : "Mute microphone",
+      icon: voice.snapshot.micMuted ? (
+        <MicIcon className={ITEM_ICON_CLASS} />
+      ) : (
+        <MicOffIcon className={ITEM_ICON_CLASS} />
+      ),
+      run: async () => voice.toggleMute(),
+    });
   if (voiceMode !== "off") {
     actionItems.push({
       kind: "action",
       value: "action:voice-mic-off",
-      searchTerms: ["voice", "microphone", "mic off", "end voice", "stop"],
-      title: "Mic off (end voice)",
+      searchTerms: ["voice", "microphone", "mic off", "end voice", "stop", "session"],
+      title: "Stop voice session",
       icon: <MicOffIcon className={ITEM_ICON_CLASS} />,
       run: async () => voice.end(),
     });
