@@ -18,6 +18,7 @@ import {
 import { harnessOwner } from "./owner";
 import pausePhraseUrl from "./fixtures/pause-phrase.wav?url";
 import resumePhraseUrl from "./fixtures/resume-phrase.wav?url";
+import confirmPhraseUrl from "./fixtures/confirm-phrase.wav?url";
 import { providerHooks, randomUUID } from "./stubs";
 
 declare global {
@@ -145,7 +146,7 @@ AudioNode.prototype.connect = function (this: AudioNode, ...args: Array<never>) 
 } as typeof AudioNode.prototype.connect;
 
 /**
- * Speaks a synthetic TTS phrase (macOS `say`, not human) into the synthetic microphone until
+ * Speaks a synthetic TTS phrase (macOS `say` or Piper, not human) into the synthetic microphone until
  * `heard()`, at most three times. The detector misses some utterances (REPORT.md: 40/48 on the
  * TTS set); attempts are reported, never hidden.
  */
@@ -160,7 +161,7 @@ async function sayUntil(url: string, markerGain: number, heard: () => boolean) {
   throw new Error(`keyword not detected in 3 utterances of ${url}`);
 }
 
-/** Plays a synthetic TTS phrase (macOS `say`, not human) into the synthetic microphone. */
+/** Plays a synthetic TTS phrase (macOS `say` or Piper, not human) into the synthetic microphone. */
 async function speak(url: string, markerGain: number) {
   const buffer = await generator.decodeAudioData(await (await fetch(url)).arrayBuffer());
   note(`decoded ${buffer.duration.toFixed(2)}s`);
@@ -204,6 +205,12 @@ window.Worker = class extends NativeWorker {
       }
     });
   }
+};
+
+/** True once the worker has reported `command` more times than it had when this was called. */
+const commandHeard = (command: string) => {
+  const before = keywordWorkerStats.commands.filter((each) => each === command).length;
+  return () => keywordWorkerStats.commands.filter((each) => each === command).length > before;
 };
 
 const realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -1343,6 +1350,137 @@ async function caseKeywords(): Promise<CaseResult> {
   });
 }
 
+/**
+ * Detector control for the three phrases: during a live call with keywords on, each fixture makes
+ * the worker report only its own command. The resume and confirm phrases are no-ops while live.
+ */
+async function caseKeywordFixtures(): Promise<CaseResult> {
+  return withCase(
+    "0c. keywords: each phrase fixture fires only its own command",
+    async (checks) => {
+      Reflect.deleteProperty(window, "desktopBridge");
+      const unmount = mountProvider();
+      try {
+        await until(() => exposed !== null, "provider");
+        exposed!.setKeywords(true);
+        await until(() => exposed!.snapshot.keywords, "keywords on");
+        exposed!.start(owner.environmentId, owner.threadId);
+        await until(() => providerMode() === "transmitting", "transmitting");
+        // Pause last: it ends the call.
+        const phrases = [
+          ["resume", resumePhraseUrl],
+          ["confirm", confirmPhraseUrl],
+          ["pause", pausePhraseUrl],
+        ] as const;
+        for (const [command, url] of phrases) {
+          const from = keywordWorkerStats.commands.length;
+          const attempts = await sayUntil(url, 0, commandHeard(command));
+          await sleep(500);
+          const heard = keywordWorkerStats.commands.slice(from);
+          checks.push({
+            name: `${command} fixture fires only ${command}`,
+            ok: heard.every((each) => each === command),
+            detail: { heard, attempts },
+          });
+          if (command !== "pause")
+            checks.push({
+              name: `${command} phrase is ignored while transmitting`,
+              ok: providerMode() === "transmitting" && startCalls === 1,
+            });
+        }
+        await until(() => providerMode() === "paused", "paused by the pause fixture");
+        exposed!.end();
+        await until(() => providerMode() === "off", "off");
+      } finally {
+        exposed?.setKeywords(false);
+        unmount();
+        await sleep(300);
+      }
+    },
+  );
+}
+
+/**
+ * Keywords on, hands-free: R plays under every spoken phrase. A confirm with no arm and one after
+ * the arm expired stay paused; arm, wait past the gap, then confirm resumes. C starts at the real
+ * gate connect, so neither the phrases (R) nor the private interval (B) may reach the new call.
+ */
+async function caseSpokenConfirm(): Promise<CaseResult> {
+  return withCase("6b. keywords: two-step spoken resume", async (checks) => {
+    Reflect.deleteProperty(window, "desktopBridge");
+    const unmount = mountProvider();
+    const snapshot = () => exposed!.snapshot;
+    const sayOverR = async (url: string, heard: () => boolean) => {
+      setMarker("R");
+      try {
+        return await sayUntil(url, R_UNDER_SPEECH, heard);
+      } finally {
+        if (providerMode() === "paused") setMarker("B");
+      }
+    };
+    try {
+      await until(() => exposed !== null, "provider");
+      exposed!.setKeywords(true);
+      await until(() => snapshot().keywords, "keywords on");
+      exposed!.start(owner.environmentId, owner.threadId);
+      await until(() => providerMode() === "transmitting", "transmitting");
+      setMarker("A");
+      await sleep(1_500);
+      const attempts: Record<string, number> = {};
+      attempts.pause = await sayUntil(pausePhraseUrl, 0, () => providerMode() === "paused");
+      setMarker("B");
+      await until(() => snapshot().listening === "listening", "local listening");
+      await sleep(2_500);
+      attempts.unarmedConfirm = await sayOverR(confirmPhraseUrl, commandHeard("confirm"));
+      await sleep(500);
+      checks.push({
+        name: "confirm without an arm stays paused",
+        ok: providerMode() === "paused" && snapshot().listening === "listening" && startCalls === 1,
+        detail: { mode: providerMode(), listening: snapshot().listening, startCalls },
+      });
+      attempts.arm = await sayOverR(resumePhraseUrl, () => snapshot().listening === "armed");
+      await until(() => snapshot().listening === "listening", "arm expiry", 12_000);
+      attempts.expiredConfirm = await sayOverR(confirmPhraseUrl, commandHeard("confirm"));
+      await sleep(500);
+      checks.push({
+        name: "confirm after the arm expired stays paused",
+        ok: providerMode() === "paused" && snapshot().listening === "listening" && startCalls === 1,
+        detail: { mode: providerMode(), listening: snapshot().listening, startCalls },
+      });
+      attempts.rearm = await sayOverR(resumePhraseUrl, () => snapshot().listening === "armed");
+      await sleep(2_500);
+      // Every microphone grant after the first call's belongs to local listening.
+      const detectorTracks = issuedTracks.slice(1);
+      markerOnEnable = "C";
+      attempts.confirm = await sayOverR(confirmPhraseUrl, () => providerMode() !== "paused");
+      await until(() => providerMode() === "transmitting", "transmitting after spoken confirm");
+      checks.push({ name: "arm, gap, then confirm resumes", ok: startCalls === 2 });
+      checks.push({
+        name: "every detector-only track ended after the spoken confirm",
+        ok:
+          detectorTracks.length > 0 &&
+          detectorTracks.every((track) => track.readyState === "ended"),
+        detail: detectorTracks.map((track) => track.readyState),
+      });
+      await sleep(1_000);
+      checks.push({
+        name: "A at rx0, C at rx1",
+        ok:
+          (byLabel(recordings.map(analyze), "rx0")?.a ?? 0) > 10 &&
+          (byLabel(recordings.map(analyze), "rx1")?.c ?? 0) > 10,
+      });
+      exposed!.end();
+      await until(() => providerMode() === "off", "off");
+      checks.push({ name: "utterances needed per keyword", ok: true, detail: attempts });
+    } finally {
+      markerOnEnable = null;
+      exposed?.setKeywords(false);
+      unmount();
+      await sleep(300);
+    }
+  });
+}
+
 async function runAll(): Promise<HarnessReport> {
   await generator.resume();
   await analysisContext.resume();
@@ -1350,6 +1488,7 @@ async function runAll(): Promise<HarnessReport> {
   const environment = await probe();
   cases.push(await caseBDetectable());
   cases.push(await caseRDetectable());
+  cases.push(await caseKeywordFixtures());
   cases.push(await caseAbc());
   cases.push(await caseResumeBleed());
   cases.push(...(await caseRaces()));
@@ -1358,6 +1497,7 @@ async function runAll(): Promise<HarnessReport> {
   cases.push(...(await caseErrors()));
   cases.push(await caseCycles());
   cases.push(await caseKeywords());
+  cases.push(await caseSpokenConfirm());
   return {
     userAgent: navigator.userAgent,
     nonce: NONCE,

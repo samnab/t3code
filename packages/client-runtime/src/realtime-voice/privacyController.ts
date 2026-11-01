@@ -68,6 +68,9 @@ const MAX_VOICE_LIFETIME_MS = 4 * 60 * 60 * 1_000;
 const LOCAL_LISTENING_UNAVAILABLE = "Paused: local listening unavailable";
 /** How long a spoken resume phrase keeps the confirm prompt open. */
 const RESUME_ARM_MS = 10_000;
+// ponytail: from offline TTS runs, not a real device. Long enough that one utterance cannot both arm
+// and confirm; calibrate against real speakers and rooms.
+const CONFIRM_MIN_GAP_MS = 2_000;
 // ponytail: fixed, not measured on real speakers. The call's playback element is gone once paused,
 // so this only covers room echo and output latency. Calibrate with a physical speaker test.
 const RESUME_ECHO_TAIL_MS = 2_000;
@@ -84,10 +87,9 @@ type VoiceState = {
   readonly expiresAt: string | null;
 };
 /**
- * On-device keyword listening while paused. "listening": the microphone is captured for the local
- * detector only and no call exists. "armed": the resume phrase was heard; a trusted local confirm is
- * still required. "unavailable": capture or the detector failed, so nothing is listening.
- * Always "off" outside "paused".
+ * On-device keyword listening while paused. "listening": the microphone feeds the local detector
+ * only and no call exists. "armed": the resume phrase was heard; the confirm phrase or a trusted
+ * Confirm must follow. "unavailable": capture or the detector failed. "off" outside "paused".
  */
 export type LocalListening = "off" | "listening" | "armed" | "unavailable";
 /** `micMuted`: this device's outbound microphone is muted inside the call. It survives pause,
@@ -167,8 +169,8 @@ function readOwnership(
 
 /** The shared mode/generation/owner authority; platform transports enforce local teardown.
  * Paused with keywords on, `localListening` is a separate detector-only capture, stopped before
- * Resume creates the new call. A keyword pause acts at once; a keyword resume only arms the
- * confirm prompt. No remote input can call `resume`. */
+ * Resume creates the new call. A keyword pause acts at once; a keyword resume only arms, and the
+ * spoken confirm phrase resumes only while armed. No remote input can call `resume`. */
 export function createRealtimeVoiceController(deps: {
   readonly createTransport: (events: {
     connected(): void;
@@ -196,6 +198,7 @@ export function createRealtimeVoiceController(deps: {
   let listening: LocalListening = "off";
   let micMuted = false;
   let pausedAt = 0;
+  let armedAt = 0;
   let cancelArm: (() => void) | null = null;
   let snapshot: VoiceSnapshot = {
     mode: "off",
@@ -333,10 +336,12 @@ export function createRealtimeVoiceController(deps: {
       expiresAt: snapshot.expiresAt,
     });
   };
-  /** Privacy pause. Revokes like Stop session, then lands in "paused" once the provider stop settles. */
+  /** Privacy pause. Revokes like Stop session, then lands in "paused" once the provider stop settles.
+   * Already paused, it cancels an armed resume: the spoken pause phrase is also the spoken cancel. */
   const pause = (reason: string | null = null) => {
     moveIntent = null;
-    cancelAttempt(reason, true);
+    if (attempt === null && snapshot.mode === "paused") cancelResume();
+    else cancelAttempt(reason, true);
   };
   const markConnected = (value: Attempt) => {
     if (!current(value) || !value.descriptionReady || !value.transport?.isConnected()) return;
@@ -520,9 +525,10 @@ export function createRealtimeVoiceController(deps: {
     await begin(destination, muted);
   };
   /**
-   * The only way out of pause, and only from a local user action: a new operation, peer and
-   * microphone grant for the paused conversation. Nothing captured before or during the pause
-   * survives into it. Pass a freshly read owner; a failed check leaves voice paused.
+   * The only way out of pause, from a trusted local action or a confirmed spoken resume
+   * (`spokenConfirm`): a new operation, peer and microphone grant for the paused conversation.
+   * Nothing captured before or during the pause survives into it. Pass a freshly read owner; a
+   * failed check leaves voice paused.
    */
   const resume = async (owner: VoiceOwner) => {
     if (
@@ -549,8 +555,20 @@ export function createRealtimeVoiceController(deps: {
     // Ignore the room's echo of the assistant's last words after the call closed.
     if (deps.now() < pausedAt + RESUME_ECHO_TAIL_MS) return;
     listening = "armed";
-    cancelArm = deps.scheduleExpiry(deps.now() + RESUME_ARM_MS, () => cancelResume());
+    armedAt = deps.now();
+    cancelArm = deps.scheduleExpiry(armedAt + RESUME_ARM_MS, () => cancelResume());
     republish();
+  };
+  /**
+   * The spoken confirm phrase: resumes only while armed, at least CONFIRM_MIN_GAP_MS after the arm
+   * and before its deadline. Anywhere else it does nothing and nothing is queued. Pass a freshly
+   * read owner, as for `resume`; a refused start lands back in "listening" and needs a new arm.
+   */
+  const spokenConfirm = async (owner: VoiceOwner) => {
+    if (snapshot.mode !== "paused" || attempt !== null || listening !== "armed") return;
+    const now = deps.now();
+    if (now < armedAt + CONFIRM_MIN_GAP_MS || now > armedAt + RESUME_ARM_MS) return;
+    await resume(owner);
   };
   const cancelResume = () => {
     if (listening !== "armed") return;
@@ -601,6 +619,7 @@ export function createRealtimeVoiceController(deps: {
     pause,
     resume,
     armResume,
+    spokenConfirm,
     cancelResume,
     localListeningFailed,
     setKeywords,

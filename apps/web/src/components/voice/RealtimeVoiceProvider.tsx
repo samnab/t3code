@@ -68,6 +68,17 @@ function resumeVoice(controller: RealtimeVoiceController) {
     reportUnavailable(error);
   }
 }
+// The spoken confirm phrase. Reads a fresh owner only while armed; anywhere else it does nothing.
+function confirmVoiceBySpeech(controller: RealtimeVoiceController) {
+  const snapshot = controller.getSnapshot();
+  if (snapshot.mode !== "paused" || snapshot.listening !== "armed") return;
+  try {
+    const owner = readVoiceOwner(snapshot.owner.environmentId, snapshot.owner.threadId);
+    void controller.spokenConfirm(owner).catch(reportUnavailable);
+  } catch (error) {
+    reportUnavailable(error);
+  }
+}
 function runVoiceShortcut(
   controller: RealtimeVoiceController,
   command: VoiceShortcutCommand,
@@ -119,9 +130,14 @@ export function RealtimeVoiceProvider({
   });
   const [{ controller, detector }] = useState(() => {
     // Keyword commands come only from this device's microphone. A pause acts at once; a resume
-    // only arms the confirm prompt. Detector failure pauses a live call and never resumes.
+    // only arms, and the confirm phrase resumes only while armed. Detector failure pauses a live
+    // call and never resumes.
     const detector = createKeywordDetector({
-      command: (command) => (command === "pause" ? controller.pause() : controller.armResume()),
+      command: (command) => {
+        if (command === "pause") controller.pause();
+        else if (command === "resume") controller.armResume();
+        else confirmVoiceBySpeech(controller);
+      },
       failed: () => controller.localListeningFailed(),
     });
     const controller: RealtimeVoiceController = createRealtimeVoiceController({

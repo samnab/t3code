@@ -29,6 +29,7 @@ const MODEL_RATE = 16000;
 const KEYWORDS = [
   "▁T ▁THREE ▁P RI V A C Y ▁PA U SE @pause",
   "▁T ▁THREE ▁RE S U ME ▁CON VER S ATION @resume",
+  "▁CON F IR M ▁UN P A U SE @confirm",
 ].join("\n");
 
 let kws = null;
@@ -128,6 +129,8 @@ async function init(message) {
     },
     // Tuned on the synthetic TTS set in /tmp/t3-voice-kws (REPORT.md): the default score of 1.0
     // caught half the phrases; 3.0 caught 40/48 with no false resume in 14 minutes of near-misses.
+    // With "confirm unpause" added (/tmp/t3-confirm/kws): 35/36 confirms over 12 Piper voices at 3
+    // rates, no cross-triggers with the other two phrases, no false hits in 12.6 minutes of negatives.
     maxActivePaths: 8,
     numTrailingBlanks: 1,
     keywordsScore: 3.0,
@@ -144,7 +147,7 @@ function onAudio(message) {
   while (kws.isReady(stream)) {
     kws.decode(stream);
     const keyword = kws.getResult(stream).keyword;
-    if (keyword === "pause" || keyword === "resume") {
+    if (keyword === "pause" || keyword === "resume" || keyword === "confirm") {
       kws.reset(stream);
       self.postMessage({ type: "command", command: keyword, generation, endSample });
     }

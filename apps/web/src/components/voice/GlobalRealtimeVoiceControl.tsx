@@ -37,11 +37,11 @@ const STATUS = {
 const LISTENING_STATUS = {
   off: STATUS.paused,
   listening: "Private: listening on this device; not sending",
-  armed: "Resume? Confirm to send audio",
-  unavailable: "Paused: local listening unavailable",
+  armed: "Resume? Say “confirm unpause” or press Confirm",
+  unavailable: "Keywords unavailable · press Resume",
 } as const;
 const KEYWORDS_HINT =
-  "Say “T3 privacy pause” to pause, or “T3 resume conversation” to ask to resume. Listening stays on this device, and resuming always needs your confirmation. Similar phrases such as “T3 privacy policy” can pause by mistake.";
+  "Say “T3 privacy pause” to pause. To resume, say “T3 resume conversation”, then say “confirm unpause” within 10 seconds, or press Confirm. Listening stays on this device. Similar phrases such as “T3 privacy policy” can pause by mistake.";
 
 function statusText(snapshot: Exclude<VoiceSnapshot, { mode: "off" }>): string {
   if (snapshot.mode === "paused") return LISTENING_STATUS[snapshot.listening];

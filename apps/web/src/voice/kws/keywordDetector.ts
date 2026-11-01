@@ -1,11 +1,11 @@
 import * as Schema from "effect/Schema";
 
 /**
- * On-device "T3 privacy pause" / "T3 resume conversation" detection in public/voice/kws. Assets
- * load lazily and are hash-checked here, so the worker needs no network; it answers only with a
- * command. Worker or worklet errors and a backlog over MAX_IN_FLIGHT report `failed`.
+ * On-device "T3 privacy pause" / "T3 resume conversation" / "confirm unpause" detection. Assets are
+ * hash-checked, so the worker needs no network. Commands are raw; the controller decides what one
+ * means now. Worker or worklet errors and a backlog over MAX_IN_FLIGHT report `failed`.
  */
-export type KeywordCommand = "pause" | "resume";
+export type KeywordCommand = "pause" | "resume" | "confirm";
 
 export interface KeywordDetector {
   /** Feeds `source` to the detector only. Resolves to a detach function. */
