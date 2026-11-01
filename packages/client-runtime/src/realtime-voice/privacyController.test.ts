@@ -39,6 +39,7 @@ function fixture(holdAt?: Stage, requireMountedOwner = false, keywordsEnabled = 
       readonly events: { connected(): void; failed(reason: string): void };
       closed: boolean;
       sending: boolean;
+      muted: boolean;
       ready: boolean;
       sent: string[];
       capture(frame: string): void;
@@ -132,10 +133,15 @@ function fixture(holdAt?: Stage, requireMountedOwner = false, keywordsEnabled = 
         events,
         closed: false,
         sending: false,
+        muted: false,
         ready: true,
         sent: [] as string[],
         capture: (frame: string) => {
-          if (transport.sending) transport.sent.push(frame);
+          if (transport.sending && !transport.muted) transport.sent.push(frame);
+        },
+        setMicMuted: (muted: boolean) => {
+          operations.push(muted ? "mute" : "unmute");
+          transport.muted = muted;
         },
         acquireMicrophone: () => step("microphone", index),
         async createOffer() {
@@ -884,7 +890,7 @@ describe("local privacy pause", () => {
     expect(g.controller.getSnapshot()).toMatchObject({ mode: "off", replacementBlocked: true });
   });
 
-  it("lets Mic off override a pending pause and forget a paused conversation", async () => {
+  it("lets Stop session override a pending pause and forget a paused conversation", async () => {
     const f = fixture();
     const closed = deferred();
     f.stopProvider.mockImplementationOnce(async () => {
@@ -1027,5 +1033,57 @@ describe("local privacy pause", () => {
       expect(g.controller.getSnapshot()).toMatchObject({ mode: "off", listening: "off" });
       expect(g.localListening.stop).toHaveBeenCalledOnce();
     });
+  });
+});
+
+describe("microphone mute", () => {
+  it("is refused while connecting or paused and survives pause, Resume and move", async () => {
+    const f = fixture("remote");
+    const starting = f.controller.start(f.owner);
+    await f.entered.promise;
+    f.controller.setMicMuted(true);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "connecting", micMuted: false });
+    f.gate.resolve();
+    await starting;
+    const first = f.transports[0]!;
+    first.capture("A");
+    f.controller.setMicMuted(true);
+    first.capture("B");
+    expect(first.sent).toEqual(["A"]);
+    expect(first.closed).toBe(false);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", micMuted: true });
+    f.controller.pause();
+    await whenMode(f.controller, "paused");
+    expect(first.closed).toBe(true);
+    f.controller.setMicMuted(false);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "paused", micMuted: true });
+    await f.controller.resume(f.owner);
+    const second = f.transports[1]!;
+    expect(f.operations.lastIndexOf("mute")).toBeLessThan(f.operations.lastIndexOf("microphone"));
+    second.capture("B2");
+    expect(second.sent).toEqual([]);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", micMuted: true });
+    await f.controller.move(f.other);
+    const third = f.transports[2]!;
+    third.capture("B3");
+    expect(third.sent).toEqual([]);
+    expect(f.controller.getSnapshot()).toMatchObject({ owner: f.other, micMuted: true });
+    f.controller.setMicMuted(false);
+    third.capture("C");
+    expect(third.sent).toEqual(["C"]);
+    expect(f.controller.getSnapshot().micMuted).toBe(false);
+  });
+
+  it("clears when the session stops, so the next call starts unmuted", async () => {
+    const f = fixture();
+    await f.controller.start(f.owner);
+    f.controller.setMicMuted(true);
+    f.controller.end();
+    await whenOff(f.controller);
+    expect(f.transports[0]!.closed).toBe(true);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "off", micMuted: false });
+    await f.controller.start(f.owner);
+    expect(f.transports[1]!.muted).toBe(false);
+    expect(f.controller.getSnapshot()).toMatchObject({ mode: "transmitting", micMuted: false });
   });
 });

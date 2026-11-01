@@ -46,6 +46,8 @@ export interface VoiceTransport {
   setRemoteDescription(sdp: string): Promise<void>;
   isConnected(): boolean;
   enableMicrophone(): void;
+  /** Shuts or reopens the gate within the call; playback continues. Absent where unsupported. */
+  setMicMuted?(muted: boolean): void;
   close(): void;
 }
 
@@ -79,20 +81,26 @@ type VoiceState = {
  * Always "off" outside "paused".
  */
 export type LocalListening = "off" | "listening" | "armed" | "unavailable";
-type KeywordState = { readonly keywords: boolean; readonly listening: LocalListening };
-// What callers publish; the controller adds the keyword fields from its own state.
+/** `micMuted`: this device's outbound microphone is muted inside the call. It survives pause,
+ * Resume and a move to another conversation, so none of them unmutes silently; ending clears it. */
+type LocalState = {
+  readonly keywords: boolean;
+  readonly listening: LocalListening;
+  readonly micMuted: boolean;
+};
+// What callers publish; the controller adds the local fields from its own state.
 type Published = VoiceSnapshot extends infer S
   ? S extends unknown
-    ? Omit<S, keyof KeywordState>
+    ? Omit<S, keyof LocalState>
     : never
   : never;
 /**
- * Pause and Mic off revoke the microphone the same way: locally first, then the provider stop.
- * Pause ("pausing" → "paused") keeps the conversation so Resume can start a fresh call in it.
- * Mic off ("ending" → "off") forgets the conversation; nothing can resume it.
+ * Pause and Stop session revoke the microphone the same way: locally first, then the provider
+ * stop. Pause ("pausing" → "paused") keeps the conversation so Resume can start a fresh call in it.
+ * Stop session ("ending" → "off") forgets the conversation; nothing can resume it.
  */
 export type VoiceSnapshot = VoiceState &
-  KeywordState &
+  LocalState &
   (
     | { readonly mode: "off"; readonly owner: null }
     | {
@@ -177,6 +185,7 @@ export function createRealtimeVoiceController(deps: {
 }) {
   let keywords = deps.keywordsEnabled === true && deps.localListening !== undefined;
   let listening: LocalListening = "off";
+  let micMuted = false;
   let pausedAt = 0;
   let cancelArm: (() => void) | null = null;
   let snapshot: VoiceSnapshot = {
@@ -187,6 +196,7 @@ export function createRealtimeVoiceController(deps: {
     expiresAt: null,
     keywords,
     listening,
+    micMuted,
   };
   let generation = 0;
   let attempt: Attempt | null = null;
@@ -204,7 +214,8 @@ export function createRealtimeVoiceController(deps: {
   // Every exit from "paused" passes here, so the detector's capture never outlives it.
   const publish = (next: Published) => {
     if (next.mode !== "paused") stopListening();
-    snapshot = { ...next, keywords, listening };
+    if (next.mode === "off") micMuted = false;
+    snapshot = { ...next, keywords, listening, micMuted };
     for (const listener of listeners) listener();
   };
   const republish = () => publish(snapshot);
@@ -279,7 +290,7 @@ export function createRealtimeVoiceController(deps: {
     if (!value.remoteRequested && !value.capturePending) finish(value, true);
     else if (value.ownership !== null) void stopRemote(value);
   };
-  /** Mic off. Overrides a pending pause and forgets a paused conversation. */
+  /** Stop session. Overrides a pending pause and forgets a paused conversation. */
   const end = (reason: string | null = null) => {
     moveIntent = null;
     stopListening();
@@ -313,7 +324,7 @@ export function createRealtimeVoiceController(deps: {
       expiresAt: snapshot.expiresAt,
     });
   };
-  /** Privacy pause. Revokes like Mic off, then lands in "paused" once the provider stop settles. */
+  /** Privacy pause. Revokes like Stop session, then lands in "paused" once the provider stop settles. */
   const pause = (reason: string | null = null) => {
     moveIntent = null;
     cancelAttempt(reason, true);
@@ -333,9 +344,10 @@ export function createRealtimeVoiceController(deps: {
       expiresAt: DateTime.formatIso(DateTime.makeUnsafe(value.expiresAt)),
     });
   };
-  const start = async (owner: VoiceOwner) => {
+  const begin = async (owner: VoiceOwner, muted: boolean) => {
     if (attempt !== null || snapshot.replacementBlocked) return;
     deps.validateOwner(owner);
+    micMuted = muted;
     const operationId = deps.createOperationId();
     let resolveFinished: (safe: boolean) => void = () => {};
     const finished = new Promise<boolean>((resolve) => {
@@ -385,6 +397,8 @@ export function createRealtimeVoiceController(deps: {
         },
       });
       value.transport = transport;
+      // Before the gate can open, so a muted Resume or move never sends a frame.
+      if (micMuted) transport.setMicMuted?.(true);
       value.capturePending = true;
       try {
         await transport.acquireMicrophone();
@@ -463,6 +477,7 @@ export function createRealtimeVoiceController(deps: {
       if (value.cancelled && !value.remoteRequested) finish(value, true);
     }
   };
+  const start = (owner: VoiceOwner) => begin(owner, false);
   const move = async (owner: VoiceOwner) => {
     deps.validateOwner(owner);
     if (
@@ -483,6 +498,7 @@ export function createRealtimeVoiceController(deps: {
     )
       return;
     const destination = Object.freeze({ ...owner });
+    const muted = snapshot.micMuted;
     const intent = {};
     moveIntent = intent;
     cancelAttempt();
@@ -492,7 +508,7 @@ export function createRealtimeVoiceController(deps: {
     if (!safe || attempt !== null || snapshot.replacementBlocked) return;
     // Grants and destination provider identity may change while A's native-close barrier settles.
     deps.validateOwner(destination);
-    await start(destination);
+    await begin(destination, muted);
   };
   /**
    * The only way out of pause, and only from a local user action: a new operation, peer and
@@ -509,7 +525,7 @@ export function createRealtimeVoiceController(deps: {
     // Release the detector's capture first: the new call acquires its own microphone afterwards.
     stopListening();
     try {
-      await start(owner);
+      await begin(owner, snapshot.micMuted);
     } finally {
       // A refused start (blocked replacement, failed owner check) leaves voice paused.
       if (attempt === null && snapshot.mode === "paused") {
@@ -546,6 +562,15 @@ export function createRealtimeVoiceController(deps: {
       if (!value.cancelled) pause(LOCAL_LISTENING_UNAVAILABLE);
     }
   };
+  /** Mute only inside a transmitting call whose transport supports it; anything else is refused. */
+  const setMicMuted = (muted: boolean) => {
+    const value = attempt;
+    if (snapshot.mode !== "transmitting" || value === null || !current(value)) return;
+    if (value.transport?.setMicMuted === undefined || muted === micMuted) return;
+    value.transport.setMicMuted(muted);
+    micMuted = muted;
+    republish();
+  };
   const setKeywords = (enabled: boolean) => {
     keywords = enabled && deps.localListening !== undefined;
     if (snapshot.mode === "paused" && attempt === null) {
@@ -564,6 +589,7 @@ export function createRealtimeVoiceController(deps: {
     cancelResume,
     localListeningFailed,
     setKeywords,
+    setMicMuted,
     getSnapshot: () => snapshot,
     subscribe: (listener: () => void) => {
       listeners.add(listener);

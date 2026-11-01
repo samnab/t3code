@@ -42,6 +42,9 @@ function fixture(contextState: AudioContextState = "running") {
     connect: (target: typeof output) => {
       opening.target = target;
     },
+    disconnect: () => {
+      opening.target = null;
+    },
     receive: (frame: string) => opening.target?.receive(frame),
   };
   const source = {
@@ -57,6 +60,7 @@ function fixture(contextState: AudioContextState = "running") {
   const closeContext = vi.fn(async () => {});
   const resumeContext = vi.fn(async () => {});
   const contexts: FakeAudioContext[] = [];
+  const context = () => contexts[0]!;
   class FakeAudioContext extends EventTarget {
     state = contextState;
     createMediaStreamSource = () => source;
@@ -74,14 +78,24 @@ function fixture(contextState: AudioContextState = "running") {
   const audio = Object.assign(new EventTarget(), {
     autoplay: false,
     srcObject: null,
+    play: vi.fn(async () => {}),
     pause: vi.fn(),
     remove: vi.fn(),
   });
   const devices = Object.assign(new EventTarget(), { getUserMedia: vi.fn(() => permission) });
-  vi.stubGlobal("RTCPeerConnection", Peer);
   vi.stubGlobal("AudioContext", FakeAudioContext);
   vi.stubGlobal("document", { createElement: () => audio });
   vi.stubGlobal("navigator", { mediaDevices: devices });
+  const peers: Peer[] = [];
+  vi.stubGlobal(
+    "RTCPeerConnection",
+    class extends Peer {
+      constructor() {
+        super();
+        peers.push(this);
+      }
+    },
+  );
   const failed = vi.fn();
   const connected = vi.fn();
   const transport = createBrowserVoiceTransport({ connected, failed });
@@ -105,6 +119,13 @@ function fixture(contextState: AudioContextState = "running") {
     closeContext,
     resumeContext,
     connected,
+    opening,
+    context,
+    remoteStream: () => {
+      const remote = { id: "remote" };
+      peers[0]!.dispatchEvent(Object.assign(new Event("track"), { streams: [remote] }));
+      return remote;
+    },
     setContextState: (state: AudioContextState) => {
       contexts[0]!.state = state;
       contexts[0]!.dispatchEvent(new Event("statechange"));
@@ -189,5 +210,80 @@ describe("browser voice resource ownership", () => {
     expect(f.failed).not.toHaveBeenCalled();
     f.setContextState("suspended");
     expect(f.failed).toHaveBeenCalledOnce();
+  });
+});
+
+describe("browser voice microphone mute", () => {
+  async function live() {
+    const f = fixture();
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    f.transport.enableMicrophone();
+    return f;
+  }
+
+  it("shuts the gate while muted and leaves the peer, channel and remote playback alone", async () => {
+    const f = await live();
+    const remote = f.remoteStream();
+    f.captureFrame("A");
+    f.transport.setMicMuted?.(true);
+    f.captureFrame("B");
+    f.captureFrame("B2");
+    expect(f.sent).toEqual(["A"]);
+    expect(f.track.enabled).toBe(true);
+    expect(f.track.stop).not.toHaveBeenCalled();
+    expect(f.outputTrack.stop).not.toHaveBeenCalled();
+    expect(f.closePeer).not.toHaveBeenCalled();
+    expect(f.channel.close).not.toHaveBeenCalled();
+    expect(f.audio.srcObject).toBe(remote);
+    expect(f.audio.pause).not.toHaveBeenCalled();
+    expect(f.transport.isConnected()).toBe(true);
+    expect(f.failed).not.toHaveBeenCalled();
+  });
+
+  it("unmutes through a fresh gate that discards the first 64 ms and keeps nothing from the mute", async () => {
+    const f = await live();
+    f.transport.setMicMuted?.(true);
+    f.captureFrame("B");
+    f.context().currentTime = 5;
+    f.opening.gain.setValueAtTime.mockClear();
+    f.opening.gain.value = 1;
+    f.transport.setMicMuted?.(false);
+    expect(f.opening.gain.value).toBe(0);
+    expect(f.opening.gain.setValueAtTime).toHaveBeenCalledExactlyOnceWith(1, 5 + 0.064);
+    f.captureFrame("C");
+    expect(f.sent).toEqual(["C"]);
+  });
+
+  it("keeps a gate muted before it opens shut when the call connects, and ignores mute after close", async () => {
+    const f = fixture();
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    f.transport.setMicMuted?.(true);
+    f.transport.enableMicrophone();
+    f.captureFrame("while-connecting-muted");
+    expect(f.sent).toEqual([]);
+    f.transport.close();
+    f.transport.setMicMuted?.(false);
+    f.captureFrame("after-close");
+    expect(f.sent).toEqual([]);
+  });
+
+  it("stops the session cleanly while muted", async () => {
+    const f = await live();
+    f.remoteStream();
+    f.transport.setMicMuted?.(true);
+    f.transport.close();
+    f.captureFrame("after-stop");
+    expect(f.sent).toEqual([]);
+    expect(f.track.stop).toHaveBeenCalledOnce();
+    expect(f.outputTrack.stop).toHaveBeenCalledOnce();
+    expect(f.closePeer).toHaveBeenCalledOnce();
+    expect(f.channel.close).toHaveBeenCalledOnce();
+    expect(f.audio.srcObject).toBeNull();
+    expect(f.closeContext).toHaveBeenCalledOnce();
+    expect(f.failed).not.toHaveBeenCalled();
   });
 });
