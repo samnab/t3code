@@ -2,6 +2,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
 import { isElectron } from "../env";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
+import { GlobalRealtimeVoiceControl } from "./voice/GlobalRealtimeVoiceControl";
 
 export function NoActiveThreadState() {
   return (
@@ -17,6 +18,7 @@ export function NoActiveThreadState() {
               </span>
             </div>
           )}
+          <GlobalRealtimeVoiceControl className="ms-auto" />
         </WorkspacePageHeader>
 
         <Empty className="flex-1">

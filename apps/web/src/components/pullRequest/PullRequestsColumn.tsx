@@ -13,6 +13,7 @@ import {
 } from "../WorkspaceBreadcrumb";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
+import { GlobalRealtimeVoiceControl } from "../voice/GlobalRealtimeVoiceControl";
 import { workspaceAreaProps } from "../../lib/workspaceFocus";
 import { PullRequestCompactFilterMenu } from "./PullRequestCompactFilterMenu";
 import type { PullRequestFilterOption } from "./PullRequestListFilters";
@@ -225,6 +226,7 @@ export function PullRequestsColumn({
             <PullRequestRefreshControl compact refreshing={refreshing} onRefresh={onRefresh} />
           </div>
         ) : null}
+        <GlobalRealtimeVoiceControl />
         {rightPanelControl}
       </WorkspacePageHeader>
 
