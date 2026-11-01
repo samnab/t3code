@@ -26,7 +26,6 @@ import { useRealtimeVoice, useRealtimeVoiceActive } from "./RealtimeVoiceProvide
 
 const STATUS = {
   transmitting: "Microphone audio sent to Codex",
-  muted: "Microphone muted · still listening to Codex",
   connecting: "Connecting · microphone not sending",
   pausing: "Paused · microphone off · closing call",
   paused: "Paused · microphone off · nothing is sent",
@@ -43,11 +42,15 @@ const LISTENING_STATUS = {
 const KEYWORDS_HINT =
   "Say “T3 privacy pause” to pause. To resume, say “T3 resume conversation”, then say “confirm unpause” within 10 seconds, or press Confirm. Listening stays on this device. Similar phrases such as “T3 privacy policy” can pause by mistake.";
 
+// Muting shuts only the call's gate: the track stays enabled, so the OS indicator stays on and,
+// with keywords on, the detector still hears a spoken pause.
 function statusText(snapshot: Exclude<VoiceSnapshot, { mode: "off" }>): string {
   if (snapshot.mode === "paused") return LISTENING_STATUS[snapshot.listening];
-  return snapshot.mode === "transmitting" && snapshot.micMuted
-    ? STATUS.muted
-    : STATUS[snapshot.mode];
+  if (snapshot.mode === "transmitting" && snapshot.micMuted)
+    return snapshot.keywords
+      ? "Muted · not sending · mic stays on for keywords"
+      : "Muted · not sending";
+  return STATUS[snapshot.mode];
 }
 
 /**
@@ -85,15 +88,19 @@ function VoiceControl({ className }: { readonly className: string | undefined })
   const armed = snapshot.listening === "armed";
   const listening = snapshot.listening === "listening" || armed;
   const status = statusText(snapshot);
+  // Keyed by role: two lines can carry the same text.
   const details = [
-    snapshot.reason,
-    `${owner.threadTitle} · ${owner.environmentLabel}`,
-    live
-      ? snapshot.expiresAt === null
-        ? "Calls last up to 4 hours"
-        : `Ends by ${new Date(snapshot.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
-      : null,
-  ].filter((line) => line !== null);
+    { key: "reason", line: snapshot.reason },
+    { key: "owner", line: `${owner.threadTitle} · ${owner.environmentLabel}` },
+    {
+      key: "expiry",
+      line: live
+        ? snapshot.expiresAt === null
+          ? "Calls last up to 4 hours"
+          : `Ends by ${new Date(snapshot.expiresAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+        : null,
+    },
+  ].filter((detail) => detail.line !== null);
   const StatusIcon = listening ? MicIcon : MicOffIcon;
   return (
     <div
@@ -110,7 +117,7 @@ function VoiceControl({ className }: { readonly className: string | undefined })
           )}
           <span className="min-w-0 max-w-56 truncate text-sm @max-[28rem]:sr-only" role="status">
             {status}
-            <span className="sr-only"> · {details.join(" · ")}</span>
+            <span className="sr-only"> · {details.map((detail) => detail.line).join(" · ")}</span>
           </span>
           {snapshot.reason && (
             <CircleAlertIcon className="size-4 shrink-0 text-warning" aria-hidden="true" />
@@ -118,8 +125,8 @@ function VoiceControl({ className }: { readonly className: string | undefined })
         </TooltipTrigger>
         <TooltipPopup side="bottom">
           <p>{status}</p>
-          {details.map((line) => (
-            <p key={line} className="text-muted-foreground">
+          {details.map(({ key, line }) => (
+            <p key={key} className="text-muted-foreground">
               {line}
             </p>
           ))}
@@ -140,8 +147,10 @@ function VoiceControl({ className }: { readonly className: string | undefined })
         hint={snapshot.mode === "paused" ? KEYWORDS_HINT : `${KEYWORDS_HINT} Change while paused.`}
         variant="ghost"
         aria-pressed={snapshot.keywords}
-        // A call's keyword tap is fixed when it starts; change keywords while paused.
+        // A call's keyword tap is fixed when it starts; change keywords while paused. Disabled, it
+        // is the first to go when the header is too narrow for every icon.
         disabled={snapshot.mode !== "paused"}
+        className={snapshot.mode === "paused" ? undefined : "@max-[28rem]:hidden"}
         onClick={() => setKeywords(!snapshot.keywords)}
       />
       <VoiceButton
@@ -151,7 +160,7 @@ function VoiceControl({ className }: { readonly className: string | undefined })
           snapshot.mode === "transmitting"
             ? snapshot.micMuted
               ? "Unmute microphone"
-              : "Mute microphone · you still hear Codex"
+              : "Mute microphone · mic stays on · you still hear Codex"
             : snapshot.micMuted
               ? "Muted · stays muted when the call resumes"
               : "Mute while the call is live"

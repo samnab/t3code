@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { createBrowserVoiceTransport } from "./browserVoiceTransport";
 
-function fixture(contextState: AudioContextState = "running") {
+function fixture(contextState: AudioContextState = "running", tapKeywords = false) {
   let grant: (stream: { getTracks(): Track[] }) => void = () => {};
   const permission = new Promise<{ getTracks(): Track[] }>((resolve) => {
     grant = resolve;
@@ -48,16 +48,24 @@ function fixture(contextState: AudioContextState = "running") {
     },
     receive: (frame: string) => opening.target?.receive(frame),
   };
+  // Web Audio semantics: `disconnect(target)` drops one connection, bare `disconnect()` drops all,
+  // including the keyword detector's tap.
+  type Target = { receive(frame: string): void };
   const source = {
-    target: null as typeof opening | null,
-    connect: vi.fn((target: typeof opening) => {
-      source.target = target;
+    targets: new Set<Target>(),
+    connect: vi.fn((target: Target) => {
+      source.targets.add(target);
     }),
-    disconnect: vi.fn(() => {
-      source.target = null;
+    disconnect: vi.fn((target?: Target) => {
+      if (target === undefined) source.targets.clear();
+      else source.targets.delete(target);
     }),
   };
-  const captureFrame = (frame: string) => source.target?.receive(frame);
+  const captureFrame = (frame: string) => {
+    for (const target of source.targets) target.receive(frame);
+  };
+  const heardByKeywords: string[] = [];
+  const keywordTap = { receive: (frame: string) => heardByKeywords.push(frame) };
   const closeContext = vi.fn(async () => {});
   const resumeContext = vi.fn(async () => {});
   const contexts: FakeAudioContext[] = [];
@@ -125,7 +133,15 @@ function fixture(contextState: AudioContextState = "running") {
   );
   const failed = vi.fn();
   const connected = vi.fn();
-  const transport = createBrowserVoiceTransport({ connected, failed });
+  const transport = createBrowserVoiceTransport(
+    { connected, failed },
+    tapKeywords
+      ? async () => {
+          source.connect(keywordTap);
+          return () => source.disconnect(keywordTap);
+        }
+      : undefined,
+  );
   const track = new Track();
   const stream = { getTracks: () => [track] };
   return {
@@ -142,6 +158,7 @@ function fixture(contextState: AudioContextState = "running") {
     outputTrack,
     source,
     sent,
+    heardByKeywords,
     captureFrame,
     closeContext,
     resumeContext,
@@ -247,7 +264,7 @@ describe("browser voice resource ownership", () => {
 
 describe("browser voice microphone mute", () => {
   async function live() {
-    const f = fixture();
+    const f = fixture("running", true);
     const pending = f.transport.acquireMicrophone();
     f.grant(f.stream);
     await pending;
@@ -255,7 +272,7 @@ describe("browser voice microphone mute", () => {
     return f;
   }
 
-  it("shuts the gate while muted and leaves the peer, channel and remote playback alone", async () => {
+  it("shuts the gate while muted, keeps the keyword tap and playback, and stops cleanly", async () => {
     const f = await live();
     const remote = f.remoteStream();
     f.captureFrame("A");
@@ -263,6 +280,8 @@ describe("browser voice microphone mute", () => {
     f.captureFrame("B");
     f.captureFrame("B2");
     expect(f.sent).toEqual(["A"]);
+    // The keyword detector still hears a spoken pause while muted.
+    expect(f.heardByKeywords).toEqual(["A", "B", "B2"]);
     expect(f.track.enabled).toBe(true);
     expect(f.track.stop).not.toHaveBeenCalled();
     expect(f.outputTrack.stop).not.toHaveBeenCalled();
@@ -271,6 +290,17 @@ describe("browser voice microphone mute", () => {
     expect(f.audio.srcObject).toBe(remote);
     expect(f.audio.pause).not.toHaveBeenCalled();
     expect(f.transport.isConnected()).toBe(true);
+    expect(f.failed).not.toHaveBeenCalled();
+    // Stop session while muted releases everything.
+    f.transport.close();
+    f.captureFrame("after-stop");
+    expect(f.sent).toEqual(["A"]);
+    expect(f.track.stop).toHaveBeenCalledOnce();
+    expect(f.outputTrack.stop).toHaveBeenCalledOnce();
+    expect(f.closePeer).toHaveBeenCalledOnce();
+    expect(f.channel.close).toHaveBeenCalledOnce();
+    expect(f.audio.srcObject).toBeNull();
+    expect(f.closeContext).toHaveBeenCalledOnce();
     expect(f.failed).not.toHaveBeenCalled();
   });
 
@@ -310,22 +340,6 @@ describe("browser voice microphone mute", () => {
       f.transport.setMicMuted?.(false);
     }
     expect(f.silence.feeds).toBe(1);
-  });
-
-  it("stops the session cleanly while muted", async () => {
-    const f = await live();
-    f.remoteStream();
-    f.transport.setMicMuted?.(true);
-    f.transport.close();
-    f.captureFrame("after-stop");
-    expect(f.sent).toEqual([]);
-    expect(f.track.stop).toHaveBeenCalledOnce();
-    expect(f.outputTrack.stop).toHaveBeenCalledOnce();
-    expect(f.closePeer).toHaveBeenCalledOnce();
-    expect(f.channel.close).toHaveBeenCalledOnce();
-    expect(f.audio.srcObject).toBeNull();
-    expect(f.closeContext).toHaveBeenCalledOnce();
-    expect(f.failed).not.toHaveBeenCalled();
   });
 });
 

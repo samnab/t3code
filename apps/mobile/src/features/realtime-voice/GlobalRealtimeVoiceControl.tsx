@@ -92,7 +92,7 @@ function RealtimeVoiceBanner(props: {
         ) : (
           <BannerAction
             danger
-            label={snapshot.mode === "connecting" ? "Cancel" : "End"}
+            label={snapshot.mode === "connecting" ? "Cancel" : "Stop session"}
             onPress={props.onEnd}
           />
         )}
