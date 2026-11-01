@@ -169,6 +169,10 @@ function VoiceControl({ className }: { readonly className: string | undefined })
         aria-label={snapshot.micMuted ? "Unmute microphone" : "Mute microphone"}
         aria-pressed={snapshot.micMuted}
         disabled={snapshot.mode !== "transmitting"}
+        // The armed row is the widest; an idle disabled Mute is the first thing to drop there.
+        className={
+          snapshot.mode === "paused" && !snapshot.micMuted ? "@max-[28rem]:hidden" : undefined
+        }
         onClick={toggleMute}
       />
       {armed ? (
