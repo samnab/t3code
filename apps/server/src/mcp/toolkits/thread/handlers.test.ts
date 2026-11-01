@@ -4,6 +4,7 @@ import {
   CommandId,
   EnvironmentId,
   MessageId,
+  ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -19,12 +20,18 @@ import * as TestClock from "effect/testing/TestClock";
 
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
+import * as CheckpointDiffQuery from "../../../checkpointing/CheckpointDiffQuery.ts";
+import {
+  CheckpointRefUnavailableError,
+  CheckpointTurnRangeUnavailableError,
+} from "../../../checkpointing/Errors.ts";
 import { CodexProviderCapabilitiesV2 } from "../../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "../../../orchestration-v2/CommandReceiptStore.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ProviderReplayHarness from "../../../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
@@ -70,18 +77,27 @@ const handlersOverDatabase = Layer.mergeAll(
   // Merged so the regression can seed runs the way completed runs persist.
   layerDatabase,
 );
-const layerTest = McpToolAccess.HandlersLayer.layer(ThreadHandlers.layer).pipe(
-  Layer.provideMerge(handlersOverDatabase),
-  Layer.provideMerge(
-    Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope("full-access")),
-  ),
-);
-const layerReadOnly = McpToolAccess.HandlersLayer.layer(ThreadHandlers.layer).pipe(
-  Layer.provideMerge(handlersOverDatabase),
-  Layer.provideMerge(
-    Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope("read-only")),
-  ),
-);
+const layerHandlers = (access: "full-access" | "read-only") =>
+  McpToolAccess.HandlersLayer.layer(ThreadHandlers.layer).pipe(
+    Layer.provideMerge(handlersOverDatabase),
+    Layer.provideMerge(
+      Layer.succeed(McpInvocationContext.McpInvocationContext, invocationScope(access)),
+    ),
+    Layer.provideMerge(layerDiffStub),
+    // Only the cross-thread t3_thread_search path calls it; the threadId path never does.
+    Layer.provideMerge(Layer.mock(ThreadSearch.ThreadSearch)({})),
+  );
+// Handlers other than t3_thread_diff never touch checkpoint diffs.
+const layerDiffStub = Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
+  getThreadDiff: () => Effect.die("No CheckpointDiffQuery stub for this MCP thread control test"),
+});
+const layerTest = layerHandlers("full-access");
+const layerReadOnly = layerHandlers("read-only");
+
+/** A t3_thread_diff handler over a specific CheckpointDiffQuery, shadowing the stub. */
+const diffOver = (
+  getThreadDiff: CheckpointDiffQuery.CheckpointDiffQuery["Service"]["getThreadDiff"],
+) => Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({ getThreadDiff });
 
 const last = <A, E, R, E2, R2>(
   handled: Effect.Effect<Stream.Stream<{ readonly result: A }, E, R>, E2, R2>,
@@ -92,28 +108,112 @@ const last = <A, E, R, E2, R2>(
     Effect.map((results) => results.at(-1)?.result),
   );
 
-const createThread = Effect.gen(function* () {
-  const orchestrator = yield* Orchestrator.OrchestratorV2;
-  yield* orchestrator.dispatch({
-    type: "thread.create",
-    commandId: CommandId.make("mcp-thread-controls:create"),
-    threadId,
-    projectId: ProjectId.make("project:mcp-thread-controls"),
-    title: "Thread controls",
-    modelSelection: { instanceId, model: "gpt-5" },
-    runtimeMode: "full-access",
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
-    createdBy: "user",
-    creationSource: "web",
+const createThreadOn = (id: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`mcp-thread-controls:create:${id}`),
+      threadId: id,
+      projectId: ProjectId.make("project:mcp-thread-controls"),
+      title: "Thread controls",
+      modelSelection: { instanceId, model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
   });
+const createThread = createThreadOn(threadId);
+
+// t3_thread_search resolves a thread's cwd through its project row, which the
+// orchestrator's thread.create does not make.
+const seedProject = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    INSERT INTO projection_projects (
+      project_id, title, workspace_root, scripts_json, created_at, updated_at
+    ) VALUES (
+      'project:mcp-thread-controls', 'Thread controls', '/tmp/mcp-thread-controls', '[]',
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+    )
+  `;
 });
 
 const readThread = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   return yield* projections.getThreadProjection(threadId);
 });
+
+// A worktree launch whose preparation failed persists the run and its error
+// turn item; the queue stays held until a worktree exists.
+const insertFailedPreparationRun = (ordinal: number, failedAt: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const runId = RunId.make(`run:api13-queue-prep-${ordinal}`);
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_runs (
+        run_id, thread_id, ordinal, provider, provider_instance_id, provider_thread_id,
+        status, requested_at, completed_at, payload_json
+      )
+      VALUES (
+        ${runId}, ${threadId}, ${ordinal}, ${instanceId}, ${instanceId}, NULL,
+        'failed', ${failedAt}, ${failedAt}, ${JSON.stringify({
+          id: runId,
+          threadId,
+          ordinal,
+          providerInstanceId: instanceId,
+          modelSelection: { instanceId, model: "gpt-5" },
+          providerThreadId: null,
+          userMessageId: MessageId.make(`message:api13-queue-prep-${ordinal}`),
+          rootNodeId: null,
+          activeAttemptId: null,
+          status: "failed",
+          requestedAt: failedAt,
+          startedAt: failedAt,
+          completedAt: failedAt,
+          checkpointId: null,
+          contextHandoffId: null,
+          workspacePreparation: { type: "worktree", baseRef: "main" },
+        })}
+      )
+    `;
+    const itemId = `turn-item:api13-queue-prep-${ordinal}`;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_turn_items (
+        turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
+        parent_item_id, ordinal, type, status, updated_at, payload_json
+      )
+      VALUES (
+        ${itemId}, ${threadId}, ${runId}, NULL, NULL, NULL, NULL, ${ordinal},
+        'error', 'failed', ${failedAt}, ${JSON.stringify({
+          id: itemId,
+          threadId,
+          runId,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal,
+          status: "failed",
+          title: "Workspace preparation failed",
+          startedAt: failedAt,
+          completedAt: failedAt,
+          updatedAt: failedAt,
+          type: "error",
+          failure: {
+            class: "unknown",
+            message: `Worktree setup failed: setup script exited 1. ${"x".repeat(600)}`,
+            code: ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+            retryable: true,
+          },
+        })}
+      )
+    `;
+  });
 
 // Mark-unread rewinds to a completed run, so the regression seeds one straight
 // into the projection store the way a finished provider run would leave it.
@@ -247,13 +347,14 @@ it.effect("refuses to start work that does not match the expected run", () =>
 const sendMessage = (
   id: string,
   dispatchMode: { readonly type: "start_immediately" | "queue_after_active" },
+  target: ThreadId = threadId,
 ) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     yield* orchestrator.dispatch({
       type: "message.dispatch",
       commandId: CommandId.make(`mcp-thread-controls:${id}`),
-      threadId,
+      threadId: target,
       messageId: MessageId.make(`message:${id}`),
       text: id,
       attachments: [],
@@ -426,6 +527,178 @@ it.effect.each(["resume_queue", "start_queued"] as const)(
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("reads a held queue with each run's held flag", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* createThread;
+    yield* sendMessage("first", { type: "start_immediately" });
+    yield* sendMessage("second", { type: "queue_after_active" });
+    const runs = (yield* readThread).runs;
+    const active = runs.find((run) => run.status !== "queued");
+    const queued = runs.find((run) => run.status === "queued");
+    if (active === undefined || queued === undefined) return yield* Effect.die("runs missing");
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make("mcp-thread-controls:hold"),
+      threadId,
+      runId: active.id,
+      holdQueue: true,
+    });
+
+    expect(yield* last(toolkit.handle("t3_queue", { threadId, action: "list" }))).toMatchObject({
+      queueHeld: true,
+      holdReason: null,
+      nextCursor: null,
+      items: [
+        {
+          queuedRunId: queued.id,
+          text: "second",
+          truncated: false,
+          queueHeld: true,
+          attachmentCount: 0,
+          attachments: [],
+        },
+      ],
+    });
+    expect(
+      yield* last(toolkit.handle("t3_queue", { threadId, action: "read", queuedRunId: queued.id })),
+    ).toMatchObject({ queuedRunId: queued.id, queueHeld: true, holdReason: null });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reads the workspace-preparation reason behind a held queue, bounded", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* createThread;
+    yield* sendMessage("first", { type: "start_immediately" });
+    yield* sendMessage("second", { type: "queue_after_active" });
+    const [active, queued] = (yield* readThread).runs.toSorted((a, b) => a.ordinal - b.ordinal);
+    if (active === undefined || queued === undefined) return yield* Effect.die("runs missing");
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make("mcp-thread-controls:hold"),
+      threadId,
+      runId: active.id,
+      holdQueue: true,
+    });
+    yield* insertFailedPreparationRun(3, "1970-01-01T03:00:00.000Z");
+
+    const listed = yield* last(toolkit.handle("t3_queue", { threadId, action: "list" }));
+    if (listed === undefined || !("holdReason" in listed)) {
+      return yield* Effect.die("list result missing");
+    }
+    expect(listed).toMatchObject({ queueHeld: true });
+    // The error message is bounded instead of handed over whole.
+    expect(listed.holdReason?.startsWith("Worktree setup failed: setup script exited 1.")).toBe(
+      true,
+    );
+    expect(listed.holdReason).toHaveLength(500);
+    expect(
+      yield* last(toolkit.handle("t3_queue", { threadId, action: "read", queuedRunId: queued.id })),
+    ).toMatchObject({
+      queuedRunId: queued.id,
+      queueHeld: true,
+      holdReason: listed.holdReason,
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reads queued attachment metadata without attachment content", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* createThread;
+    yield* sendMessage("first", { type: "start_immediately" });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("mcp-thread-controls:attach"),
+      threadId,
+      messageId: MessageId.make("message:attached"),
+      text: "with attachment",
+      attachments: [
+        {
+          type: "file",
+          id: "attachment-notes",
+          name: "notes.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 1234,
+        },
+      ],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+
+    const listed = yield* last(toolkit.handle("t3_queue", { threadId, action: "list" }));
+    if (listed === undefined || !("items" in listed)) return yield* Effect.die("list missing");
+    expect(listed.items[0]).toMatchObject({
+      text: "with attachment",
+      attachmentCount: 1,
+      attachments: [
+        { name: "notes.pdf", type: "file", mimeType: "application/pdf", sizeBytes: 1234 },
+      ],
+    });
+    // Metadata only: exactly the four safe fields, no content bytes or URLs.
+    expect(Object.keys(listed.items[0]?.attachments[0] ?? {})).toEqual([
+      "name",
+      "type",
+      "mimeType",
+      "sizeBytes",
+    ]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("t3_thread_search with threadId finds matches in that transcript only", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* seedProject;
+    yield* createThreadOn(threadId);
+    const other = ThreadId.make("thread:mcp-thread-controls-other");
+    yield* createThreadOn(other);
+    yield* sendMessage("needle-in-target", { type: "start_immediately" });
+    yield* sendMessage("needle-in-other", { type: "start_immediately" }, other);
+
+    const found = yield* last(
+      toolkit.handle("t3_thread_search", { threadId, query: "needle-in-target" }),
+    );
+    expect(found).toMatchObject({
+      threadId,
+      totalMatches: 1,
+      matches: [{ entryId: expect.any(String), count: 1 }],
+    });
+
+    // The other thread holds this match; searching here must not return it.
+    // Checked encoded: an empty result once lost threadId and totalMatches on the wire.
+    const empty = yield* toolkit
+      .handle("t3_thread_search", { threadId, query: "needle-in-other" })
+      .pipe(
+        Stream.unwrap,
+        Stream.runCollect,
+        Effect.map((results) => results.at(-1)?.encodedResult),
+      );
+    expect(empty).toEqual({ threadId, totalMatches: 0, matches: [] });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses to search a deleted thread", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    const gone = ThreadId.make("thread:mcp-thread-controls-deleted");
+    yield* createThreadOn(gone);
+    yield* sendMessage("needle-in-gone", { type: "start_immediately" }, gone);
+    yield* (yield* Orchestrator.OrchestratorV2).dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("mcp-thread-controls:delete"),
+      threadId: gone,
+    });
+    expect(
+      yield* last(toolkit.handle("t3_thread_search", { threadId: gone, query: "needle-in-gone" })),
+    ).toMatchObject({ code: "thread_not_found" });
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("lowers a thread's modes and refuses to raise them, recording nothing", () =>
   Effect.gen(function* () {
     const toolkit = yield* ThreadToolkit;
@@ -451,5 +724,174 @@ it.effect("lowers a thread's modes and refuses to raise them, recording nothing"
       ),
     ).toMatchObject({ code: "interaction_mode_escalation_denied", message });
     expect((yield* readThread).thread).toEqual(lowered);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+const queriedDiff = {
+  fromTurnCount: 1,
+  toTurnCount: 2,
+  latestTurnCount: 3,
+  diff: "diff --git a/file.ts b/file.ts",
+};
+
+it.effect("reads one turn's checkpoint diff", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    const calls: Array<CheckpointDiffQuery.ThreadDiffInput> = [];
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_diff", { threadId, turn: 2 }).pipe(
+          Effect.provide(
+            diffOver((input) =>
+              Effect.sync(() => {
+                calls.push(input);
+                return queriedDiff;
+              }),
+            ),
+          ),
+        ),
+      ),
+    ).toEqual({ threadId, ...queriedDiff, truncated: false, totalChars: queriedDiff.diff.length });
+    expect(calls).toEqual([{ threadId, turn: 2, ignoreWhitespace: undefined }]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("reads the whole thread up to the latest ready turn without a turn", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    const calls: Array<CheckpointDiffQuery.ThreadDiffInput> = [];
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_diff", { threadId }).pipe(
+          Effect.provide(
+            diffOver((input) =>
+              Effect.sync(() => {
+                calls.push(input);
+                return queriedDiff;
+              }),
+            ),
+          ),
+        ),
+      ),
+    ).toEqual({ threadId, ...queriedDiff, truncated: false, totalChars: queriedDiff.diff.length });
+    expect(calls).toEqual([{ threadId, turn: undefined, ignoreWhitespace: undefined }]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("truncates the diff to maxChars and flags it", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    const long = { ...queriedDiff, diff: "x".repeat(30) };
+    expect(
+      yield* last(
+        toolkit
+          .handle("t3_thread_diff", { threadId, maxChars: 10 })
+          .pipe(Effect.provide(diffOver(() => Effect.succeed(long)))),
+      ),
+    ).toEqual({
+      threadId,
+      fromTurnCount: long.fromTurnCount,
+      toTurnCount: long.toTurnCount,
+      latestTurnCount: long.latestTurnCount,
+      diff: "x".repeat(10),
+      truncated: true,
+      totalChars: 30,
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses a turn above the thread's ready turns", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_diff", { threadId, turn: 5 }).pipe(
+          Effect.provide(
+            diffOver(() =>
+              Effect.fail(
+                new CheckpointTurnRangeUnavailableError({
+                  operation: "CheckpointDiffQuery.getTurnDiff",
+                  threadId,
+                  requestedTurnCount: 5,
+                  availableTurnCount: 3,
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      code: "invalid_request",
+      message: "Turn 5 is not available: the thread has 3 ready turns.",
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses a turn with no ready checkpoint", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    expect(
+      yield* last(
+        toolkit.handle("t3_thread_diff", { threadId, turn: 2 }).pipe(
+          Effect.provide(
+            diffOver(() =>
+              Effect.fail(
+                new CheckpointRefUnavailableError({
+                  operation: "CheckpointDiffQuery.getTurnDiff",
+                  threadId,
+                  turnCount: 2,
+                  checkpoint: "to",
+                }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      code: "invalid_request",
+      message: "Turn 2 has no ready checkpoint; try another turn.",
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("refuses a thread this client cannot read", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    expect(
+      yield* last(toolkit.handle("t3_thread_diff", { threadId: ThreadId.make("thread:gone") })),
+    ).toMatchObject({ code: "thread_not_found" });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("returns an empty diff for a thread with no ready turns", () =>
+  Effect.gen(function* () {
+    const toolkit = yield* ThreadToolkit;
+    yield* createThread;
+    expect(
+      yield* last(
+        toolkit
+          .handle("t3_thread_diff", { threadId })
+          .pipe(
+            Effect.provide(
+              diffOver(() =>
+                Effect.succeed({ fromTurnCount: 0, toTurnCount: 0, latestTurnCount: 0, diff: "" }),
+              ),
+            ),
+          ),
+      ),
+    ).toEqual({
+      threadId,
+      fromTurnCount: 0,
+      toTurnCount: 0,
+      latestTurnCount: 0,
+      diff: "",
+      truncated: false,
+      totalChars: 0,
+    });
   }).pipe(Effect.provide(layerTest)),
 );

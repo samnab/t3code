@@ -2,6 +2,9 @@ import {
   BackgroundActivityProfile,
   BackgroundActivityProfileSelection,
   CustomModelSetting,
+  DelegationCandidate,
+  DelegationTierId,
+  DelegationTiers,
   EnvironmentConnectReachabilityCause,
   ExecutionEnvironmentDescriptor,
   IdleCompactionMode,
@@ -22,8 +25,10 @@ import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as Keybindings from "../../../keybindings.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
+import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as DatabaseStorage from "../../../persistence/DatabaseStorage.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as StorageCleanup from "../../../storageCleanup.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -50,6 +55,12 @@ const PreferenceFields = {
   sidebarAutoSettleAfterDays: ServerSettings.fields.sidebarAutoSettleAfterDays,
   sidebarAutoSettleOnMerge: ServerSettings.fields.sidebarAutoSettleOnMerge,
   sidebarAutoSettleKeepPullRequests: ServerSettings.fields.sidebarAutoSettleKeepPullRequests,
+  pullRequestMergeMethod: ServerSettings.fields.pullRequestMergeMethod,
+  branchNamingMode: ServerSettings.fields.branchNamingMode,
+  reviewGuidesEnabled: ServerSettings.fields.reviewGuidesEnabled,
+  defaultAutoPull: ServerSettings.fields.defaultAutoPull,
+  removeAgentCreditsOnMerge: ServerSettings.fields.removeAgentCreditsOnMerge,
+  worktreeSubmodules: ServerSettings.fields.worktreeSubmodules,
   favorites: ServerSettings.fields.favorites,
   providerModelPreferences: ServerSettings.fields.providerModelPreferences,
   defaultModelSelection: ServerSettings.fields.defaultModelSelection,
@@ -62,8 +73,21 @@ const PreferenceFields = {
   continueThreadsAfterServerUpdate: ServerSettings.fields.continueThreadsAfterServerUpdate,
   responseStreamingMode: ServerSettings.fields.responseStreamingMode,
   defaultRuntimeMode: ServerSettings.fields.defaultRuntimeMode,
+  delegationTiers: DelegationTiers,
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceView),
 };
+// Compact candidate input: provider `options` stay a Settings-UI concern, so
+// the schema does not embed the option-selection union.
+const DelegationTierCandidateInput = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  minHeadroomPercent: DelegationCandidate.fields.minHeadroomPercent,
+});
+const DelegationTierChange = Schema.Struct({
+  tier: DelegationTierId,
+  before: DelegationTiers.fields.small,
+  after: DelegationTiers.fields.small,
+});
 const shared = {
   failure: OrchestratorMcpFailure,
   failureMode: "return" as const,
@@ -109,8 +133,13 @@ const EnvironmentReadTool = Tool.make("t3_environment_read", {
   .annotate(Tool.Destructive, false);
 const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update", {
   ...shared,
+  dependencies: [
+    ...shared.dependencies,
+    ProviderRegistry.ProviderRegistry,
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+  ],
   description:
-    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental; provider instance ids come from `orchestrator_capabilities`. Global model defaults apply where a project sets none. `snoozeLimitedThreads` never resumes threads. `defaultRuntimeMode` can only be lowered; raise it in Settings. Per-project values: `t3_project_settings_update`.",
+    "Update environment-wide preferences. Live full-access or default caller thread only. Omitted fields are unchanged; `customInstructions: ''` clears it. `completionAudio` changes future defaults only; use `t3_completion_audio_bulk_off` for existing threads. Model preference ops are incremental; provider instance ids come from `orchestrator_capabilities`. `null` resets a model default. Global model defaults apply where a project sets none. `snoozeLimitedThreads` never resumes threads. `defaultRuntimeMode` can only be lowered; raise it in Settings. `pullRequestMergeMethod` `null` uses each device's last selected method. `setDelegationTier` replaces one tier's candidates (null clears); their minimum headroom can only rise. Per-project values: `t3_project_settings_update`.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     completionAudio: ServerSettingsPatch.fields.completionAudio,
@@ -122,6 +151,11 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
     sidebarAutoSettleAfterDays: ServerSettingsPatch.fields.sidebarAutoSettleAfterDays,
     sidebarAutoSettleOnMerge: ServerSettingsPatch.fields.sidebarAutoSettleOnMerge,
     sidebarAutoSettleKeepPullRequests: ServerSettingsPatch.fields.sidebarAutoSettleKeepPullRequests,
+    pullRequestMergeMethod: ServerSettingsPatch.fields.pullRequestMergeMethod,
+    branchNamingMode: ServerSettingsPatch.fields.branchNamingMode,
+    defaultAutoPull: ServerSettingsPatch.fields.defaultAutoPull,
+    removeAgentCreditsOnMerge: ServerSettingsPatch.fields.removeAgentCreditsOnMerge,
+    worktreeSubmodules: ServerSettingsPatch.fields.worktreeSubmodules,
     setModelFavorites: ServerSettingsPatch.fields.setModelFavorites,
     setModelsHidden: ServerSettingsPatch.fields.setModelsHidden,
     setProviderModelOrder: ServerSettingsPatch.fields.setProviderModelOrder,
@@ -136,8 +170,17 @@ const EnvironmentPreferencesTool = Tool.make("t3_environment_preferences_update"
     continueThreadsAfterServerUpdate: ServerSettingsPatch.fields.continueThreadsAfterServerUpdate,
     responseStreamingMode: ServerSettingsPatch.fields.responseStreamingMode,
     defaultRuntimeMode: ServerSettingsPatch.fields.defaultRuntimeMode,
+    setDelegationTier: Schema.optionalKey(
+      Schema.Struct({
+        tier: DelegationTierId,
+        candidates: Schema.NullOr(Schema.Array(DelegationTierCandidateInput)),
+      }),
+    ),
   }),
-  success: Schema.Struct(PreferenceFields),
+  success: Schema.Struct({
+    ...PreferenceFields,
+    delegationTierChange: Schema.optionalKey(DelegationTierChange),
+  }),
 }).annotate(Tool.Destructive, true);
 const ProviderInstanceUpdateTool = Tool.make("t3_provider_instance_update", {
   ...shared,

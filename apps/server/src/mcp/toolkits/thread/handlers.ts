@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type RunId,
   OrchestratorMcpFailure,
+  ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -23,11 +24,17 @@ import {
 } from "../../threadAccess.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as CheckpointDiffQuery from "../../../checkpointing/CheckpointDiffQuery.ts";
+import type { CheckpointServiceError } from "../../../checkpointing/Errors.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { hiddenModelMessage } from "../../ModelVisibility.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import { ThreadToolkit } from "./tools.ts";
+
+// Bounded read output: metadata only, never attachment bytes or URLs.
+const QUEUE_ATTACHMENTS_LIMIT = 10;
+const QUEUE_HOLD_REASON_CHARS = 500;
 
 function queueEntry(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
@@ -42,7 +49,36 @@ function queueEntry(
     queuedRunId: run.id,
     text: characters.slice(0, limit).join(""),
     truncated: characters.length > limit,
+    queueHeld: run.queueHeld === true,
+    attachmentCount: message.attachments.length,
+    attachments: message.attachments
+      .slice(0, QUEUE_ATTACHMENTS_LIMIT)
+      .map(({ name, type, mimeType, sizeBytes }) => ({ name, type, mimeType, sizeBytes })),
   };
+}
+
+// The queue stays held while failed worktree setup has left no worktree; that
+// preparation error is the reason the apps show for a held queue.
+function queueHoldReason(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "turnItems">,
+): string | null {
+  const worktreeSetupUnresolved =
+    projection.thread.worktreePath === null &&
+    projection.runs.some(
+      (run) =>
+        (run.status === "failed" || run.status === "interrupted") &&
+        run.workspacePreparation?.type === "worktree",
+    );
+  if (!worktreeSetupUnresolved) return null;
+  const failure = projection.turnItems.findLast(
+    (item) =>
+      item.type === "error" &&
+      item.status === "failed" &&
+      item.failure.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
+  );
+  // An interrupted setup leaves no failure item but still holds the queue.
+  if (failure?.type !== "error") return "Worktree setup did not finish.";
+  return Array.from(failure.failure.message).slice(0, QUEUE_HOLD_REASON_CHARS).join("");
 }
 const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
   threadId: ThreadId | undefined,
@@ -83,6 +119,17 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
 });
 const refuse = (message: string) =>
   new OrchestratorMcpFailure({ code: "invalid_request", message });
+
+const DEFAULT_DIFF_CHARS = 20_000;
+
+const diffFailure = (error: CheckpointServiceError) =>
+  error._tag === "CheckpointTurnRangeUnavailableError"
+    ? refuse(
+        `Turn ${error.requestedTurnCount} is not available: the thread has ${error.availableTurnCount} ready turns.`,
+      )
+    : error._tag === "CheckpointRefUnavailableError"
+      ? refuse(`Turn ${error.turnCount} has no ready checkpoint; try another turn.`)
+      : unavailable();
 
 /** A field the chosen action needs. `null` counts as given, as in `beforeRunId: null`. */
 const required = <A>(value: A | undefined, name: string) =>
@@ -144,11 +191,27 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_search: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
+      if (input.threadId !== undefined) {
+        // readThread is the t3_thread_read rule: existing and not deleted; archived stays readable.
+        const { threads, projection } = yield* readThread(input.threadId);
+        const result = yield* threads
+          .searchThread({ threadId: projection.thread.id, query: input.query })
+          .pipe(Effect.mapError(unavailable));
+        return {
+          threadId: projection.thread.id,
+          totalMatches: result.totalMatches,
+          matches: result.navigation ?? [],
+        };
+      }
       const { caller } = yield* readCaller();
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const { matches } = yield* threadSearch
-        .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
+        .searchThreads({
+          query: input.query,
+          projectId: input.projectId ?? caller?.projectId,
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        })
         .pipe(Effect.mapError(unavailable));
       return {
         matches: matches.map((match) => ({
@@ -216,7 +279,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     ),
   ),
   t3_pending_request: McpToolAccess.either(
-    (input) => input.action !== "respond",
+    (input) => input.action === "list" || input.action === "read",
     McpToolAccess.reads((input) =>
       Effect.gen(function* () {
         if (input.action === "list") {
@@ -235,23 +298,61 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     writesThread((input) =>
       Effect.gen(function* () {
         const requestId = yield* required(input.requestId, "requestId");
-        const answers = yield* required(input.answers, "answers");
+        // readQuestion refuses anything but a pending user-input question, so approvals and
+        // already-resolved requests are turned away before any command dispatches.
         const { threads, projection } = yield* readQuestion({
           threadId: input.threadId,
           requestId,
         });
         const result = yield* threads
-          .dispatch({
-            type: "runtime-request.respond",
-            threadId: projection.thread.id,
-            commandId: yield* newCommandId(),
-            requestId,
-            answers,
-          })
+          .dispatch(
+            input.action === "dismiss"
+              ? {
+                  type: "thread.user-input.dismiss",
+                  threadId: projection.thread.id,
+                  commandId: yield* newCommandId(),
+                  requestId,
+                }
+              : {
+                  type: "runtime-request.respond",
+                  threadId: projection.thread.id,
+                  commandId: yield* newCommandId(),
+                  requestId,
+                  answers: yield* required(input.answers, "answers"),
+                },
+          )
           .pipe(Effect.mapError(dispatchFailure));
         return { sequence: result.sequence };
       }),
     ),
+  ),
+  t3_thread_diff: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId);
+      const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+      const queried = yield* checkpointDiffQuery
+        .getThreadDiff({
+          threadId: projection.thread.id,
+          turn: input.turn,
+          ignoreWhitespace: input.ignoreWhitespace,
+        })
+        .pipe(Effect.mapError(diffFailure));
+      const maxChars = input.maxChars ?? DEFAULT_DIFF_CHARS;
+      // Diffs reach 10 MB; slice UTF-16 units instead of materializing code points,
+      // stepping back so a surrogate pair is never split.
+      let end = Math.min(maxChars, queried.diff.length);
+      const lastUnit = queried.diff.charCodeAt(end - 1);
+      if (end < queried.diff.length && lastUnit >= 0xd800 && lastUnit <= 0xdbff) end -= 1;
+      return {
+        threadId: projection.thread.id,
+        fromTurnCount: queried.fromTurnCount,
+        toTurnCount: queried.toTurnCount,
+        latestTurnCount: queried.latestTurnCount,
+        diff: queried.diff.slice(0, end),
+        truncated: end < queried.diff.length,
+        totalChars: queried.diff.length,
+      };
+    }),
   ),
   t3_thread_configuration: McpToolAccess.reads((input) => readConfiguration(input.threadId)),
   t3_thread_configure: McpToolAccess.either(
@@ -403,27 +504,33 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     (input) => input.action === "list" || input.action === "read",
     McpToolAccess.reads((input) =>
       Effect.gen(function* () {
-        const { projection } = yield* readThread(input.threadId, ["runs", "messages"]);
+        const { projection } = yield* readThread(input.threadId, ["runs", "messages", "turnItems"]);
         if (input.action === "list") {
           const runs = queuedRunsInDeliveryOrder(projection);
           const cursor = input.cursor ?? 0;
           const end = cursor + (input.limit ?? 20);
+          const queueHeld = projection.runs.some(
+            (run) => run.status === "queued" && run.queueHeld === true,
+          );
           return {
             items: runs.slice(cursor, end).flatMap((run) => {
               const entry = queueEntry(projection, run.id, 1000);
               return entry === undefined ? [] : [entry];
             }),
             nextCursor: end < runs.length ? end : null,
+            queueHeld,
+            holdReason: queueHeld ? queueHoldReason(projection) : null,
           };
         }
         const queuedRunId = yield* required(input.queuedRunId, "queuedRunId");
-        return (
-          queueEntry(projection, queuedRunId, 16000) ??
-          (yield* new OrchestratorMcpFailure({
+        const entry = queueEntry(projection, queuedRunId, 16000);
+        if (entry === undefined) {
+          return yield* new OrchestratorMcpFailure({
             code: "invalid_request",
             message: "The queued message was not found.",
-          }))
-        );
+          });
+        }
+        return { ...entry, holdReason: queueHoldReason(projection) };
       }),
     ),
     writesThread((input) =>

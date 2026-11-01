@@ -31,6 +31,7 @@ import * as Receipts from "./CommandReceiptStore.ts";
 import * as Projections from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as Registry from "./ProviderAdapterRegistry.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as Harness from "./testkit/ProviderReplayHarness.ts";
@@ -334,6 +335,12 @@ const tools = Layer.mergeAll(
   Layer.provideMerge(Settings.layerTest()),
   Layer.provideMerge(ThreadCommandExecutor.layer),
   Layer.provideMerge(Layer.mock(CloudLink.CloudLink)({})),
+  Layer.provideMerge(
+    Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+  ),
+  Layer.provideMerge(
+    Layer.mock(Registry.ProviderAdapterRegistryV2)({ list: () => Effect.succeed([]) }),
+  ),
   Layer.provideMerge(
     Layer.mock(ServerEnvironment.ServerEnvironment)({
       getDescriptor: Effect.succeed({

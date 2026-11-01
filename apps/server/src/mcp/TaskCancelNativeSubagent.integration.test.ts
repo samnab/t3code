@@ -47,6 +47,7 @@ import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(NodeServices.layer),
 );
 
 const driver = ProviderDriverKind.make("claudeAgent");

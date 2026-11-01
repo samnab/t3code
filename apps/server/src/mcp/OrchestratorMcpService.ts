@@ -65,6 +65,7 @@ import {
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
   normalizeThreadPullRequestKey,
@@ -77,6 +78,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -120,6 +122,7 @@ import {
   taskPrompt,
 } from "./delegatedTaskModes.ts";
 import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import { assertProjectWorktree } from "./toolkits/project/handlers.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -262,7 +265,11 @@ function scheduledTaskWorkspaceStrategy(
     : { type: "worktree", baseRef: "main", startFromOrigin: true };
 }
 
-function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): OrchestratorMcpScheduledTask {
+function scheduledTaskSummary(
+  task: ScheduledTask,
+  mayRun: boolean,
+  deliveries?: OrchestratorMcpScheduledTask["webhookDeliveries"],
+): OrchestratorMcpScheduledTask {
   return {
     scheduledTaskId: task.id,
     title: task.title,
@@ -271,12 +278,25 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
     projectId: task.projectId,
     boundThreadId: task.threadId,
     schedule: task.schedule,
+    workspaceStrategy: task.workspaceStrategy,
+    providerInstanceId: task.modelSelection.instanceId,
+    model: task.modelSelection.model,
+    ...(task.modelSelection.options === undefined ? {} : { options: task.modelSelection.options }),
+    runtimeMode: task.runtimeMode,
+    interactionMode: task.interactionMode,
     nextRunAt: task.nextRunAt,
     lastRunStatus: task.lastRunStatus,
+    lastRunAt: task.lastRunAt,
+    // Stored as Cause.pretty: stack frames and server paths follow the first line.
+    lastRunError: task.lastRunError?.split("\n", 1)[0]?.slice(0, 500) ?? null,
+    runCount: task.runCount,
     ...(task.webhook?.url == null || !mayRun ? {} : { webhookUrl: task.webhook.url }),
     ...(task.webhook === undefined
       ? {}
       : { webhookSignature: task.webhook.hasSecret ? "set" : "none" }),
+    ...(deliveries === undefined || deliveries.length === 0
+      ? {}
+      : { webhookDeliveries: deliveries }),
   };
 }
 
@@ -800,6 +820,9 @@ function listItemFromShell(
     pullRequests: threadPullRequests(shell.pullRequests),
     ...threadSettlement(shell),
     ...threadSnooze(shell, nowMs),
+    pinned: shell.pinnedAt != null,
+    archived: shell.archivedAt !== null,
+    autoSettle: shell.autoSettleDisabledAt == null,
     lastVisitedAt: shell.lastVisitedAt != null ? DateTime.formatIso(shell.lastVisitedAt) : null,
     latestRunCompletedAt:
       shell.latestRunCompletedAt != null ? DateTime.formatIso(shell.latestRunCompletedAt) : null,
@@ -854,6 +877,8 @@ function threadDetail(
       (request) => request.status === "pending",
     ).length,
     archived: projection.thread.archivedAt !== null,
+    pinned: projection.thread.pinnedAt != null,
+    autoSettle: projection.thread.autoSettleDisabledAt == null,
     ...threadSettlement(projection.thread),
     ...threadSnooze(shell, nowMs),
     lastVisitedAt: shell.lastVisitedAt != null ? DateTime.formatIso(shell.lastVisitedAt) : null,
@@ -1004,6 +1029,7 @@ const make = Effect.gen(function* () {
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
+  const fileSystem = yield* FileSystem.FileSystem;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const delegationPolicy = yield* DelegationPolicy.DelegationPolicy;
@@ -1024,17 +1050,25 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const projectDefaultModelSelection = (
-    project: Effect.Success<ReturnType<typeof requireProject>>,
-  ) =>
-    project.defaultModelSelection === null
-      ? Effect.fail(
-          failure(
-            "invalid_request",
-            `Project ${project.id} has no default model, so this caller cannot pick one for it.`,
-          ),
-        )
-      : Effect.succeed(project.defaultModelSelection);
+  /** The project's effective default: project override, then the environment default. */
+  const projectDefaultModelSelection = Effect.fn(
+    "OrchestratorMcpService.projectDefaultModelSelection",
+  )(function* (project: Effect.Success<ReturnType<typeof requireProject>>) {
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError((error) =>
+        failure("orchestration_error", `Unable to read server settings: ${error.message}`),
+      ),
+    );
+    const modelSelection = resolveProjectSettings(settings, project.id, project).settings
+      .defaultModelSelection;
+    if (modelSelection === null) {
+      return yield* failure(
+        "invalid_request",
+        `Project ${project.id} has no default model, so this caller cannot pick one for it.`,
+      );
+    }
+    return modelSelection;
+  });
   const secretRequests = yield* SecretRequests.SecretRequests;
 
   const requireCapability = (scope: McpInvocationScope) =>
@@ -1304,7 +1338,12 @@ const make = Effect.gen(function* () {
   };
 
   const resolveTarget = Effect.fn("OrchestratorMcpService.resolveTarget")(function* (input: {
-    readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
+    readonly parent: {
+      readonly thread: Pick<
+        OrchestrationV2ThreadProjection["thread"],
+        "projectId" | "modelSelection"
+      >;
+    };
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
     /** Receipt replays bypass current settings and the hidden-model check because they start no work. Dispatch must reuse the checked command ID. */
@@ -1872,17 +1911,32 @@ const make = Effect.gen(function* () {
         };
       },
       task: ScheduledTask,
+      includeDeliveries = false,
     ) {
       const live =
         caller.parent === undefined
           ? scope.client?.access !== "read-only"
           : Exit.isSuccess(yield* Effect.exit(assertLiveCaller(scope, caller.parent)));
       const modes = yield* scheduledTaskRunModes(task).pipe(Effect.option);
+      // Delivery status is read-only decoration: a failed read omits the
+      // field instead of failing the task read it decorates.
+      const deliveries =
+        includeDeliveries && task.webhook !== undefined
+          ? yield* scheduledTasks
+              .listWebhookDeliveries({ id: task.id, acceptAnyOutcome: true, limit: 3 })
+              .pipe(
+                Effect.map(({ deliveries }) =>
+                  deliveries.map(({ receivedAt, outcome }) => ({ receivedAt, outcome })),
+                ),
+                Effect.option,
+              )
+          : Option.none();
       return scheduledTaskSummary(
         task,
         live &&
           Option.isSome(modes) &&
           modes.value.every((mode) => withinLimits(caller.limits, mode)),
+        Option.isSome(deliveries) ? deliveries.value : undefined,
       );
     },
   );
@@ -1987,7 +2041,16 @@ const make = Effect.gen(function* () {
         return {
           tasks: yield* Effect.forEach(
             tasks.filter((task) => projectId === undefined || task.projectId === projectId),
-            (task) => summarizeScheduledTask(scope, { parent, limits }, task),
+            (task) =>
+              summarizeScheduledTask(
+                scope,
+                { parent, limits },
+                task,
+                // Deliveries need one query per webhook task, so
+                // single-project lists carry them and whole-environment
+                // lists skip them.
+                projectId !== undefined,
+              ),
           ),
         };
       },
@@ -1997,6 +2060,81 @@ const make = Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
+        if (input.providerInstanceId !== undefined) {
+          const enabled = yield* threadManagement.isProviderInstanceEnabledForProject({
+            projectId: existing.projectId,
+            instanceId: input.providerInstanceId,
+          });
+          if (!enabled) {
+            return yield* failure(
+              "invalid_request",
+              `Provider ${input.providerInstanceId} is not enabled for this project. Enable it in Settings, or pick one from orchestrator_capabilities.`,
+            );
+          }
+        }
+        // Validate against the task's project and selection, not the
+        // caller's: the task launches there, so the new model must be
+        // launchable there right now, and unspecified parts inherit what
+        // the task already runs.
+        const recheck = {
+          parent: {
+            thread: {
+              projectId: existing.projectId,
+              modelSelection: existing.modelSelection,
+            },
+          },
+        };
+        const resolvedTarget =
+          input.providerInstanceId === undefined &&
+          input.model === undefined &&
+          input.options === undefined
+            ? input.runtimeMode === undefined
+              ? undefined
+              : // A mode-only edit resolves the provider the task already
+                // runs, so resolveRuntimeMode can refuse a mode it does not
+                // offer instead of saving it to run later as approval-required.
+                yield* resolveTargetRechecking({
+                  ...recheck,
+                  target: undefined,
+                  providers: yield* loadProviders,
+                })
+            : yield* resolveTargetRechecking({
+                ...recheck,
+                target: {
+                  providerInstanceId: input.providerInstanceId,
+                  model: input.model,
+                  options: input.options,
+                },
+                providers: yield* loadProviders,
+              });
+        // Modes only go down from the task's stored ones: the user raises
+        // them in the app. The resolved target rechecks a stored mode
+        // against a provider the task is being moved to, stepping down when
+        // the new provider does not offer it.
+        const runtimeMode = yield* resolveRuntimeMode(
+          existing.runtimeMode,
+          input.runtimeMode,
+          resolvedTarget,
+        ).pipe(
+          Effect.catch((error) =>
+            error.code === "runtime_mode_escalation_denied"
+              ? failure(
+                  "invalid_request",
+                  `Runtime mode ${input.runtimeMode} is broader than the task's ${existing.runtimeMode}. Agents can only lower a task's modes; the user raises them in Settings.`,
+                )
+              : error,
+          ),
+        );
+        if (input.interactionMode !== undefined) {
+          yield* resolveInteractionMode(existing.interactionMode, input.interactionMode).pipe(
+            Effect.catch(() =>
+              failure(
+                "invalid_request",
+                `Interaction mode ${input.interactionMode} is broader than the task's ${existing.interactionMode}. Agents can only lower a task's modes; the user raises them in Settings.`,
+              ),
+            ),
+          );
+        }
         if (
           input.bindToCurrentThread === true &&
           (parent === undefined || parent.thread.projectId !== existing.projectId)
@@ -2014,11 +2152,75 @@ const make = Effect.gen(function* () {
             : input.bindToCurrentThread && parent !== undefined
               ? parent.thread.id
               : null;
-        // Update workspace strategy on rebinding so unbound root tasks cannot run in the shared checkout.
-        const workspaceStrategy =
-          input.bindToCurrentThread === undefined
-            ? existing.workspaceStrategy
-            : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+        // A bound run follows the bound thread's own provider, workspace and
+        // modes, so accepting these edits would report success and change
+        // nothing at run time.
+        if (
+          threadId !== null &&
+          [
+            input.providerInstanceId,
+            input.model,
+            input.options,
+            input.workspaceStrategy,
+            input.runtimeMode,
+            input.interactionMode,
+          ].some((value) => value !== undefined)
+        ) {
+          return yield* failure(
+            "invalid_request",
+            "This task is bound to a thread, so it runs with that thread's provider, model, workspace and modes. Pass bindToCurrentThread:false to unbind it, or change the bound thread's own settings.",
+          );
+        }
+        // An explicit strategy wins over the one derived from rebinding; the
+        // membership check keeps a task from running outside its project.
+        // Both run the same base-ref check a thread launch does, so a task
+        // does not discover a dead baseRef when it fires unattended.
+        const refuseUnresolvableWorktreeBase = (
+          strategy: Extract<OrchestrationV2ThreadLaunchWorkspaceStrategy, { type: "worktree" }>,
+        ) =>
+          threadLaunch
+            .checkWorktreeBase({ projectId: existing.projectId, workspaceStrategy: strategy })
+            .pipe(
+              Effect.mapError((error) =>
+                failure(
+                  "invalid_request",
+                  `${error.message} No task update was saved. Pass a branch, tag, or commit that exists there${
+                    strategy.startFromOrigin === true
+                      ? "; the project has no usable remote to fetch it from."
+                      : ", or set startFromOrigin:true if it exists only on a remote."
+                  }`,
+                ),
+              ),
+            );
+        let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy;
+        if (input.workspaceStrategy === undefined) {
+          if (input.bindToCurrentThread === undefined) {
+            workspaceStrategy = existing.workspaceStrategy;
+          } else {
+            // Unbinding derives a default worktree strategy; it gets the
+            // same base-ref check as an explicit one.
+            const derived = scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+            if (derived.type === "worktree") {
+              yield* refuseUnresolvableWorktreeBase(derived);
+            }
+            workspaceStrategy = derived;
+          }
+        } else if (input.workspaceStrategy.type === "existing_worktree") {
+          const project = yield* requireProject(existing.projectId);
+          const worktreePath = yield* assertProjectWorktree({
+            git: gitDriver,
+            fileSystem,
+            workspaceRoot: project.workspaceRoot,
+            worktreePath: input.workspaceStrategy.worktreePath,
+          });
+          workspaceStrategy = { ...input.workspaceStrategy, worktreePath };
+        } else {
+          const strategy = input.workspaceStrategy;
+          if (strategy.type === "worktree") {
+            yield* refuseUnresolvableWorktreeBase(strategy);
+          }
+          workspaceStrategy = strategy;
+        }
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -2028,9 +2230,9 @@ const make = Effect.gen(function* () {
           projectId: existing.projectId,
           threadId,
           workspaceStrategy,
-          modelSelection: existing.modelSelection,
-          runtimeMode: existing.runtimeMode,
-          interactionMode: existing.interactionMode,
+          modelSelection: resolvedTarget?.modelSelection ?? existing.modelSelection,
+          runtimeMode,
+          interactionMode: input.interactionMode ?? existing.interactionMode,
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
         };
@@ -2041,7 +2243,7 @@ const make = Effect.gen(function* () {
               failure("orchestration_error", `Could not update scheduled task: ${error.message}`),
             ),
           );
-        return yield* summarizeScheduledTask(scope, { parent, limits }, task);
+        return yield* summarizeScheduledTask(scope, { parent, limits }, task, true);
       },
     ),
     deleteScheduledTask: Effect.fn("OrchestratorMcpService.deleteScheduledTask")(
@@ -2885,6 +3087,7 @@ const make = Effect.gen(function* () {
         .listProjectThreads({
           projectId: projectId ?? undefined,
           includeSubagents: input.includeSubagents !== false,
+          location: input.archived ? "archive" : "active",
         })
         .pipe(
           Effect.mapError((error) =>
@@ -3231,6 +3434,7 @@ export const layer: Layer.Layer<
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
   | GitVcsDriver.GitVcsDriver
+  | FileSystem.FileSystem
   | ProviderRegistry.ProviderRegistry
   | ProviderAdapterRegistry.ProviderAdapterRegistryV2
   | ServerSettings.ServerSettingsService

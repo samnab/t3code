@@ -14,10 +14,12 @@ import {
   ProviderUserInputAnswers,
   IsoDateTime,
   OrchestratorMcpFailure,
+  clampedPositiveInt,
   OrchestrationV2DispatchCommandResult,
   ThreadId,
   RunId,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ThreadGoal,
   ThreadGoalLoopClientCommand,
@@ -30,6 +32,7 @@ import { Tool, Toolkit } from "effect/ai";
 
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
+import * as CheckpointDiffQuery from "../../../checkpointing/CheckpointDiffQuery.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -83,11 +86,21 @@ const commandTool = {
     Crypto.Crypto,
   ],
 };
+const queueAttachment = Schema.Struct({
+  name: Schema.String,
+  type: Schema.String,
+  mimeType: Schema.String,
+  sizeBytes: NonNegativeInt,
+});
 const queueEntry = Schema.Struct({
   queuedRunId: RunId,
   text: Schema.String,
   truncated: Schema.Boolean,
+  queueHeld: Schema.Boolean,
+  attachmentCount: NonNegativeInt,
+  attachments: Schema.Array(queueAttachment),
 });
+const queueHoldReason = Schema.NullOr(Schema.String.check(Schema.isMaxLength(500)));
 const QUEUE_READ_ACTIONS = ["list", "read"] as const;
 const QueueTool = Tool.make("t3_queue", {
   ...commandTool,
@@ -111,8 +124,16 @@ const QueueTool = Tool.make("t3_queue", {
     limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
   }),
   success: Schema.Union([
-    Schema.Struct({ items: Schema.Array(queueEntry), nextCursor: Schema.NullOr(NonNegativeInt) }),
-    queueEntry,
+    Schema.Struct({
+      items: Schema.Array(queueEntry),
+      nextCursor: Schema.NullOr(NonNegativeInt),
+      queueHeld: Schema.Boolean,
+      holdReason: queueHoldReason,
+    }),
+    Schema.Struct({
+      ...queueEntry.fields,
+      holdReason: queueHoldReason,
+    }),
     OrchestrationV2DispatchCommandResult,
   ]),
 }).annotate(Tool.Destructive, true);
@@ -136,9 +157,9 @@ const question = Schema.Struct({
 const PendingRequestTool = Tool.make("t3_pending_request", {
   ...commandTool,
   description:
-    "Pending user questions in a thread. Omit `threadId` for this thread. list: their ids; approvals are not listed. read: one by `requestId`. respond: answer one with `answers`; this cannot approve a permission request.",
+    "Pending user questions in a thread. Omit `threadId` for this thread. list: their ids; approvals are not listed. read: one by `requestId`. respond: answer one with `answers`; this cannot approve a permission request. dismiss: drop a pending question; approvals cannot be dismissed.",
   parameters: Schema.Struct({
-    action: Schema.Literals(["list", "read", "respond"]),
+    action: Schema.Literals(["list", "read", "respond", "dismiss"]),
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
     requestId: Schema.optional(RuntimeRequestId),
@@ -272,25 +293,42 @@ const ThreadTransferTool = Tool.make("t3_thread_transfer", {
 const ThreadSearchTool = Tool.make("t3_thread_search", {
   ...commandTool,
   description:
-    "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive.",
+    "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive. With `threadId`: search only that transcript (first/last 17 matching entries); `entryId` is the message id, or item id for plans.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     ...OrchestrationSearchThreadsInput.fields,
     projectId: Schema.optional(ProjectId),
+    threadId: Schema.optional(ThreadId),
   }),
-  success: Schema.Struct({
-    matches: Schema.Array(
-      Schema.Struct({
-        threadId: OrchestrationThreadSearchMatch.fields.threadId,
-        projectId: OrchestrationThreadSearchMatch.fields.projectId,
-        title: Schema.String,
-        link: Schema.optional(Schema.String),
-        source: Schema.Literals(["title", "user", "assistant"]),
-        snippet: Schema.optional(OrchestrationThreadSearchMatch.fields.snippet),
-        messageCreatedAt: Schema.optional(OrchestrationThreadSearchMatch.fields.messageCreatedAt),
-      }),
-    ),
-  }),
+  success: Schema.Union([
+    // Per-thread first: a zero-match result also fits the cross-thread shape,
+    // which would strip threadId and totalMatches on encode.
+    Schema.Struct({
+      threadId: ThreadId,
+      totalMatches: NonNegativeInt,
+      matches: Schema.Array(
+        Schema.Struct({
+          entryId: TrimmedNonEmptyString,
+          runId: Schema.NullOr(RunId),
+          startIndex: NonNegativeInt,
+          count: NonNegativeInt,
+        }),
+      ),
+    }),
+    Schema.Struct({
+      matches: Schema.Array(
+        Schema.Struct({
+          threadId: OrchestrationThreadSearchMatch.fields.threadId,
+          projectId: OrchestrationThreadSearchMatch.fields.projectId,
+          title: Schema.String,
+          link: Schema.optional(Schema.String),
+          source: Schema.Literals(["title", "user", "assistant"]),
+          snippet: Schema.optional(OrchestrationThreadSearchMatch.fields.snippet),
+          messageCreatedAt: Schema.optional(OrchestrationThreadSearchMatch.fields.messageCreatedAt),
+        }),
+      ),
+    }),
+  ]),
   dependencies: [...commandTool.dependencies, ThreadSearch.ThreadSearch],
 })
   .annotate(Tool.Readonly, true)
@@ -317,9 +355,43 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ThreadDiffTool = Tool.make("t3_thread_diff", {
+  description:
+    "Read a thread's checkpoint diff, the same one the app's diff panel shows. `turn`: that one turn's diff; omit for the whole thread up to the latest ready turn.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+    turn: Schema.optional(PositiveInt),
+    ignoreWhitespace: Schema.optional(Schema.Boolean),
+    maxChars: Schema.optional(clampedPositiveInt(200_000)).annotate({
+      description: "Max chars of diff, 1 to 200000.",
+    }),
+  }),
+  success: Schema.Struct({
+    threadId: ThreadId,
+    fromTurnCount: NonNegativeInt,
+    toTurnCount: NonNegativeInt,
+    latestTurnCount: NonNegativeInt,
+    diff: Schema.String,
+    truncated: Schema.Boolean,
+    totalChars: NonNegativeInt,
+  }),
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [
+    McpInvocationContext.McpInvocationContext,
+    ThreadManagementService.ThreadManagementService,
+    CheckpointDiffQuery.CheckpointDiffQuery,
+  ],
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
 export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,
   ThreadSearchTool,
+  ThreadDiffTool,
   ThreadConfigurationTool,
   ThreadConfigureTool,
   ThreadLowerModesTool,

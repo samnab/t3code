@@ -31,6 +31,15 @@ export class ProviderBackgroundTaskServiceV2 extends Context.Service<
 const isUnsupportedError = Schema.is(OrchestrationV2BackgroundTaskUnsupportedError);
 const isStopError = Schema.is(OrchestrationV2BackgroundTaskStopError);
 
+/** The id the adapter knows for a timeline item: its native ref, else the item id. */
+const nativeTaskId = (item: {
+  readonly id: unknown;
+  readonly nativeItemRef?: { readonly nativeId: string | null } | null;
+}) => {
+  const nativeId = item.nativeItemRef?.nativeId;
+  return typeof nativeId === "string" && nativeId.length > 0 ? nativeId : String(item.id);
+};
+
 export const layer: Layer.Layer<
   ProviderBackgroundTaskServiceV2,
   never,
@@ -58,7 +67,8 @@ export const layer: Layer.Layer<
             runs: projection.runs,
           }).find(
             (candidate) =>
-              (candidate.nativeItemRef?.nativeId ?? String(candidate.id)) === input.taskId,
+              // Agents only see timeline item ids, so either id addresses the task.
+              nativeTaskId(candidate) === input.taskId || String(candidate.id) === input.taskId,
           );
           const itemProviderThread =
             item?.providerThreadId === null || item?.providerThreadId === undefined
@@ -70,7 +80,7 @@ export const layer: Layer.Layer<
               : {
                   providerThread: itemProviderThread,
                   task: {
-                    taskId: input.taskId,
+                    taskId: nativeTaskId(item),
                     kind:
                       item.type === "command_execution"
                         ? ("command" as const)
@@ -113,7 +123,7 @@ export const layer: Layer.Layer<
           }
 
           const liveTasks = yield* runtime.listBackgroundTasks(match.providerThread);
-          if (!liveTasks.some((task) => task.taskId === input.taskId)) {
+          if (!liveTasks.some((task) => task.taskId === match.task.taskId)) {
             return yield* new OrchestrationV2BackgroundTaskStopError({
               reason: "task-not-found",
               threadId: input.threadId,
@@ -122,7 +132,7 @@ export const layer: Layer.Layer<
           }
           yield* runtime.stopBackgroundTask({
             providerThread: match.providerThread,
-            taskId: input.taskId,
+            taskId: match.task.taskId,
           });
         }).pipe(
           Effect.mapError((cause) =>

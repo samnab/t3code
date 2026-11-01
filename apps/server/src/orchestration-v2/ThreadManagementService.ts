@@ -419,10 +419,11 @@ export interface ThreadManagementServiceShape {
     Orchestrator.OrchestratorV2Error
   >;
   readonly getThreadShell: Orchestrator.OrchestratorV2["Service"]["getThreadShell"];
-  /** Omit `projectId` to list every project's threads. Side chats are never listed. */
+  /** Omit `projectId` to list every project's threads. Default location is active threads. Side chats are never listed. */
   readonly listProjectThreads: (input: {
     readonly projectId?: ProjectId | undefined;
     readonly includeSubagents: boolean;
+    readonly location?: "active" | "archive" | undefined;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, ThreadManagementError>;
   readonly sendToThread: (
     input: ThreadManagementSendInput,
@@ -795,7 +796,7 @@ const make = Effect.gen(function* () {
   const listProjectThreads: ThreadManagementServiceShape["listProjectThreads"] = (input) =>
     orchestrator
       .getShellSnapshot({
-        location: "active",
+        location: input.location ?? "active",
         ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
       })
       .pipe(
@@ -806,8 +807,9 @@ const make = Effect.gen(function* () {
               cause,
             }),
         ),
+        // The snapshot keeps archived rows apart; `location` already picked which side is filled.
         Effect.map((snapshot) =>
-          snapshot.threads
+          [...snapshot.threads, ...snapshot.archivedThreads]
             .filter((thread) =>
               input.includeSubagents
                 ? thread.lineage.sideChat !== true

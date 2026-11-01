@@ -106,6 +106,70 @@ it.effect("excludes ready checkpoints from rolled-back runs", () => {
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("getThreadDiff diffs one turn and reports the latest ready turn", () => {
+  const projection = makeProjection();
+  const layer = layerFor({
+    projection: Effect.succeed({
+      ...projection,
+      checkpoints: [
+        {
+          scopeId: firstScopeId,
+          runId: firstRunId,
+          ordinalWithinScope: 1,
+          appRunOrdinal: 1,
+          status: "ready" as const,
+          ref: CheckpointRef.make("refs/t3/test/first"),
+        },
+        ...projection.checkpoints,
+      ],
+    }),
+  });
+
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    assert.deepEqual(yield* query.getThreadDiff({ threadId, turn: 2 }), {
+      fromTurnCount: 1,
+      toTurnCount: 2,
+      latestTurnCount: 2,
+      diff: "diff",
+    });
+    assert.deepEqual(yield* query.getThreadDiff({ threadId }), {
+      fromTurnCount: 0,
+      toTurnCount: 2,
+      latestTurnCount: 2,
+      diff: "diff",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("getThreadDiff returns an empty diff for a thread with no ready turns", () => {
+  const projection = makeProjection();
+  const layer = layerFor({
+    projection: Effect.succeed({ ...projection, checkpoints: [] }),
+  });
+
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    assert.deepEqual(yield* query.getThreadDiff({ threadId }), {
+      fromTurnCount: 0,
+      toTurnCount: 0,
+      latestTurnCount: 0,
+      diff: "",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("getThreadDiff refuses a turn above the latest ready turn", () => {
+  const layer = layerFor({ projection: Effect.succeed(makeProjection()) });
+
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const error = yield* query.getThreadDiff({ threadId, turn: 3 }).pipe(Effect.flip);
+    assert.instanceOf(error, CheckpointTurnRangeUnavailableError);
+    assert.strictEqual(error.availableTurnCount, 2);
+  }).pipe(Effect.provide(layer));
+});
+
 function makeProjectionAfterStoppedRun(stoppedRunCheckpoint: boolean) {
   const thirdRunId = RunId.make("run:checkpoint-diff-v2:3");
   const checkpoint = (

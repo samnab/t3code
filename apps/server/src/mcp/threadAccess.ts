@@ -189,7 +189,8 @@ export const readThread = Effect.fn("mcp.readThread")(function* <
   }
   const projection = yield* context.threads
     .getProjectThreadRecords({ projectId: shell.projectId, threadId: targetId }, fields, {
-      turnItemTypes: ["user_input_request"],
+      // Error items carry the workspace-preparation failure t3_queue reports as holdReason.
+      turnItemTypes: ["user_input_request", "error"],
     })
     .pipe(
       Effect.mapError((error) =>

@@ -13,6 +13,9 @@ import {
   type OrchestrationV2ThreadShell,
   type ScheduledTask,
   ScheduledTaskId,
+  type ScheduledTaskUpsertInput,
+  ScheduledTaskWebhookDeliveryId,
+  type ScheduledTaskWebhookDeliverySummary,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -28,6 +31,7 @@ import {
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -82,6 +86,7 @@ const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(NodeServices.layer),
 );
 
 describe("OrchestratorMcpService", () => {
@@ -2299,6 +2304,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       tasks: ReadonlyArray<ScheduledTask>,
       boundThread: OrchestrationV2ThreadShell | null,
       upserted: Ref.Ref<number>,
+      deliveries: ReadonlyArray<ScheduledTaskWebhookDeliverySummary> = [],
     ) =>
       layerOrchestratorService.pipe(
         Layer.provide(
@@ -2319,6 +2325,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             Layer.mock(RemoteDelegation.RemoteDelegation)({}),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({
               list: () => Effect.succeed({ tasks }),
+              listWebhookDeliveries: () => Effect.succeed({ deliveries }),
               upsert: () =>
                 Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: tasks[0]! })),
             }),
@@ -2346,6 +2353,78 @@ describe("OrchestratorMcpService provider resolution", () => {
           listed.tasks.map((summary) => summary.webhookUrl),
           [undefined, "https://t3.example/hooks/secret"],
         );
+      }),
+    );
+
+    it.effect("reads back the stored execution details", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const listed = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) => mcp.listScheduledTasks(supervisedClient, { projectId })),
+          Effect.provide(
+            service(
+              [
+                task({
+                  workspaceStrategy: { type: "worktree", baseRef: "dev", startFromOrigin: true },
+                  modelSelection: {
+                    instanceId: ProviderInstanceId.make("codex"),
+                    model: "gpt-5",
+                    options: [{ id: "reasoningEffort", value: "high" }],
+                  },
+                  runtimeMode: "auto",
+                  interactionMode: "plan",
+                  runCount: 3,
+                  lastRunAt: "2026-10-06T12:00:00.000Z",
+                  lastRunStatus: "failed",
+                  lastRunError:
+                    "Provider unavailable\n    at run (/srv/t3/ScheduledTaskService.ts:858)",
+                  nextRunAt: "2026-10-07T00:00:00.000Z",
+                }),
+              ],
+              null,
+              upserted,
+              // Metadata only: never headers, bodies, URLs, signatures or tokens.
+              [
+                {
+                  id: ScheduledTaskWebhookDeliveryId.make("delivery:1"),
+                  taskId: ScheduledTaskId.make("scheduled-task:webhook"),
+                  receivedAt: "2026-10-06T09:00:00.000Z",
+                  method: "POST",
+                  contentType: null,
+                  bodyBytes: 2,
+                  outcome: "accepted",
+                  signatureVerified: true,
+                  missingFields: [],
+                  error: null,
+                },
+              ],
+            ),
+          ),
+        );
+        assert.deepEqual(listed.tasks[0], {
+          scheduledTaskId: ScheduledTaskId.make("scheduled-task:webhook"),
+          title: "On push",
+          prompt: "Do {{body.instruction}}",
+          enabled: true,
+          projectId,
+          boundThreadId: null,
+          schedule: { type: "webhook", signature: null },
+          workspaceStrategy: { type: "worktree", baseRef: "dev", startFromOrigin: true },
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5",
+          options: [{ id: "reasoningEffort", value: "high" }],
+          runtimeMode: "auto",
+          interactionMode: "plan",
+          nextRunAt: "2026-10-07T00:00:00.000Z",
+          lastRunStatus: "failed",
+          lastRunAt: "2026-10-06T12:00:00.000Z",
+          // Stack frames and server paths stay out of the agent's context.
+          lastRunError: "Provider unavailable",
+          runCount: 3,
+          // The task runs at a mode above the caller's, so the URL stays withheld.
+          webhookSignature: "none",
+          webhookDeliveries: [{ receivedAt: "2026-10-06T09:00:00.000Z", outcome: "accepted" }],
+        });
       }),
     );
 
@@ -2391,6 +2470,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   Layer.mock(RemoteDelegation.RemoteDelegation)({}),
                   Layer.mock(ScheduledTaskService.ScheduledTaskService)({
                     list: () => Effect.succeed({ tasks: [task({})] }),
+                    listWebhookDeliveries: () => Effect.succeed({ deliveries: [] }),
                   }),
                 ),
               ),
@@ -2481,6 +2561,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   Layer.mock(RemoteDelegation.RemoteDelegation)({}),
                   Layer.mock(ScheduledTaskService.ScheduledTaskService)({
                     list: () => Effect.succeed({ tasks: [bound] }),
+                    listWebhookDeliveries: () => Effect.succeed({ deliveries: [] }),
                     upsert: () =>
                       Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: bound })),
                   }),
@@ -2496,6 +2577,478 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(yield* Ref.get(upserted), 1);
         assert.equal(updated.scheduledTaskId, bound.id);
         assert.equal(updated.webhookUrl, undefined);
+      }),
+    );
+  });
+
+  describe("scheduled task edits", () => {
+    const projectId = ProjectId.make("project:scheduled-edits");
+    const codex = ProviderInstanceId.make("codex");
+    const editsTask = (overrides: Partial<ScheduledTask> = {}): ScheduledTask => ({
+      id: ScheduledTaskId.make("scheduled-task:edits"),
+      title: "Queue watch",
+      prompt: "Watch the queue",
+      enabled: false,
+      schedule: { type: "interval", everyMs: 120_000 },
+      projectId,
+      threadId: null,
+      workspaceStrategy: { type: "root" },
+      modelSelection: { instanceId: codex, model: "gpt-5" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      createdBy: "user",
+      creationSource: "web",
+      createdAt: "2026-10-05T00:00:00.000Z",
+      updatedAt: "2026-10-05T00:00:00.000Z",
+      nextRunAt: null,
+      lastRunAt: null,
+      lastRunStatus: "succeeded",
+      lastRunError: null,
+      runCount: 2,
+      ...overrides,
+    });
+    const clientScope = (access: "approval-required" | "auto"): McpInvocationScope => ({
+      environmentId: EnvironmentId.make("environment:scheduled-edits"),
+      requestNamespace: "client:scheduled-edits",
+      thread: undefined,
+      client: { sessionId: "scheduled-edits", label: "Claude Code", access },
+      capabilities: new Set(["orchestration"]),
+      issuedAt: 1,
+    });
+    const provider = (
+      models: ReadonlyArray<string>,
+      supportedRuntimeModes?: ServerProvider["supportedRuntimeModes"],
+    ): ServerProvider => ({
+      instanceId: codex,
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: "test",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-09-13T00:00:00.000Z",
+      models: models.map((slug) => ({ slug, name: slug, isCustom: false, capabilities: null })),
+      slashCommands: [],
+      skills: [],
+      ...(supportedRuntimeModes === undefined ? {} : { supportedRuntimeModes }),
+    });
+    const layer = (input: {
+      readonly task?: ScheduledTask;
+      readonly providers?: ReadonlyArray<ServerProvider>;
+      readonly enabledInstances?: ReadonlySet<string>;
+      readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+      readonly worktrees?: ReadonlyArray<string>;
+      readonly saved?: Ref.Ref<ReadonlyArray<ScheduledTaskUpsertInput>>;
+      readonly realPath?: (path: string) => Effect.Effect<string, unknown>;
+      readonly baseRefError?: string;
+    }) =>
+      OrchestratorMcpService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            // Overrides the Node FileSystem above when the test needs a fixed realpath.
+            ...(input.realPath === undefined
+              ? []
+              : [Layer.succeed(FileSystem.FileSystem, { realPath: input.realPath } as never)]),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              checkWorktreeBase: () =>
+                input.baseRefError === undefined
+                  ? Effect.void
+                  : Effect.fail(
+                      new ThreadLaunchService.ThreadLaunchBaseRefError({
+                        projectId,
+                        projectTitle: "Edits",
+                        workspaceRoot: "/repo",
+                        baseRef: input.baseRefError,
+                      }),
+                    ),
+            }),
+            Layer.mock(GitVcsDriver.GitVcsDriver)({
+              listWorktreePaths: () => Effect.succeed([...(input.worktrees ?? [])]),
+            }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              isProviderInstanceEnabledForProject: ({ instanceId }) =>
+                Effect.succeed(input.enabledInstances?.has(instanceId) ?? false),
+              // Null reads a bound thread as deleted, so its checks fall back to the task's own modes.
+              getThreadShell: () => Effect.succeed(null),
+            }),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({
+              getProviders: Effect.succeed(input.providers ?? []),
+              refreshInstance: () => Effect.succeed(input.providers ?? []),
+            }),
+            Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+              list: () => Effect.succeed((input.providers ?? []).map((p) => p.instanceId)),
+            }),
+            ServerSettings.layerTest(input.settings ?? {}),
+            Layer.mock(ProjectService.ProjectService)({
+              getById: () =>
+                Effect.succeedSome({
+                  id: projectId,
+                  title: "Edits",
+                  workspaceRoot: "/repo",
+                  defaultModelSelection: null,
+                  scripts: [],
+                  createdAt: "2026-10-05T00:00:00.000Z",
+                  updatedAt: "2026-10-05T00:00:00.000Z",
+                  deletedAt: null,
+                } as never),
+            }),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            unusedDelegationPolicyLayer,
+            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+              list: () => Effect.succeed({ tasks: [input.task ?? editsTask()] }),
+              listWebhookDeliveries: () => Effect.succeed({ deliveries: [] }),
+              upsert: (upsert) =>
+                (input.saved === undefined
+                  ? Effect.void
+                  : Ref.update(input.saved, (all) => [...all, upsert])
+                ).pipe(
+                  Effect.as({
+                    task: { ...(input.task ?? editsTask()), ...upsert } as ScheduledTask,
+                  }),
+                ),
+            }),
+          ),
+        ),
+      );
+
+    it.effect("changes the model to one the task's project could launch", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              providers: [provider(["gpt-5", "gpt-5.4"])],
+              enabledInstances: new Set([codex]),
+              saved,
+            }),
+          ),
+        );
+        const updated = yield* mcp.updateScheduledTask(clientScope("approval-required"), {
+          scheduledTaskId: existing.id,
+          model: "gpt-5.4",
+        });
+        assert.equal(updated.model, "gpt-5.4");
+        const savedInput = (yield* Ref.get(saved))[0];
+        assert.deepEqual(savedInput?.modelSelection, { instanceId: codex, model: "gpt-5.4" });
+      }),
+    );
+
+    it.effect("refuses a hidden model without saving", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              providers: [provider(["gpt-5", "gpt-5.4"])],
+              settings: {
+                providerModelPreferences: {
+                  [codex]: { hiddenModels: ["gpt-5.4"], modelOrder: [] },
+                },
+              },
+              saved,
+            }),
+          ),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            model: "gpt-5.4",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "model_unavailable");
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect("refuses a provider instance the project has disabled", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              providers: [provider(["gpt-5"])],
+              enabledInstances: new Set([]),
+              saved,
+            }),
+          ),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            providerInstanceId: codex,
+            model: "gpt-5",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /not enabled for this project/);
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect("refuses a runtime mode raise without saving", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask({ runtimeMode: "auto" });
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(layer({ task: existing, providers: [provider(["gpt-5"])], saved })),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("auto"), {
+            scheduledTaskId: existing.id,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /Settings/);
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect("lowers modes and leaves unrelated fields alone", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask({
+          runtimeMode: "auto",
+          interactionMode: "default",
+          modelSelection: {
+            instanceId: codex,
+            model: "gpt-5",
+            options: [{ id: "reasoningEffort", value: "high" }],
+          },
+          workspaceStrategy: { type: "worktree", baseRef: "dev", startFromOrigin: true },
+        });
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(layer({ task: existing, providers: [provider(["gpt-5"])], saved })),
+        );
+        const updated = yield* mcp.updateScheduledTask(clientScope("auto"), {
+          scheduledTaskId: existing.id,
+          runtimeMode: "approval-required",
+          interactionMode: "plan",
+        });
+        assert.equal(updated.runtimeMode, "approval-required");
+        assert.equal(updated.interactionMode, "plan");
+        assert.deepEqual(yield* Ref.get(saved), [
+          {
+            id: existing.id,
+            title: existing.title,
+            prompt: existing.prompt,
+            enabled: existing.enabled,
+            schedule: existing.schedule,
+            projectId: existing.projectId,
+            threadId: existing.threadId,
+            workspaceStrategy: existing.workspaceStrategy,
+            modelSelection: existing.modelSelection,
+            runtimeMode: "approval-required",
+            interactionMode: "plan",
+            createdBy: existing.createdBy,
+            creationSource: existing.creationSource,
+          },
+        ]);
+      }),
+    );
+
+    it.effect("refuses a worktree path outside the task's project", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(layer({ task: existing, worktrees: ["/repo/wt-in"], saved })),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            workspaceStrategy: {
+              type: "existing_worktree",
+              worktreePath: "/nonexistent/elsewhere/wt",
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /worktreePath does not exist/);
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect("refuses a worktree path whose real path cannot be read", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              worktrees: ["/repo/wt-gone"],
+              realPath: () => Effect.fail({ _tag: "TestNoSuchPathError" }),
+              saved,
+            }),
+          ),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            workspaceStrategy: { type: "existing_worktree", worktreePath: "/repo/wt-gone" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect("refuses edits a bound task would ignore until it is unbound", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask({ threadId: ThreadId.make("thread:scheduled-bound") });
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              providers: [provider(["gpt-5", "gpt-5.4"])],
+              enabledInstances: new Set([codex]),
+              saved,
+            }),
+          ),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            model: "gpt-5.4",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /bindToCurrentThread:false/);
+        assert.deepEqual(yield* Ref.get(saved), []);
+        const updated = yield* mcp.updateScheduledTask(clientScope("approval-required"), {
+          scheduledTaskId: existing.id,
+          bindToCurrentThread: false,
+          model: "gpt-5.4",
+        });
+        assert.equal(updated.model, "gpt-5.4");
+        assert.equal((yield* Ref.get(saved))[0]?.threadId, null);
+      }),
+    );
+
+    it.effect("stores the worktree path it actually cleared", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              worktrees: ["/repo/wt-real"],
+              realPath: (path) => Effect.succeed(path === "/repo/wt-link" ? "/repo/wt-real" : path),
+              saved,
+            }),
+          ),
+        );
+        yield* mcp.updateScheduledTask(clientScope("approval-required"), {
+          scheduledTaskId: existing.id,
+          workspaceStrategy: { type: "existing_worktree", worktreePath: "/repo/wt-link" },
+        });
+        assert.deepEqual((yield* Ref.get(saved))[0]?.workspaceStrategy, {
+          type: "existing_worktree",
+          worktreePath: "/repo/wt-real",
+        });
+      }),
+    );
+
+    it.effect("steps a stored mode down when the moved-to provider lacks it", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask({ runtimeMode: "auto" });
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              providers: [provider(["gpt-5"], ["approval-required"])],
+              enabledInstances: new Set([codex]),
+              saved,
+            }),
+          ),
+        );
+        const updated = yield* mcp.updateScheduledTask(clientScope("auto"), {
+          scheduledTaskId: existing.id,
+          providerInstanceId: codex,
+          model: "gpt-5",
+        });
+        assert.equal(updated.runtimeMode, "approval-required");
+        assert.equal((yield* Ref.get(saved))[0]?.runtimeMode, "approval-required");
+      }),
+    );
+
+    it.effect("refuses a runtime mode the task's provider does not offer", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask({ runtimeMode: "auto" });
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layer({
+              task: existing,
+              providers: [provider(["gpt-5"], ["approval-required"])],
+              enabledInstances: new Set([codex]),
+              saved,
+            }),
+          ),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("auto"), {
+            scheduledTaskId: existing.id,
+            runtimeMode: "auto-accept-edits",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /does not offer runtime mode auto-accept-edits/);
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect("refuses a worktree base ref the project cannot resolve", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(layer({ task: existing, saved, baseRefError: "no-such-branch" })),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            workspaceStrategy: {
+              type: "worktree",
+              baseRef: "no-such-branch",
+              startFromOrigin: false,
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /no-such-branch/);
+        assert.deepEqual(yield* Ref.get(saved), []);
+      }),
+    );
+
+    it.effect("checks the worktree strategy derived from unbinding", () =>
+      Effect.gen(function* () {
+        const saved = yield* Ref.make<ReadonlyArray<ScheduledTaskUpsertInput>>([]);
+        const existing = editsTask();
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(layer({ task: existing, saved, baseRefError: "main" })),
+        );
+        const error = yield* mcp
+          .updateScheduledTask(clientScope("approval-required"), {
+            scheduledTaskId: existing.id,
+            bindToCurrentThread: false,
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "invalid_request");
+        assert.match(error.message, /No task update was saved/);
+        assert.deepEqual(yield* Ref.get(saved), []);
       }),
     );
   });
@@ -3180,6 +3733,85 @@ describe("OrchestratorMcpService thread list", () => {
           ["thread:b-snoozed", "project:b"],
         ],
       );
+    }).pipe(Effect.provide(service)),
+  );
+});
+
+describe("OrchestratorMcpService thread organization readback", () => {
+  const client: McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment:thread-org"),
+    requestNamespace: "client:thread-org",
+    thread: undefined,
+    client: { sessionId: "thread-org", label: "Claude Code", access: "full-access" },
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  };
+  const pinnedAt = DateTime.makeUnsafe("2026-01-01T03:00:00.000Z");
+  const pinnedThreadId = ThreadId.make("thread:org-pinned");
+  const archivedThreadId = ThreadId.make("thread:org-archived");
+  const pinnedShell: OrchestrationV2ThreadShell = {
+    ...liveThreadShell(pinnedThreadId),
+    pinnedAt,
+    autoSettleDisabledAt: pinnedAt,
+  };
+  const archivedShell: OrchestrationV2ThreadShell = {
+    ...liveThreadShell(archivedThreadId),
+    archivedAt: pinnedAt,
+  };
+  // Stands in for the projection store's active/archive locations.
+  const service = layerOrchestratorService.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          listProjectThreads: (input) =>
+            Effect.succeed(input.location === "archive" ? [archivedShell] : [pinnedShell]),
+          getThreadShell: () => Effect.succeed(pinnedShell),
+          getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(pinnedShell)),
+          getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        unusedDelegationPolicyLayer,
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      ),
+    ),
+  );
+
+  it.effect("reads pin and auto-settle state back into list and detail", () =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const listed = yield* mcp.listThreads(client, { allProjects: true });
+      assert.equal(listed.threads.length, 1);
+      assert.equal(listed.threads[0]?.pinned, true);
+      assert.equal(listed.threads[0]?.autoSettle, false);
+      assert.equal(listed.threads[0]?.archived, false);
+      const read = yield* mcp.readThread(client, { threadId: pinnedThreadId });
+      assert.equal(read.thread.pinned, true);
+      assert.equal(read.thread.autoSettle, false);
+    }).pipe(Effect.provide(service)),
+  );
+
+  it.effect("lists archived threads only when asked", () =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const active = yield* mcp.listThreads(client, { allProjects: true });
+      assert.deepStrictEqual(
+        active.threads.map((thread) => thread.threadId),
+        [pinnedThreadId],
+      );
+      const archive = yield* mcp.listThreads(client, { allProjects: true, archived: true });
+      assert.deepStrictEqual(
+        archive.threads.map((thread) => thread.threadId),
+        [archivedThreadId],
+      );
+      assert.equal(archive.threads[0]?.archived, true);
     }).pipe(Effect.provide(service)),
   );
 });
