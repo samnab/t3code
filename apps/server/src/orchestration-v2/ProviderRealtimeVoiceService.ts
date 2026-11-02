@@ -107,6 +107,13 @@ export const layer: Layer.Layer<
         records.contextHandoffs.some((handoff) => {
           if (handoff.status !== "ready" || handoff.toProviderThreadId !== providerThread.id)
             return false;
+          // Already in this native thread's history; a turn would skip it too.
+          if (
+            handoff.delivery !== undefined &&
+            handoff.delivery.status !== "pending" &&
+            handoff.delivery.nativeThreadId === providerThread.nativeThreadRef?.nativeId
+          )
+            return false;
           const target = records.runs.find((run) => run.id === handoff.targetRunId);
           return (
             target === undefined ||

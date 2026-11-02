@@ -5075,6 +5075,37 @@ it.effect("ProviderRealtimeVoiceServiceV2 starts voice on an unloaded thread wit
       assert.equal(yield* Ref.get(voiceStarts), 2);
       assert.isTrue(Exit.isSuccess(yield* startWithTargetRun("completed")));
       assert.equal(yield* Ref.get(voiceStarts), 3);
+
+      // A turn skips a handoff already injected into this native thread, so voice must too,
+      // even when its target run was later interrupted.
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            threadId,
+            type: "context-handoff.updated",
+            occurredAt: now,
+            payload: {
+              id: ContextHandoffId.make("handoff:voice"),
+              threadId,
+              targetRunId: handoffRunId,
+              fromProviderThreadIds: [],
+              toProviderThreadId: providerThread.id,
+              coveredRunOrdinals: { from: 1, to: 1 },
+              strategy: "delta_since_target_last_seen",
+              status: "ready",
+              summaryMessageId: null,
+              summaryText: "",
+              delivery: { nativeThreadId: "native-thread", status: "injected", itemIds: [] },
+              createdByProviderInstanceId: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      assert.isTrue(Exit.isSuccess(yield* startWithTargetRun("interrupted")));
+      assert.equal(yield* Ref.get(voiceStarts), 4);
     }).pipe(
       Effect.provide(
         ProviderRealtimeVoiceService.layer.pipe(
