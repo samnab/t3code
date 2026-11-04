@@ -137,10 +137,29 @@ describe("thread links", () => {
   it("lists the threads a message's links can name, outside code", () => {
     expect(
       threadLinkRefs(
-        "<t3-thread://v2/there/t1> [a](t3-thread://v1/t%3A2) `<t3-thread://v2/code/t3>`",
+        [
+          "<t3-thread://v2/there/t1> [a](t3-thread://v1/t%3A2)",
+          "[b](t3-thread://v2/remote/thread:task:mcp%3A1)",
+          "<t3-thread://v1/t%3A2> `<t3-thread://v2/code/t3>`",
+          "``[span](t3-thread://v1/span)``",
+          "```md",
+          "<t3-thread://v2/code/fence>",
+          "```",
+          "~~~md",
+          "[fenced](t3-thread://v1/fenced)",
+          "~~~",
+          "<t3-thread://v1/after>",
+        ].join("\n"),
         local,
       ),
-    ).toEqual([ref("there", "t1"), ref("local", "t%3A2"), ref("local", "t:2")]);
+    ).toEqual([
+      ref("there", "t1"),
+      ref("local", "t%3A2"),
+      ref("local", "t:2"),
+      ref("remote", "thread:task:mcp%3A1"),
+      ref("remote", "thread:task:mcp:1"),
+      ref("local", "after"),
+    ]);
   });
 
   it("writes a titleless autolink that opens that exact thread", () => {

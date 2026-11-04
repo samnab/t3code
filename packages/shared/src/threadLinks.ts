@@ -6,8 +6,9 @@ export const THREAD_LINK_PROTOCOL = "t3-thread";
 const V1_PREFIX = `${THREAD_LINK_PROTOCOL}://v1/`;
 const V2_PREFIX = `${THREAD_LINK_PROTOCOL}://v2/`;
 // Code comes first in the alternation so a link written inside a code span or fence is skipped.
+// Hermes matchAll drops Babel's synthesized named groups, so captures stay positional.
 const THREAD_LINK_OUTSIDE_CODE =
-  /(?<fence>(`{3,}|~{3,})[\s\S]*?(?:\2|$))|(?<span>(`+)[^\n]*?\4)|\[(?<label>[^\]\n]*)\]\((?<href>t3-thread:\/\/v[12]\/[^\s)]+)\)|<(?<autolink>t3-thread:\/\/v[12]\/[^\s<>]+)>/g;
+  /((`{3,}|~{3,})[\s\S]*?(?:\2|$))|((`+)[^\n]*?\4)|\[([^\]\n]*)\]\((t3-thread:\/\/v[12]\/[^\s)]+)\)|<(t3-thread:\/\/v[12]\/[^\s<>]+)>/g;
 
 const decodeThreadId = Schema.decodeUnknownOption(ThreadId);
 const decodeEnvironmentId = Schema.decodeUnknownOption(EnvironmentId);
@@ -98,7 +99,7 @@ export function threadLinkRefs(
 ): ReadonlyArray<ScopedThreadRef> {
   const refs = new Map<string, ScopedThreadRef>();
   for (const match of markdown.matchAll(THREAD_LINK_OUTSIDE_CODE)) {
-    const href = match.groups?.href ?? match.groups?.autolink;
+    const href = match[6] ?? match[7];
     const link = href === undefined ? null : parseThreadLinkHref(href);
     if (link === null) continue;
     for (const ref of threadLinkCandidates(link, messageEnvironmentId)) {
@@ -127,28 +128,39 @@ export function relabelThreadLinks(
   title: (ref: ScopedThreadRef) => string | undefined,
 ): string {
   if (!hasThreadLinks(markdown)) return markdown;
-  return markdown.replace(THREAD_LINK_OUTSIDE_CODE, (source, ...args) => {
-    const groups = args.at(-1) as { href?: string; autolink?: string; label?: string };
-    const href = groups.href ?? groups.autolink;
-    if (href === undefined) return source;
-    const written = parseThreadLinkHref(href);
-    if (written === null) return source;
-    const environmentId = written.environmentId ?? messageEnvironmentId;
-    const decoded = percentDecodedThreadLinkId(written.threadId);
-    const threadId =
-      title({ environmentId, threadId: written.threadId }) === undefined &&
-      decoded !== null &&
-      title({ environmentId, threadId: decoded }) !== undefined
-        ? decoded
-        : written.threadId;
-    const current = title({ environmentId, threadId });
-    if (current === undefined) {
-      if (groups.href !== undefined && written.environmentId === null) return source;
-      return groups.label?.trim() || unknownThreadLinkLabel(written, messageEnvironmentId);
-    }
-    return formatThreadLink(
-      { environmentId: written.environmentId, threadId },
-      current.trim() || groups.label || threadId,
-    );
-  });
+  return markdown.replace(
+    THREAD_LINK_OUTSIDE_CODE,
+    (
+      source,
+      _fence: string | undefined,
+      _fenceMarker: string | undefined,
+      _span: string | undefined,
+      _spanMarker: string | undefined,
+      label: string | undefined,
+      labeledHref: string | undefined,
+      autolink: string | undefined,
+    ) => {
+      const href = labeledHref ?? autolink;
+      if (href === undefined) return source;
+      const written = parseThreadLinkHref(href);
+      if (written === null) return source;
+      const environmentId = written.environmentId ?? messageEnvironmentId;
+      const decoded = percentDecodedThreadLinkId(written.threadId);
+      const threadId =
+        title({ environmentId, threadId: written.threadId }) === undefined &&
+        decoded !== null &&
+        title({ environmentId, threadId: decoded }) !== undefined
+          ? decoded
+          : written.threadId;
+      const current = title({ environmentId, threadId });
+      if (current === undefined) {
+        if (labeledHref !== undefined && written.environmentId === null) return source;
+        return label?.trim() || unknownThreadLinkLabel(written, messageEnvironmentId);
+      }
+      return formatThreadLink(
+        { environmentId: written.environmentId, threadId },
+        current.trim() || label || threadId,
+      );
+    },
+  );
 }
