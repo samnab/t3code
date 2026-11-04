@@ -26,6 +26,7 @@ import {
   type ThreadLink,
 } from "@t3tools/shared/threadLinks";
 import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import { threadChipTargets } from "../lib/enrichedLinkPresentation";
@@ -34,7 +35,8 @@ import { projectGlyphImageAtom, projectGlyphKey } from "../native/ProjectChipIco
 import { projectFaviconUrlAtom } from "./assets";
 import { environmentProjects } from "./projects";
 import { environmentServerConfigsAtom, serverEnvironment } from "./server";
-import { environmentThreadDetails, environmentThreadShells } from "./threads";
+import { environmentThreadDetails, environmentThreadShells, threadFamilies } from "./threads";
+import { environmentShell } from "./shell";
 
 const EMPTY_PROJECT_ATOM = Atom.make<EnvironmentProject | null>(null).pipe(
   Atom.withLabel("mobile-project:empty"),
@@ -55,12 +57,28 @@ const EMPTY_THREAD_LINK_TITLES_ATOM = Atom.make<ReadonlyMap<string, string>>(new
 const decodeThreadKey = Schema.decodeUnknownSync(Schema.Tuple([EnvironmentId, ThreadId]));
 const threadKey = (ref: ScopedThreadRef) => JSON.stringify([ref.environmentId, ref.threadId]);
 
-// Null when this client doesn't know the thread. Keyed, so a link never walks an environment's threads.
+// Bounded shells omit existing threads; a missing keyed row needs an authoritative family read.
 const threadTitleAtom = Atom.family((key: string) => {
   const ref = scopeThreadRef(...decodeThreadKey(JSON.parse(key)));
-  return Atom.make((get) => get(environmentThreadShells.threadShellAtom(ref))?.title ?? null).pipe(
-    Atom.withLabel(`mobile-thread-title:${key}`),
-  );
+  return Atom.make((get) => {
+    const shell = get(environmentThreadShells.threadShellAtom(ref));
+    if (shell !== null) return shell.title;
+    const family = get(threadFamilies.familyAtom(ref.environmentId, ref.threadId));
+    if (!AsyncResult.isSuccess(family) || family.waiting) return null;
+    const state = get(environmentShell.stateValueAtom(ref.environmentId));
+    const cut = Option.getOrNull(state.snapshot)?.olderSettled?.asOfSequence ?? 0;
+    if (
+      family.value.snapshotSequence < cut ||
+      (state.removedAt.get(ref.threadId) ?? -1) > family.value.snapshotSequence
+    )
+      return null;
+    return (
+      family.value.threads.find(
+        (thread) =>
+          thread.id === ref.threadId && thread.deletedAt === null && thread.archivedAt === null,
+      )?.title ?? null
+    );
+  }).pipe(Atom.withLabel(`mobile-thread-title:${key}`));
 });
 
 const decodeThreadKeys = Schema.decodeUnknownSync(Schema.Array(Schema.String));
