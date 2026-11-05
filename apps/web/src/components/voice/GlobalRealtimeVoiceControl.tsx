@@ -40,7 +40,7 @@ const LISTENING_STATUS = {
   unavailable: "Keywords unavailable · press Resume",
 } as const;
 const KEYWORDS_HINT =
-  "Say “T3 privacy pause” to pause. To resume, say “T3 resume conversation”, then say “confirm unpause” within 10 seconds, or press Confirm. Listening stays on this device. Similar phrases such as “T3 privacy policy” can pause by mistake.";
+  "Say “pause voice” to pause. To resume, say “resume voice”, then say “confirm unpause” within 10 seconds, or press Confirm. Listening stays on this device. Sentences containing “pause voice” can pause by mistake.";
 
 // Muting shuts only the call's gate: the track stays enabled, so the OS indicator stays on and,
 // with keywords on, the detector still hears a spoken pause.

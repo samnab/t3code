@@ -386,13 +386,13 @@ On web and desktop, a live voice conversation can be paused and resumed by voice
 Turn on **Keywords** in the voice controls while the conversation is paused. The
 setting is saved on this device.
 
-- Say "T3 privacy pause" to pause. Nothing is sent while paused.
-- To resume, say "T3 resume conversation", then say "confirm unpause". Wait about
+- Say "pause voice" to pause. Nothing is sent while paused.
+- To resume, say "resume voice", then say "confirm unpause". Wait about
   three seconds after the first phrase, and say the second within ten seconds.
-  Otherwise voice stays paused. Saying "T3 privacy pause" or pressing **Cancel**
+  Otherwise voice stays paused. Saying "pause voice" or pressing **Cancel**
   between the two phrases keeps it paused.
 
 Keywords are recognized on your device. While paused with keywords on, the
 microphone stays on for that local listening only. If local listening is
 unavailable, voice stays paused: press **Resume** or **Confirm**, or use the
-pause shortcut. Similar phrases such as "T3 privacy policy" can pause by mistake.
+pause shortcut. Sentences that contain "pause voice" can pause by mistake.

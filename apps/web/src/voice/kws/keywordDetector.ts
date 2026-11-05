@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 
 /**
- * On-device "T3 privacy pause" / "T3 resume conversation" / "confirm unpause" detection. Assets are
+ * On-device "pause voice" / "resume voice" / "confirm unpause" detection. Assets are
  * hash-checked, so the worker needs no network. Commands are raw; the controller decides what one
  * means now. Worker or worklet errors and a backlog over MAX_IN_FLIGHT report `failed`.
  */
