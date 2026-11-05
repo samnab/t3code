@@ -40,8 +40,9 @@ it("does not inject a completed goal into a later user turn", () => {
   ).toBe("Start unrelated work");
 });
 
-for (const state of ["running", "completed"] as const) {
-  it(`leaves native maintenance commands bare for a ${state} goal`, () => {
+it.each(["running", "completed"] as const)(
+  "leaves native maintenance commands bare for a %s goal",
+  (state) => {
     const thread = {
       goal: "Ship the goal loop",
       goalLoop: {
@@ -61,5 +62,5 @@ for (const state of ["running", "completed"] as const) {
         attachments: [],
       }),
     ).toBe("/compact");
-  });
-}
+  },
+);

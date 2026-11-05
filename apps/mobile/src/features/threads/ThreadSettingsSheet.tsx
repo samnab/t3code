@@ -61,7 +61,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
-import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
+import { AppBar } from "../../components/ui/AppBar";
 import { AndroidAnchoredMenu } from "../../components/ui/AndroidAnchoredMenu";
 import { IconButton } from "../../components/ui/IconButton";
 import { ProviderIcon } from "../../components/ProviderIcon";
@@ -120,6 +120,8 @@ import {
   COMPLETION_AUDIO_CHOICES,
   compatibleRuntimeModeForChoices,
   runtimeModeChoicesForSupportedModes,
+  withManagedRuntimeModeLimits,
+  type RuntimeModeChoice,
   selectableChoices,
 } from "./thread-settings-options";
 import {
@@ -315,7 +317,7 @@ type ThreadSettingsSessionValue = {
   readonly manageHidden: boolean;
   readonly setManageHidden: (value: boolean) => void;
   readonly runtimeMode: RuntimeMode;
-  readonly runtimeModeChoices: ReturnType<typeof runtimeModeChoicesForSupportedModes>;
+  readonly runtimeModeChoices: ReadonlyArray<RuntimeModeChoice>;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
   readonly completionAudio?: CompletionAudioMode;
   readonly supportsCompletionSound?: boolean;
@@ -527,8 +529,9 @@ function ThreadSettingsSessionProvider(
     pendingModel ??
     props.providerGroups.flatMap((group) => group.models).find((option) => isApplied(option)) ??
     null;
-  const runtimeModeChoices = runtimeModeChoicesForSupportedModes(
-    displayedModel?.supportedRuntimeModes,
+  const runtimeModeChoices = withManagedRuntimeModeLimits(
+    runtimeModeChoicesForSupportedModes(displayedModel?.supportedRuntimeModes),
+    [config?.managedPolicy],
   );
   const compatibleRuntimeMode = compatibleRuntimeModeForChoices(
     props.runtimeMode,
@@ -1156,7 +1159,8 @@ function ThreadSettingsChoiceContent(props: {
           rows: session.runtimeModeChoices.map((choice) => ({
             id: choice.mode,
             label: choice.label,
-            description: choice.description,
+            description: choice.disabledReason ?? choice.description,
+            disabled: choice.disabledReason !== undefined,
             selected: choice.mode === session.runtimeMode,
             onPress: () => {
               void Haptics.selectionAsync();
@@ -1171,6 +1175,7 @@ function ThreadSettingsChoiceContent(props: {
               id: choice.id,
               label: choice.label,
               description: choice.description,
+              disabled: false,
               selected:
                 choice.id ===
                 (session.promptTraits.ultrathinkPromptControlled &&
@@ -1206,6 +1211,7 @@ function ThreadSettingsChoiceContent(props: {
                 id: choice.mode,
                 label: choice.label,
                 description: choice.description,
+                disabled: session.canUpdateCompletionAudio === false,
                 selected: choice.mode === session.completionAudio,
                 onPress: () => {
                   if (session.canUpdateCompletionAudio === false) return;
@@ -1246,7 +1252,7 @@ function ThreadSettingsChoiceContent(props: {
               selected={row.selected}
               separated={index > 0}
               onPress={row.onPress}
-              disabled={session.canUpdateCompletionAudio === false}
+              disabled={row.disabled}
             />
           ) : (
             <ChoiceRow
@@ -1255,6 +1261,7 @@ function ThreadSettingsChoiceContent(props: {
               isLast={index === submenuContent.rows.length - 1}
               label={row.label}
               selected={row.selected}
+              disabled={row.disabled}
               onPress={row.onPress}
             />
           ),
@@ -1519,7 +1526,8 @@ function ThreadSettingsChoiceScreen() {
     <>
       <NativeStackScreenOptions options={{ headerShown: Platform.OS !== "android" }} />
       {Platform.OS === "android" ? (
-        <AndroidScreenHeader
+        <AppBar
+          embedded
           title={route.params.title}
           onBack={() => navigation.goBack()}
           hideBottomBorder

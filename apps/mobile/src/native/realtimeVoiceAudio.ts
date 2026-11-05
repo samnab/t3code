@@ -1,14 +1,7 @@
-/**
- * Native owner of realtime voice audio. The iOS build feeds WebRTC only through a
- * default-deny native send gate; other platforms report unsupported and must not
- * fall back to an ungated microphone track.
- *
- * Call order for one user-started conversation: `prepare(owner)`, create the
- * react-native-webrtc peer, require `snapshot().adopted`, then `openGate`, renew
- * the epoch's lease while sending, and `closeGate`/`end` with the same values.
- * Each `prepare` starts a new capture lifetime and closes any open epoch. A failed
- * renewal means native code closed the gate (lease expiry, revocation or audio fault).
- */
+// iOS feeds WebRTC only through a default-deny native send gate; other platforms must not
+// fall back to an ungated mic. Order: `prepare(owner)`, create the peer, require
+// `snapshot().adopted`, `openGate`, renew the lease while sending, then `closeGate`/`end`.
+// A failed renewal means native code already closed the gate.
 export interface RealtimeVoiceAudioSnapshot {
   readonly installed: boolean;
   readonly adopted: boolean;
@@ -41,13 +34,9 @@ export interface RealtimeVoiceAudio {
   readonly closeGate: (epoch: number) => boolean;
   readonly end: (owner: string) => Promise<boolean>;
   readonly snapshot: () => RealtimeVoiceAudioSnapshot;
-  /**
-   * Terminal. Fires once after a fault (`interruption`, `route:N`, `mediaServicesReset` or
-   * `audioFault`) only when native code has already closed the gate, ended the owner and
-   * released the audio session. Never fires for a deliberate `end`. After any end, `prepare`
-   * may reject `busy` until native teardown finishes; for a fault, that is when this fires.
-   * Prepare again only on a new user action.
-   */
+  // Terminal: fires once after a fault, after native code closed the gate and released audio;
+  // never for a deliberate `end`. `prepare` may reject `busy` until teardown finishes.
+  // Prepare again only on a new user action.
   readonly addRevokedListener: (listener: (event: RealtimeVoiceAudioRevoked) => void) => {
     remove: () => void;
   };

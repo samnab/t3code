@@ -12,7 +12,7 @@ import {
   normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "@t3tools/provider-core/server/maintenanceResolver";
-import { makeClaudeMaintenanceResolver as makeClaudeDriverMaintenanceResolver } from "./ClaudeDriver.ts";
+import { makeClaudeMaintenanceResolver as makeClaudeDriverMaintenanceResolver } from "./ClaudeMaintenance.ts";
 
 const windowsHost = HostProcess.Platform.defaultValue() === "win32";
 

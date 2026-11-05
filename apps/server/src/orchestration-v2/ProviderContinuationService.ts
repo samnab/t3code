@@ -50,14 +50,9 @@ function delegatedCompletionRetryKey(
   return `${request.threadId}:${completion.parentRunId}:${completion.generation}:${completion.messageId}`;
 }
 
-/**
- * Drains ProviderContinuationRequests and dispatches an internal
- * message.dispatch per request so the wake turn buffered by the adapter is
- * ingested as a normal run. Delegated completions are durable mailbox offers:
- * the orchestrator selects native steering or queued delivery under its thread
- * lock. Spoken requests start immediately when the thread is idle; other
- * adapter-buffered continuations queue behind active work.
- */
+// Turns each adapter-buffered wake turn into an internal message.dispatch. Delegated
+// completions are mailbox offers the orchestrator steers or queues under its thread lock;
+// spoken requests start at once on an idle thread, others queue behind active work.
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const ids = yield* IdAllocator.IdAllocatorV2;

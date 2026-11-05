@@ -8,17 +8,23 @@ import {
   AgentSendResult,
 } from "./agentMessaging.ts";
 
+const decodeAgentSendInput = Schema.decodeSync(AgentSendInput);
+const decodeAgentSendResult = Schema.decodeSync(AgentSendResult);
+const decodeAgentInboxInput = Schema.decodeSync(AgentInboxInput);
+const decodeAgentInboxResult = Schema.decodeSync(AgentInboxResult);
+const decodeUnknownInboxInput = Schema.decodeUnknownSync(AgentInboxInput);
+
 describe("agent messaging contracts", () => {
   it("decodes durable send and inbox tool input/output", () => {
     expect(
-      Schema.decodeSync(AgentSendInput)({
+      decodeAgentSendInput({
         messageId: "message-1",
         targetAgentId: "agent-2",
         message: "Please inspect the importer.",
       }),
     ).toMatchObject({ targetAgentId: "agent-2" });
     expect(
-      Schema.decodeSync(AgentSendResult)({
+      decodeAgentSendResult({
         messageId: "message-1",
         senderAgentId: "agent-1",
         targetAgentId: "agent-2",
@@ -27,13 +33,13 @@ describe("agent messaging contracts", () => {
       }),
     ).toMatchObject({ status: "notified", deliveryRunId: "run-1" });
     expect(
-      Schema.decodeSync(AgentInboxInput)({
+      decodeAgentInboxInput({
         acknowledgeMessageIds: ["message-1"],
         limit: 25,
       }),
     ).toEqual({ acknowledgeMessageIds: ["message-1"], limit: 25 });
     expect(
-      Schema.decodeSync(AgentInboxResult)({
+      decodeAgentInboxResult({
         agentId: "agent-1",
         peers: [
           {
@@ -61,10 +67,11 @@ describe("agent messaging contracts", () => {
   });
 
   it("rejects oversized inbox batches and invalid limits", () => {
-    const decode = Schema.decodeUnknownSync(AgentInboxInput);
     expect(() =>
-      decode({ acknowledgeMessageIds: Array.from({ length: 51 }, (_, i) => `m-${i}`) }),
+      decodeUnknownInboxInput({
+        acknowledgeMessageIds: Array.from({ length: 51 }, (_, i) => `m-${i}`),
+      }),
     ).toThrow();
-    expect(() => decode({ limit: 0 })).toThrow();
+    expect(() => decodeUnknownInboxInput({ limit: 0 })).toThrow();
   });
 });

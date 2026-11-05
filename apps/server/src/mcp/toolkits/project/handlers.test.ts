@@ -1,4 +1,5 @@
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import * as ManagedPolicy from "../../../policy/ManagedPolicy.ts";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
@@ -9,8 +10,8 @@ import {
   type Project as ProjectRecord,
   type ModelSelection,
   type RuntimeMode,
-  ThreadId,
   type OrchestrationV2ThreadShell,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -28,6 +29,7 @@ import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandE
 import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as DocumentText from "../../../provider/DocumentText.ts";
+import { OrchestratorRuntimeModeAboveCeilingError } from "../../../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
@@ -53,7 +55,9 @@ const clientLaunchHarness = (input: {
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
-  readonly webOrigin?: string;
+  readonly hostedAppUrl?: string;
+  /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
+  readonly refusedByCeiling?: true;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -82,7 +86,6 @@ const clientLaunchHarness = (input: {
             },
           }),
     }),
-    NodeCrypto.layer,
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
       requestNamespace: "client:session-1",
@@ -91,7 +94,7 @@ const clientLaunchHarness = (input: {
         sessionId: "session-1",
         label: "Claude Code",
         access: input.runtimeModeCeiling,
-        webOrigin: input.webOrigin,
+        hostedAppUrl: input.hostedAppUrl,
       },
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
@@ -116,6 +119,23 @@ const clientLaunchHarness = (input: {
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
       launch: (launch) => {
         input.launched.push(launch);
+        if (input.refusedByCeiling) {
+          return Effect.fail(
+            new ThreadLaunch.ThreadLaunchError({
+              operation: "create-thread",
+              commandId: launch.commandId,
+              projectId: launch.projectId,
+              cause: new OrchestratorRuntimeModeAboveCeilingError({
+                commandId: launch.commandId,
+                threadId: launch.threadId ?? ThreadId.make("thread:refused"),
+                refused: "mode",
+                runtimeMode: launch.runtimeMode,
+                maxRuntimeMode: "approval-required",
+                organization: "Example Corp",
+              }),
+            }),
+          );
+        }
         return Effect.succeed({
           threadId: launch.threadId,
           projection: {
@@ -154,7 +174,7 @@ const clientLaunchHarness = (input: {
         Layer.provide(NodeServices.layer),
       ),
     ),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
   return { projectId, modelSelection, projectDefaults, dependencies: layerDependencies };
 };
@@ -172,17 +192,19 @@ it.effect(
           readonly runtimeMode?: RuntimeMode;
           readonly targeted?: false;
           readonly overrideModel?: ModelSelection;
-          readonly webOrigin?: string;
+          readonly hostedAppUrl?: string;
+          readonly refusedByCeiling?: true;
         },
       ) {
-        const { targeted, overrideModel, webOrigin, ...input } = params;
+        const { targeted, overrideModel, hostedAppUrl, refusedByCeiling, ...input } = params;
         const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
         const { projectId, modelSelection, dependencies } = clientLaunchHarness({
           runtimeModeCeiling,
           defaultRuntimeMode,
           launched,
           ...(overrideModel === undefined ? {} : { overrideModel }),
-          ...(webOrigin === undefined ? {} : { webOrigin }),
+          ...(hostedAppUrl === undefined ? {} : { hostedAppUrl }),
+          ...(refusedByCeiling === undefined ? {} : { refusedByCeiling }),
         });
         const toolkit = yield* ProjectToolkit.pipe(
           Effect.provide(
@@ -211,11 +233,11 @@ it.effect(
 
       const aboveCeiling = yield* launchWith("auto-accept-edits", "full-access", {
         title: "Fix",
-        webOrigin: "https://box.example.ts.net",
+        hostedAppUrl: "https://t3.example.com",
       });
       expect(aboveCeiling.launched[0]?.runtimeMode).toBe("auto-accept-edits");
       expect(aboveCeiling.result).toMatchObject({
-        link: `https://box.example.ts.net/environment/${encodeURIComponent(aboveCeiling.launched[0]?.threadId ?? "")}`,
+        link: `https://t3.example.com/threads/environment/${encodeURIComponent(aboveCeiling.launched[0]?.threadId ?? "")}`,
       });
 
       const requested = yield* launchWith("full-access", "approval-required", {
@@ -246,6 +268,16 @@ it.effect(
         overrideModel,
       });
       expect(fromSettings.launched[0]?.modelSelection).toEqual(overrideModel);
+
+      // An administrator's ceiling the orchestrator enforces is named, not reported as unavailable.
+      const managed = yield* launchWith("full-access", "full-access", {
+        title: "Fix",
+        refusedByCeiling: true,
+      });
+      expect(managed.result).toMatchObject({
+        code: "invalid_request",
+        message: "Example Corp limits threads to Supervised.",
+      });
     }),
 );
 
@@ -546,6 +578,7 @@ it.effect("project settings read reports each effective value with its source", 
 // A fresh service per build rereads settings.json, so each build is a server restart.
 const restartedSettings = () =>
   Layer.fresh(ServerSettings.layer).pipe(
+    Layer.provide(ManagedPolicy.layerTest()),
     Layer.provide(
       Layer.succeed(
         ServerSecretStore.ServerSecretStore,

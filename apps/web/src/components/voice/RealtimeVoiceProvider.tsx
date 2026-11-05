@@ -163,6 +163,7 @@ export function RealtimeVoiceProvider({
     return { controller, detector };
   });
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to the voice controller to toast when a call ends
   useEffect(() => {
     let previous = controller.getSnapshot();
     return controller.subscribe(() => {
@@ -181,6 +182,7 @@ export function RealtimeVoiceProvider({
       }
     });
   }, [controller]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- binds page lifecycle and desktop events to the voice session
   useEffect(() => {
     const end = () => controller.end("Voice ended because the app is closing or suspended.");
     // Desktop voice outlives a hidden window; screen lock and sleep pause it instead.
@@ -216,6 +218,7 @@ export function RealtimeVoiceProvider({
   }, [controller, detector]);
   // Separate from the lifecycle effect, whose cleanup ends voice, so remapping never ends a call.
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the window keydown listener on current keybindings
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if (event.defaultPrevented || controller.getSnapshot().mode === "off") return;

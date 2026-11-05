@@ -44,12 +44,13 @@ import {
 import { toastManager } from "./ui/toast";
 import { useRealtimeVoiceActive } from "./voice/RealtimeVoiceProvider";
 
-const PREVIEW_FORWARDED_LAYOUT_COMMANDS = [
+const PREVIEW_FORWARDED_COMMANDS = [
   "workspace.focusNext",
   "workspace.focusPrevious",
   "sidebar.toggle",
   "rightPanel.toggle",
   "rightPanel.toggleMaximized",
+  "preview.focusUrl",
 ] as const;
 const PREVIEW_FORWARDED_VOICE_COMMANDS = ["voice.togglePause", "voice.micOff"] as const;
 
@@ -210,7 +211,7 @@ export function ReopenClosedViewShortcut() {
     // Voice chords are claimed only during a call, and the voice owner's menu actions only revoke.
     const commands = [
       ...(hasHistory ? (["view.reopenClosed"] as const) : []),
-      ...PREVIEW_FORWARDED_LAYOUT_COMMANDS,
+      ...PREVIEW_FORWARDED_COMMANDS,
       ...(voiceActive ? PREVIEW_FORWARDED_VOICE_COMMANDS : []),
     ];
     void preview

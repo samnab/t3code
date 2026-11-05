@@ -10,9 +10,10 @@ import {
   isValidDesktopBootstrapToken,
 } from "@t3tools/shared/desktopBootstrapToken";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
+import * as Mac from "effect/crypto/Mac";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -266,7 +267,7 @@ const PAIRING_TOKEN_PATTERN = new RegExp(
 );
 
 const make = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const config = yield* ServerConfig.ServerConfig;
   const pairingLinks = yield* AuthPairingLinks.AuthPairingLinkRepository;
   const seededGrantsRef = yield* Ref.make(new Map<string, StoredBootstrapGrant>());
@@ -274,7 +275,7 @@ const make = Effect.gen(function* () {
   const generatePairingToken = Effect.gen(function* () {
     let credential = "";
     while (credential.length < PAIRING_TOKEN_LENGTH) {
-      const bytes = yield* crypto
+      const bytes = yield* random
         .randomBytes(PAIRING_TOKEN_LENGTH)
         .pipe(
           Effect.mapError(
@@ -316,9 +317,13 @@ const make = Effect.gen(function* () {
 
   // Accept tokens derived from the rotating desktop secret; older desktops send only a token.
   const desktopBootstrapSecret = config.desktopBootstrapSecret;
+  const mac = yield* Mac.Mac;
   const consumeRotatingDesktopToken = (credential: string, nowMs: number) =>
-    desktopBootstrapSecret !== undefined &&
-    isValidDesktopBootstrapToken(desktopBootstrapSecret, credential, nowMs);
+    desktopBootstrapSecret === undefined
+      ? Effect.succeed(false)
+      : isValidDesktopBootstrapToken(desktopBootstrapSecret, credential, nowMs).pipe(
+          Effect.provideService(Mac.Mac, mac),
+        );
 
   if (config.desktopBootstrapToken && desktopBootstrapSecret === undefined) {
     const now = yield* DateTime.now;
@@ -382,8 +387,8 @@ const make = Effect.gen(function* () {
   const issueOneTimeToken: PairingGrantStore["Service"]["issueOneTimeToken"] = Effect.fn(
     "PairingGrantStore.issueOneTimeToken",
   )(function* (input) {
-    const id = yield* crypto
-      .randomUUIDv4()
+    const id = yield* random
+      .uuidV4()
       .pipe(
         Effect.mapError(
           (cause) =>
@@ -456,7 +461,7 @@ const make = Effect.gen(function* () {
   const consume: PairingGrantStore["Service"]["consume"] = Effect.fn("PairingGrantStore.consume")(
     function* (credential, input) {
       const now = yield* DateTime.now;
-      if (consumeRotatingDesktopToken(credential, now.epochMilliseconds)) {
+      if (yield* consumeRotatingDesktopToken(credential, now.epochMilliseconds)) {
         return {
           method: "desktop-bootstrap",
           scopes: AuthStandardClientScopes,

@@ -6,8 +6,8 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
-import DesktopPairingMigration from "./Migrations/077_AuthDesktopPairingSessionTtl.ts";
-import RealtimeVoiceHistoryResumeMigration from "./Migrations/078_RealtimeVoiceHistoryResume.ts";
+import DesktopPairingMigration from "./Migrations/080_AuthDesktopPairingSessionTtl.ts";
+import RealtimeVoiceHistoryResumeMigration from "./Migrations/081_RealtimeVoiceHistoryResume.ts";
 import { reconcileForkMigrationLedger } from "./reconcileForkMigrationLedger.ts";
 
 const forkHistory = [
@@ -394,7 +394,7 @@ describe("desktop pairing backport upgrade", () => {
           "ScheduledTaskWebhooks",
         );
         assert.strictEqual(
-          history.find((row) => row.migration_id === 77)?.name,
+          history.find((row) => row.migration_id === 80)?.name,
           "AuthDesktopPairingSessionTtl",
         );
         assert.strictEqual(history.length, migrationManifest.length);
@@ -426,15 +426,18 @@ const forkRenumberTail = [
   [74, "ExcludeAttachmentPlaceholdersFromSearch"],
   [75, "SubagentDeliveryState"],
   [76, "ProjectionProjectsPinArchive"],
-  [77, "AuthDesktopPairingSessionTtl"],
-  [78, "RealtimeVoiceHistoryResume"],
+  [77, "RepairBooleanSettledOverride"],
+  [78, "DropOrchestrationEventCorrelationIndex"],
+  [79, "DelegatedRecoveryIndexes"],
+  [80, "AuthDesktopPairingSessionTtl"],
+  [81, "RealtimeVoiceHistoryResume"],
 ];
 
 const readRenumberTail = Effect.map(readHistory, (history) =>
   history.filter((row) => row.migration_id >= 69).map((row) => [row.migration_id, row.name]),
 );
 
-// Upstream 070–076 must have run, not just been recorded.
+// Upstream 070–079 must have run, not just been recorded.
 const assertUpstreamSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const hasColumn = (table: string, column: string) =>
@@ -451,10 +454,11 @@ const assertUpstreamSchema = Effect.gen(function* () {
     SELECT name FROM sqlite_master
     WHERE type = 'index' AND name IN (
       'orchestration_v2_projection_turn_items_waiting_link_idx',
-      'orchestration_v2_projection_turn_items_active_ordinal_idx'
+      'orchestration_v2_projection_turn_items_active_ordinal_idx',
+      'orchestration_v2_projection_runs_delegated_delivery_idx'
     )
   `;
-  assert.strictEqual(indexes.length, 2);
+  assert.strictEqual(indexes.length, 3);
 });
 
 describe("fork migration renumber", () => {
@@ -462,6 +466,7 @@ describe("fork migration renumber", () => {
     [68, 69, 70],
     [69, 70, 71],
     [72, 73, 74],
+    [76, 77, 78],
   ] as const)(
     "reruns fork migrations recorded after upstream migration %i",
     ([throughId, pairingId, voiceId]) =>
@@ -495,16 +500,16 @@ describe("fork migration renumber", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect("adds only the fork migrations to an upstream database at 076", () =>
+  it.effect("adds only the fork migrations to an upstream database at 079", () =>
     Effect.gen(function* () {
-      yield* runMigrations({ toMigrationInclusive: 76 });
+      yield* runMigrations({ toMigrationInclusive: 79 });
       const before = yield* readHistory;
       const executed = yield* runMigrations();
       assert.deepStrictEqual(
         executed.map(([id, name]) => [id, name]),
         [
-          [77, "AuthDesktopPairingSessionTtl"],
-          [78, "RealtimeVoiceHistoryResume"],
+          [80, "AuthDesktopPairingSessionTtl"],
+          [81, "RealtimeVoiceHistoryResume"],
         ],
       );
       assert.deepStrictEqual((yield* readHistory).slice(0, before.length), before);

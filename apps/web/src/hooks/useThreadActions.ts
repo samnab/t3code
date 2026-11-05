@@ -45,7 +45,10 @@ import {
   readThreadShells,
 } from "../state/entities";
 import { useUiStateStore } from "../uiStateStore";
+import { useDiffPanelStore } from "../diffPanelStore";
+import { usePreviewMiniPlayerStore } from "../previewMiniPlayerStore";
 import { clearThreadPreviewState } from "../previewStateStore";
+import { useRightPanelStore } from "../rightPanelStore";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
@@ -255,6 +258,13 @@ function expireThreadUndos(target: ScopedThreadRef, kinds: readonly string[]) {
   for (const kind of kinds) ThreadUndo.invalidate(kind, scopedThreadKey(target));
 }
 
+function clearDeletedThreadPanelState(ref: ScopedThreadRef) {
+  clearThreadPreviewState(ref);
+  useRightPanelStore.getState().removeThread(ref);
+  useDiffPanelStore.getState().removeThread(ref);
+  usePreviewMiniPlayerStore.getState().removeThread(ref);
+}
+
 /** A No project thread that already has its own folder, on a server that can promote it. */
 export function canTurnThreadIntoProject(threadRef: ScopedThreadRef): boolean {
   const thread = readThreadShell(threadRef);
@@ -457,7 +467,7 @@ export function useThreadActions() {
       if (result._tag === "Success") {
         expireThreadUndos(target, [...LIST_PLACEMENT_UNDO_KINDS, "archive"]);
         refreshArchivedThreadsForEnvironment(target.environmentId);
-        clearThreadPreviewState(target);
+        clearDeletedThreadPanelState(target);
       }
       return result;
     }
@@ -564,6 +574,7 @@ export function useThreadActions() {
       deletedThreadId: threadRef.threadId,
       deletedThreadIds,
       sortOrder: sidebarThreadSortOrder,
+      now: new Date().toISOString(),
     });
     const deleteResult = await deleteThreadMutation({
       environmentId: threadRef.environmentId,
@@ -581,7 +592,7 @@ export function useThreadActions() {
       threadRef,
     );
     clearTerminalUiState(threadRef);
-    clearThreadPreviewState(threadRef);
+    clearDeletedThreadPanelState(threadRef);
 
     if (shouldNavigateToFallback) {
       const fallbackThread = fallbackThreadId

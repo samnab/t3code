@@ -51,8 +51,8 @@ export const layer: Layer.Layer<
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
 
     return ProviderBackgroundTaskServiceV2.of({
-      stop: (input) =>
-        Effect.gen(function* () {
+      stop: Effect.fn("ProviderBackgroundTaskService.stop")(
+        function* (input) {
           const projection = yield* projections.getThreadProjection(input.threadId);
           const rosterMatch = projection.providerThreads
             .flatMap((providerThread) =>
@@ -134,18 +134,21 @@ export const layer: Layer.Layer<
             providerThread: match.providerThread,
             taskId: match.task.taskId,
           });
-        }).pipe(
-          Effect.mapError((cause) =>
-            isUnsupportedError(cause) || isStopError(cause)
-              ? cause
-              : new OrchestrationV2BackgroundTaskStopError({
-                  reason: "unexpected-failure",
-                  threadId: input.threadId,
-                  taskId: input.taskId,
-                  cause,
-                }),
+        },
+        (effect, input) =>
+          effect.pipe(
+            Effect.mapError((cause) =>
+              isUnsupportedError(cause) || isStopError(cause)
+                ? cause
+                : new OrchestrationV2BackgroundTaskStopError({
+                    reason: "unexpected-failure",
+                    threadId: input.threadId,
+                    taskId: input.taskId,
+                    cause,
+                  }),
+            ),
           ),
-        ),
+      ),
     });
   }),
 );

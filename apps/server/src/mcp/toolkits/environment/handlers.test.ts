@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
@@ -27,6 +28,7 @@ import * as Stream from "effect/Stream";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import * as ServerSecretStore from "../../../auth/ServerSecretStore.ts";
+import * as ManagedPolicy from "../../../policy/ManagedPolicy.ts";
 import * as CloudLink from "../../../cloud/CloudLink.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
@@ -204,6 +206,7 @@ const countingSettings = (updates: Ref.Ref<number>) =>
 // A fresh service per call rereads settings.json, so each build is a server restart.
 const restartedSettings = () =>
   Layer.fresh(Settings.layer).pipe(
+    Layer.provide(ManagedPolicy.layerTest()),
     Layer.provide(
       Layer.succeed(
         ServerSecretStore.ServerSecretStore,
@@ -760,7 +763,10 @@ it.layer(
 // The real secret store, so stored API keys and sensitive environment values
 // survive a restart the way they do in production.
 const restartedSettingsWithSecrets = () =>
-  Layer.fresh(Settings.layer).pipe(Layer.provide(ServerSecretStore.layer));
+  Layer.fresh(Settings.layer).pipe(
+    Layer.provide(Layer.merge(ServerSecretStore.layer, ManagedPolicy.layerTest())),
+    Layer.provide(NodeCrypto.layer),
+  );
 
 it.layer(
   Layer.mergeAll(
@@ -1021,9 +1027,13 @@ it.layer(
                 staticSettings,
                 Layer.mock(Keybindings.Keybindings)({
                   upsertKeybindingRule: () =>
-                    Ref.update(writes, (count) => count + 1).pipe(Effect.as([])),
+                    Ref.update(writes, (count) => count + 1).pipe(
+                      Effect.as({ keybindings: [], issues: [] }),
+                    ),
                   removeKeybindingRule: () =>
-                    Ref.update(writes, (count) => count + 1).pipe(Effect.as([])),
+                    Ref.update(writes, (count) => count + 1).pipe(
+                      Effect.as({ keybindings: [], issues: [] }),
+                    ),
                 }),
               ),
             ),

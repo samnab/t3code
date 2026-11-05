@@ -1,14 +1,9 @@
 import type { ModelSelection, ServerProvider, ServerSettings } from "@t3tools/contracts";
 import { ProviderInstanceId } from "@t3tools/contracts";
 
-/**
- * Agent-facing model visibility. `providerModelPreferences` (server
- * settings) hides models per provider instance; every surface an agent can
- * drive — `orchestrator_capabilities`, `delegate_task`, `create_threads`,
- * `t3_thread_launch` — routes through this one module so capabilities can
- * never advertise what dispatch would reject. Custom models are never
- * hidden (the web client treats them as unhideable too).
- */
+// Every agent surface (capabilities, delegate_task, create_threads, t3_thread_launch) routes
+// through here so capabilities never advertise what dispatch would reject. Custom models are
+// never hidden, matching the web client.
 
 /** Slugs hidden for one provider instance. */
 export function hiddenModelSlugs(

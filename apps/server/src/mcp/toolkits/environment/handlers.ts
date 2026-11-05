@@ -13,7 +13,6 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceId,
-  type ResolvedKeybindingsConfig,
   resolveProjectProviderInstanceEnabled,
   type ServerSettings,
   shouldRecommendDatabaseCompaction,
@@ -256,12 +255,11 @@ const keybindingCommand = (command: string) =>
 const keybindingsWrite = Effect.fn("EnvironmentToolkit.keybindingsWrite")(function* (
   write: (
     service: Keybindings.Keybindings["Service"],
-  ) => Effect.Effect<ResolvedKeybindingsConfig, KeybindingsConfigError>,
+  ) => Effect.Effect<Keybindings.KeybindingsConfigState, KeybindingsConfigError>,
 ) {
   yield* access;
   const service = yield* Keybindings.Keybindings;
-  const keybindings = yield* write(service).pipe(Effect.mapError(keybindingsFailure));
-  return { keybindings, issues: [] };
+  return yield* write(service).pipe(Effect.mapError(keybindingsFailure));
 });
 // A tier's quota guard is its candidates' minimum headroom; absent means 0.
 const headroomThreshold = (candidate: DelegationCandidate) => candidate.minHeadroomPercent ?? 0;

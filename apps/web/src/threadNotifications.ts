@@ -102,10 +102,31 @@ const buffers = new Map<string, Promise<AudioBuffer>>();
 /** Completion and input bursts keep separate slots, even when they choose the same asset. */
 const playingUntil = new Map<string, number>();
 
+function loadNotificationBuffer(context: AudioContext, url: string): Promise<AudioBuffer> {
+  let buffer = buffers.get(url);
+  if (!buffer) {
+    buffer = fetch(url)
+      .then((response) => response.arrayBuffer())
+      .then((data) => context.decodeAudioData(data))
+      .catch((error: unknown) => {
+        buffers.delete(url);
+        throw error;
+      });
+    buffers.set(url, buffer);
+  }
+  return buffer;
+}
+
 /** Called from a gesture so browsers allow later background playback. */
 export function unlockNotificationAudio() {
+  const firstUnlock = audioContext === undefined;
   audioContext ??= new AudioContext();
   void audioContext.resume().catch(() => undefined);
+  if (!firstUnlock) return;
+  // Fetch and decode during interaction so the first alert is ready when the thread finishes.
+  for (const url of [completionUrl, inputUrl]) {
+    void loadNotificationBuffer(audioContext, url).catch(() => undefined);
+  }
 }
 
 export async function playNotificationSound(
@@ -122,14 +143,7 @@ export async function playNotificationSound(
   const tone = options.tone ?? kind;
   const url = tone === "completion" ? completionUrl : inputUrl;
   try {
-    let buffer = buffers.get(url);
-    if (!buffer) {
-      buffer = fetch(url)
-        .then((response) => response.arrayBuffer())
-        .then((data) => context.decodeAudioData(data));
-      buffers.set(url, buffer);
-    }
-    const decoded = await buffer;
+    const decoded = await loadNotificationBuffer(context, url);
     if (!shouldPlay() || context.state !== "running") return false;
     // Coalesce same-kind bursts after decode to avoid clipping; input and completion alerts keep separate slots.
     if (options.burst !== false && context.currentTime < (playingUntil.get(kind) ?? 0))
@@ -145,7 +159,7 @@ export async function playNotificationSound(
     if (options.burst !== false) playingUntil.set(kind, context.currentTime + decoded.duration);
     return true;
   } catch {
-    buffers.delete(url);
+    // A failed load is retried on the next alert.
     return false;
   }
 }

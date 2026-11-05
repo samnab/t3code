@@ -44,18 +44,9 @@ const gateFor = (homeKey: string): Semaphore.Semaphore => {
   return gate;
 };
 
-/**
- * Serializes Codex app-server startup per Codex home. Codex opens a sqlite
- * state runtime under `CODEX_HOME` while starting, and two app-servers doing
- * that at once make one of them exit 1, so `startup` must cover the spawn and
- * the `initialize` round-trip that proves the child is up. Startups against
- * different homes, and app-servers already running, stay concurrent.
- *
- * A startup that dies reporting that state runtime is retried once inside the
- * gate: Codex itself or another Codex app can hold the database briefly. The
- * retry spawns a second child, so `startup` must register its own teardown
- * (finalizers for the dead child are no-ops).
- */
+// Two app-servers opening CODEX_HOME's sqlite at once make one exit 1, so `startup` must
+// cover spawn plus `initialize`. A state-runtime death retries once inside the gate (another
+// Codex can hold the db briefly); the retry spawns a new child, so `startup` owns its teardown.
 export const withCodexStartupLock = <A, E, R>(
   homeKey: string,
   startup: Effect.Effect<A, E, R>,

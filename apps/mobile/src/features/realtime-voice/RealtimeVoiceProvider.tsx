@@ -90,6 +90,7 @@ export function RealtimeVoiceProvider({ children }: { readonly children: ReactNo
     }),
   );
   const snapshot = useSyncExternalStore(owner.subscribe, owner.getSnapshot);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- ends the native voice session on unmount
   useEffect(() => () => owner.end("Voice ended because the app closed."), [owner]);
   return (
     <Context
