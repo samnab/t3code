@@ -73,7 +73,7 @@ index 031bd6d..fbfe9ba 100644
 
 ## Model: the `*.int8.onnx` files and `tokens.txt` in `vendor/`
 
-These come from https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2, whose archive SHA-256 is `f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a`. The model's README declares Apache License 2.0. Only the int8 encoder, decoder and joiner and `tokens.txt` are shipped. The two phrases in `kws.worker.js` were tokenized with the archive's `bpe.model`.
+These come from https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2, whose archive SHA-256 is `f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a`. The model's README declares Apache License 2.0. Only the int8 encoder, decoder and joiner and `tokens.txt` are shipped. The three phrases in `kws.worker.js` were tokenized with the archive's `bpe.model`.
 
 ## Worker CSP
 

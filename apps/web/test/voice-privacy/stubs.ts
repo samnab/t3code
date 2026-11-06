@@ -3,12 +3,15 @@
  * Vite config redirects those imports here, so the real provider, controller and transport run
  * against the harness's local receiver instead of a T3 host.
  */
+import { createContext, useContext } from "react";
 import * as Cause from "effect/Cause";
 import * as Hex from "effect/encoding/Hex";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import { DEFAULT_RESOLVED_KEYBINDINGS, isMacPlatform } from "@t3tools/shared/keybindings";
+import { type CxOptions, cx } from "class-variance-authority";
+import { twMerge } from "tailwind-merge";
 import type { VoiceOperationOwner, VoiceOwner } from "@t3tools/client-runtime/realtime-voice";
-import type { ProviderRealtimeVoiceStartResult } from "@t3tools/contracts";
+import type { ProviderRealtimeVoiceStartResult, ScopedThreadRef } from "@t3tools/contracts";
 import { harnessOwner } from "./owner";
 
 interface StartCall {
@@ -65,3 +68,10 @@ export const toastManager = {
     providerHooks.toasts.push(toast);
   },
 };
+export { isMacPlatform };
+export const isWindowsPlatform = (platform: string) => /^win(dows)?/i.test(platform);
+export const cn = (...inputs: CxOptions) => twMerge(cx(inputs));
+
+/** The thread on screen for ui.tsx. */
+export const RouteContext = createContext<ScopedThreadRef | null>(null);
+export const useThreadRouteRef = () => useContext(RouteContext);

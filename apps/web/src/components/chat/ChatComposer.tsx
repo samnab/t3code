@@ -122,6 +122,7 @@ import type { ThreadSyncPhase } from "../../threadSync";
 import { ComposerBanner } from "./ComposerBanner";
 import { ComposerSurface } from "./ComposerSurface";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./ComposerBannerStack";
+import { RealtimeVoiceComposerStrip } from "../voice/GlobalRealtimeVoiceControl";
 import {
   attachmentsToReleaseOnUploadCapabilityLoss,
   composerOtherFilesForPresentation,
@@ -3247,6 +3248,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </ComposerBanner.Root>
             </ComposerBanner.Attachment>
           ) : null}
+          <RealtimeVoiceComposerStrip threadRef={routeThreadRef} />
         </ComposerBanner.Column>
         <ComposerStashBadge
           count={stashQueue.length}

@@ -25,10 +25,11 @@ for (const name of [
 }
 
 const MODEL_RATE = 16000;
-// Pretokenized with the model's bpe.model. "T3" is spoken "T three".
+// Pretokenized with the model's bpe.model.
 const KEYWORDS = [
-  "▁T ▁THREE ▁P RI V A C Y ▁PA U SE @pause",
-  "▁T ▁THREE ▁RE S U ME ▁CON VER S ATION @resume",
+  "▁PA U SE ▁ VO IC E @pause",
+  "▁RE S U ME ▁ VO IC E @resume",
+  "▁CON F IR M ▁UN P A U SE @confirm",
 ].join("\n");
 
 let kws = null;
@@ -126,8 +127,10 @@ async function init(message) {
       modelingUnit: "bpe",
       bpeVocab: "",
     },
-    // Tuned on the synthetic TTS set in /tmp/t3-voice-kws (REPORT.md): the default score of 1.0
-    // caught half the phrases; 3.0 caught 40/48 with no false resume in 14 minutes of near-misses.
+    // Tuned on synthetic TTS (12 Piper voices, 3 rates): 3.0 caught 35/36 "pause voice", 36/36
+    // "resume voice" and 34/36 "confirm unpause", no cross-triggers, nothing in 13.3 min of ordinary
+    // speech. Sentences containing a phrase ("pause voice chat while I...") fire it about 1 in 5
+    // times; "confirm unpause" never did, which is why resume needs it.
     maxActivePaths: 8,
     numTrailingBlanks: 1,
     keywordsScore: 3.0,
@@ -144,7 +147,7 @@ function onAudio(message) {
   while (kws.isReady(stream)) {
     kws.decode(stream);
     const keyword = kws.getResult(stream).keyword;
-    if (keyword === "pause" || keyword === "resume") {
+    if (keyword === "pause" || keyword === "resume" || keyword === "confirm") {
       kws.reset(stream);
       self.postMessage({ type: "command", command: keyword, generation, endSample });
     }

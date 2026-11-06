@@ -16,6 +16,7 @@ import { Button } from "./ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty";
 import { SidebarInset } from "./ui/sidebar";
 import { WorkspacePageHeader } from "./WorkspacePageHeader";
+import { GlobalRealtimeVoiceControl } from "./voice/GlobalRealtimeVoiceControl";
 
 /** Home screen for the hosted app before any computer is added. */
 export function HostedEmptyState() {
@@ -31,6 +32,7 @@ export function HostedEmptyState() {
               {APP_DISPLAY_NAME}
             </span>
           </div>
+          <GlobalRealtimeVoiceControl className="ms-auto" />
         </WorkspacePageHeader>
 
         <Empty className="flex-1">

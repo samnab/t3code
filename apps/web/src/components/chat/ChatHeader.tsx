@@ -44,6 +44,7 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
+import { GlobalRealtimeVoiceControl } from "../voice/GlobalRealtimeVoiceControl";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -51,6 +52,8 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   activeThreadLinkOrigin?: string | null | undefined;
   isServerThread: boolean;
+  /** The composer, and so the live voice strip, is mounted for this thread. */
+  composerMounted: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
   onOpenThread: (threadId: ThreadId) => void;
@@ -83,6 +86,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadTitle,
   activeThreadLinkOrigin,
   isServerThread,
+  composerMounted,
   activeProject,
   parentThreadLink,
   onOpenThread,
@@ -295,14 +299,14 @@ export const ChatHeader = memo(function ChatHeader({
     <div
       ref={breadcrumbContainerRef}
       className={cn(
-        "flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
+        "@container flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
         rightPanelOpen ? "pr-10" : "pr-24",
       )}
       onContextMenu={handleHeaderContextMenu}
     >
       <WorkspaceBreadcrumb
         ariaLabel="Thread breadcrumb"
-        className="flex-1 overflow-clip [overflow-clip-margin:2px]"
+        className="min-w-24 flex-1 overflow-clip [overflow-clip-margin:2px]"
       >
         {activeProject ? (
           <>
@@ -473,6 +477,7 @@ export const ChatHeader = memo(function ChatHeader({
         onManage={onOpenOptimizers}
       />
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
+      <GlobalRealtimeVoiceControl ownerHasComposer={composerMounted} />
     </div>
   );
 });

@@ -1,11 +1,11 @@
 import * as Schema from "effect/Schema";
 
 /**
- * On-device "T3 privacy pause" / "T3 resume conversation" detection in public/voice/kws. Assets
- * load lazily and are hash-checked here, so the worker needs no network; it answers only with a
- * command. Worker or worklet errors and a backlog over MAX_IN_FLIGHT report `failed`.
+ * On-device "pause voice" / "resume voice" / "confirm unpause" detection. Assets are
+ * hash-checked, so the worker needs no network. Commands are raw; the controller decides what one
+ * means now. Worker or worklet errors and a backlog over MAX_IN_FLIGHT report `failed`.
  */
-export type KeywordCommand = "pause" | "resume";
+export type KeywordCommand = "pause" | "resume" | "confirm";
 
 export interface KeywordDetector {
   /** Feeds `source` to the detector only. Resolves to a detach function. */
@@ -17,7 +17,12 @@ type WorkerMessage =
   | { readonly type: "ready" }
   | { readonly type: "failed" }
   | { readonly type: "processed"; readonly generation: number }
-  | { readonly type: "command"; readonly generation: number; readonly command: KeywordCommand };
+  | {
+      readonly type: "command";
+      readonly generation: number;
+      readonly command: KeywordCommand;
+      readonly endSample: number;
+    };
 
 const ASSETS = `${import.meta.env.BASE_URL.replace(/\/$/, "")}/voice/kws/`;
 const MODEL_FILES = {
@@ -64,13 +69,16 @@ async function loadVerified() {
 }
 
 export function createKeywordDetector(events: {
-  command(command: KeywordCommand): void;
+  /** `heardAt`: ms of captured audio from this attach to the end of the phrase. Unlike arrival
+   * time, a worker backlog cannot stretch the interval between two commands. */
+  command(command: KeywordCommand, heardAt: number): void;
   failed(): void;
 }): KeywordDetector {
   let worker: Worker | null = null;
   let ready: Promise<void> | null = null;
   let generation = 0;
   let inFlight = 0;
+  let sampleRate = 48_000;
   let detachCurrent: (() => void) | null = null;
 
   const fail = () => {
@@ -102,7 +110,8 @@ export function createKeywordDetector(events: {
         fail();
       } else if (message.generation !== generation) return;
       else if (message.type === "processed") inFlight -= 1;
-      else if (message.type === "command") events.command(message.command);
+      else if (message.type === "command")
+        events.command(message.command, (message.endSample / sampleRate) * 1_000);
     });
     const onError = () => {
       clearTimeout(timeout);
@@ -130,7 +139,8 @@ export function createKeywordDetector(events: {
       const node = new AudioWorkletNode(context, "kws-capture", { outputChannelCount: [1] });
       const mine = ++generation;
       inFlight = 0;
-      target.postMessage({ type: "reset", generation: mine, sampleRate: context.sampleRate });
+      sampleRate = context.sampleRate;
+      target.postMessage({ type: "reset", generation: mine, sampleRate });
       detachCurrent?.();
       const onBlock = (event: MessageEvent<Float32Array>) => {
         if (generation !== mine || worker !== target) return;
@@ -202,7 +212,8 @@ export function createLocalListening(detector: KeywordDetector, failed: () => vo
       };
       void (async () => {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const context = new AudioContext();
+        // No output device: reopening a Bluetooth output can block the renderer for 10 s.
+        const context = new AudioContext({ sinkId: { type: "none" } });
         let detach = () => {};
         release = () => {
           detach();

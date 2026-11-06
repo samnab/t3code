@@ -31,6 +31,7 @@ function header(title: string) {
         activeThreadId={ThreadId.make("thread")}
         activeThreadTitle={title}
         isServerThread
+        composerMounted
         activeProject={null}
         parentThreadLink={null}
         onOpenThread={() => {}}

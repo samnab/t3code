@@ -12,11 +12,15 @@ It builds `harness.tsx` with `vite.config.ts` into `/tmp/t3-voice-privacy-egress
 
 ## How it works
 
-- `getUserMedia` is replaced by a clone of a synthetic `OscillatorNode` track. Both browsers also run with `--use-fake-device-for-media-stream`. The probe only calls the real `getUserMedia` when every input is labelled `Fake…`.
+- `getUserMedia` is replaced by a clone of a synthetic `OscillatorNode` track. Both browsers also run with `--use-fake-device-for-media-stream`. No audio context, the harness's or the transport's, opens an output device. The probe only calls the real `getUserMedia` when every input is labelled `Fake…`.
 - Markers: A is 700 Hz (public, before pause). B is 40 ms chirps at 1900/2300 Hz keyed by a random nonce. C is 3300 Hz (public, after Resume). B plays whenever the controller is not `transmitting`.
 - `startProvider` / `stopProvider` answer from a local `RTCPeerConnection`. Every received stream and every sender track after the gate is recorded through Web Audio and scanned in 1024-sample windows with Goertzel filters. A window counts as a marker when the marker bins hold at least 20% of its energy and the window is at least -60 dBFS. A "trace" also counts windows down to -100 dBFS.
 - The vite config swaps out the app modules that need a live host (atoms, RPC, owner lookup, toasts) for `stubs.ts`. The provider, controller, transport and shortcut resolution run as shipped.
 - Fetch, XHR, WebSocket, beacon, data-channel sends, console output, toasts and provider start/stop payloads are captured. The runner checks that none of them contains the B nonce and that no request leaves the harness origin.
 - `electron-main.cjs` loads the same page in Electron under the shipped desktop CSP, and sends the trusted chord with `sendInputEvent`.
 
+- Keyword cases speak synthetic TTS fixtures, 16 kHz mono 16-bit, into the synthetic microphone. `pause-phrase.wav` ("pause voice"), `resume-phrase.wav` ("resume voice") and `confirm-phrase.wav` ("confirm unpause") are Piper `en_US-ljspeech-medium` at length scale 1.0, resampled from 22.05 kHz with ffmpeg, a voice trained from scratch on the public-domain LJ Speech dataset (rhasspy/piper-voices, MIT). R (1300 Hz) plays under every phrase spoken while paused. Case 0c checks that each fixture makes the worker report only its own command. Case 6 covers the spoken pause, the arm, its expiry and the trusted Confirm. Case 6b covers the hands-free two-step resume: a confirm with no arm or after expiry stays paused, and arm, a 3.5 s wait, then confirm resumes with C at the new call and no R or B in any stream.
+
 Case 1b is a measurement, not a pass/fail gate. B keeps playing during the resume negotiation and switches to C inside the transport's real `enableMicrophone` call, so any B it finds was emitted before the gate opened.
+
+`ui.html` renders the shipped header pill and composer strip with the app styles, the same stubs, a synthetic microphone and a local answering peer, for layout screenshots. `?view=owner|other` picks the thread on screen. Build it with the same config; it is not part of `run.ts`.

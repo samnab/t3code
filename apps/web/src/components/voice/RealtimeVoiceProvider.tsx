@@ -25,6 +25,7 @@ import { randomUUID } from "../../lib/utils";
 import {
   createRealtimeVoiceController,
   type RealtimeVoiceController,
+  type VoiceLevels,
   type VoiceOwner,
   type VoiceSnapshot,
 } from "@t3tools/client-runtime/realtime-voice";
@@ -57,12 +58,16 @@ function reportUnavailable(error: unknown) {
   );
 }
 // Re-reads the paused conversation so Resume uses its current provider binding and grants.
-function resumeVoice(controller: RealtimeVoiceController) {
+// `spokenAt`: the confirm phrase's detector audio time; it reads an owner only while armed.
+function resumeVoice(controller: RealtimeVoiceController, spokenAt?: number) {
   const snapshot = controller.getSnapshot();
   if (snapshot.mode !== "paused") return;
+  if (spokenAt !== undefined && snapshot.listening !== "armed") return;
   try {
     const owner = readVoiceOwner(snapshot.owner.environmentId, snapshot.owner.threadId);
-    void controller.resume(owner).catch(reportUnavailable);
+    const resumed =
+      spokenAt === undefined ? controller.resume(owner) : controller.spokenConfirm(owner, spokenAt);
+    void resumed.catch(reportUnavailable);
   } catch (error) {
     reportUnavailable(error);
   }
@@ -96,6 +101,8 @@ interface VoiceContext {
   readonly resume: () => void;
   readonly end: () => void;
   readonly cancelResume: () => void;
+  readonly toggleMute: () => void;
+  readonly levels: () => VoiceLevels;
   readonly setKeywords: (enabled: boolean) => void;
   readonly returnToOwner: (owner: VoiceOwner) => void;
 }
@@ -116,9 +123,14 @@ export function RealtimeVoiceProvider({
   });
   const [{ controller, detector }] = useState(() => {
     // Keyword commands come only from this device's microphone. A pause acts at once; a resume
-    // only arms the confirm prompt. Detector failure pauses a live call and never resumes.
+    // only arms, and the confirm phrase resumes only while armed. Detector failure pauses a live
+    // call and never resumes.
     const detector = createKeywordDetector({
-      command: (command) => (command === "pause" ? controller.pause() : controller.armResume()),
+      command: (command, heardAt) => {
+        if (command === "pause") controller.pause();
+        else if (command === "resume") controller.armResume(heardAt);
+        else if (command === "confirm") resumeVoice(controller, heardAt);
+      },
       failed: () => controller.localListeningFailed(),
     });
     const controller: RealtimeVoiceController = createRealtimeVoiceController({
@@ -251,6 +263,8 @@ export function RealtimeVoiceProvider({
         resume: () => resumeVoice(controller),
         end: () => controller.end(),
         cancelResume: () => controller.cancelResume(),
+        toggleMute: () => controller.setMicMuted(!controller.getSnapshot().micMuted),
+        levels: controller.levels,
         setKeywords: (enabled) => {
           try {
             window.localStorage.setItem(KEYWORDS_STORAGE_KEY, enabled ? "on" : "off");

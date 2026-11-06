@@ -400,3 +400,20 @@ including filenames or folders containing `#` or `?`.
 
 On mobile, select a PDF attachment or link to open it. iOS uses the native viewer;
 Android opens a compatible installed file viewer.
+
+## Voice conversation keywords
+
+On web and desktop, a live voice conversation can be paused and resumed by voice.
+Turn on **Keywords** in the voice controls while the conversation is paused. The
+setting is saved on this device.
+
+- Say "pause voice" to pause. Nothing is sent while paused.
+- To resume, say "resume voice", then say "confirm unpause". Wait about
+  three seconds after the first phrase, and say the second within ten seconds.
+  Otherwise voice stays paused. Saying "pause voice" or pressing **Cancel**
+  between the two phrases keeps it paused.
+
+Keywords are recognized on your device. While paused with keywords on, the
+microphone stays on for that local listening only. If local listening is
+unavailable, voice stays paused: press **Resume** or **Confirm**, or use the
+pause shortcut. Sentences that contain "pause voice" can pause by mistake.
