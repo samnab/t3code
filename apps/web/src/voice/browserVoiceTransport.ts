@@ -19,37 +19,34 @@ export function createBrowserVoiceTransport(
   },
   tapKeywords?: (source: MediaStreamAudioSourceNode) => Promise<() => void>,
 ): VoiceTransport {
-  // Created and resumed inside the user gesture that starts or resumes voice, so autoplay policy
-  // lets it run. Until it runs the transport reports not connected and the gate stays shut.
-  // Created first: if this constructor throws, no peer exists yet to leak.
-  const context = new AudioContext();
-  void context.resume().catch(() => {});
-  let peer: RTCPeerConnection;
-  try {
-    peer = new RTCPeerConnection();
-  } catch (error) {
-    void context.close().catch(() => {});
-    throw error;
-  }
+  const peer = new RTCPeerConnection();
   const audio = document.createElement("audio");
   audio.autoplay = true;
   const channel = peer.createDataChannel("oai-events");
-  const inputMeter = context.createAnalyser();
-  const outputMeter = context.createAnalyser();
-  const meterFrame = new Float32Array(inputMeter.fftSize);
-  let assistant: MediaStreamAudioSourceNode | null = null;
-  const rms = (analyser: AnalyserNode) => {
-    analyser.getFloatTimeDomainData(meterFrame);
-    let sum = 0;
-    for (const sample of meterFrame) sum += sample * sample;
-    return Math.sqrt(sum / meterFrame.length);
-  };
   let microphone: MediaStream | null = null;
   let graph: {
+    readonly context: AudioContext;
     readonly source: MediaStreamAudioSourceNode;
     readonly silence: ConstantSourceNode;
     readonly output: MediaStreamAudioDestinationNode;
+    readonly inputMeter: AnalyserNode;
+    readonly outputMeter: AnalyserNode;
+    readonly meterFrame: Float32Array<ArrayBuffer>;
   } | null = null;
+  // The assistant stream can only be metered once the microphone's context exists.
+  let remote: MediaStream | null = null;
+  let assistant: MediaStreamAudioSourceNode | null = null;
+  const meterAssistant = () => {
+    if (graph === null || remote === null || assistant !== null) return;
+    assistant = graph.context.createMediaStreamSource(remote);
+    assistant.connect(graph.outputMeter);
+  };
+  const rms = (analyser: AnalyserNode, frame: Float32Array<ArrayBuffer>) => {
+    analyser.getFloatTimeDomainData(frame);
+    let sum = 0;
+    for (const sample of frame) sum += sample * sample;
+    return Math.sqrt(sum / frame.length);
+  };
   let gateOpen = false;
   let micMuted = false;
   let opening: GainNode | null = null;
@@ -66,11 +63,8 @@ export function createBrowserVoiceTransport(
     void audio.play().catch(() => {
       if (!closed) events.failed("Voice playback is unavailable. Microphone off.");
     });
-    const stream = event.streams[0];
-    if (assistant === null && stream !== undefined) {
-      assistant = context.createMediaStreamSource(stream);
-      assistant.connect(outputMeter);
-    }
+    remote ??= event.streams[0] ?? null;
+    meterAssistant();
   };
   const onConnectionState = () => {
     if (closed) return;
@@ -93,9 +87,9 @@ export function createBrowserVoiceTransport(
   };
   // A suspended context carries no audio: unready before the gate opens, an ended call after.
   const onContextState = () => {
-    if (closed) return;
-    if (context.state === "running") events.connected();
-    else if (gateOpen || context.state === "closed") fail();
+    if (closed || graph === null) return;
+    if (graph.context.state === "running") events.connected();
+    else if (gateOpen || graph.context.state === "closed") fail();
   };
   peer.addEventListener("track", onTrack);
   peer.addEventListener("connectionstatechange", onConnectionState);
@@ -103,9 +97,7 @@ export function createBrowserVoiceTransport(
   channel.addEventListener("open", onChannelOpen);
   channel.addEventListener("error", onChannelError);
   audio.addEventListener("error", onAudioError);
-  context.addEventListener("statechange", onContextState);
   cleanups.push(() => {
-    context.removeEventListener("statechange", onContextState);
     peer.removeEventListener("track", onTrack);
     peer.removeEventListener("connectionstatechange", onConnectionState);
     channel.removeEventListener("close", onChannelClose);
@@ -116,6 +108,7 @@ export function createBrowserVoiceTransport(
   // A muted gate is still created and connected, without the microphone. The zero source keeps it
   // live: with no active input, Chromium's destination emits no frames and the peer sends no RTP.
   const openGate = (open: NonNullable<typeof graph>) => {
+    const { context } = open;
     const gain = context.createGain();
     gain.gain.value = 0;
     gain.gain.setValueAtTime(
@@ -125,7 +118,7 @@ export function createBrowserVoiceTransport(
     open.silence.connect(gain);
     if (!micMuted) open.source.connect(gain);
     gain.connect(open.output);
-    gain.connect(inputMeter);
+    gain.connect(open.inputMeter);
     opening = gain;
   };
   return {
@@ -145,13 +138,26 @@ export function createBrowserVoiceTransport(
           track.removeEventListener("mute", fail);
         });
       }
+      // Only after the microphone is granted: the constructor blocks the renderer on the audio
+      // service (20 s with CoreAudio stalled), while a missing device rejects getUserMedia at once.
+      // Sticky activation from the starting click lets it resume.
+      const context = new AudioContext();
+      void context.resume().catch(() => {});
+      context.addEventListener("statechange", onContextState);
+      cleanups.push(() => context.removeEventListener("statechange", onContextState));
+      const inputMeter = context.createAnalyser();
       graph = {
+        context,
         source: context.createMediaStreamSource(stream),
         silence: context.createConstantSource(),
         output: context.createMediaStreamDestination(),
+        inputMeter,
+        outputMeter: context.createAnalyser(),
+        meterFrame: new Float32Array(inputMeter.fftSize),
       };
       graph.silence.offset.value = 0;
       graph.silence.start();
+      meterAssistant();
       for (const track of graph.output.stream.getAudioTracks()) {
         peer.addTrack(track, graph.output.stream);
       }
@@ -203,9 +209,9 @@ export function createBrowserVoiceTransport(
     isConnected: () =>
       peer.connectionState === "connected" &&
       channel.readyState === "open" &&
-      context.state === "running",
+      graph?.context.state === "running",
     enableMicrophone() {
-      if (closed || graph === null || context.state !== "running") return;
+      if (closed || graph === null || graph.context.state !== "running") return;
       gateOpen = true;
       for (const track of microphone?.getTracks() ?? []) track.enabled = true;
       if (opening === null) openGate(graph);
@@ -227,11 +233,11 @@ export function createBrowserVoiceTransport(
     // Meter-only analysers after the gate and on the remote stream; neither reaches the context
     // destination. A shut gate reads zero outright: a disconnected analyser keeps its last frame.
     levels: () =>
-      closed
+      closed || graph === null
         ? { input: 0, output: 0 }
         : {
-            input: opening === null || micMuted ? 0 : rms(inputMeter),
-            output: assistant === null ? 0 : rms(outputMeter),
+            input: opening === null || micMuted ? 0 : rms(graph.inputMeter, graph.meterFrame),
+            output: assistant === null ? 0 : rms(graph.outputMeter, graph.meterFrame),
           },
     close() {
       if (closed) return;
@@ -245,7 +251,7 @@ export function createBrowserVoiceTransport(
       }
       microphone = null;
       for (const track of graph?.output.stream.getTracks() ?? []) track.stop();
-      void context.close().catch(() => {});
+      void graph?.context.close().catch(() => {});
       graph = null;
       cancelIce?.();
       channel.close();

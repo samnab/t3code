@@ -3,8 +3,10 @@ import { createBrowserVoiceTransport } from "./browserVoiceTransport";
 
 function fixture(contextState: AudioContextState = "running", tapKeywords = false) {
   let grant: (stream: { getTracks(): Track[] }) => void = () => {};
-  const permission = new Promise<{ getTracks(): Track[] }>((resolve) => {
+  let deny: (error: Error) => void = () => {};
+  const permission = new Promise<{ getTracks(): Track[] }>((resolve, reject) => {
     grant = resolve;
+    deny = reject;
   });
   class Track extends EventTarget {
     enabled = true;
@@ -149,6 +151,8 @@ function fixture(contextState: AudioContextState = "running", tapKeywords = fals
     track,
     stream,
     grant,
+    deny,
+    contexts,
     addTrack,
     closePeer,
     channel,
@@ -243,10 +247,10 @@ describe("browser voice resource ownership", () => {
 
   it("reports not connected and sends nothing while autoplay keeps the audio context suspended", async () => {
     const f = fixture("suspended");
-    expect(f.resumeContext).toHaveBeenCalledOnce();
     const pending = f.transport.acquireMicrophone();
     f.grant(f.stream);
     await pending;
+    expect(f.resumeContext).toHaveBeenCalledOnce();
     expect(f.transport.isConnected()).toBe(false);
     f.transport.enableMicrophone();
     f.captureFrame("while-suspended");
@@ -259,6 +263,18 @@ describe("browser voice resource ownership", () => {
     expect(f.failed).not.toHaveBeenCalled();
     f.setContextState("suspended");
     expect(f.failed).toHaveBeenCalledOnce();
+  });
+
+  // With CoreAudio stalled, constructing an AudioContext blocked the renderer for 20 s before
+  // getUserMedia could report "Requested device not found".
+  it("fails a missing microphone without constructing an audio context", async () => {
+    const f = fixture();
+    const pending = f.transport.acquireMicrophone();
+    f.deny(new DOMException("Requested device not found", "NotFoundError"));
+    await expect(pending).rejects.toThrow("Requested device not found");
+    expect(f.contexts).toHaveLength(0);
+    f.transport.close();
+    expect(f.closePeer).toHaveBeenCalledOnce();
   });
 });
 
