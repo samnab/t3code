@@ -1,0 +1,3 @@
+@import "../../src/index.css";
+/* Vite root is this folder; scan the app source so its components get their utilities. */
+@source "../../src";
