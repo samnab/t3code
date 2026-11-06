@@ -204,7 +204,7 @@ function VoicePill({
   return (
     <div
       className={cn(
-        "flex min-w-0 items-center overflow-hidden rounded-full border border-border/60 p-px [-webkit-app-region:no-drag]",
+        "flex min-w-0 items-center overflow-hidden rounded-full border border-border/60 p-px has-focus-visible:ring-2 has-focus-visible:ring-inset has-focus-visible:ring-ring [-webkit-app-region:no-drag]",
         className,
       )}
       role="region"
@@ -295,36 +295,55 @@ function ReturnButton({ call }: { readonly call: VoiceCall }) {
 /** Keywords, Mute, the pause group and Stop, in the same order and copy in both layouts. */
 function VoiceActions({ call, labels }: { readonly call: VoiceCall; readonly labels: string }) {
   const { snapshot, hint } = call;
+  const ending = snapshot.mode === "ending";
+  const unavailable = snapshot.listening === "unavailable";
   return (
     <>
-      <VoiceButton
-        icon={snapshot.keywords ? EarIcon : EarOffIcon}
-        label={snapshot.keywords ? "Keywords on" : "Keywords off"}
-        hint={snapshot.mode === "paused" ? KEYWORDS_HINT : `${KEYWORDS_HINT} Change while paused.`}
-        variant="ghost"
-        labels={labels}
-        aria-pressed={snapshot.keywords}
-        // A call's keyword tap is fixed when it starts; change keywords while paused. Disabled, it
-        // is the first to go when the row is too narrow for every icon.
-        disabled={snapshot.mode !== "paused"}
-        className={snapshot.mode === "paused" ? undefined : "@max-[28rem]:hidden"}
-        onClick={() => call.setKeywords(!snapshot.keywords)}
-      />
-      <MuteButton call={call} labels={labels} />
-      <PauseGroup call={call} labels={labels} />
+      {/* Ending, nothing but the closing call is left to act on. */}
+      {!ending && (
+        <>
+          <VoiceButton
+            icon={snapshot.keywords && !unavailable ? EarIcon : EarOffIcon}
+            label={
+              unavailable
+                ? "Keywords unavailable"
+                : snapshot.keywords
+                  ? "Keywords on"
+                  : "Keywords off"
+            }
+            hint={
+              snapshot.mode === "paused" ? KEYWORDS_HINT : `${KEYWORDS_HINT} Change while paused.`
+            }
+            variant="ghost"
+            labels={labels}
+            aria-pressed={snapshot.keywords && !unavailable}
+            // A call's keyword tap is fixed when it starts; change keywords while paused. Disabled,
+            // it is the first to go when the row is too narrow for every icon.
+            disabled={snapshot.mode !== "paused" || unavailable}
+            className={
+              snapshot.mode === "paused" && !unavailable ? undefined : "@max-[28rem]:hidden"
+            }
+            onClick={() => call.setKeywords(!snapshot.keywords)}
+          />
+          <MuteButton call={call} labels={labels} />
+          <PauseGroup call={call} labels={labels} />
+        </>
+      )}
       <VoiceButton
         icon={PhoneOffIcon}
         label={snapshot.mode === "connecting" ? "Cancel" : "Stop session"}
         hint={hint(snapshot.mode === "connecting" ? "Cancel call" : "Stop session", "voice.micOff")}
         variant="destructive-outline"
         labels={labels}
+        disabled={ending}
         onClick={call.end}
       />
     </>
   );
 }
 
-// The pill's one-click action: whatever the pause group offers while paused, else Mute.
+// The pill's one-click action: whatever the pause group offers while paused, none while ending,
+// else Mute.
 function VoicePrimaryAction({
   call,
   labels,
@@ -333,6 +352,7 @@ function VoicePrimaryAction({
   readonly labels: string;
 }) {
   const { mode } = call.snapshot;
+  if (mode === "ending") return null;
   return mode === "paused" || mode === "pausing" ? (
     <PauseGroup call={call} labels={labels} />
   ) : (
