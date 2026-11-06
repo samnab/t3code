@@ -3,6 +3,7 @@ import {
   type EnvironmentId,
   type ProviderConsumeResetCreditOutcome,
   ProviderConsumeResetCreditInput,
+  resetCreditAccountKey,
   ServerProvider,
   ServerProviderResetCredits,
   ServerProviderUsageWindow,
@@ -28,6 +29,7 @@ import { useEnvironmentScope, readEnvironmentScope } from "../../state/session";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
+import { Switch } from "../ui/switch";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -318,6 +320,44 @@ export function resetCreditsSummary(
   }`;
 }
 
+/** Per-account opt-in for the server spending a credit in its last 30 minutes. */
+export function AutoRedeemToggle({
+  environmentId,
+  input,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly input: ProviderConsumeResetCreditInput;
+}) {
+  const supported = useAtomValue(
+    environmentPresentations.presentationAtom(environmentId),
+    (environment) => environment?.serverConfig?.environment.capabilities.resetCreditAutoRedeem,
+  );
+  const key = resetCreditAccountKey(input);
+  const enabled = useAtomValue(
+    serverEnvironment.settingsValueAtom(environmentId),
+    (settings) => settings?.resetCreditAutoRedeem[key] === true,
+  );
+  const canManageProviders = useEnvironmentScope(environmentId, AuthProvidersManageScope);
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings);
+  if (supported !== true) return null;
+  return (
+    <label className="flex items-center gap-1.5">
+      <Switch
+        size="sm"
+        checked={enabled}
+        disabled={!canManageProviders}
+        onCheckedChange={(checked) =>
+          void updateSettings({
+            environmentId,
+            input: { patch: { resetCreditAutoRedeem: { [key]: checked ? true : null } } },
+          })
+        }
+      />
+      Auto-use before expiry
+    </label>
+  );
+}
+
 export function ResetCredits({
   environmentId,
   input,
@@ -348,6 +388,9 @@ export function ResetCredits({
         >
           {busy ? "Using…" : "Use reset"}
         </Button>
+      ) : null}
+      {credits.availableCount > 0 ? (
+        <AutoRedeemToggle environmentId={environmentId} input={input} />
       ) : null}
       {status ? <span className="text-foreground">{status}</span> : null}
       <ResetCreditDialog

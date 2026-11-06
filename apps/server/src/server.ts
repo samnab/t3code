@@ -109,6 +109,7 @@ import * as ProviderAdapterRegistry from "./orchestration-v2/ProviderAdapterRegi
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as ProviderUsageLimitsIngestion from "./provider/ProviderUsageLimitsIngestion.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+import * as ResetCreditAutoRedeem from "./usage/ResetCreditAutoRedeem.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
@@ -690,6 +691,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
   ProviderUsageLimitsIngestion.layer,
+  ResetCreditAutoRedeem.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),

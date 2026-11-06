@@ -112,6 +112,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Every protocol-2 server sends this; older mobile builds still read it. */
   environmentThemes: Schema.optionalKey(Schema.Boolean),
   usageLimitSources: Schema.optionalKey(Schema.Boolean),
+  /** Honors `resetCreditAutoRedeem` settings; hide the toggle where it is absent. */
+  resetCreditAutoRedeem: Schema.optionalKey(Schema.Boolean),
   /** Honors `workspaceSnapshotsOnDemand`; older servers send every snapshot and drop them in the stream. */
   providerWorkspaceSnapshotsOnDemand: Schema.optionalKey(Schema.Boolean),
   usagePriceOverrides: Schema.optionalKey(Schema.Boolean),

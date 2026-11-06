@@ -6,6 +6,7 @@ import {
   type EnvironmentId,
   type ProviderConsumeResetCreditOutcome,
   type ProviderConsumeResetCreditInput,
+  resetCreditAccountKey,
   type ServerProvider,
   type ServerProviderResetCredits,
   type ServerProviderUsageWindow,
@@ -24,6 +25,7 @@ import { Linking, Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
+import { ThemedSwitch } from "../../components/ui/ThemedSwitch";
 import { environmentPresentations } from "../../state/presentation";
 import { serverEnvironment } from "../../state/server";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
@@ -227,6 +229,44 @@ const OUTCOME_TEXT: Record<ProviderConsumeResetCreditOutcome, string> = {
   alreadyRedeemed: "That credit was already redeemed.",
 };
 
+/** Per-account opt-in for the server spending a credit in its last 30 minutes. */
+function AutoRedeemToggle(props: {
+  readonly environmentId: EnvironmentId;
+  readonly input: ProviderConsumeResetCreditInput;
+  readonly disabled: boolean;
+}) {
+  const { environmentId, input } = props;
+  const supported = useAtomValue(
+    environmentPresentations.presentationAtom(environmentId),
+    (environment) => environment?.serverConfig?.environment.capabilities.resetCreditAutoRedeem,
+  );
+  const key = resetCreditAccountKey(input);
+  const enabled = useAtomValue(
+    serverEnvironment.settingsValueAtom(environmentId),
+    (settings) => settings?.resetCreditAutoRedeem[key] === true,
+  );
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "change reset credit auto-use",
+  });
+  if (supported !== true) return null;
+  return (
+    <View className="flex-row items-center gap-2">
+      <ThemedSwitch
+        accessibilityLabel="Auto-use reset credit before expiry"
+        disabled={props.disabled}
+        value={enabled}
+        onValueChange={(checked) =>
+          void updateSettings({
+            environmentId,
+            input: { patch: { resetCreditAutoRedeem: { [key]: checked ? true : null } } },
+          })
+        }
+      />
+      <Text className="text-xs text-foreground-tertiary">Auto-use before expiry</Text>
+    </View>
+  );
+}
+
 export function ResetCredits(props: {
   readonly environmentId: EnvironmentId;
   readonly input: ProviderConsumeResetCreditInput;
@@ -307,6 +347,13 @@ export function ResetCredits(props: {
             {busy ? "Using…" : "Use reset"}
           </Text>
         </Pressable>
+      ) : null}
+      {credits.availableCount > 0 ? (
+        <AutoRedeemToggle
+          environmentId={environmentId}
+          input={input}
+          disabled={!canManageProviders}
+        />
       ) : null}
       {!canManageProviders ? (
         <Text className="text-xs text-foreground-tertiary">

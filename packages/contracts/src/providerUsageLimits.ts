@@ -92,6 +92,26 @@ export const ProviderConsumeResetCreditInput = Schema.Union([
 ]);
 export type ProviderConsumeResetCreditInput = typeof ProviderConsumeResetCreditInput.Type;
 
+/** Settings key for one account's `resetCreditAutoRedeem` opt-in; hub keys drop the per-credit id. */
+export function resetCreditAccountKey(input: ProviderConsumeResetCreditInput): string {
+  return "sourceId" in input
+    ? `hub:${input.sourceId}:${input.accountId}`
+    : `instance:${input.instanceId}`;
+}
+
+/** Auto-redeem spends a credit once it is this close to expiring. */
+const RESET_CREDIT_AUTO_REDEEM_LEAD_MS = 30 * 60 * 1000;
+
+/** True when an unspent credit expires within the lead time and has not expired yet. */
+export function isResetCreditExpiringSoon(
+  credits: ServerProviderResetCredits | undefined,
+  nowMs: number,
+): boolean {
+  if (!credits || credits.availableCount === 0 || !credits.nextExpiresAt) return false;
+  const remaining = Date.parse(credits.nextExpiresAt) - nowMs;
+  return remaining > 0 && remaining <= RESET_CREDIT_AUTO_REDEEM_LEAD_MS;
+}
+
 export class UsageLimitSourceError extends Schema.TaggedError<UsageLimitSourceError>()(
   "UsageLimitSourceError",
   { detail: Schema.String },

@@ -385,6 +385,7 @@ export function applyServerSettingsPatch(
     worktreeCleanup: worktreeCleanupPatch,
     // Merged per entry below; its `null` removals must not reach deepMerge.
     usageLimitSources: usageLimitSourcesPatch,
+    resetCreditAutoRedeem: resetCreditAutoRedeemPatch,
     secretProviders: secretProvidersPatch,
     sourceControlHosts: sourceControlHostsPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
@@ -633,6 +634,14 @@ export function applyServerSettingsPatch(
           usageLimitSources: mergeSettingsEntries(
             current.usageLimitSources,
             usageLimitSourcesPatch,
+          ),
+        }
+      : {}),
+    ...(resetCreditAutoRedeemPatch !== undefined
+      ? {
+          resetCreditAutoRedeem: mergeSettingsEntries(
+            current.resetCreditAutoRedeem,
+            resetCreditAutoRedeemPatch,
           ),
         }
       : {}),

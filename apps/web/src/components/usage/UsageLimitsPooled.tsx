@@ -41,6 +41,7 @@ import { Alert, AlertTitle } from "../ui/alert";
 import { Popover, PopoverCreateHandle, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import {
   PaceIcon,
+  AutoRedeemToggle,
   ResetCreditDialog,
   barColor,
   usePaceMark,
@@ -210,6 +211,14 @@ function SegmentPopover({
               {redeem.busy ? "Using…" : "Use reset"}
             </Button>
           </span>
+          {account.redeem ? (
+            <span className="mt-1.5 flex">
+              <AutoRedeemToggle
+                environmentId={account.redeem.environmentId}
+                input={account.redeem.input}
+              />
+            </span>
+          ) : null}
         </div>
       ) : null}
     </div>

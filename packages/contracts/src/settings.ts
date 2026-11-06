@@ -1458,6 +1458,10 @@ export const ServerSettings = Schema.Struct({
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /** Keyed by `resetCreditAccountKey`; opted-in accounts spend a credit shortly before it expires. */
+  resetCreditAutoRedeem: Schema.Record(TrimmedNonEmptyString, Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   secretProviders: Schema.Record(SecretProviderId, SecretProviderConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1820,6 +1824,9 @@ export const ServerSettingsPatch = Schema.Struct({
   usageLimitSources: Schema.optionalKey(
     Schema.Record(UsageLimitSourceId, Schema.NullOr(UsageLimitSourceConfig)),
   ),
+  resetCreditAutoRedeem: Schema.optionalKey(
+    Schema.Record(TrimmedNonEmptyString, Schema.NullOr(Schema.Boolean)),
+  ),
   secretProviders: Schema.optionalKey(
     Schema.Record(SecretProviderId, Schema.NullOr(SecretProviderConfigWrite)),
   ),
@@ -1846,6 +1853,7 @@ export function requiredScopesForServerSettingsPatch(
       key === "providers" ||
       key === "providerInstances" ||
       key === "usageLimitSources" ||
+      key === "resetCreditAutoRedeem" ||
       key === "secretProviders"
     ) {
       changesProviders = true;

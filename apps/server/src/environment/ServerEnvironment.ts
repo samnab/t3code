@@ -245,6 +245,7 @@ export const make = Effect.gen(function* () {
       threadForceStop: true,
       environmentThemes: true,
       usageLimitSources: true,
+      resetCreditAutoRedeem: true,
       providerWorkspaceSnapshotsOnDemand: true,
       usagePriceOverrides: true,
       usageModelAliases: true,
