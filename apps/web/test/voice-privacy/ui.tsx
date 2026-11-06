@@ -56,10 +56,23 @@ async function sayResume() {
   source.start();
 }
 
+// While held, the provider's start and stop wait for "release", so connecting and ending stay up.
+let held = false;
+let releases: Array<() => void> = [];
+const gate = () =>
+  held ? new Promise<void>((resolve) => releases.push(resolve)) : Promise.resolve();
+const release = () => {
+  held = false;
+  for (const resolve of releases) resolve();
+  releases = [];
+};
+providerHooks.stop = gate;
+
 providerHooks.start = async (
   start: VoiceOperationOwner,
   sdp: string,
 ): Promise<ProviderRealtimeVoiceStartResult> => {
+  await gate();
   const peer = new RTCPeerConnection();
   await peer.setRemoteDescription({ type: "offer", sdp });
   const assistant = tone(220).stream;
@@ -82,12 +95,11 @@ providerHooks.start = async (
   };
 };
 
-function Page() {
+type View = "owner" | "other" | "owner-no-composer";
+
+function Page({ view, setView }: { view: View; setView: (view: View) => void }) {
   const voice = useRealtimeVoice();
-  const [view, setView] = useState(
-    new URLSearchParams(location.search).get("view") === "other" ? "other" : "owner",
-  );
-  const ref = view === "owner" ? owner : other;
+  const ref = view === "other" ? other : owner;
   return (
     <div className="flex h-dvh flex-col bg-background text-foreground">
       <div className="flex gap-2 border-b border-dashed p-1 text-xs text-muted-foreground">
@@ -100,38 +112,65 @@ function Page() {
         <button type="button" onClick={() => setView("other")}>
           harness: view other
         </button>
+        <button type="button" onClick={() => setView("owner-no-composer")}>
+          harness: view owner without composer
+        </button>
+        <button type="button" onClick={() => (held = true)}>
+          harness: hold provider
+        </button>
+        <button type="button" onClick={release}>
+          harness: release provider
+        </button>
         <button type="button" onClick={() => void sayResume()}>
           harness: say resume voice
         </button>
         <span data-testid="mode">{voice.snapshot.mode}</span>
       </div>
       <header className="@container flex h-11 items-center gap-2 border-b px-3 text-sm">
-        <span className="truncate">{view === "owner" ? owner.threadTitle : "Another thread"}</span>
+        <span className="truncate">{view === "other" ? "Another thread" : owner.threadTitle}</span>
         <RouteContext value={ref}>
-          <GlobalRealtimeVoiceControl className="ms-auto" />
+          <GlobalRealtimeVoiceControl className="ms-auto" ownerHasComposer={view === "owner"} />
         </RouteContext>
       </header>
       <main className="flex min-h-0 flex-1 flex-col p-4">
         <p className="mx-auto w-full max-w-3xl text-sm text-muted-foreground">
           Yes, that is plausible. The desktop test separates those possibilities.
         </p>
-        <form className="mx-auto mt-auto w-full min-w-0 max-w-3xl" data-chat-composer-form="true">
-          <ComposerBanner.Dock>
-            <ComposerBanner.Column>
-              <RealtimeVoiceComposerStrip threadRef={ref} />
-            </ComposerBanner.Column>
-          </ComposerBanner.Dock>
-          <div className="relative min-h-24 rounded-2xl border bg-card p-3 text-sm text-muted-foreground">
-            Ask anything. @ files, $ skills, / commands
-          </div>
-        </form>
+        {view === "owner-no-composer" ? (
+          <p className="mx-auto mt-auto text-sm text-muted-foreground">
+            No composer on this view (for example a provider subagent thread).
+          </p>
+        ) : (
+          <form className="mx-auto mt-auto w-full min-w-0 max-w-3xl" data-chat-composer-form="true">
+            <ComposerBanner.Dock>
+              <ComposerBanner.Column>
+                <RealtimeVoiceComposerStrip threadRef={ref} />
+              </ComposerBanner.Column>
+            </ComposerBanner.Dock>
+            <div
+              contentEditable
+              suppressContentEditableWarning
+              data-testid="composer-editor"
+              className="relative min-h-24 rounded-2xl border bg-card p-3 text-sm text-muted-foreground focus:outline-2 focus:outline-ring"
+            >
+              Ask anything. @ files, $ skills, / commands
+            </div>
+          </form>
+        )}
       </main>
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <RealtimeVoiceProvider returnToOwner={() => {}}>
-    <Page />
-  </RealtimeVoiceProvider>,
-);
+function App() {
+  const [view, setView] = useState<View>(
+    new URLSearchParams(location.search).get("view") === "other" ? "other" : "owner",
+  );
+  return (
+    <RealtimeVoiceProvider returnToOwner={() => setView("owner")}>
+      <Page view={view} setView={setView} />
+    </RealtimeVoiceProvider>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<App />);

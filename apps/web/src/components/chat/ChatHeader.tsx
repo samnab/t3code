@@ -51,6 +51,8 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   activeThreadLinkOrigin?: string | null | undefined;
   isServerThread: boolean;
+  /** The composer, and so the live voice strip, is mounted for this thread. */
+  composerMounted: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
   onOpenThread: (threadId: ThreadId) => void;
@@ -82,6 +84,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadTitle,
   activeThreadLinkOrigin,
   isServerThread,
+  composerMounted,
   activeProject,
   parentThreadLink,
   onOpenThread,
@@ -467,7 +470,7 @@ export const ChatHeader = memo(function ChatHeader({
         onManage={onOpenOptimizers}
       />
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
-      <GlobalRealtimeVoiceControl />
+      <GlobalRealtimeVoiceControl ownerHasComposer={composerMounted} />
     </div>
   );
 });

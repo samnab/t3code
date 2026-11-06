@@ -67,12 +67,21 @@ function isVoiceOwner(owner: VoiceOwner, ref: ScopedThreadRef | null): boolean {
 }
 
 /**
- * The live call as a header pill on every screen except its owner thread, where the composer
- * strip takes over. Click opens the full controls, including Return. Mount it in every header a
- * call can outlive; it renders nothing without a call, at the owner, or outside the voice provider.
+ * The live call as a header pill. Click opens the full controls, plus Return away from the owner.
+ * Mount it in every header a call can outlive; it renders nothing without a call or outside the
+ * voice provider. Pass `ownerHasComposer` only where the owner's composer, and so its strip, is
+ * mounted: the pill then steps aside on the owner thread.
  */
-export function GlobalRealtimeVoiceControl({ className }: { readonly className?: string }) {
-  return useRealtimeVoiceActive() ? <VoicePill className={className} /> : null;
+export function GlobalRealtimeVoiceControl({
+  className,
+  ownerHasComposer = false,
+}: {
+  readonly className?: string;
+  readonly ownerHasComposer?: boolean;
+}) {
+  return useRealtimeVoiceActive() ? (
+    <VoicePill className={className} ownerHasComposer={ownerHasComposer} />
+  ) : null;
 }
 
 /**
@@ -117,13 +126,32 @@ function useVoiceCall() {
 // popover always has room for labels.
 const STRIP_LABELS = "@max-[44rem]:sr-only";
 
+// Short state for the closed pill, in the status text's own words.
+function pillState(snapshot: VoiceCall["snapshot"]): string {
+  if (snapshot.mode === "transmitting") return snapshot.micMuted ? "Muted" : "Live";
+  if (snapshot.mode === "connecting") return "Connecting";
+  if (snapshot.mode === "ending") return "Ending";
+  return "Paused";
+}
+
 function VoiceStrip({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
   const call = useVoiceCall();
-  if (call === null || !isVoiceOwner(call.snapshot.owner, threadRef)) return null;
+  const region = useRef<HTMLDivElement>(null);
+  const shown = call !== null && isVoiceOwner(call.snapshot.owner, threadRef);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Return unmounts the focused pill; land focus in the owner's composer instead of <body>
+  useEffect(() => {
+    if (!shown || document.activeElement !== document.body) return;
+    region.current
+      ?.closest("[data-chat-composer-form]")
+      ?.querySelector<HTMLElement>('[data-testid="composer-editor"]')
+      ?.focus();
+  }, [shown]);
+  if (!shown) return null;
   return (
     <ComposerBanner.Attachment>
       <ComposerBanner.Root variant={call.snapshot.reason ? "warning" : "default"}>
         <div
+          ref={region}
           className="flex min-w-0 items-center gap-1 ps-1.5"
           role="region"
           aria-label="Voice conversation"
@@ -155,16 +183,28 @@ function VoiceStrip({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
   );
 }
 
-function VoicePill({ className }: { readonly className: string | undefined }) {
+function VoicePill({
+  className,
+  ownerHasComposer,
+}: {
+  readonly className: string | undefined;
+  readonly ownerHasComposer: boolean;
+}) {
   const call = useVoiceCall();
   const route = useThreadRouteRef();
   const panel = useRef<HTMLDivElement>(null);
-  if (call === null || isVoiceOwner(call.snapshot.owner, route)) return null;
+  if (call === null) return null;
+  const atOwner = isVoiceOwner(call.snapshot.owner, route);
+  if (atOwner && ownerHasComposer) return null;
   const { snapshot, status } = call;
+  // Away from the owner, the pill names it.
+  const label = atOwner
+    ? pillState(snapshot)
+    : `${pillState(snapshot)} in ${snapshot.owner.threadTitle}`;
   return (
     <div
       className={cn(
-        "flex min-w-0 items-center rounded-full border border-border/60 p-px [-webkit-app-region:no-drag]",
+        "flex min-w-0 items-center overflow-hidden rounded-full border border-border/60 p-px [-webkit-app-region:no-drag]",
         className,
       )}
       role="region"
@@ -173,13 +213,10 @@ function VoicePill({ className }: { readonly className: string | undefined }) {
       <Popover>
         <PopoverTrigger
           render={<Button size="sm" variant="ghost" />}
-          aria-label={`Voice controls · ${status} · ${snapshot.owner.threadTitle}`}
+          aria-label={`Voice controls · ${label}`}
         >
           <VoiceStatusIcon call={call} />
-          {/* Away from the owner, the pill names it; state lives in the icon and the popover. */}
-          <span className="min-w-0 max-w-40 truncate @max-[56rem]:hidden">
-            {snapshot.owner.threadTitle}
-          </span>
+          <span className="min-w-0 max-w-48 truncate @max-[56rem]:hidden">{label}</span>
           {snapshot.reason && <CircleAlertIcon className="text-warning" aria-hidden="true" />}
           <ChevronDownIcon aria-hidden="true" />
         </PopoverTrigger>
@@ -200,9 +237,11 @@ function VoicePill({ className }: { readonly className: string | undefined }) {
             aria-label="Voice controls"
           >
             <VoiceDetails call={call} />
-            <div>
-              <ReturnButton call={call} />
-            </div>
+            {!atOwner && (
+              <div>
+                <ReturnButton call={call} />
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-1">
               <VoiceActions call={call} labels="" />
             </div>
