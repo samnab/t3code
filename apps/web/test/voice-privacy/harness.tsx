@@ -1484,9 +1484,52 @@ async function caseSpokenConfirm(): Promise<CaseResult> {
   });
 }
 
+/**
+ * Chromium plays all remote WebRTC audio in a frame through one output, closed with the last
+ * playing element. Recorders need one and each case closes them, so the next call reopened a
+ * Bluetooth output and blocked the renderer 10 s. This muted silent loopback holds it open.
+ */
+async function keepRemoteOutputOpen() {
+  const sender = new NativePeer();
+  const receiver = new NativePeer();
+  sender.addEventListener(
+    "icecandidate",
+    (event) => void receiver.addIceCandidate(event.candidate),
+  );
+  receiver.addEventListener(
+    "icecandidate",
+    (event) => void sender.addIceCandidate(event.candidate),
+  );
+  const silence = generator.createConstantSource();
+  silence.offset.value = 0;
+  const destination = generator.createMediaStreamDestination();
+  silence.connect(destination);
+  silence.start();
+  for (const track of destination.stream.getAudioTracks())
+    sender.addTrack(track, destination.stream);
+  const playing = new Promise<void>((resolve) => {
+    receiver.addEventListener("track", (event) => {
+      const element = new Audio();
+      element.muted = true;
+      element.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+      void element.play().then(resolve, resolve);
+    });
+  });
+  await sender.setLocalDescription();
+  const offer = sender.localDescription;
+  if (offer === null) throw new Error("keep-alive produced no offer");
+  await receiver.setRemoteDescription(offer);
+  await receiver.setLocalDescription();
+  const answer = receiver.localDescription;
+  if (answer === null) throw new Error("keep-alive produced no answer");
+  await sender.setRemoteDescription(answer);
+  await playing;
+}
+
 async function runAll(): Promise<HarnessReport> {
   await generator.resume();
   await analysisContext.resume();
+  await keepRemoteOutputOpen();
   const cases: Array<CaseResult> = [];
   const environment = await probe();
   cases.push(await caseBDetectable());
