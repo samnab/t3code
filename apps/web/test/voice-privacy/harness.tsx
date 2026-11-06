@@ -80,7 +80,9 @@ RTCDataChannel.prototype.send = function (this: RTCDataChannel, data: never) {
 
 const NativeAudioContext = window.AudioContext;
 const NativePeer = window.RTCPeerConnection;
-const generator = new NativeAudioContext({ sampleRate: 48_000 });
+// The harness's own contexts never open the output device either: on a Bluetooth output, reopening
+// it as a new call starts can block the renderer for 10 s and stall the case that is running.
+const generator = new NativeAudioContext({ sampleRate: 48_000, sinkId: { type: "none" } });
 const oscillator = generator.createOscillator();
 const amplitude = generator.createGain();
 amplitude.gain.value = 0;
@@ -228,7 +230,7 @@ navigator.mediaDevices.getUserMedia = async () => {
   return new MediaStream([track]);
 };
 
-const analysisContext = new NativeAudioContext({ sampleRate: 48_000 });
+const analysisContext = new NativeAudioContext({ sampleRate: 48_000, sinkId: { type: "none" } });
 interface Recording {
   readonly label: string;
   readonly chunks: Array<Float32Array>;

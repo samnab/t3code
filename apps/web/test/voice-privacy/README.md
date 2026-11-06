@@ -12,7 +12,7 @@ It builds `harness.tsx` with `vite.config.ts` into `/tmp/t3-voice-privacy-egress
 
 ## How it works
 
-- `getUserMedia` is replaced by a clone of a synthetic `OscillatorNode` track. Both browsers also run with `--use-fake-device-for-media-stream`. The probe only calls the real `getUserMedia` when every input is labelled `Fake…`.
+- `getUserMedia` is replaced by a clone of a synthetic `OscillatorNode` track. Both browsers also run with `--use-fake-device-for-media-stream`. No audio context, the harness's or the transport's, opens an output device. The probe only calls the real `getUserMedia` when every input is labelled `Fake…`.
 - Markers: A is 700 Hz (public, before pause). B is 40 ms chirps at 1900/2300 Hz keyed by a random nonce. C is 3300 Hz (public, after Resume). B plays whenever the controller is not `transmitting`.
 - `startProvider` / `stopProvider` answer from a local `RTCPeerConnection`. Every received stream and every sender track after the gate is recorded through Web Audio and scanned in 1024-sample windows with Goertzel filters. A window counts as a marker when the marker bins hold at least 20% of its energy and the window is at least -60 dBFS. A "trace" also counts windows down to -100 dBFS.
 - The vite config swaps out the app modules that need a live host (atoms, RPC, owner lookup, toasts) for `stubs.ts`. The provider, controller, transport and shortcut resolution run as shipped.

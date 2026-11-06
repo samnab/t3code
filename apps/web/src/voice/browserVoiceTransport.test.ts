@@ -107,7 +107,7 @@ function fixture(contextState: AudioContextState = "running", tapKeywords = fals
     sampleRate = 48_000;
     resume = resumeContext;
     close = closeContext;
-    constructor() {
+    constructor(readonly options?: AudioContextOptions) {
       super();
       contexts.push(this);
     }
@@ -263,6 +263,17 @@ describe("browser voice resource ownership", () => {
     expect(f.failed).not.toHaveBeenCalled();
     f.setContextState("suspended");
     expect(f.failed).toHaveBeenCalledOnce();
+  });
+
+  // On a Bluetooth output, a context opened just after the last call's closed blocked the renderer
+  // for 10 s. The graph only feeds the peer and meters; playback is the <audio> element.
+  it("builds its audio context without an output device", async () => {
+    const f = fixture();
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    expect(f.contexts[0]?.options).toEqual({ sinkId: { type: "none" } });
+    f.transport.close();
   });
 
   // With CoreAudio stalled, constructing an AudioContext blocked the renderer for 20 s before

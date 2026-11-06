@@ -12,6 +12,13 @@ import type { VoiceTransport } from "@t3tools/client-runtime/realtime-voice";
 // apps/web/test/voice-privacy/cutoff-benchmark.html.
 const GATE_DISCARD_QUANTA = 24;
 
+// Chromium 110+ and Electron; other engines ignore the unknown member. Missing from lib.dom.
+declare global {
+  interface AudioContextOptions {
+    sinkId?: string | { type: "none" };
+  }
+}
+
 export function createBrowserVoiceTransport(
   events: {
     connected(): void;
@@ -138,10 +145,10 @@ export function createBrowserVoiceTransport(
           track.removeEventListener("mute", fail);
         });
       }
-      // Only after the microphone is granted: the constructor blocks the renderer on the audio
-      // service (20 s with CoreAudio stalled), while a missing device rejects getUserMedia at once.
-      // Sticky activation from the starting click lets it resume.
-      const context = new AudioContext();
+      // After the grant: the constructor can block the renderer 20 s on a stalled audio service.
+      // No output device: the graph only feeds the peer and meters, and reopening a Bluetooth
+      // output right after the last call blocked the renderer 10 s. The starting click resumes it.
+      const context = new AudioContext({ sinkId: { type: "none" } });
       void context.resume().catch(() => {});
       context.addEventListener("statechange", onContextState);
       cleanups.push(() => context.removeEventListener("statechange", onContextState));
