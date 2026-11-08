@@ -635,7 +635,7 @@ function deferred<T>() {
 }
 
 // The provider's wiring: the real chooser over the real transport, with this device's storage.
-function routed(microphone: string) {
+function routed(microphone: string, speakerSelectable = false) {
   const stored = new Map([["t3code:voice-microphone", microphone]]);
   vi.stubGlobal("window", {
     localStorage: {
@@ -663,7 +663,11 @@ function routed(microphone: string) {
       view.state = change(view.state);
     },
   );
-  const f = fixture("running", true, true, { microphoneId: microphone, adopted: chooser.adopted });
+  const f = fixture("running", true, true, {
+    microphoneId: microphone,
+    speakerSelectable,
+    adopted: chooser.adopted,
+  });
   holder.f = f;
   // As the provider does, the choice is saved before the transport hears it.
   const choose = (kind: "microphone" | "speaker", deviceId: string) => {
@@ -748,5 +752,65 @@ describe("browser voice device truth", () => {
     });
     expect(stored.get("t3code:voice-microphone")).toBe("a");
     await toB;
+  });
+});
+
+describe("browser voice device requests", () => {
+  it("asks for no other microphone when a named one is missing after close", async () => {
+    const f = fixture("running", false, true, { microphoneId: "a" });
+    const pending = f.transport.acquireMicrophone();
+    f.transport.close();
+    f.deny(new DOMException("Requested device not found", "NotFoundError"));
+    await expect(pending).rejects.toThrow("Requested device not found");
+    expect(f.devices.getUserMedia).toHaveBeenCalledOnce();
+  });
+
+  it("routes the speaker one setSinkId at a time, ending on the latest choice", async () => {
+    const { f, view, stored, choose } = routed("a", true);
+    const toB = deferred<void>();
+    f.setSinkId.mockImplementation((deviceId) =>
+      deviceId === "b" ? toB.promise : Promise.resolve(),
+    );
+    const b = choose("speaker", "b");
+    const c = choose("speaker", "c");
+    // C would land first; B, finishing last, must not leave the element on B.
+    await Promise.resolve();
+    toB.resolve();
+    await Promise.all([b, c]);
+    expect(f.setSinkId.mock.calls.at(-1)).toEqual(["c"]);
+    expect(view.state).toMatchObject({ speaker: "c", inUse: { speaker: "c" }, failed: null });
+    expect(stored.get("t3code:voice-speaker")).toBe("c");
+  });
+
+  it("gives up a microphone switch whose grant never lands, keeping the live mic and saying so", async () => {
+    vi.useFakeTimers();
+    try {
+      const { f, view, stored, choose } = routed("a");
+      const pending = f.transport.acquireMicrophone();
+      f.grant(f.stream);
+      await pending;
+      f.transport.enableMicrophone();
+      const b = f.newMicrophone();
+      const bGrant = deferred<typeof b.stream>();
+      f.devices.getUserMedia.mockImplementationOnce(() => bGrant.promise);
+      const toB = choose("microphone", "b");
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(view.state).toMatchObject({
+        microphone: "a",
+        inUse: { microphone: "a" },
+        switching: null,
+        failed: { kind: "microphone", deviceId: "b" },
+      });
+      expect(stored.get("t3code:voice-microphone")).toBe("a");
+      await toB;
+      // The late grant is released, never adopted.
+      bGrant.resolve(b.stream);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(b.track.stop).toHaveBeenCalledOnce();
+      f.captureFrame("still-a");
+      expect(f.sent).toEqual(["still-a"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

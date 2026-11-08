@@ -171,6 +171,7 @@ export function RealtimeVoiceProvider({
       detector,
       () => controller.localListeningFailed(),
       () => readAudioDevice("microphone"),
+      (deviceId) => chooser.adopted("microphone", deviceId),
     );
     const controller: RealtimeVoiceController = createRealtimeVoiceController({
       keywordsEnabled: readKeywordsEnabled(),

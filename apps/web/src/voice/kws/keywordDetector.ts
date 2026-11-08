@@ -81,6 +81,8 @@ export function createKeywordDetector(events: {
   let inFlight = 0;
   let sampleRate = 48_000;
   let detachCurrent: (() => void) | null = null;
+  // Only the newest attach may install or detach a tap; an older one finishing late is a no-op.
+  let attaching = 0;
 
   const fail = () => {
     if (worker === null) return;
@@ -130,11 +132,13 @@ export function createKeywordDetector(events: {
 
   return {
     async attach(source) {
+      const attempt = ++attaching;
       detachCurrent?.();
       ready ??= start();
       await ready;
       const context = source.context;
       await context.audioWorklet.addModule(`${ASSETS}capture.worklet.js`);
+      if (attempt !== attaching) return () => {};
       const target = worker;
       if (target === null) throw new Error("Local listening unavailable");
       const node = new AudioWorkletNode(context, "kws-capture", { outputChannelCount: [1] });
@@ -190,15 +194,15 @@ export function createKeywordDetector(events: {
 }
 
 /**
- * The paused conversation's detector-only capture: its own microphone grant and AudioContext,
- * connected to nothing but the detector. `stop` releases both; a late grant after `stop` is
- * released at once. Any capture failure reports `failed`. `microphone` is the call's chosen device,
- * read at each start, so restarting picks up a new choice.
+ * The paused conversation's detector-only capture, its own grant and AudioContext; `stop` releases
+ * both, and a late grant at once. Capture failure reports `failed`. Each start reads the chosen
+ * `microphone`; `adopted` hears the device captured, and null once released.
  */
 export function createLocalListening(
   detector: KeywordDetector,
   failed: () => void,
   microphone: () => string = () => "",
+  adopted: (deviceId: string | null) => void = () => {},
 ) {
   let stopCurrent: (() => void) | null = null;
   return {
@@ -206,6 +210,7 @@ export function createLocalListening(
       stopCurrent?.();
       let stopped = false;
       let release = () => {};
+      let published = false;
       const stop = () => {
         stopped = true;
         release();
@@ -217,7 +222,8 @@ export function createLocalListening(
         failed();
       };
       void (async () => {
-        const { stream } = await captureMicrophone(microphone());
+        const captured = await captureMicrophone(microphone(), () => !stopped);
+        const { stream } = captured;
         // No output device: reopening a Bluetooth output can block the renderer for 10 s.
         const context = new AudioContext({ sinkId: { type: "none" } });
         let detach = () => {};
@@ -225,11 +231,15 @@ export function createLocalListening(
           detach();
           for (const track of stream.getTracks()) track.stop();
           void context.close().catch(() => {});
+          // Only a capture that published clears it: a late, superseded one must not.
+          if (published) adopted(null);
         };
         if (stopped) {
           release();
           return;
         }
+        published = true;
+        adopted(captured.deviceId);
         for (const track of stream.getTracks()) {
           track.addEventListener("ended", fail);
           track.addEventListener("mute", fail);

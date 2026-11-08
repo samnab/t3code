@@ -90,10 +90,12 @@ export const microphoneConstraints = (deviceId: string): MediaStreamConstraints 
 
 /**
  * Starts capture on the chosen microphone and says which one it got. A saved device that is gone
- * falls back to the system default ("", shown disconnected); a missing default still rejects.
+ * falls back to the system default ("", shown disconnected); a missing default still rejects, and
+ * so does a capture no longer `current` (closed or superseded), which must not ask for another mic.
  */
 export async function captureMicrophone(
   deviceId: string,
+  current: () => boolean,
 ): Promise<{ readonly stream: MediaStream; readonly deviceId: string }> {
   try {
     return {
@@ -104,7 +106,7 @@ export async function captureMicrophone(
     const missing =
       error instanceof Error &&
       (error.name === "OverconstrainedError" || error.name === "NotFoundError");
-    if (deviceId === "" || !missing) throw error;
+    if (deviceId === "" || !missing || !current()) throw error;
     return { stream: await navigator.mediaDevices.getUserMedia({ audio: true }), deviceId: "" };
   }
 }

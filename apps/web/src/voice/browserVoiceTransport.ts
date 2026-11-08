@@ -11,6 +11,10 @@ import { captureMicrophone, microphoneConstraints, type AudioDeviceKind } from "
 // (Chromium, Electron 44). Re-measure on physical and Bluetooth mics with
 // apps/web/test/voice-privacy/cutoff-benchmark.html.
 const GATE_DISCARD_QUANTA = 24;
+// ponytail: fixed, not measured. A mid-call switch keeps the old mic sending until the new grant
+// lands; a Bluetooth headset can take several seconds, but past this the user must hear that the
+// switch failed rather than watch "Switching…" while the old mic stays live.
+const SWITCH_TIMEOUT_MS = 15_000;
 
 // Chromium 110+ and Electron; other engines ignore the unknown member. Missing from lib.dom.
 declare global {
@@ -242,15 +246,28 @@ export function createBrowserVoiceTransport(
       while (!closed && wanted !== null && wanted !== adoptedId) {
         const target = wanted;
         let stream: MediaStream;
+        const request = navigator.mediaDevices.getUserMedia(microphoneConstraints(target));
+        let expire: ReturnType<typeof setTimeout> | undefined;
         try {
-          stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints(target));
+          stream = await Promise.race([
+            request,
+            new Promise<never>((_, reject) => {
+              expire = setTimeout(() => {
+                // Never adopted: a grant that lands after this is released on arrival.
+                void request.then(release, () => {});
+                reject(new Error("The microphone took too long to start."));
+              }, SWITCH_TIMEOUT_MS);
+            }),
+          ]);
         } catch (error) {
+          clearTimeout(expire);
           if (target === wanted) {
             wanted = adoptedId;
             takeWaiter()?.reject(error);
           }
           continue;
         }
+        clearTimeout(expire);
         if (closed || target !== wanted) {
           release(stream);
           continue;
@@ -265,7 +282,7 @@ export function createBrowserVoiceTransport(
   };
   const acquire = async () => {
     const first = wanted ?? devices.microphone();
-    const captured = await captureMicrophone(first);
+    const captured = await captureMicrophone(first, () => !closed);
     const stream = captured.stream;
     if (closed) {
       release(stream);
@@ -304,6 +321,45 @@ export function createBrowserVoiceTransport(
     // A choice made during the grant is captured before this returns, so before the gate can open.
     await drive();
   };
+  // Speaker routing works like the microphone: one setSinkId at a time toward the latest choice, so
+  // completions never land out of order. `sinkId` is the last sink that succeeded.
+  let sinkId = "";
+  let sinkWanted = "";
+  let sinkWaiter: {
+    readonly resolve: () => void;
+    readonly reject: (error: unknown) => void;
+  } | null = null;
+  let sinkDriving = false;
+  const driveSink = async () => {
+    if (sinkDriving || !("setSinkId" in audio)) return;
+    sinkDriving = true;
+    try {
+      while (!closed && sinkWanted !== sinkId) {
+        const target = sinkWanted;
+        try {
+          await audio.setSinkId(target);
+        } catch (error) {
+          if (target === sinkWanted) {
+            sinkWanted = sinkId;
+            const failed = sinkWaiter;
+            sinkWaiter = null;
+            failed?.reject(error);
+          }
+          continue;
+        }
+        if (closed) break;
+        sinkId = target;
+        devices.adopted("speaker", target);
+        if (target === sinkWanted) {
+          const done = sinkWaiter;
+          sinkWaiter = null;
+          done?.resolve();
+        }
+      }
+    } finally {
+      sinkDriving = false;
+    }
+  };
   // The element plays on the system default until a setSinkId succeeds.
   devices.adopted("speaker", "");
   return {
@@ -321,9 +377,15 @@ export function createBrowserVoiceTransport(
     async setSpeaker(deviceId) {
       if (!("setSinkId" in audio)) return false;
       if (closed) return true;
-      await audio.setSinkId(deviceId);
-      // The last setSinkId to succeed is where the element plays.
-      if (!closed) devices.adopted("speaker", deviceId);
+      const superseded = sinkWaiter;
+      sinkWaiter = null;
+      superseded?.resolve();
+      sinkWanted = deviceId;
+      if (deviceId === sinkId && !sinkDriving) return true;
+      await new Promise<void>((resolve, reject) => {
+        sinkWaiter = { resolve, reject };
+        void driveSink();
+      });
       return true;
     },
     // The element outlives each remote track, so a reconnected stream keeps the level.
@@ -411,6 +473,8 @@ export function createBrowserVoiceTransport(
       for (const stream of held) release(stream);
       microphone = null;
       takeWaiter()?.resolve();
+      sinkWaiter?.resolve();
+      sinkWaiter = null;
       adoptedId = null;
       devices.adopted("microphone", null);
       devices.adopted("speaker", null);
