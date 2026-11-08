@@ -26,6 +26,8 @@ export interface BrowserVoiceTransport extends VoiceTransport {
   setMicrophone(deviceId: string): Promise<void>;
   /** Plays the assistant on `deviceId` ("" = system default). False where outputs can't be chosen. */
   setSpeaker(deviceId: string): Promise<boolean>;
+  /** The assistant's playback level, 0–100. Playback only: capture, gate and keywords are untouched. */
+  setVolume(volume: number): void;
 }
 
 export function createBrowserVoiceTransport(
@@ -250,6 +252,10 @@ export function createBrowserVoiceTransport(
       if (!("setSinkId" in audio)) return false;
       if (!closed) await audio.setSinkId(deviceId);
       return true;
+    },
+    // The element outlives each remote track, so a reconnected stream keeps the level.
+    setVolume(volume) {
+      if (!closed) audio.volume = volume / 100;
     },
     async createOffer() {
       const offer = await peer.createOffer();

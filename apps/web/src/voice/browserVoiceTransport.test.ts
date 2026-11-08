@@ -564,3 +564,29 @@ describe("browser voice audio devices", () => {
     expect(unsupported.setSinkId).not.toHaveBeenCalled();
   });
 });
+
+describe("browser voice agent volume", () => {
+  it("sets only the assistant element's volume, which a reconnected stream keeps", async () => {
+    const f = fixture("running", true);
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    f.transport.enableMicrophone();
+    const captures = f.devices.getUserMedia.mock.calls.length;
+    const wiring = f.source.connect.mock.calls.length + f.source.disconnect.mock.calls.length;
+    f.transport.setVolume(40);
+    expect(f.audio).toHaveProperty("volume", 0.4);
+    f.remoteStream();
+    f.remoteStream();
+    expect(f.audio).toHaveProperty("volume", 0.4);
+    f.transport.setVolume(0);
+    expect(f.audio).toHaveProperty("volume", 0);
+    f.captureFrame("still-sent");
+    expect(f.sent).toEqual(["still-sent"]);
+    expect(f.devices.getUserMedia).toHaveBeenCalledTimes(captures);
+    expect(f.source.connect.mock.calls.length + f.source.disconnect.mock.calls.length).toBe(wiring);
+    f.transport.close();
+    f.transport.setVolume(100);
+    expect(f.audio).toHaveProperty("volume", 0);
+  });
+});

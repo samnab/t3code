@@ -19,7 +19,14 @@ import {
   createBrowserVoiceTransport,
   type BrowserVoiceTransport,
 } from "../../voice/browserVoiceTransport";
-import { readAudioDevice, writeAudioDevice, type AudioDeviceKind } from "../../voice/audioDevices";
+import {
+  clampVoiceVolume,
+  readAudioDevice,
+  readVoiceVolume,
+  writeAudioDevice,
+  writeVoiceVolume,
+  type AudioDeviceKind,
+} from "../../voice/audioDevices";
 import { createKeywordDetector, createLocalListening } from "../../voice/kws/keywordDetector";
 import {
   isVoiceShortcutCommand,
@@ -105,6 +112,9 @@ export interface VoiceAudioRouting {
   readonly speaker: string;
   readonly switching: string | null;
   readonly failed: { readonly kind: AudioDeviceKind; readonly deviceId: string } | null;
+  /** The agent's voice level, 0–100, and the level a click on the silenced speaker restores. */
+  readonly volume: number;
+  readonly restoreVolume: number;
 }
 
 interface VoiceContext {
@@ -120,6 +130,7 @@ interface VoiceContext {
   readonly setKeywords: (enabled: boolean) => void;
   readonly audio: VoiceAudioRouting;
   readonly chooseAudioDevice: (kind: AudioDeviceKind, deviceId: string) => void;
+  readonly setVoiceVolume: (volume: number) => void;
   readonly returnToOwner: (owner: VoiceOwner) => void;
 }
 const Context = createContext<VoiceContext | null>(null);
@@ -142,6 +153,9 @@ export function RealtimeVoiceProvider({
     speaker: readAudioDevice("speaker"),
     switching: null,
     failed: null,
+    volume: readVoiceVolume(),
+    // Not stored: after a reload at 0, the speaker restores full volume.
+    restoreVolume: readVoiceVolume() || 100,
   }));
   const [{ controller, detector, localListening, live }] = useState(() => {
     // The newest call's transport; a closed one ignores device changes.
@@ -173,6 +187,7 @@ export function RealtimeVoiceProvider({
           () => readAudioDevice("microphone"),
         );
         live.transport = transport;
+        transport.setVolume(readVoiceVolume());
         // A saved speaker that is gone plays on the system default; the panel shows it disconnected.
         // Any other failure (a permission, a stalled device) shows as a failed choice.
         const speaker = readAudioDevice("speaker");
@@ -348,6 +363,16 @@ export function RealtimeVoiceProvider({
         },
         audio,
         chooseAudioDevice: (kind, deviceId) => void chooseAudioDevice(kind, deviceId),
+        setVoiceVolume: (value) => {
+          const volume = clampVoiceVolume(value);
+          writeVoiceVolume(volume);
+          live.transport?.setVolume(volume);
+          setAudio((current) => ({
+            ...current,
+            volume,
+            restoreVolume: volume > 0 ? volume : current.restoreVolume,
+          }));
+        },
         returnToOwner,
       }}
     >

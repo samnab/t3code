@@ -1,7 +1,17 @@
-import { CircleDashedIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import {
+  CircleDashedIcon,
+  SlidersHorizontalIcon,
+  SmartphoneIcon,
+  Volume2Icon,
+  VolumeXIcon,
+} from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { VoiceLevels } from "@t3tools/client-runtime/realtime-voice";
-import { canChooseSpeaker, type AudioDeviceKind } from "../../voice/audioDevices";
+import {
+  canChooseSpeaker,
+  canSetVoiceVolume,
+  type AudioDeviceKind,
+} from "../../voice/audioDevices";
 import { METER_STEPS, meterStep } from "../../voice/voiceLevels";
 import { Button } from "../ui/button";
 import {
@@ -15,6 +25,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useRealtimeVoice, type VoiceAudioRouting } from "./RealtimeVoiceProvider";
 
 interface DeviceList {
@@ -86,6 +97,8 @@ export function VoiceAudioDevices({
   const { inputs, outputs } = useAudioDeviceLists(snapshot.mode);
   if (snapshot.mode === "off" || snapshot.mode === "ending") return null;
   const speakerSelectable = canChooseSpeaker() && outputs.devices.length > 0;
+  const volumeSettable = canSetVoiceVolume();
+  const silenced = volumeSettable && audio.volume === 0;
   const warning = isDisconnected(audio.microphone, inputs)
     ? "microphone disconnected"
     : speakerSelectable && isDisconnected(audio.speaker, outputs)
@@ -97,9 +110,17 @@ export function VoiceAudioDevices({
     <Menu>
       <MenuTrigger
         render={<Button size="sm" variant="ghost" />}
-        aria-label={warning === null ? "Audio devices" : `Audio devices, ${warning}`}
+        aria-label={[
+          "Audio devices",
+          ...(warning === null ? [] : [warning]),
+          ...(silenced ? ["agent voice off"] : []),
+        ].join(", ")}
       >
-        <SlidersHorizontalIcon aria-hidden="true" />
+        {silenced ? (
+          <VolumeXIcon className="text-warning" aria-hidden="true" />
+        ) : (
+          <SlidersHorizontalIcon aria-hidden="true" />
+        )}
         <span className={labels}>Audio</span>
         {warning !== null && (
           <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-hidden="true" />
@@ -137,8 +158,97 @@ export function VoiceAudioDevices({
             </Note>
           </div>
         )}
+        <MenuSeparator />
+        {volumeSettable ? (
+          <VoiceVolume
+            volume={audio.volume}
+            restore={audio.restoreVolume}
+            setVolume={voice.setVoiceVolume}
+          />
+        ) : (
+          <div className="flex flex-col gap-1.5 px-2 py-1.5">
+            <p className="font-medium text-sm">Agent voice volume</p>
+            <p className="flex items-center gap-2 rounded-md border px-2 py-1.5 text-sm">
+              <SmartphoneIcon className="size-4 shrink-0" aria-hidden="true" />
+              Use the volume buttons on your device.
+            </p>
+            <Note>This browser controls volume itself, so there’s no slider here.</Note>
+          </div>
+        )}
       </MenuPopup>
     </Menu>
+  );
+}
+
+// Arrows, Page keys, Home/End, Enter, Space and typeahead belong to the slider and the speaker
+// button here, not to the menu's device rows. Escape and Tab still reach the menu.
+const stopMenuKeys = (event: React.KeyboardEvent) => {
+  if (event.key !== "Escape" && event.key !== "Tab") event.stopPropagation();
+};
+
+/** The agent's playback level only: the native range gives ±5 arrows, ±10 Page keys, Home/End. */
+function VoiceVolume({
+  volume,
+  restore,
+  setVolume,
+}: {
+  readonly volume: number;
+  readonly restore: number;
+  readonly setVolume: (volume: number) => void;
+}) {
+  const label = useId();
+  const silenced = volume === 0;
+  const toggle = silenced ? `Restore agent voice to ${restore}` : "Silence agent voice";
+  return (
+    <div
+      className="flex flex-col gap-0.5 px-2 pt-1.5 pb-2"
+      role="group"
+      aria-labelledby={label}
+      onKeyDown={stopMenuKeys}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p id={label} className="font-medium text-sm">
+          Agent voice volume
+        </p>
+        <span
+          className={silenced ? "text-sm text-warning-foreground" : "text-sm tabular-nums"}
+          aria-hidden="true"
+        >
+          {silenced ? "Off" : volume}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <Tooltip>
+          <TooltipTrigger
+            render={<Button size="icon-sm" variant="ghost" aria-label={toggle} />}
+            onClick={() => setVolume(silenced ? restore : 0)}
+          >
+            {silenced ? (
+              <VolumeXIcon className="text-warning" aria-hidden="true" />
+            ) : (
+              <Volume2Icon aria-hidden="true" />
+            )}
+          </TooltipTrigger>
+          <TooltipPopup side="top">{toggle}</TooltipPopup>
+        </Tooltip>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={volume}
+          aria-label="Agent voice volume"
+          aria-valuetext={silenced ? "Off" : `${volume} percent`}
+          onChange={(event) => setVolume(Number(event.currentTarget.value))}
+          className="h-11 min-w-0 flex-1 cursor-pointer rounded-sm accent-primary focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2"
+        />
+      </div>
+      <Note>
+        {silenced
+          ? `You won’t hear the agent. The transcript keeps updating. Click the speaker to restore ${restore}.`
+          : "Only the agent’s voice in this call. Your computer’s volume and your mic don’t change."}
+      </Note>
+    </div>
   );
 }
 

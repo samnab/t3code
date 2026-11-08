@@ -46,3 +46,33 @@ export async function captureMicrophone(deviceId: string): Promise<MediaStream> 
 /** Whether this engine can route an element to a chosen output (Chromium, Electron). */
 export const canChooseSpeaker = () =>
   typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype;
+
+const VOLUME_KEY = "t3code:voice-volume";
+/** The agent's voice level, 0–100. Anything but a finite number reads as the default, 100. */
+export function clampVoiceVolume(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 100;
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+export function readVoiceVolume(): number {
+  try {
+    const raw = window.localStorage.getItem(VOLUME_KEY);
+    return raw === null ? 100 : clampVoiceVolume(JSON.parse(raw));
+  } catch {
+    return 100;
+  }
+}
+
+export function writeVoiceVolume(volume: number) {
+  try {
+    window.localStorage.setItem(VOLUME_KEY, JSON.stringify(clampVoiceVolume(volume)));
+  } catch {}
+}
+
+/** False where element volume is read-only (iOS reads 1 and ignores writes): use device buttons. */
+export function canSetVoiceVolume() {
+  if (typeof document === "undefined") return false;
+  const probe = document.createElement("audio");
+  probe.volume = 0.5;
+  return probe.volume === 0.5;
+}
