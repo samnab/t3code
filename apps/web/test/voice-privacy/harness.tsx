@@ -133,13 +133,17 @@ function setMarker(next: Marker) {
   }
 }
 
-// The transport's gate is the connection into the sender's destination node. Switching the
-// marker inside that call puts the B/C boundary at the real enable instant, for transports the
-// harness does not construct itself (the provider's).
+// The transport's gate connects into the sender's destination; switching the marker there puts
+// the B/C boundary at the real enable instant. Only the transport's context counts: `speak` also
+// connects into `microphoneOut`, which would flip to C before the spoken confirm (case 6b).
 const nativeConnect = AudioNode.prototype.connect;
 AudioNode.prototype.connect = function (this: AudioNode, ...args: Array<never>) {
   const [target] = args as Array<unknown>;
-  if (markerOnEnable !== null && target instanceof MediaStreamAudioDestinationNode) {
+  if (
+    markerOnEnable !== null &&
+    target instanceof MediaStreamAudioDestinationNode &&
+    target.context !== generator
+  ) {
     note(`gate connect at generator ${generator.currentTime.toFixed(4)}`);
     setMarker(markerOnEnable);
     markerOnEnable = null;
