@@ -4,6 +4,7 @@ import { createBrowserVoiceTransport } from "./browserVoiceTransport";
 function fixture(
   contextState: AudioContextState = "running",
   tapKeywords = false,
+  keywordsOn = true,
   { speakerSelectable = false, microphoneId = "" } = {},
 ) {
   let grant: (stream: { getTracks(): Track[] }) => void = () => {};
@@ -79,6 +80,7 @@ function fixture(
   const captureFrame = (frame: string) => captureOn(source, frame);
   const heardByKeywords: string[] = [];
   const keywordTap = { receive: (frame: string) => heardByKeywords.push(frame) };
+  const taps = { live: 0 };
   const closeContext = vi.fn(async () => {});
   const resumeContext = vi.fn(async () => {});
   const contexts: FakeAudioContext[] = [];
@@ -163,9 +165,17 @@ function fixture(
       ? async () => {
           const tapped = sources.at(-1)!;
           tapped.connect(keywordTap);
-          return () => tapped.disconnect(keywordTap);
+          taps.live += 1;
+          let detached = false;
+          return () => {
+            if (detached) return;
+            detached = true;
+            taps.live -= 1;
+            tapped.disconnect(keywordTap);
+          };
         }
       : undefined,
+    keywordsOn,
     () => microphoneId,
   );
   const track = new Track();
@@ -187,6 +197,7 @@ function fixture(
     outputTrack,
     source,
     sources,
+    taps,
     captureOn,
     setSinkId,
     newMicrophone: () => {
@@ -321,6 +332,28 @@ describe("browser voice resource ownership", () => {
   });
 });
 
+describe("browser voice live keywords", () => {
+  it("attaches and detaches the keyword tap mid-call without touching the gate", async () => {
+    const f = fixture("running", true, false);
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    f.transport.enableMicrophone();
+    f.captureFrame("A");
+    f.transport.setKeywords?.(true);
+    await Promise.resolve();
+    f.captureFrame("B");
+    f.transport.setKeywords?.(false);
+    f.captureFrame("C");
+    f.transport.setKeywords?.(true);
+    await Promise.resolve();
+    f.transport.close();
+    f.captureFrame("D");
+    expect(f.heardByKeywords).toEqual(["B"]);
+    expect(f.sent).toEqual(["A", "B", "C"]);
+  });
+});
+
 describe("browser voice microphone mute", () => {
   async function live() {
     const f = fixture("running", true);
@@ -424,8 +457,8 @@ describe("browser voice levels", () => {
 });
 
 describe("browser voice audio devices", () => {
-  async function live(options: Parameters<typeof fixture>[2] = {}) {
-    const f = fixture("running", true, options);
+  async function live(options: Parameters<typeof fixture>[3] = {}) {
+    const f = fixture("running", true, true, options);
     const pending = f.transport.acquireMicrophone();
     f.grant(f.stream);
     await pending;
@@ -441,7 +474,11 @@ describe("browser voice audio devices", () => {
   it("swaps the microphone behind an open gate and moves the keyword tap with it", async () => {
     const f = await live();
     f.transport.enableMicrophone();
+    await Promise.resolve();
+    expect(f.taps.live).toBe(1);
     const next = await switchTo(f, "usb");
+    await Promise.resolve();
+    expect(f.taps.live).toBe(1);
     expect(f.devices.getUserMedia).toHaveBeenLastCalledWith({
       audio: { deviceId: { exact: "usb" } },
     });
@@ -503,7 +540,7 @@ describe("browser voice audio devices", () => {
   });
 
   it("captures a saved microphone, or the system default once it is gone", async () => {
-    const f = fixture("running", false, { microphoneId: "gone" });
+    const f = fixture("running", false, true, { microphoneId: "gone" });
     f.devices.getUserMedia.mockImplementationOnce(async () => {
       throw new DOMException("No such device", "OverconstrainedError");
     });

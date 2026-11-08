@@ -1271,8 +1271,7 @@ function OpenCommandPaletteDialog(props: {
       run: async () => voice.cancelResume(),
     });
   }
-  // A call's keyword tap is fixed when it starts, so keywords change only outside a live call.
-  if (voiceMode === "off" || voiceMode === "paused")
+  if (voiceMode !== "ending")
     actionItems.push({
       kind: "action",
       value: "action:voice-keywords",

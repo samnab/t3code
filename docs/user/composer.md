@@ -404,8 +404,8 @@ Android opens a compatible installed file viewer.
 ## Voice conversation keywords
 
 On web and desktop, a live voice conversation can be paused and resumed by voice.
-Turn on **Keywords** in the voice controls while the conversation is paused. The
-setting is saved on this device.
+Turn **Keywords** on or off in the voice controls at any time, including during a
+live conversation. The setting is saved on this device.
 
 - Say "pause voice" to pause. Nothing is sent while paused.
 - To resume, say "resume voice", then say "confirm unpause". Wait about

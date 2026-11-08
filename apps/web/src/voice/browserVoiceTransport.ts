@@ -3,9 +3,9 @@ import { captureMicrophone, microphoneConstraints } from "./audioDevices";
 
 /**
  * A single peer and sink; closing also releases a microphone granted after cancellation.
- * The peer sends a Web Audio destination track. The microphone reaches it only while the gate
- * (the source → destination connection) is open, so the sender never holds the raw track.
- * `tapKeywords` also feeds the microphone to the keyword detector; `microphoneId` ("" = default).
+ * The microphone reaches the sent destination track only while the gate is open.
+ * `tapKeywords` also feeds the source, before the gate, to the on-device keyword detector
+ * while keywords are on (`keywordsOn`, then `setKeywords`). `microphoneId`: "" = system default.
  */
 // Audio already in the track pipeline at gate-open predates it. With synthetic tracks, holding 8
 // quanta still leaked a 5 ms block in 8-11 of 50 trials; 12 and 24 leaked none in 50 or 100
@@ -34,6 +34,7 @@ export function createBrowserVoiceTransport(
     failed(reason: string): void;
   },
   tapKeywords?: (source: MediaStreamAudioSourceNode) => Promise<() => void>,
+  keywordsOn = true,
   microphoneId: () => string = () => "",
 ): BrowserVoiceTransport {
   const peer = new RTCPeerConnection();
@@ -68,6 +69,35 @@ export function createBrowserVoiceTransport(
   let micMuted = false;
   let opening: GainNode | null = null;
   let closed = false;
+  let detachKeywords: (() => void) | null = null;
+  let tapped: MediaStreamAudioSourceNode | null = null;
+  let tapping = false;
+  // One tap at a time, on the current source; a toggle, switch or close during a pending attach
+  // is settled once it resolves.
+  const syncKeywords = () => {
+    if (tapKeywords === undefined || tapping) return;
+    const wanted = closed || !keywordsOn ? null : (graph?.source ?? null);
+    if (detachKeywords !== null && tapped !== wanted) {
+      detachKeywords();
+      detachKeywords = null;
+      tapped = null;
+    }
+    if (wanted === null || detachKeywords !== null) return;
+    tapping = true;
+    tapped = wanted;
+    // The detector reports its own failures; the call does not wait on it.
+    void tapKeywords(wanted).then(
+      (detach) => {
+        tapping = false;
+        detachKeywords = detach;
+        syncKeywords();
+      },
+      () => {
+        tapping = false;
+        tapped = null;
+      },
+    );
+  };
   let cancelIce: (() => void) | undefined;
   const cleanups: Array<() => void> = [];
   const fail = () => {
@@ -141,14 +171,6 @@ export function createBrowserVoiceTransport(
     };
   };
   cleanups.push(() => unwatchMicrophone());
-  const tap = (source: MediaStreamAudioSourceNode) => {
-    if (tapKeywords === undefined) return;
-    // The detector reports its own failures; the call does not wait on it.
-    void tapKeywords(source).then(
-      (detach) => (closed ? detach() : cleanups.push(detach)),
-      () => {},
-    );
-  };
   let switches = 0;
   // A muted gate is still created and connected, without the microphone. The zero source keeps it
   // live: with no active input, Chromium's destination emits no frames and the peer sends no RTP.
@@ -197,7 +219,7 @@ export function createBrowserVoiceTransport(
       for (const track of graph.output.stream.getAudioTracks()) {
         peer.addTrack(track, graph.output.stream);
       }
-      tap(graph.source);
+      syncKeywords();
     },
     async setMicrophone(deviceId) {
       if (closed || graph === null) return;
@@ -222,7 +244,7 @@ export function createBrowserVoiceTransport(
         opening.disconnect();
         openGate(graph);
       }
-      tap(graph.source);
+      syncKeywords();
     },
     async setSpeaker(deviceId) {
       if (!("setSinkId" in audio)) return false;
@@ -287,6 +309,10 @@ export function createBrowserVoiceTransport(
         openGate(graph);
       }
     },
+    setKeywords(on) {
+      keywordsOn = on;
+      syncKeywords();
+    },
     // Meter-only analysers after the gate and on the remote stream; neither reaches the context
     // destination. A shut gate reads zero outright: a disconnected analyser keeps its last frame.
     levels: () =>
@@ -301,6 +327,7 @@ export function createBrowserVoiceTransport(
       closed = true;
       // Shut the gate before anything else so no later microphone frame reaches the sender.
       graph?.source.disconnect();
+      syncKeywords();
       for (const cleanup of cleanups) cleanup();
       for (const track of microphone?.getTracks() ?? []) {
         track.enabled = false;

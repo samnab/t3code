@@ -48,6 +48,8 @@ export interface VoiceTransport {
   enableMicrophone(): void;
   /** Shuts or reopens the gate within the call; playback continues. Absent where unsupported. */
   setMicMuted?(muted: boolean): void;
+  /** Attaches or detaches the on-device keyword tap within the call. Absent where unsupported. */
+  setKeywords?(on: boolean): void;
   /** Current levels, read on demand by a meter. Absent where unsupported. */
   levels?(): VoiceLevels;
   close(): void;
@@ -607,12 +609,14 @@ export function createRealtimeVoiceController(deps: {
     if (snapshot.mode !== "transmitting" || value === null || !current(value)) return SILENT;
     return value.transport?.levels?.() ?? SILENT;
   };
+  /** Takes effect at once: paused, it starts or stops the detector-only capture; in a call, the
+   * transport attaches or detaches its keyword tap. Mute, pause and the gate are untouched. */
   const setKeywords = (enabled: boolean) => {
     keywords = enabled && deps.localListening !== undefined;
     if (snapshot.mode === "paused" && attempt === null) {
       if (keywords) startListening();
       else stopListening();
-    }
+    } else attempt?.transport?.setKeywords?.(keywords);
     republish();
   };
   return {

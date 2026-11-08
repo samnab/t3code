@@ -162,7 +162,8 @@ export function RealtimeVoiceProvider({
       createTransport: (events) => {
         const transport = createBrowserVoiceTransport(
           events,
-          controller.getSnapshot().keywords ? (source) => detector.attach(source) : undefined,
+          (source) => detector.attach(source),
+          controller.getSnapshot().keywords,
           () => readAudioDevice("microphone"),
         );
         live.transport = transport;
