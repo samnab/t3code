@@ -253,7 +253,7 @@ function VoicePill({
               </div>
             )}
             <div className="flex flex-wrap items-center gap-1">
-              <VoiceAudioDevices labels="" />
+              <VoiceAudioDevices labels="" side="left" />
               <VoiceActions call={call} labels="" />
             </div>
           </div>

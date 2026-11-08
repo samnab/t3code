@@ -42,7 +42,64 @@ function tone(frequency: number) {
   return { context, amplitude, destination, stream: destination.stream };
 }
 const microphone = tone(440);
-navigator.mediaDevices.getUserMedia = async () => microphone.stream.clone();
+const search = new URLSearchParams(location.search);
+if (search.get("theme") === "light") document.documentElement.classList.remove("dark");
+
+// Synthetic devices with long names. Every capture is the same tone; only the list and the
+// constraints differ, so no physical device is opened and no permission prompt appears.
+const device = (kind: MediaDeviceKind, deviceId: string, label: string): MediaDeviceInfo => ({
+  kind,
+  deviceId,
+  label,
+  groupId: deviceId,
+  toJSON: () => ({ kind, deviceId, label }),
+});
+let devices = [
+  device("audioinput", "default", "Default - MacBook Pro Microphone"),
+  device("audioinput", "mic-builtin", "MacBook Pro Microphone"),
+  device("audioinput", "mic-studio", "Studio Display Microphone"),
+  device(
+    "audioinput",
+    "mic-shure",
+    "Shure MV7+ USB Podcast Microphone with Very Long Name (2nd Gen)",
+  ),
+  device("audiooutput", "default", "Default - MacBook Pro Speakers"),
+  device("audiooutput", "out-builtin", "MacBook Pro Speakers"),
+  device("audiooutput", "out-airpods", "AirPods Pro — Nabeel’s (Bluetooth)"),
+  device("audiooutput", "out-lg", "LG UltraFine Display Audio with an Extremely Long Product Name"),
+];
+const listed = (kind: MediaDeviceKind, deviceId: string) =>
+  devices.some((entry) => entry.kind === kind && entry.deviceId === deviceId);
+navigator.mediaDevices.enumerateDevices = async () => devices;
+const unplug = (deviceIds: ReadonlyArray<string>) => {
+  devices = devices.filter((entry) => !deviceIds.includes(entry.deviceId));
+  navigator.mediaDevices.dispatchEvent(new Event("devicechange"));
+};
+const capture = { delayMs: 0, failNext: false };
+navigator.mediaDevices.getUserMedia = async (constraints) => {
+  const audio = constraints?.audio;
+  const wanted = typeof audio === "object" ? audio.deviceId : undefined;
+  const deviceId =
+    typeof wanted === "object" && !Array.isArray(wanted) && typeof wanted.exact === "string"
+      ? wanted.exact
+      : "";
+  if (deviceId !== "" && !listed("audioinput", deviceId))
+    throw new DOMException("No such device", "OverconstrainedError");
+  await new Promise((resolve) => setTimeout(resolve, capture.delayMs));
+  if (capture.failNext) {
+    capture.failNext = false;
+    throw new DOMException("Could not start audio source", "NotReadableError");
+  }
+  return microphone.stream.clone();
+};
+// `?sink=none` stands in for an engine without output selection. Otherwise the stub accepts the
+// listed ids without opening any output device.
+if (search.get("sink") === "none") Reflect.deleteProperty(HTMLMediaElement.prototype, "setSinkId");
+else
+  HTMLMediaElement.prototype.setSinkId = async (sinkId: string) => {
+    if (sinkId !== "" && !listed("audiooutput", sinkId))
+      throw new DOMException("No such device", "NotFoundError");
+  };
 // Speaks the shipped "resume voice" fixture into the microphone, so the real detector arms.
 async function sayResume() {
   const data = await (await fetch(resumePhraseUrl)).arrayBuffer();
@@ -123,6 +180,15 @@ function Page({ view, setView }: { view: View; setView: (view: View) => void }) 
         </button>
         <button type="button" onClick={() => void sayResume()}>
           harness: say resume voice
+        </button>
+        <button type="button" onClick={() => (capture.delayMs = 2_500)}>
+          harness: slow switch
+        </button>
+        <button type="button" onClick={() => (capture.failNext = true)}>
+          harness: fail next switch
+        </button>
+        <button type="button" onClick={() => unplug(["mic-studio", "out-airpods"])}>
+          harness: unplug studio and airpods
         </button>
         <span data-testid="mode">{voice.snapshot.mode}</span>
       </div>

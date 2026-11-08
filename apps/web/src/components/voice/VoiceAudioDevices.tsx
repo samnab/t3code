@@ -65,7 +65,14 @@ const isDisconnected = (chosen: string, list: DeviceList) =>
  * The call's microphone and speaker as one "Audio" button and panel. Mount it beside the voice
  * actions; it renders nothing without a call or while one ends. A choice applies at once.
  */
-export function VoiceAudioDevices({ labels }: { readonly labels: string }) {
+export function VoiceAudioDevices({
+  labels,
+  side = "top",
+}: {
+  readonly labels: string;
+  /** "left" inside another popover, so the panel does not cover it. */
+  readonly side?: "top" | "left";
+}) {
   const voice = useRealtimeVoice();
   const { snapshot, audio } = voice;
   const { inputs, outputs } = useAudioDeviceLists(snapshot.mode);
@@ -93,9 +100,9 @@ export function VoiceAudioDevices({ labels }: { readonly labels: string }) {
       </PopoverTrigger>
       {/* Focus lands on the checked microphone; Escape returns it to the button. */}
       <PopoverPopup
-        side="top"
+        side={side}
         align="end"
-        width="md"
+        width="lg"
         padding="compact"
         touchBackdrop
         initialFocus={() =>
