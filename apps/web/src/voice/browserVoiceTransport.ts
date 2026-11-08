@@ -282,15 +282,23 @@ export function createBrowserVoiceTransport(
   };
   const acquire = async () => {
     let first = wanted ?? devices.microphone();
-    let captured: Awaited<ReturnType<typeof captureMicrophone>>;
-    try {
-      // The system-default fallback is only for the choice still wanted; never once superseded.
-      captured = await captureMicrophone(first, () => !closed && (wanted ?? first) === first);
-    } catch (error) {
-      if (closed || wanted === null || wanted === first) throw error;
-      first = wanted;
-      captured = await captureMicrophone(first, () => !closed && wanted === first);
-    }
+    // Retries the latest choice for as long as a failure was superseded by a newer one. The
+    // system-default fallback is only for the choice still wanted.
+    const captureWanted = async () => {
+      for (;;) {
+        const target = first;
+        try {
+          return await captureMicrophone(target, () => !closed && (wanted ?? target) === target);
+        } catch (error) {
+          if (closed || wanted === null || wanted === target) {
+            takeWaiter()?.reject(error);
+            throw error;
+          }
+          first = wanted;
+        }
+      }
+    };
+    const captured = await captureWanted();
     const stream = captured.stream;
     if (closed) {
       release(stream);

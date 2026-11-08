@@ -119,3 +119,30 @@ describe("paused local listening", () => {
     listening.stop();
   });
 });
+
+describe("paused local listening capture", () => {
+  it("stops the granted tracks when the listening context cannot open", async () => {
+    const track = Object.assign(new EventTarget(), { stop: vi.fn() });
+    vi.stubGlobal("navigator", {
+      mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track] }) },
+    });
+    vi.stubGlobal(
+      "AudioContext",
+      vi.fn(function () {
+        throw new Error("audio service unavailable");
+      }),
+    );
+    let reported: () => void = () => {};
+    const failed = new Promise<void>((resolve) => (reported = resolve));
+    const listening = createLocalListening(
+      { attach: async () => () => {}, close: () => {} },
+      () => reported(),
+      () => "a",
+    );
+    listening.start();
+    await failed;
+    expect(track.stop).toHaveBeenCalledOnce();
+    listening.stop();
+    expect(track.stop).toHaveBeenCalledOnce();
+  });
+});

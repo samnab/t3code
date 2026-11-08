@@ -226,8 +226,9 @@ export function createLocalListening(
       void (async () => {
         const captured = await captureMicrophone(microphone(), () => !stopped);
         const { stream } = captured;
-        // No output device: reopening a Bluetooth output can block the renderer for 10 s.
-        const context = new AudioContext({ sinkId: { type: "none" } });
+        // Owned by release from here, so every exit, including a context that fails to open,
+        // stops the tracks.
+        let context: AudioContext | null = null;
         let detach = () => {};
         let released = false;
         release = () => {
@@ -235,7 +236,7 @@ export function createLocalListening(
           released = true;
           detach();
           for (const track of stream.getTracks()) track.stop();
-          void context.close().catch(() => {});
+          void context?.close().catch(() => {});
           if (owner === token) {
             owner = null;
             adopted(null);
@@ -245,19 +246,22 @@ export function createLocalListening(
           release();
           return;
         }
+        // No output device: reopening a Bluetooth output can block the renderer for 10 s.
+        const opened = new AudioContext({ sinkId: { type: "none" } });
+        context = opened;
         owner = token;
         adopted(captured.deviceId);
         for (const track of stream.getTracks()) {
           track.addEventListener("ended", fail);
           track.addEventListener("mute", fail);
         }
-        await context.resume();
+        await opened.resume();
         // A suspended or interrupted context hears nothing; say so instead of looking healthy.
-        context.addEventListener("statechange", () => {
-          if (context.state !== "running") fail();
+        opened.addEventListener("statechange", () => {
+          if (opened.state !== "running") fail();
         });
-        if (context.state !== "running") throw new Error("Local listening unavailable");
-        detach = await detector.attach(context.createMediaStreamSource(stream));
+        if (opened.state !== "running") throw new Error("Local listening unavailable");
+        detach = await detector.attach(opened.createMediaStreamSource(stream));
         // Stopped while attaching: the capture is already released; drop the late tap too.
         if (stopped) detach();
       })().catch(fail);

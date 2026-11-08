@@ -780,6 +780,32 @@ describe("browser voice device requests", () => {
     ]);
   });
 
+  it("retries the latest startup choice while earlier ones fail, never the system default", async () => {
+    const f = fixture("running", false, true, { microphoneId: "a" });
+    const pending = f.transport.acquireMicrophone();
+    f.choose("b");
+    const toB = f.transport.setMicrophone("b");
+    const bAsked = deferred<void>();
+    const bGrant = deferred<{ getTracks(): never[] }>();
+    f.devices.getUserMedia.mockImplementationOnce(() => {
+      bAsked.resolve();
+      return bGrant.promise;
+    });
+    f.deny(new DOMException("Requested device not found", "NotFoundError"));
+    await bAsked.promise;
+    f.choose("c");
+    const toC = f.transport.setMicrophone("c");
+    const c = f.newMicrophone();
+    f.devices.getUserMedia.mockImplementationOnce(async () => c.stream);
+    bGrant.reject(new DOMException("Could not start audio source", "NotReadableError"));
+    await Promise.all([pending, toB, toC]);
+    expect(f.devices.getUserMedia.mock.calls).toEqual([
+      [{ audio: { deviceId: { exact: "a" } } }],
+      [{ audio: { deviceId: { exact: "b" } } }],
+      [{ audio: { deviceId: { exact: "c" } } }],
+    ]);
+  });
+
   it("routes the speaker one setSinkId at a time, ending on the latest choice", async () => {
     const { f, view, stored, choose } = routed("a", true);
     const toB = deferred<void>();
