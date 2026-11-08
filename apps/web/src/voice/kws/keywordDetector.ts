@@ -217,7 +217,7 @@ export function createLocalListening(
         failed();
       };
       void (async () => {
-        const stream = await captureMicrophone(microphone());
+        const { stream } = await captureMicrophone(microphone());
         // No output device: reopening a Bluetooth output can block the renderer for 10 s.
         const context = new AudioContext({ sinkId: { type: "none" } });
         let detach = () => {};

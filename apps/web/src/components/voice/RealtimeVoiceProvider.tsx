@@ -146,13 +146,14 @@ export function RealtimeVoiceProvider({
   const [audio, setAudio] = useState<VoiceAudioRouting>(() => ({
     microphone: readAudioDevice("microphone"),
     speaker: readAudioDevice("speaker"),
+    inUse: { microphone: null, speaker: null },
     switching: null,
     failed: null,
     volume: readVoiceVolume(),
     // Not stored: after a reload at 0, the speaker restores full volume.
     restoreVolume: readVoiceVolume() || 100,
   }));
-  const [{ controller, detector, localListening, live }] = useState(() => {
+  const [{ controller, detector, chooser, live }] = useState(() => {
     // The newest call's transport; a closed one ignores device changes.
     const live: { transport: BrowserVoiceTransport | null } = { transport: null };
     // Keyword commands come only from this device's microphone. A pause acts at once; a resume
@@ -179,7 +180,7 @@ export function RealtimeVoiceProvider({
           events,
           (source) => detector.attach(source),
           controller.getSnapshot().keywords,
-          () => readAudioDevice("microphone"),
+          { microphone: () => readAudioDevice("microphone"), adopted: chooser.adopted },
         );
         live.transport = transport;
         transport.setVolume(readVoiceVolume());
@@ -224,12 +225,9 @@ export function RealtimeVoiceProvider({
       describeError,
       watchOwner: watchVoiceOwner,
     });
-    return { controller, detector, localListening, live };
-  });
-  // Applies at once to a live call; while paused it restarts keyword listening and the next call
-  // captures it. A failed choice restores the device still in use (see createAudioDeviceChooser).
-  const [chooseAudioDevice] = useState(() =>
-    createAudioDeviceChooser(
+    // Applies at once to a live call; while paused it restarts keyword listening and the next call
+    // captures it. The device shown as in use is only ever the one the transport adopted.
+    const chooser = createAudioDeviceChooser(
       async (kind, deviceId) => {
         if (kind === "speaker") return live.transport?.setSpeaker(deviceId);
         const { listening } = controller.getSnapshot();
@@ -237,8 +235,9 @@ export function RealtimeVoiceProvider({
         return live.transport?.setMicrophone(deviceId);
       },
       (change) => setAudio((current) => ({ ...current, ...change(current) })),
-    ),
-  );
+    );
+    return { controller, detector, chooser, live };
+  });
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to the voice controller to toast when a call ends
   useEffect(() => {
@@ -337,7 +336,7 @@ export function RealtimeVoiceProvider({
           controller.setKeywords(enabled);
         },
         audio,
-        chooseAudioDevice: (kind, deviceId) => void chooseAudioDevice(kind, deviceId),
+        chooseAudioDevice: (kind, deviceId) => void chooser.choose(kind, deviceId),
         setVoiceVolume: (value) => {
           const volume = clampVoiceVolume(value);
           writeVoiceVolume(volume);

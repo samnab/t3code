@@ -24,57 +24,64 @@ function writeAudioDevice(kind: AudioDeviceKind, deviceId: string) {
   } catch {}
 }
 
-/** The chosen devices as shown. `switching`: the microphone a live call is moving to. `failed`:
- * the last choice that could not be applied; the device shown is then the one still in use. */
+/** `microphone`/`speaker`: the saved choices. `inUse`: what the live call actually uses, as its
+ * transport reports it (null without a call). `switching`: the microphone a choice is moving to.
+ * `failed`: the latest choice the call could not apply. */
 export interface AudioDeviceChoices {
   readonly microphone: string;
   readonly speaker: string;
+  readonly inUse: Readonly<Record<AudioDeviceKind, string | null>>;
   readonly switching: string | null;
   readonly failed: { readonly kind: AudioDeviceKind; readonly deviceId: string } | null;
 }
 
 /**
- * Saves and applies a choice at once. Each kind tracks its own latest request and the last device
- * actually applied: only the latest request settles, and a failure restores the last applied device
- * in storage and on screen, never an earlier choice still in flight.
+ * Saves and applies a choice at once. The device in use comes only from `adopted`, which the
+ * transport calls whenever its device changes. A superseded choice writes nothing; when the latest
+ * choice fails, storage and the choice fall back to the device in use, beside the failure.
  */
 export function createAudioDeviceChooser(
   apply: (kind: AudioDeviceKind, deviceId: string) => Promise<unknown>,
   update: (change: (current: AudioDeviceChoices) => AudioDeviceChoices) => void,
 ) {
   const latest: Record<AudioDeviceKind, number> = { microphone: 0, speaker: 0 };
-  const applied: Record<AudioDeviceKind, string> = {
-    microphone: readAudioDevice("microphone"),
-    speaker: readAudioDevice("speaker"),
-  };
-  const switching = (kind: AudioDeviceKind, current: AudioDeviceChoices, next: string | null) =>
-    kind === "microphone" ? next : current.switching;
-  return async (kind: AudioDeviceKind, deviceId: string) => {
-    const request = ++latest[kind];
-    writeAudioDevice(kind, deviceId);
-    update((current) => ({
-      ...current,
-      [kind]: deviceId,
-      switching: switching(kind, current, deviceId),
-      failed: null,
-    }));
-    try {
-      await apply(kind, deviceId);
-    } catch {
-      if (request !== latest[kind]) return;
-      const restored = applied[kind];
-      writeAudioDevice(kind, restored);
+  const inUse: Record<AudioDeviceKind, string | null> = { microphone: null, speaker: null };
+  return {
+    adopted(kind: AudioDeviceKind, deviceId: string | null) {
+      inUse[kind] = deviceId;
+      update((current) => ({ ...current, inUse: { ...current.inUse, [kind]: deviceId } }));
+    },
+    async choose(kind: AudioDeviceKind, deviceId: string) {
+      const request = ++latest[kind];
+      const settled = (current: AudioDeviceChoices, switching: string | null) =>
+        kind === "microphone" ? switching : current.switching;
+      writeAudioDevice(kind, deviceId);
       update((current) => ({
         ...current,
-        [kind]: restored,
-        switching: switching(kind, current, null),
+        [kind]: deviceId,
+        switching: settled(current, deviceId),
+        failed: null,
+      }));
+      let failed = false;
+      try {
+        await apply(kind, deviceId);
+      } catch {
+        failed = true;
+      }
+      if (request !== latest[kind]) return;
+      const used = inUse[kind];
+      if (!failed || used === null) {
+        update((current) => ({ ...current, switching: settled(current, null) }));
+        return;
+      }
+      writeAudioDevice(kind, used);
+      update((current) => ({
+        ...current,
+        [kind]: used,
+        switching: settled(current, null),
         failed: { kind, deviceId },
       }));
-      return;
-    }
-    if (request !== latest[kind]) return;
-    applied[kind] = deviceId;
-    update((current) => ({ ...current, switching: switching(kind, current, null) }));
+    },
   };
 }
 
@@ -82,18 +89,23 @@ export const microphoneConstraints = (deviceId: string): MediaStreamConstraints 
   deviceId === "" ? { audio: true } : { audio: { deviceId: { exact: deviceId } } };
 
 /**
- * Starts capture on the chosen microphone. A saved device that is gone falls back to the system
- * default (the device panel shows it disconnected); a missing default still rejects.
+ * Starts capture on the chosen microphone and says which one it got. A saved device that is gone
+ * falls back to the system default ("", shown disconnected); a missing default still rejects.
  */
-export async function captureMicrophone(deviceId: string): Promise<MediaStream> {
+export async function captureMicrophone(
+  deviceId: string,
+): Promise<{ readonly stream: MediaStream; readonly deviceId: string }> {
   try {
-    return await navigator.mediaDevices.getUserMedia(microphoneConstraints(deviceId));
+    return {
+      stream: await navigator.mediaDevices.getUserMedia(microphoneConstraints(deviceId)),
+      deviceId,
+    };
   } catch (error) {
     const missing =
       error instanceof Error &&
       (error.name === "OverconstrainedError" || error.name === "NotFoundError");
     if (deviceId === "" || !missing) throw error;
-    return navigator.mediaDevices.getUserMedia({ audio: true });
+    return { stream: await navigator.mediaDevices.getUserMedia({ audio: true }), deviceId: "" };
   }
 }
 

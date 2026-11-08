@@ -277,8 +277,9 @@ function DeviceSection({
   const chosen = audio[kind];
   const disconnected = isDisconnected(chosen, list);
   const failed = audio.failed?.kind === kind ? audio.failed.deviceId : null;
-  // A missing saved device, or a saved speaker the call could not apply, uses the system default.
-  const inUse = disconnected || failed === chosen ? "" : chosen;
+  // The live call's device as its transport reports it; without a call, the saved choice (or the
+  // system default a gone device falls back to).
+  const inUse = audio.inUse[kind] ?? (disconnected ? "" : chosen);
   const nameOf = (deviceId: string) =>
     deviceId === ""
       ? "System default"
@@ -334,9 +335,7 @@ function DeviceSection({
           ))}
           {failed !== null && (
             <p className="px-2 py-1 text-warning-foreground text-xs" role="status">
-              {failed === chosen
-                ? `Couldn’t use ${nameOf(failed)}. Using system default.`
-                : `Couldn’t switch to ${nameOf(failed)}. Still using ${nameOf(chosen)}.`}
+              Couldn’t switch to {nameOf(failed)}. Using {nameOf(inUse)}.
             </p>
           )}
         </>

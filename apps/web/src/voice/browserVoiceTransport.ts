@@ -1,11 +1,10 @@
 import type { VoiceTransport } from "@t3tools/client-runtime/realtime-voice";
-import { captureMicrophone, microphoneConstraints } from "./audioDevices";
+import { captureMicrophone, microphoneConstraints, type AudioDeviceKind } from "./audioDevices";
 
 /**
- * A single peer and sink; closing also releases a microphone granted after cancellation.
- * The microphone reaches the sent destination track only while the gate is open.
- * `tapKeywords` also feeds the source, before the gate, to the on-device keyword detector
- * while keywords are on (`keywordsOn`, then `setKeywords`). `microphoneId`: "" = system default.
+ * One peer and sink. The microphone reaches the sender only through the open gate; `tapKeywords`
+ * feeds the source to the on-device detector while keywords are on. `devices.adopted` reports every
+ * device the call actually uses (null once closed): the only source for "in use".
  */
 // Audio already in the track pipeline at gate-open predates it. With synthetic tracks, holding 8
 // quanta still leaked a 5 ms block in 8-11 of 50 trials; 12 and 24 leaked none in 50 or 100
@@ -21,10 +20,12 @@ declare global {
 }
 
 export interface BrowserVoiceTransport extends VoiceTransport {
-  /** Captures `deviceId` and swaps it in behind the gate, which keeps its open, shut or muted
-   * state. Rejects, keeping the current microphone, when the device cannot be captured. */
+  /** Moves the call to `deviceId` behind the gate, which keeps its open, shut or muted state.
+   * Resolves once adopted, superseded by a later choice, or closed. Rejects when the latest choice
+   * cannot be captured; the call then stays on the adopted device. */
   setMicrophone(deviceId: string): Promise<void>;
-  /** Plays the assistant on `deviceId` ("" = system default). False where outputs can't be chosen. */
+  /** Plays the assistant on `deviceId` ("" = system default). False where outputs can't be chosen.
+   * Rejects when setSinkId fails; the element keeps its last sink. */
   setSpeaker(deviceId: string): Promise<boolean>;
   /** The assistant's playback level, 0–100. Playback only: capture, gate and keywords are untouched. */
   setVolume(volume: number): void;
@@ -37,7 +38,10 @@ export function createBrowserVoiceTransport(
   },
   tapKeywords?: (source: MediaStreamAudioSourceNode) => Promise<() => void>,
   keywordsOn = true,
-  microphoneId: () => string = () => "",
+  devices: {
+    readonly microphone: () => string;
+    readonly adopted: (kind: AudioDeviceKind, deviceId: string | null) => void;
+  } = { microphone: () => "", adopted: () => {} },
 ): BrowserVoiceTransport {
   const peer = new RTCPeerConnection();
   const audio = document.createElement("audio");
@@ -173,11 +177,27 @@ export function createBrowserVoiceTransport(
     };
   };
   cleanups.push(() => unwatchMicrophone());
-  let switches = 0;
-  // The device the transport holds, and the first grant: a choice made before it waits for it.
-  let capturedId: string | null = null;
-  let markAcquired = () => {};
-  const acquired = new Promise<void>((resolve) => (markAcquired = resolve));
+  // Every granted stream not yet released: the adopted one and a replacement on its way in. close()
+  // stops them all; a grant that lands after close is stopped on arrival.
+  const held = new Set<MediaStream>();
+  const release = (stream: MediaStream) => {
+    held.delete(stream);
+    for (const track of stream.getTracks()) {
+      track.enabled = false;
+      track.stop();
+    }
+  };
+  // `adoptedId` is the microphone the call captures; `wanted` the latest choice; `waiter` settles
+  // that choice's setMicrophone.
+  let adoptedId: string | null = null;
+  let wanted: string | null = null;
+  let waiter: { readonly resolve: () => void; readonly reject: (error: unknown) => void } | null =
+    null;
+  const takeWaiter = () => {
+    const current = waiter;
+    waiter = null;
+    return current;
+  };
   // A muted gate is still created and connected, without the microphone. The zero source keeps it
   // live: with no active input, Chromium's destination emits no frames and the peer sends no RTP.
   const openGate = (open: NonNullable<typeof graph>) => {
@@ -194,25 +214,65 @@ export function createBrowserVoiceTransport(
     gain.connect(open.inputMeter);
     opening = gain;
   };
-  // A choice made while the grant is pending is captured here, before the call can transmit. If
-  // that capture fails the granted device stays, and the waiting setMicrophone reports the failure.
-  const acquire = async () => {
-    let wanted = microphoneId();
-    let stream = await captureMicrophone(wanted);
-    while (!closed && microphoneId() !== wanted) {
-      const next = microphoneId();
-      const replacement = await captureMicrophone(next).catch(() => null);
-      if (replacement === null) break;
-      for (const track of stream.getTracks()) track.stop();
-      stream = replacement;
-      wanted = next;
+  const swapIn = (stream: MediaStream, deviceId: string) => {
+    if (graph === null) return;
+    const previous = microphone;
+    // Off the gate and the keyword tap first, so the old device sends nothing more.
+    graph.source.disconnect();
+    graph = { ...graph, source: graph.context.createMediaStreamSource(stream) };
+    adoptMicrophone(stream);
+    if (previous !== null) release(previous);
+    // An open, unmuted gate is replaced as on unmute: the new device's first frames are discarded.
+    if (opening !== null && !micMuted) {
+      graph.silence.disconnect(opening);
+      opening.disconnect();
+      openGate(graph);
     }
+    syncKeywords();
+    adoptedId = deviceId;
+    devices.adopted("microphone", deviceId);
+  };
+  // Moves the call to the latest choice, one capture at a time. A grant that arrives superseded is
+  // released; only the latest choice's failure is reported, and the adopted device stays.
+  let driving = false;
+  const drive = async () => {
+    if (driving || graph === null) return;
+    driving = true;
+    try {
+      while (!closed && wanted !== null && wanted !== adoptedId) {
+        const target = wanted;
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints(target));
+        } catch (error) {
+          if (target === wanted) {
+            wanted = adoptedId;
+            takeWaiter()?.reject(error);
+          }
+          continue;
+        }
+        if (closed || target !== wanted) {
+          release(stream);
+          continue;
+        }
+        held.add(stream);
+        swapIn(stream, target);
+        takeWaiter()?.resolve();
+      }
+    } finally {
+      driving = false;
+    }
+  };
+  const acquire = async () => {
+    const first = wanted ?? devices.microphone();
+    const captured = await captureMicrophone(first);
+    const stream = captured.stream;
     if (closed) {
-      for (const track of stream.getTracks()) track.stop();
+      release(stream);
       return;
     }
+    held.add(stream);
     adoptMicrophone(stream);
-    capturedId = wanted;
     // After the grant: the constructor can block the renderer 20 s on a stalled audio service.
     // No output device: the graph only feeds the peer and meters, and reopening a Bluetooth
     // output right after the last call blocked the renderer 10 s. The starting click resumes it.
@@ -237,45 +297,33 @@ export function createBrowserVoiceTransport(
       peer.addTrack(track, graph.output.stream);
     }
     syncKeywords();
+    adoptedId = captured.deviceId;
+    devices.adopted("microphone", adoptedId);
+    // With no newer choice, a saved device that is gone stays chosen (shown disconnected), not retried.
+    if (wanted === null || wanted === first) wanted = adoptedId;
+    // A choice made during the grant is captured before this returns, so before the gate can open.
+    await drive();
   };
+  // The element plays on the system default until a setSinkId succeeds.
+  devices.adopted("speaker", "");
   return {
-    async acquireMicrophone() {
-      try {
-        await acquire();
-      } finally {
-        markAcquired();
-      }
-    },
-    async setMicrophone(deviceId) {
-      const mine = ++switches;
-      if (graph === null) await acquired;
-      if (closed || graph === null || mine !== switches || deviceId === capturedId) return;
-      const stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints(deviceId));
-      if (closed || graph === null || mine !== switches) {
-        for (const track of stream.getTracks()) track.stop();
-        return;
-      }
-      const previous = microphone;
-      // Off the gate and the keyword tap first, so the old device sends nothing more.
-      graph.source.disconnect();
-      graph = { ...graph, source: graph.context.createMediaStreamSource(stream) };
-      adoptMicrophone(stream);
-      capturedId = deviceId;
-      for (const track of previous?.getTracks() ?? []) {
-        track.enabled = false;
-        track.stop();
-      }
-      // An open, unmuted gate is replaced as on unmute: the new device's first frames are discarded.
-      if (opening !== null && !micMuted) {
-        graph.silence.disconnect(opening);
-        opening.disconnect();
-        openGate(graph);
-      }
-      syncKeywords();
+    acquireMicrophone: acquire,
+    setMicrophone(deviceId) {
+      if (closed) return Promise.resolve();
+      takeWaiter()?.resolve();
+      wanted = deviceId;
+      if (graph !== null && deviceId === adoptedId) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        waiter = { resolve, reject };
+        void drive();
+      });
     },
     async setSpeaker(deviceId) {
       if (!("setSinkId" in audio)) return false;
-      if (!closed) await audio.setSinkId(deviceId);
+      if (closed) return true;
+      await audio.setSinkId(deviceId);
+      // The last setSinkId to succeed is where the element plays.
+      if (!closed) devices.adopted("speaker", deviceId);
       return true;
     },
     // The element outlives each remote track, so a reconnected stream keeps the level.
@@ -356,16 +404,16 @@ export function createBrowserVoiceTransport(
     close() {
       if (closed) return;
       closed = true;
-      markAcquired();
       // Shut the gate before anything else so no later microphone frame reaches the sender.
       graph?.source.disconnect();
       syncKeywords();
       for (const cleanup of cleanups) cleanup();
-      for (const track of microphone?.getTracks() ?? []) {
-        track.enabled = false;
-        track.stop();
-      }
+      for (const stream of held) release(stream);
       microphone = null;
+      takeWaiter()?.resolve();
+      adoptedId = null;
+      devices.adopted("microphone", null);
+      devices.adopted("speaker", null);
       for (const track of graph?.output.stream.getTracks() ?? []) track.stop();
       void graph?.context.close().catch(() => {});
       graph = null;

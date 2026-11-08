@@ -9,7 +9,15 @@ const state = vi.hoisted(() => ({ choose: vi.fn() }));
 vi.mock(import("./RealtimeVoiceProvider"), () => ({
   useRealtimeVoice: (() => ({
     snapshot: { mode: "transmitting" },
-    audio: { microphone: "", speaker: "", switching: null, failed: null },
+    audio: {
+      microphone: "",
+      speaker: "",
+      inUse: { microphone: "", speaker: "" },
+      switching: null,
+      failed: null,
+      volume: 100,
+      restoreVolume: 100,
+    },
     levels: () => ({ input: 0, output: 0 }),
     chooseAudioDevice: state.choose,
   })) as never,

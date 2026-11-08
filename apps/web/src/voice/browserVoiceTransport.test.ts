@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { createAudioDeviceChooser, type AudioDeviceChoices } from "./audioDevices";
 import { createBrowserVoiceTransport } from "./browserVoiceTransport";
 
 function fixture(
   contextState: AudioContextState = "running",
   tapKeywords = false,
   keywordsOn = true,
-  { speakerSelectable = false, microphoneId = "" } = {},
+  {
+    speakerSelectable = false,
+    microphoneId = "",
+    adopted = (_kind: "microphone" | "speaker", _deviceId: string | null) => {},
+  } = {},
 ) {
   let grant: (stream: { getTracks(): Track[] }) => void = () => {};
   let deny: (error: Error) => void = () => {};
@@ -178,7 +183,7 @@ function fixture(
         }
       : undefined,
     keywordsOn,
-    () => chosen.id,
+    { microphone: () => chosen.id, adopted },
   );
   const track = new Track();
   const stream = { getTracks: () => [track] };
@@ -616,5 +621,132 @@ describe("browser voice agent volume", () => {
     f.transport.close();
     f.transport.setVolume(100);
     expect(f.audio).toHaveProperty("volume", 0);
+  });
+});
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {};
+  let reject: (error: Error) => void = () => {};
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+// The provider's wiring: the real chooser over the real transport, with this device's storage.
+function routed(microphone: string) {
+  const stored = new Map([["t3code:voice-microphone", microphone]]);
+  vi.stubGlobal("window", {
+    localStorage: {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => stored.set(key, value),
+      removeItem: (key: string) => stored.delete(key),
+    },
+  });
+  const view: { state: AudioDeviceChoices } = {
+    state: {
+      microphone,
+      speaker: "",
+      inUse: { microphone: null, speaker: null },
+      switching: null,
+      failed: null,
+    },
+  };
+  const holder: { f: ReturnType<typeof fixture> | null } = { f: null };
+  const chooser = createAudioDeviceChooser(
+    (kind, deviceId) =>
+      kind === "microphone"
+        ? (holder.f?.transport.setMicrophone(deviceId) ?? Promise.resolve())
+        : (holder.f?.transport.setSpeaker(deviceId) ?? Promise.resolve()),
+    (change) => {
+      view.state = change(view.state);
+    },
+  );
+  const f = fixture("running", true, true, { microphoneId: microphone, adopted: chooser.adopted });
+  holder.f = f;
+  // As the provider does, the choice is saved before the transport hears it.
+  const choose = (kind: "microphone" | "speaker", deviceId: string) => {
+    if (kind === "microphone") f.choose(deviceId);
+    return chooser.choose(kind, deviceId);
+  };
+  return { f, view, stored, choose };
+}
+
+describe("browser voice device truth", () => {
+  it("ends on the microphone actually captured when a startup choice is superseded and the next fails", async () => {
+    const { f, view, stored, choose } = routed("a");
+    const pending = f.transport.acquireMicrophone();
+    const b = f.newMicrophone();
+    const bGrant = deferred<typeof b.stream>();
+    const bAsked = deferred<void>();
+    f.devices.getUserMedia.mockImplementationOnce(() => {
+      bAsked.resolve();
+      return bGrant.promise;
+    });
+    const toB = choose("microphone", "b");
+    f.grant(f.stream);
+    await bAsked.promise;
+    f.devices.getUserMedia.mockImplementationOnce(async () => {
+      throw new DOMException("Could not start audio source", "NotReadableError");
+    });
+    const toC = choose("microphone", "c");
+    bGrant.resolve(b.stream);
+    await Promise.all([pending, toB, toC]);
+    // The superseded B was released; A is still the capture.
+    expect(b.track.stop).toHaveBeenCalledOnce();
+    expect(f.track.stop).not.toHaveBeenCalled();
+    f.transport.enableMicrophone();
+    f.captureFrame("from-a");
+    expect(f.sent).toEqual(["from-a"]);
+    expect(view.state).toMatchObject({
+      microphone: "a",
+      inUse: { microphone: "a" },
+      switching: null,
+      failed: { kind: "microphone", deviceId: "c" },
+    });
+    expect(stored.get("t3code:voice-microphone")).toBe("a");
+  });
+
+  it("stops a granted microphone at close while a replacement grant is pending, and the late grant on arrival", async () => {
+    const f = fixture("running", true, true, { microphoneId: "a" });
+    const pending = f.transport.acquireMicrophone();
+    const b = f.newMicrophone();
+    const bGrant = deferred<typeof b.stream>();
+    const bAsked = deferred<void>();
+    f.devices.getUserMedia.mockImplementationOnce(() => {
+      bAsked.resolve();
+      return bGrant.promise;
+    });
+    f.choose("b");
+    const toB = f.transport.setMicrophone("b");
+    f.grant(f.stream);
+    await bAsked.promise;
+    f.transport.close();
+    expect(f.track.stop).toHaveBeenCalledOnce();
+    expect(f.track.enabled).toBe(false);
+    bGrant.resolve(b.stream);
+    await Promise.all([pending, toB]);
+    expect(b.track.stop).toHaveBeenCalledOnce();
+  });
+
+  it("shows the granted microphone as in use, with the error, when the startup choice fails", async () => {
+    const { f, view, stored, choose } = routed("a");
+    const pending = f.transport.acquireMicrophone();
+    const toB = choose("microphone", "b");
+    f.devices.getUserMedia.mockImplementationOnce(async () => {
+      throw new DOMException("Could not start audio source", "NotReadableError");
+    });
+    f.grant(f.stream);
+    await pending;
+    // Settled before acquireMicrophone returns, so before the gate can open.
+    expect(view.state).toMatchObject({
+      microphone: "a",
+      inUse: { microphone: "a" },
+      switching: null,
+      failed: { kind: "microphone", deviceId: "b" },
+    });
+    expect(stored.get("t3code:voice-microphone")).toBe("a");
+    await toB;
   });
 });

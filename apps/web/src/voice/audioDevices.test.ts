@@ -55,12 +55,21 @@ function pending() {
 
 function chooser(apply: (kind: string, deviceId: string) => Promise<void>) {
   const view = {
-    state: { microphone: "a", speaker: "", switching: null, failed: null } as AudioDeviceChoices,
+    state: {
+      microphone: "a",
+      speaker: "",
+      inUse: { microphone: null, speaker: null },
+      switching: null,
+      failed: null,
+    } as AudioDeviceChoices,
   };
-  const choose = createAudioDeviceChooser(apply, (change) => {
+  const chooser = createAudioDeviceChooser(apply, (change) => {
     view.state = change(view.state);
   });
-  return { view, choose };
+  // A live call reports the device it holds.
+  chooser.adopted("microphone", "a");
+  chooser.adopted("speaker", "");
+  return { view, choose: chooser.choose };
 }
 
 describe("audio device choices", () => {
@@ -74,7 +83,7 @@ describe("audio device choices", () => {
     await choose("speaker", "headphones");
     microphone.reject(new Error("busy"));
     await b;
-    expect(view.state).toEqual({
+    expect(view.state).toMatchObject({
       microphone: "a",
       speaker: "headphones",
       switching: null,
