@@ -75,8 +75,10 @@ const unplug = (deviceIds: ReadonlyArray<string>) => {
   devices = devices.filter((entry) => !deviceIds.includes(entry.deviceId));
   navigator.mediaDevices.dispatchEvent(new Event("devicechange"));
 };
-const capture = { delayMs: 0, failNext: false };
+const capture = { delayMs: 0, failNext: false, count: 0 };
 navigator.mediaDevices.getUserMedia = async (constraints) => {
+  // Read by the screenshot script to prove browsing the device menu captures nothing.
+  document.documentElement.dataset.captures = String(++capture.count);
   const audio = constraints?.audio;
   const wanted = typeof audio === "object" ? audio.deviceId : undefined;
   const deviceId =
