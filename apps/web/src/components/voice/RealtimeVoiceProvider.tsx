@@ -137,6 +137,12 @@ export function RealtimeVoiceProvider({
   const stopProvider = useOrchestrationCommand(threadEnvironment.stopRealtimeVoice, {
     reportFailure: false,
   });
+  const [audio, setAudio] = useState<VoiceAudioRouting>(() => ({
+    microphone: readAudioDevice("microphone"),
+    speaker: readAudioDevice("speaker"),
+    switching: null,
+    failed: null,
+  }));
   const [{ controller, detector, localListening, live }] = useState(() => {
     // The newest call's transport; a closed one ignores device changes.
     const live: { transport: BrowserVoiceTransport | null } = { transport: null };
@@ -168,8 +174,13 @@ export function RealtimeVoiceProvider({
         );
         live.transport = transport;
         // A saved speaker that is gone plays on the system default; the panel shows it disconnected.
+        // Any other failure (a permission, a stalled device) shows as a failed choice.
         const speaker = readAudioDevice("speaker");
-        if (speaker !== "") void transport.setSpeaker(speaker).catch(() => {});
+        if (speaker !== "")
+          void transport.setSpeaker(speaker).catch((error: unknown) => {
+            if (error instanceof Error && error.name === "NotFoundError") return;
+            setAudio((current) => ({ ...current, failed: { kind: "speaker", deviceId: speaker } }));
+          });
         return transport;
       },
       createOperationId: randomUUID,
@@ -205,12 +216,6 @@ export function RealtimeVoiceProvider({
     });
     return { controller, detector, localListening, live };
   });
-  const [audio, setAudio] = useState<VoiceAudioRouting>(() => ({
-    microphone: readAudioDevice("microphone"),
-    speaker: readAudioDevice("speaker"),
-    switching: null,
-    failed: null,
-  }));
   const audioRequests = useRef(0);
   // Applies at once to a live call; while paused it restarts keyword listening and the next call
   // captures it. A failed switch restores the previous choice, which the call is still using.

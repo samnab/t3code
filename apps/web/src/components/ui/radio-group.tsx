@@ -3,15 +3,10 @@ import { RadioGroup as RadioGroupPrimitive } from "@base-ui/react/radio-group";
 
 import { cn } from "~/lib/utils";
 
-// `compact` stacks rows that carry their own padding, such as a device list.
-function RadioGroup({
-  className,
-  spacing = "default",
-  ...props
-}: RadioGroupPrimitive.Props & { spacing?: "default" | "compact" }) {
+function RadioGroup({ className, ...props }: RadioGroupPrimitive.Props) {
   return (
     <RadioGroupPrimitive
-      className={cn("flex flex-col", spacing === "compact" ? "gap-0.5" : "gap-3", className)}
+      className={cn("flex flex-col gap-3", className)}
       data-slot="radio-group"
       {...props}
     />

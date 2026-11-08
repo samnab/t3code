@@ -1,12 +1,19 @@
 import { CircleDashedIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { VoiceLevels } from "@t3tools/client-runtime/realtime-voice";
 import { canChooseSpeaker, type AudioDeviceKind } from "../../voice/audioDevices";
 import { METER_STEPS, meterStep } from "../../voice/voiceLevels";
 import { Button } from "../ui/button";
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-import { Radio, RadioGroup } from "../ui/radio-group";
-import { Separator } from "../ui/separator";
+import {
+  Menu,
+  MenuGroupLabel,
+  MenuPopup,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuRadioItemIndicator,
+  MenuSeparator,
+  MenuTrigger,
+} from "../ui/menu";
 import { Spinner } from "../ui/spinner";
 import { useRealtimeVoice, type VoiceAudioRouting } from "./RealtimeVoiceProvider";
 
@@ -62,21 +69,21 @@ const isDisconnected = (chosen: string, list: DeviceList) =>
   !list.devices.some((device) => device.deviceId === chosen);
 
 /**
- * The call's microphone and speaker as one "Audio" button and panel. Mount it beside the voice
- * actions; it renders nothing without a call or while one ends. A choice applies at once.
+ * The call's microphone and speaker as one "Audio" button and menu. Mount it beside the voice
+ * actions; it renders nothing without a call or while one ends. Arrow keys only move the
+ * highlight: capturing a device takes a click, Enter or Space, so browsing never opens one.
  */
 export function VoiceAudioDevices({
   labels,
   side = "top",
 }: {
   readonly labels: string;
-  /** "left" inside another popover, so the panel does not cover it. */
+  /** "left" inside another popover, so the menu does not cover it. */
   readonly side?: "top" | "left";
 }) {
   const voice = useRealtimeVoice();
   const { snapshot, audio } = voice;
   const { inputs, outputs } = useAudioDeviceLists(snapshot.mode);
-  const radios = useRef<HTMLDivElement>(null);
   if (snapshot.mode === "off" || snapshot.mode === "ending") return null;
   const speakerSelectable = canChooseSpeaker() && outputs.devices.length > 0;
   const warning = isDisconnected(audio.microphone, inputs)
@@ -87,8 +94,8 @@ export function VoiceAudioDevices({
         ? null
         : `${audio.failed.kind} switch failed`;
   return (
-    <Popover>
-      <PopoverTrigger
+    <Menu>
+      <MenuTrigger
         render={<Button size="sm" variant="ghost" />}
         aria-label={warning === null ? "Audio devices" : `Audio devices, ${warning}`}
       >
@@ -97,58 +104,46 @@ export function VoiceAudioDevices({
         {warning !== null && (
           <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-hidden="true" />
         )}
-      </PopoverTrigger>
-      {/* Focus lands on the checked microphone; Escape returns it to the button. */}
-      <PopoverPopup
-        side={side}
-        align="end"
-        width="lg"
-        padding="compact"
-        touchBackdrop
-        initialFocus={() =>
-          radios.current?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]') ?? true
-        }
-      >
-        <div ref={radios} className="flex flex-col gap-2" role="group" aria-label="Audio devices">
+      </MenuTrigger>
+      <MenuPopup side={side} align="end" className="w-96" aria-label="Audio devices">
+        <DeviceSection
+          kind="microphone"
+          title="Microphone"
+          list={inputs}
+          audio={audio}
+          levels={voice.levels}
+          choose={voice.chooseAudioDevice}
+          empty="Start a call to choose devices."
+        />
+        <MenuSeparator />
+        {speakerSelectable ? (
           <DeviceSection
-            kind="microphone"
-            title="Microphone"
-            list={inputs}
+            kind="speaker"
+            title="Speaker"
+            list={outputs}
             audio={audio}
-            levels={voice.levels}
+            levels={null}
             choose={voice.chooseAudioDevice}
-            empty={<Note>Start a call to choose devices.</Note>}
+            empty={null}
           />
-          <Separator />
-          {speakerSelectable ? (
-            <DeviceSection
-              kind="speaker"
-              title="Speaker"
-              list={outputs}
-              audio={audio}
-              levels={null}
-              choose={voice.chooseAudioDevice}
-              empty={null}
-            />
-          ) : (
-            <div className="flex flex-col gap-0.5 px-1">
-              <p className="font-medium text-sm">Speaker</p>
-              <p className="text-sm">Uses system output</p>
-              <Note>
-                {window.desktopBridge
-                  ? "Change it in System Settings."
-                  : "This browser can’t choose a speaker. Change it in your computer’s sound settings."}
-              </Note>
-            </div>
-          )}
-        </div>
-      </PopoverPopup>
-    </Popover>
+        ) : (
+          <div className="flex flex-col gap-0.5 px-2 py-1.5">
+            <p className="font-medium text-sm">Speaker</p>
+            <p className="text-sm">Uses system output</p>
+            <Note>
+              {window.desktopBridge
+                ? "Change it in System Settings."
+                : "This browser can’t choose a speaker. Change it in your computer’s sound settings."}
+            </Note>
+          </div>
+        )}
+      </MenuPopup>
+    </Menu>
   );
 }
 
 function Note({ children }: { readonly children: string }) {
-  return <p className="px-1 text-muted-foreground text-xs">{children}</p>;
+  return <p className="text-muted-foreground text-xs">{children}</p>;
 }
 
 function DeviceSection({
@@ -167,14 +162,13 @@ function DeviceSection({
   /** Meters the device in use only: opening every microphone to meter it would capture them all. */
   readonly levels: (() => VoiceLevels) | null;
   readonly choose: (kind: AudioDeviceKind, deviceId: string) => void;
-  readonly empty: React.ReactNode;
+  readonly empty: string | null;
 }) {
-  const heading = useId();
   const chosen = audio[kind];
   const disconnected = isDisconnected(chosen, list);
-  // A missing saved device plays or captures on the system default.
-  const inUse = disconnected ? "" : chosen;
   const failed = audio.failed?.kind === kind ? audio.failed.deviceId : null;
+  // A missing saved device, or a saved speaker the call could not apply, uses the system default.
+  const inUse = disconnected || failed === chosen ? "" : chosen;
   const nameOf = (deviceId: string) =>
     deviceId === ""
       ? "System default"
@@ -194,54 +188,55 @@ function DeviceSection({
     ) : null;
   };
   return (
-    <section className="flex flex-col gap-1" aria-labelledby={heading}>
-      <h3 id={heading} className="px-1 font-medium text-sm">
-        {title}
-      </h3>
+    <MenuRadioGroup
+      value={inUse}
+      onValueChange={(value) => {
+        if (typeof value === "string" && value !== chosen) choose(kind, value);
+      }}
+    >
+      <MenuGroupLabel>{title}</MenuGroupLabel>
       {list.devices.length === 0 ? (
-        empty
+        empty !== null && (
+          <div className="px-2 pb-1.5">
+            <Note>{empty}</Note>
+          </div>
+        )
       ) : (
         <>
           {disconnected && (
-            <p className="flex items-center gap-2.5 rounded-md bg-warning-surface px-2 py-1.5 text-sm text-warning-foreground">
+            <p className="mx-1 mb-0.5 flex items-center gap-2 rounded-sm bg-warning-surface px-2 py-1.5 text-sm text-warning-foreground">
               <CircleDashedIcon className="size-4 shrink-0" aria-hidden="true" />
               Chosen {kind} disconnected · using system default
             </p>
           )}
-          <RadioGroup
-            aria-labelledby={heading}
-            value={inUse}
-            onValueChange={(value) => {
-              if (typeof value === "string" && value !== chosen) choose(kind, value);
-            }}
-            spacing="compact"
-          >
-            <DeviceRow value="" name="System default" detail={list.defaultName}>
-              {trailing("")}
+          <DeviceRow value="" name="System default" detail={list.defaultName}>
+            {trailing("")}
+          </DeviceRow>
+          {list.devices.map((device) => (
+            <DeviceRow
+              key={device.deviceId}
+              value={device.deviceId}
+              name={device.label}
+              detail={null}
+            >
+              {trailing(device.deviceId)}
             </DeviceRow>
-            {list.devices.map((device) => (
-              <DeviceRow
-                key={device.deviceId}
-                value={device.deviceId}
-                name={device.label}
-                detail={null}
-              >
-                {trailing(device.deviceId)}
-              </DeviceRow>
-            ))}
-          </RadioGroup>
+          ))}
           {failed !== null && (
-            <p className="px-1 text-warning-foreground text-xs" role="status">
-              Couldn’t switch to {nameOf(failed)}. Still using {nameOf(chosen)}.
+            <p className="px-2 py-1 text-warning-foreground text-xs" role="status">
+              {failed === chosen
+                ? `Couldn’t use ${nameOf(failed)}. Using system default.`
+                : `Couldn’t switch to ${nameOf(failed)}. Still using ${nameOf(chosen)}.`}
             </p>
           )}
         </>
       )}
-    </section>
+    </MenuRadioGroup>
   );
 }
 
-// Long names clamp to one line and open in full on hover or keyboard focus.
+// Long names clamp to one line and open in full while the row is highlighted (hover or keyboard).
+// The menu stays open after a choice, so the result shows in place.
 function DeviceRow({
   value,
   name,
@@ -254,14 +249,18 @@ function DeviceRow({
   readonly children: React.ReactNode;
 }) {
   return (
-    <label className="group/row flex cursor-default items-center gap-2.5 rounded-md px-2 py-1.5 text-sm hover:bg-accent has-data-checked:bg-accent/60">
-      <Radio value={value} />
-      <span className="line-clamp-1 min-w-0 flex-1 break-words group-hover/row:line-clamp-none group-has-focus-visible/row:line-clamp-none">
-        {name}
-        {detail !== null && <span className="text-muted-foreground"> ({detail})</span>}
+    <MenuRadioItem value={value} closeOnClick={false} focusRing>
+      <span className="flex items-center gap-2">
+        <span className="flex size-4 shrink-0 items-center justify-center">
+          <MenuRadioItemIndicator />
+        </span>
+        <span className="line-clamp-1 min-w-0 flex-1 break-words in-data-highlighted:line-clamp-none">
+          {name}
+          {detail !== null && <span className="text-muted-foreground"> ({detail})</span>}
+        </span>
+        {children}
       </span>
-      {children}
-    </label>
+    </MenuRadioItem>
   );
 }
 
