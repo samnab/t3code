@@ -174,6 +174,10 @@ export function createBrowserVoiceTransport(
   };
   cleanups.push(() => unwatchMicrophone());
   let switches = 0;
+  // The device the transport holds, and the first grant: a choice made before it waits for it.
+  let capturedId: string | null = null;
+  let markAcquired = () => {};
+  const acquired = new Promise<void>((resolve) => (markAcquired = resolve));
   // A muted gate is still created and connected, without the microphone. The zero source keeps it
   // live: with no active input, Chromium's destination emits no frames and the peer sends no RTP.
   const openGate = (open: NonNullable<typeof graph>) => {
@@ -190,42 +194,62 @@ export function createBrowserVoiceTransport(
     gain.connect(open.inputMeter);
     opening = gain;
   };
+  // A choice made while the grant is pending is captured here, before the call can transmit. If
+  // that capture fails the granted device stays, and the waiting setMicrophone reports the failure.
+  const acquire = async () => {
+    let wanted = microphoneId();
+    let stream = await captureMicrophone(wanted);
+    while (!closed && microphoneId() !== wanted) {
+      const next = microphoneId();
+      const replacement = await captureMicrophone(next).catch(() => null);
+      if (replacement === null) break;
+      for (const track of stream.getTracks()) track.stop();
+      stream = replacement;
+      wanted = next;
+    }
+    if (closed) {
+      for (const track of stream.getTracks()) track.stop();
+      return;
+    }
+    adoptMicrophone(stream);
+    capturedId = wanted;
+    // After the grant: the constructor can block the renderer 20 s on a stalled audio service.
+    // No output device: the graph only feeds the peer and meters, and reopening a Bluetooth
+    // output right after the last call blocked the renderer 10 s. The starting click resumes it.
+    const context = new AudioContext({ sinkId: { type: "none" } });
+    void context.resume().catch(() => {});
+    context.addEventListener("statechange", onContextState);
+    cleanups.push(() => context.removeEventListener("statechange", onContextState));
+    const inputMeter = context.createAnalyser();
+    graph = {
+      context,
+      source: context.createMediaStreamSource(stream),
+      silence: context.createConstantSource(),
+      output: context.createMediaStreamDestination(),
+      inputMeter,
+      outputMeter: context.createAnalyser(),
+      meterFrame: new Float32Array(inputMeter.fftSize),
+    };
+    graph.silence.offset.value = 0;
+    graph.silence.start();
+    meterAssistant();
+    for (const track of graph.output.stream.getAudioTracks()) {
+      peer.addTrack(track, graph.output.stream);
+    }
+    syncKeywords();
+  };
   return {
     async acquireMicrophone() {
-      const stream = await captureMicrophone(microphoneId());
-      if (closed) {
-        for (const track of stream.getTracks()) track.stop();
-        return;
+      try {
+        await acquire();
+      } finally {
+        markAcquired();
       }
-      adoptMicrophone(stream);
-      // After the grant: the constructor can block the renderer 20 s on a stalled audio service.
-      // No output device: the graph only feeds the peer and meters, and reopening a Bluetooth
-      // output right after the last call blocked the renderer 10 s. The starting click resumes it.
-      const context = new AudioContext({ sinkId: { type: "none" } });
-      void context.resume().catch(() => {});
-      context.addEventListener("statechange", onContextState);
-      cleanups.push(() => context.removeEventListener("statechange", onContextState));
-      const inputMeter = context.createAnalyser();
-      graph = {
-        context,
-        source: context.createMediaStreamSource(stream),
-        silence: context.createConstantSource(),
-        output: context.createMediaStreamDestination(),
-        inputMeter,
-        outputMeter: context.createAnalyser(),
-        meterFrame: new Float32Array(inputMeter.fftSize),
-      };
-      graph.silence.offset.value = 0;
-      graph.silence.start();
-      meterAssistant();
-      for (const track of graph.output.stream.getAudioTracks()) {
-        peer.addTrack(track, graph.output.stream);
-      }
-      syncKeywords();
     },
     async setMicrophone(deviceId) {
-      if (closed || graph === null) return;
       const mine = ++switches;
+      if (graph === null) await acquired;
+      if (closed || graph === null || mine !== switches || deviceId === capturedId) return;
       const stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints(deviceId));
       if (closed || graph === null || mine !== switches) {
         for (const track of stream.getTracks()) track.stop();
@@ -236,6 +260,7 @@ export function createBrowserVoiceTransport(
       graph.source.disconnect();
       graph = { ...graph, source: graph.context.createMediaStreamSource(stream) };
       adoptMicrophone(stream);
+      capturedId = deviceId;
       for (const track of previous?.getTracks() ?? []) {
         track.enabled = false;
         track.stop();
@@ -331,6 +356,7 @@ export function createBrowserVoiceTransport(
     close() {
       if (closed) return;
       closed = true;
+      markAcquired();
       // Shut the gate before anything else so no later microphone frame reaches the sender.
       graph?.source.disconnect();
       syncKeywords();

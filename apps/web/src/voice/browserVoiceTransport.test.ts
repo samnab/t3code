@@ -158,6 +158,8 @@ function fixture(
   );
   const failed = vi.fn();
   const connected = vi.fn();
+  // The device the user has chosen, as the provider's storage reports it.
+  const chosen = { id: microphoneId };
   const transport = createBrowserVoiceTransport(
     { connected, failed },
     // The detector taps the newest microphone source.
@@ -176,7 +178,7 @@ function fixture(
         }
       : undefined,
     keywordsOn,
-    () => microphoneId,
+    () => chosen.id,
   );
   const track = new Track();
   const stream = { getTracks: () => [track] };
@@ -198,6 +200,7 @@ function fixture(
     source,
     sources,
     taps,
+    choose: (deviceId: string) => (chosen.id = deviceId),
     captureOn,
     setSinkId,
     newMicrophone: () => {
@@ -515,6 +518,31 @@ describe("browser voice audio devices", () => {
     const calls = f.devices.getUserMedia.mock.calls.length;
     await f.transport.setMicrophone("usb");
     expect(f.devices.getUserMedia).toHaveBeenCalledTimes(calls);
+  });
+
+  it("captures a microphone chosen while the first grant is pending before the call can send", async () => {
+    const f = fixture("running", true, true, { microphoneId: "a" });
+    const pending = f.transport.acquireMicrophone();
+    f.choose("b");
+    let settled = false;
+    const choice = f.transport.setMicrophone("b").then(() => (settled = true));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    const b = f.newMicrophone();
+    f.devices.getUserMedia.mockImplementationOnce(async () => b.stream);
+    f.grant(f.stream);
+    await pending;
+    await choice;
+    expect(f.devices.getUserMedia.mock.calls).toEqual([
+      [{ audio: { deviceId: { exact: "a" } } }],
+      [{ audio: { deviceId: { exact: "b" } } }],
+    ]);
+    expect(f.track.stop).toHaveBeenCalledOnce();
+    f.transport.enableMicrophone();
+    f.captureFrame("from-a");
+    f.captureOn(f.sources.at(-1)!, "from-b");
+    expect(f.sent).toEqual(["from-b"]);
   });
 
   it("keeps the call on the current microphone when the new one cannot be captured", async () => {

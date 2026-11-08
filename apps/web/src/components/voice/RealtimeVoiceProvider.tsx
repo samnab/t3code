@@ -2,7 +2,6 @@ import {
   createContext,
   useContext,
   useEffect,
-  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -21,10 +20,11 @@ import {
 } from "../../voice/browserVoiceTransport";
 import {
   clampVoiceVolume,
+  createAudioDeviceChooser,
   readAudioDevice,
   readVoiceVolume,
-  writeAudioDevice,
   writeVoiceVolume,
+  type AudioDeviceChoices,
   type AudioDeviceKind,
 } from "../../voice/audioDevices";
 import { createKeywordDetector, createLocalListening } from "../../voice/kws/keywordDetector";
@@ -105,13 +105,8 @@ function readKeywordsEnabled(): boolean {
   }
 }
 
-/** This device's chosen microphone and speaker ("" = system default). `switching` is the device a
- * live call is moving to; `failed` the last choice that could not be applied (the old one stays). */
-export interface VoiceAudioRouting {
-  readonly microphone: string;
-  readonly speaker: string;
-  readonly switching: string | null;
-  readonly failed: { readonly kind: AudioDeviceKind; readonly deviceId: string } | null;
+/** This device's chosen microphone and speaker ("" = system default) and agent voice level. */
+export interface VoiceAudioRouting extends AudioDeviceChoices {
   /** The agent's voice level, 0–100, and the level a click on the silenced speaker restores. */
   readonly volume: number;
   readonly restoreVolume: number;
@@ -231,39 +226,19 @@ export function RealtimeVoiceProvider({
     });
     return { controller, detector, localListening, live };
   });
-  const audioRequests = useRef(0);
   // Applies at once to a live call; while paused it restarts keyword listening and the next call
-  // captures it. A failed switch restores the previous choice, which the call is still using.
-  const chooseAudioDevice = async (kind: AudioDeviceKind, deviceId: string) => {
-    const previous = readAudioDevice(kind);
-    const request = ++audioRequests.current;
-    writeAudioDevice(kind, deviceId);
-    setAudio((current) => ({
-      ...current,
-      [kind]: deviceId,
-      switching: kind === "microphone" ? deviceId : current.switching,
-      failed: null,
-    }));
-    try {
-      if (kind === "speaker") await live.transport?.setSpeaker(deviceId);
-      else {
+  // captures it. A failed choice restores the device still in use (see createAudioDeviceChooser).
+  const [chooseAudioDevice] = useState(() =>
+    createAudioDeviceChooser(
+      async (kind, deviceId) => {
+        if (kind === "speaker") return live.transport?.setSpeaker(deviceId);
         const { listening } = controller.getSnapshot();
         if (listening === "listening" || listening === "armed") localListening.start();
-        await live.transport?.setMicrophone(deviceId);
-      }
-      if (request === audioRequests.current)
-        setAudio((current) => ({ ...current, switching: null }));
-    } catch {
-      if (request !== audioRequests.current) return;
-      writeAudioDevice(kind, previous);
-      setAudio((current) => ({
-        ...current,
-        [kind]: previous,
-        switching: null,
-        failed: { kind, deviceId },
-      }));
-    }
-  };
+        return live.transport?.setMicrophone(deviceId);
+      },
+      (change) => setAudio((current) => ({ ...current, ...change(current) })),
+    ),
+  );
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to the voice controller to toast when a call ends
   useEffect(() => {
