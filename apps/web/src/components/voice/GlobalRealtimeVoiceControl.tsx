@@ -4,8 +4,6 @@ import {
   ChevronDownIcon,
   CircleAlertIcon,
   CornerUpLeftIcon,
-  EarIcon,
-  EarOffIcon,
   MicIcon,
   MicOffIcon,
   PauseIcon,
@@ -23,6 +21,7 @@ import type {
 } from "@t3tools/client-runtime/realtime-voice";
 import { useThreadRouteRef } from "../../hooks/useThreadRouteTarget";
 import { shortcutLabelForCommand } from "../../keybindings";
+import { VoiceKeywordsControl } from "./VoiceKeywordsControl";
 import { cn } from "../../lib/utils";
 import { primaryServerKeybindingsAtom } from "../../state/server";
 import { METER_STEPS, meterStep, speakingPhrase } from "../../voice/voiceLevels";
@@ -47,17 +46,6 @@ const LISTENING_STATUS = {
   armed: "Resume? Say “confirm unpause” or press Confirm",
   unavailable: "Keywords unavailable · press Resume",
 } as const;
-const KEYWORDS_HOW =
-  "Say “pause voice” to pause. To resume, say “resume voice”, then say “confirm unpause” within 10 seconds, or press Confirm. Listening stays on this device. Sentences containing “pause voice” can pause by mistake.";
-
-function keywordsHint(snapshot: Exclude<VoiceSnapshot, { mode: "off" }>): string {
-  if (snapshot.listening === "unavailable")
-    return "Keywords unavailable: local listening failed on this device. They try again when the call resumes.";
-  return snapshot.keywords
-    ? `Keywords on. ${KEYWORDS_HOW} Click to turn off.`
-    : `Keywords off. Click to turn on. ${KEYWORDS_HOW}`;
-}
-
 // Muting shuts only the call's gate: the track stays enabled, so the OS indicator stays on and,
 // with keywords on, the detector still hears a spoken pause.
 function statusText(snapshot: Exclude<VoiceSnapshot, { mode: "off" }>): string {
@@ -304,30 +292,16 @@ function ReturnButton({ call }: { readonly call: VoiceCall }) {
 function VoiceActions({ call, labels }: { readonly call: VoiceCall; readonly labels: string }) {
   const { snapshot, hint } = call;
   const ending = snapshot.mode === "ending";
-  const unavailable = snapshot.listening === "unavailable";
   return (
     <>
       {/* Ending, nothing but the closing call is left to act on. */}
       {!ending && (
         <>
-          <VoiceButton
-            icon={snapshot.keywords && !unavailable ? EarIcon : EarOffIcon}
-            label={
-              unavailable
-                ? "Keywords unavailable"
-                : snapshot.keywords
-                  ? "Keywords on"
-                  : "Keywords off"
-            }
-            hint={keywordsHint(snapshot)}
-            variant="ghost"
+          <VoiceKeywordsControl
+            snapshot={snapshot}
+            status={call.status}
             labels={labels}
-            aria-label={unavailable ? "Keywords unavailable" : "Keywords"}
-            aria-pressed={snapshot.keywords && !unavailable}
-            // aria-disabled, not disabled: a disabled button takes no hover or focus, so its
-            // tooltip could never say why.
-            aria-disabled={unavailable || undefined}
-            onClick={() => !unavailable && call.setKeywords(!snapshot.keywords)}
+            setKeywords={call.setKeywords}
           />
           <MuteButton call={call} labels={labels} />
           <PauseGroup call={call} labels={labels} />
