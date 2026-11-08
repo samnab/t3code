@@ -205,12 +205,14 @@ export function createLocalListening(
   adopted: (deviceId: string | null) => void = () => {},
 ) {
   let stopCurrent: (() => void) | null = null;
+  // The capture whose device is published; only it may clear it.
+  let owner: object | null = null;
   return {
     start() {
       stopCurrent?.();
       let stopped = false;
       let release = () => {};
-      let published = false;
+      const token = {};
       const stop = () => {
         stopped = true;
         release();
@@ -227,18 +229,23 @@ export function createLocalListening(
         // No output device: reopening a Bluetooth output can block the renderer for 10 s.
         const context = new AudioContext({ sinkId: { type: "none" } });
         let detach = () => {};
+        let released = false;
         release = () => {
+          if (released) return;
+          released = true;
           detach();
           for (const track of stream.getTracks()) track.stop();
           void context.close().catch(() => {});
-          // Only a capture that published clears it: a late, superseded one must not.
-          if (published) adopted(null);
+          if (owner === token) {
+            owner = null;
+            adopted(null);
+          }
         };
         if (stopped) {
           release();
           return;
         }
-        published = true;
+        owner = token;
         adopted(captured.deviceId);
         for (const track of stream.getTracks()) {
           track.addEventListener("ended", fail);
@@ -251,7 +258,8 @@ export function createLocalListening(
         });
         if (context.state !== "running") throw new Error("Local listening unavailable");
         detach = await detector.attach(context.createMediaStreamSource(stream));
-        if (stopped) release();
+        // Stopped while attaching: the capture is already released; drop the late tap too.
+        if (stopped) detach();
       })().catch(fail);
     },
     stop() {

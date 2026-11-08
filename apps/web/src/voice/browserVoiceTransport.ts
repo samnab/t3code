@@ -281,8 +281,16 @@ export function createBrowserVoiceTransport(
     }
   };
   const acquire = async () => {
-    const first = wanted ?? devices.microphone();
-    const captured = await captureMicrophone(first, () => !closed);
+    let first = wanted ?? devices.microphone();
+    let captured: Awaited<ReturnType<typeof captureMicrophone>>;
+    try {
+      // The system-default fallback is only for the choice still wanted; never once superseded.
+      captured = await captureMicrophone(first, () => !closed && (wanted ?? first) === first);
+    } catch (error) {
+      if (closed || wanted === null || wanted === first) throw error;
+      first = wanted;
+      captured = await captureMicrophone(first, () => !closed && wanted === first);
+    }
     const stream = captured.stream;
     if (closed) {
       release(stream);
@@ -317,7 +325,10 @@ export function createBrowserVoiceTransport(
     adoptedId = captured.deviceId;
     devices.adopted("microphone", adoptedId);
     // With no newer choice, a saved device that is gone stays chosen (shown disconnected), not retried.
-    if (wanted === null || wanted === first) wanted = adoptedId;
+    if (wanted === null || wanted === first) {
+      wanted = adoptedId;
+      takeWaiter()?.resolve();
+    }
     // A choice made during the grant is captured before this returns, so before the gate can open.
     await drive();
   };
@@ -358,6 +369,12 @@ export function createBrowserVoiceTransport(
       }
     } finally {
       sinkDriving = false;
+      // Back on the applied sink (a superseded attempt failed): that choice is settled.
+      if (!closed && sinkWanted === sinkId) {
+        const done = sinkWaiter;
+        sinkWaiter = null;
+        done?.resolve();
+      }
     }
   };
   // The element plays on the system default until a setSinkId succeeds.

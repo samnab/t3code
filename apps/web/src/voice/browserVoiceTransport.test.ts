@@ -765,6 +765,21 @@ describe("browser voice device requests", () => {
     expect(f.devices.getUserMedia).toHaveBeenCalledOnce();
   });
 
+  it("captures the newer choice, not the system default, when a superseded saved mic is missing", async () => {
+    const f = fixture("running", false, true, { microphoneId: "a" });
+    const pending = f.transport.acquireMicrophone();
+    f.choose("b");
+    const toB = f.transport.setMicrophone("b");
+    const b = f.newMicrophone();
+    f.devices.getUserMedia.mockImplementationOnce(async () => b.stream);
+    f.deny(new DOMException("Requested device not found", "NotFoundError"));
+    await Promise.all([pending, toB]);
+    expect(f.devices.getUserMedia.mock.calls).toEqual([
+      [{ audio: { deviceId: { exact: "a" } } }],
+      [{ audio: { deviceId: { exact: "b" } } }],
+    ]);
+  });
+
   it("routes the speaker one setSinkId at a time, ending on the latest choice", async () => {
     const { f, view, stored, choose } = routed("a", true);
     const toB = deferred<void>();

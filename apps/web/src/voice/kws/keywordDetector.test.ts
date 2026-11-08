@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { createKeywordDetector } from "./keywordDetector";
+import { createKeywordDetector, createLocalListening } from "./keywordDetector";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -66,5 +66,56 @@ describe("keyword detector attach", () => {
     expect(b.node.disconnect).not.toHaveBeenCalled();
     expect(a.node.connect).not.toHaveBeenCalled();
     detector.close();
+  });
+});
+
+describe("paused local listening", () => {
+  it("keeps the newer listener's microphone published when a stopped one finishes late", async () => {
+    const track = () => Object.assign(new EventTarget(), { stop: vi.fn() });
+    vi.stubGlobal("navigator", {
+      mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track()] }) },
+    });
+    vi.stubGlobal(
+      "AudioContext",
+      class extends EventTarget {
+        state = "running";
+        resume = async () => {};
+        close = async () => {};
+        createMediaStreamSource = () => ({});
+      },
+    );
+    let attachA: (detach: () => void) => void = () => {};
+    const attaching = { a: new Promise<() => void>((resolve) => (attachA = resolve)) };
+    // Each attach call signals the test, so it waits on events, not time.
+    const calls: Array<() => void> = [];
+    const called = [0, 1].map(() => new Promise<void>((resolve) => calls.push(resolve)));
+    const detector = {
+      attach: vi.fn(() => {
+        const call = detector.attach.mock.calls.length - 1;
+        calls[call]?.();
+        return call === 0 ? attaching.a : Promise.resolve(() => {});
+      }),
+      close: () => {},
+    };
+    const published: Array<string | null> = [];
+    const chosen = { id: "a" };
+    const listening = createLocalListening(
+      detector,
+      () => {},
+      () => chosen.id,
+      (deviceId) => published.push(deviceId),
+    );
+    listening.start();
+    await called[0];
+    chosen.id = "b";
+    listening.start();
+    await called[1];
+    // A's attach lands after B owns the microphone.
+    const detachA = vi.fn();
+    attachA(detachA);
+    await attaching.a;
+    expect(detachA).toHaveBeenCalledOnce();
+    expect(published).toEqual(["a", null, "b"]);
+    listening.stop();
   });
 });
