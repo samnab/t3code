@@ -47,8 +47,16 @@ const LISTENING_STATUS = {
   armed: "Resume? Say “confirm unpause” or press Confirm",
   unavailable: "Keywords unavailable · press Resume",
 } as const;
-const KEYWORDS_HINT =
+const KEYWORDS_HOW =
   "Say “pause voice” to pause. To resume, say “resume voice”, then say “confirm unpause” within 10 seconds, or press Confirm. Listening stays on this device. Sentences containing “pause voice” can pause by mistake.";
+
+function keywordsHint(snapshot: Exclude<VoiceSnapshot, { mode: "off" }>): string {
+  if (snapshot.listening === "unavailable")
+    return "Keywords unavailable: local listening failed on this device. They try again when the call resumes.";
+  return snapshot.keywords
+    ? `Keywords on. ${KEYWORDS_HOW} Click to turn off.`
+    : `Keywords off. Click to turn on. ${KEYWORDS_HOW}`;
+}
 
 // Muting shuts only the call's gate: the track stays enabled, so the OS indicator stays on and,
 // with keywords on, the detector still hears a spoken pause.
@@ -311,19 +319,15 @@ function VoiceActions({ call, labels }: { readonly call: VoiceCall; readonly lab
                   ? "Keywords on"
                   : "Keywords off"
             }
-            hint={
-              snapshot.mode === "paused" ? KEYWORDS_HINT : `${KEYWORDS_HINT} Change while paused.`
-            }
+            hint={keywordsHint(snapshot)}
             variant="ghost"
             labels={labels}
+            aria-label={unavailable ? "Keywords unavailable" : "Keywords"}
             aria-pressed={snapshot.keywords && !unavailable}
-            // A call's keyword tap is fixed when it starts; change keywords while paused. Disabled,
-            // it is the first to go when the row is too narrow for every icon.
-            disabled={snapshot.mode !== "paused" || unavailable}
-            className={
-              snapshot.mode === "paused" && !unavailable ? undefined : "@max-[28rem]:hidden"
-            }
-            onClick={() => call.setKeywords(!snapshot.keywords)}
+            // aria-disabled, not disabled: a disabled button takes no hover or focus, so its
+            // tooltip could never say why.
+            aria-disabled={unavailable || undefined}
+            onClick={() => !unavailable && call.setKeywords(!snapshot.keywords)}
           />
           <MuteButton call={call} labels={labels} />
           <PauseGroup call={call} labels={labels} />

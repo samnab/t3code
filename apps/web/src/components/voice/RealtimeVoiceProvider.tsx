@@ -139,7 +139,8 @@ export function RealtimeVoiceProvider({
       createTransport: (events) =>
         createBrowserVoiceTransport(
           events,
-          controller.getSnapshot().keywords ? (source) => detector.attach(source) : undefined,
+          (source) => detector.attach(source),
+          controller.getSnapshot().keywords,
         ),
       createOperationId: randomUUID,
       validateOwner: validateVoiceOwner,

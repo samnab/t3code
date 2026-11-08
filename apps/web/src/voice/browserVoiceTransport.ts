@@ -2,9 +2,9 @@ import type { VoiceTransport } from "@t3tools/client-runtime/realtime-voice";
 
 /**
  * A single peer and sink; closing also releases a microphone granted after cancellation.
- * The peer sends a Web Audio destination track. The microphone reaches it only while the gate
- * (the source → destination connection) is open, so the sender never holds the raw track.
- * `tapKeywords`, when given, also feeds the microphone to the local keyword detector.
+ * The microphone reaches the sent destination track only while the gate is open.
+ * `tapKeywords` also feeds the source, before the gate, to the on-device keyword detector
+ * while keywords are on (`keywordsOn`, then `setKeywords`).
  */
 // Audio already in the track pipeline at gate-open predates it. With synthetic tracks, holding 8
 // quanta still leaked a 5 ms block in 8-11 of 50 trials; 12 and 24 leaked none in 50 or 100
@@ -25,6 +25,7 @@ export function createBrowserVoiceTransport(
     failed(reason: string): void;
   },
   tapKeywords?: (source: MediaStreamAudioSourceNode) => Promise<() => void>,
+  keywordsOn = true,
 ): VoiceTransport {
   const peer = new RTCPeerConnection();
   const audio = document.createElement("audio");
@@ -58,6 +59,29 @@ export function createBrowserVoiceTransport(
   let micMuted = false;
   let opening: GainNode | null = null;
   let closed = false;
+  let detachKeywords: (() => void) | null = null;
+  let tapping = false;
+  // One tap at a time; a toggle or close during a pending attach is settled once it resolves.
+  const syncKeywords = () => {
+    if (tapKeywords === undefined) return;
+    if (closed || !keywordsOn) {
+      detachKeywords?.();
+      detachKeywords = null;
+    } else if (graph !== null && detachKeywords === null && !tapping) {
+      tapping = true;
+      // The detector reports its own failures; the call does not wait on it.
+      void tapKeywords(graph.source).then(
+        (detach) => {
+          tapping = false;
+          detachKeywords = detach;
+          syncKeywords();
+        },
+        () => {
+          tapping = false;
+        },
+      );
+    }
+  };
   let cancelIce: (() => void) | undefined;
   const cleanups: Array<() => void> = [];
   const fail = () => {
@@ -170,14 +194,7 @@ export function createBrowserVoiceTransport(
       }
       navigator.mediaDevices.addEventListener("devicechange", fail);
       cleanups.push(() => navigator.mediaDevices.removeEventListener("devicechange", fail));
-      if (tapKeywords !== undefined) {
-        const source = graph.source;
-        // The detector reports its own failures; the call does not wait on it.
-        void tapKeywords(source).then(
-          (detach) => (closed ? detach() : cleanups.push(detach)),
-          () => {},
-        );
-      }
+      syncKeywords();
     },
     async createOffer() {
       const offer = await peer.createOffer();
@@ -237,6 +254,10 @@ export function createBrowserVoiceTransport(
         openGate(graph);
       }
     },
+    setKeywords(on) {
+      keywordsOn = on;
+      syncKeywords();
+    },
     // Meter-only analysers after the gate and on the remote stream; neither reaches the context
     // destination. A shut gate reads zero outright: a disconnected analyser keeps its last frame.
     levels: () =>
@@ -251,6 +272,7 @@ export function createBrowserVoiceTransport(
       closed = true;
       // Shut the gate before anything else so no later microphone frame reaches the sender.
       graph?.source.disconnect();
+      syncKeywords();
       for (const cleanup of cleanups) cleanup();
       for (const track of microphone?.getTracks() ?? []) {
         track.enabled = false;

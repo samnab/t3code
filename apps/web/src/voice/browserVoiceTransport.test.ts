@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { createBrowserVoiceTransport } from "./browserVoiceTransport";
 
-function fixture(contextState: AudioContextState = "running", tapKeywords = false) {
+function fixture(
+  contextState: AudioContextState = "running",
+  tapKeywords = false,
+  keywordsOn = true,
+) {
   let grant: (stream: { getTracks(): Track[] }) => void = () => {};
   let deny: (error: Error) => void = () => {};
   const permission = new Promise<{ getTracks(): Track[] }>((resolve, reject) => {
@@ -143,6 +147,7 @@ function fixture(contextState: AudioContextState = "running", tapKeywords = fals
           return () => source.disconnect(keywordTap);
         }
       : undefined,
+    keywordsOn,
   );
   const track = new Track();
   const stream = { getTracks: () => [track] };
@@ -286,6 +291,28 @@ describe("browser voice resource ownership", () => {
     expect(f.contexts).toHaveLength(0);
     f.transport.close();
     expect(f.closePeer).toHaveBeenCalledOnce();
+  });
+});
+
+describe("browser voice live keywords", () => {
+  it("attaches and detaches the keyword tap mid-call without touching the gate", async () => {
+    const f = fixture("running", true, false);
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    f.transport.enableMicrophone();
+    f.captureFrame("A");
+    f.transport.setKeywords?.(true);
+    await Promise.resolve();
+    f.captureFrame("B");
+    f.transport.setKeywords?.(false);
+    f.captureFrame("C");
+    f.transport.setKeywords?.(true);
+    await Promise.resolve();
+    f.transport.close();
+    f.captureFrame("D");
+    expect(f.heardByKeywords).toEqual(["B"]);
+    expect(f.sent).toEqual(["A", "B", "C"]);
   });
 });
 

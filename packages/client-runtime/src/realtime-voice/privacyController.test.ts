@@ -144,6 +144,9 @@ function fixture(holdAt?: Stage, requireMountedOwner = false, keywordsEnabled = 
           operations.push(muted ? "mute" : "unmute");
           transport.muted = muted;
         },
+        setKeywords: (on: boolean) => {
+          operations.push(on ? "tap" : "untap");
+        },
         acquireMicrophone: () => step("microphone", index),
         async createOffer() {
           await step("offer", index);
@@ -925,6 +928,30 @@ describe("local privacy pause", () => {
       await whenMode(f.controller, "paused");
       return f;
     };
+
+    it("toggles a live call's keyword tap at once without touching mute, sending or local listening", async () => {
+      const f = fixture();
+      await f.controller.start(f.owner);
+      f.controller.setMicMuted(true);
+      f.operations.length = 0;
+      f.controller.setKeywords(true);
+      expect(f.operations).toEqual(["tap"]);
+      expect(f.controller.getSnapshot()).toMatchObject({
+        mode: "transmitting",
+        keywords: true,
+        micMuted: true,
+        listening: "off",
+      });
+      f.controller.setKeywords(false);
+      expect(f.operations).toEqual(["tap", "untap"]);
+      expect(f.transports[0]).toMatchObject({ sending: true, muted: true, closed: false });
+      expect(f.localListening.start).not.toHaveBeenCalled();
+      f.controller.setKeywords(true);
+      f.controller.pause();
+      await whenMode(f.controller, "paused");
+      expect(f.controller.getSnapshot()).toMatchObject({ keywords: true, listening: "listening" });
+      expect(f.operations.indexOf("close")).toBeLessThan(f.operations.indexOf("listen"));
+    });
 
     it("listens only after the call's capture closed and stops before resume opens a new one", async () => {
       const f = await pausedWithKeywords();
