@@ -94,6 +94,33 @@ navigator.mediaDevices.getUserMedia = async (constraints) => {
   }
   return microphone.stream.clone();
 };
+// `?volume=fixed` stands in for iOS, where element volume reads 1 and ignores writes. Otherwise
+// the last level written to any media element is recorded for the screenshot script.
+const volume = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "volume");
+Object.defineProperty(HTMLMediaElement.prototype, "volume", {
+  configurable: true,
+  get(this: HTMLMediaElement) {
+    return search.get("volume") === "fixed" ? 1 : volume?.get?.call(this);
+  },
+  set(this: HTMLMediaElement, level: number) {
+    if (search.get("volume") === "fixed") return;
+    // Only the assistant's element holds a stream; the support probe does not.
+    if (this.srcObject !== null) document.documentElement.dataset.agentVolume = String(level);
+    volume?.set?.call(this, level);
+  },
+});
+const srcObject = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "srcObject");
+Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
+  configurable: true,
+  get(this: HTMLMediaElement) {
+    return srcObject?.get?.call(this);
+  },
+  set(this: HTMLMediaElement, stream: MediaStream | null) {
+    srcObject?.set?.call(this, stream);
+    // The level the assistant's element plays at once its stream arrives.
+    if (stream !== null) document.documentElement.dataset.agentVolume = String(this.volume);
+  },
+});
 // `?sink=none` stands in for an engine without output selection. Otherwise the stub accepts the
 // listed ids without opening any output device.
 if (search.get("sink") === "none") Reflect.deleteProperty(HTMLMediaElement.prototype, "setSinkId");

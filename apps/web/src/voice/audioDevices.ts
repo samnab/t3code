@@ -69,10 +69,14 @@ export function writeVoiceVolume(volume: number) {
   } catch {}
 }
 
-/** False where element volume is read-only (iOS reads 1 and ignores writes): use device buttons. */
+let volumeSettable: boolean | undefined;
+/** False where element volume is read-only (iOS reads 1 and ignores writes): use device buttons.
+ * Probed once per page with a detached element. */
 export function canSetVoiceVolume() {
-  if (typeof document === "undefined") return false;
-  const probe = document.createElement("audio");
-  probe.volume = 0.5;
-  return probe.volume === 0.5;
+  if (volumeSettable === undefined) {
+    const probe = document.createElement("audio");
+    probe.volume = 0.5;
+    volumeSettable = probe.volume === 0.5;
+  }
+  return volumeSettable;
 }
