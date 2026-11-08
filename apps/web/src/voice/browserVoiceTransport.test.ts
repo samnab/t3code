@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { createBrowserVoiceTransport } from "./browserVoiceTransport";
 
-function fixture(contextState: AudioContextState = "running", tapKeywords = false) {
+function fixture(
+  contextState: AudioContextState = "running",
+  tapKeywords = false,
+  { speakerSelectable = false, microphoneId = "" } = {},
+) {
   let grant: (stream: { getTracks(): Track[] }) => void = () => {};
   let deny: (error: Error) => void = () => {};
   const permission = new Promise<{ getTracks(): Track[] }>((resolve, reject) => {
@@ -53,19 +57,26 @@ function fixture(contextState: AudioContextState = "running", tapKeywords = fals
   // Web Audio semantics: `disconnect(target)` drops one connection, bare `disconnect()` drops all,
   // including the keyword detector's tap.
   type Target = { receive(frame: string): void };
-  const source = {
-    targets: new Set<Target>(),
-    connect: vi.fn((target: Target) => {
-      source.targets.add(target);
-    }),
-    disconnect: vi.fn((target?: Target) => {
-      if (target === undefined) source.targets.clear();
-      else source.targets.delete(target);
-    }),
+  const makeSource = () => {
+    const made = {
+      targets: new Set<Target>(),
+      connect: vi.fn((target: Target) => {
+        made.targets.add(target);
+      }),
+      disconnect: vi.fn((target?: Target) => {
+        if (target === undefined) made.targets.clear();
+        else made.targets.delete(target);
+      }),
+    };
+    return made;
   };
-  const captureFrame = (frame: string) => {
-    for (const target of source.targets) target.receive(frame);
+  // One source per captured microphone stream, in capture order; `source` is the first.
+  const sources = [makeSource()];
+  const source = sources[0]!;
+  const captureOn = (from: ReturnType<typeof makeSource>, frame: string) => {
+    for (const target of from.targets) target.receive(frame);
   };
+  const captureFrame = (frame: string) => captureOn(source, frame);
   const heardByKeywords: string[] = [];
   const keywordTap = { receive: (frame: string) => heardByKeywords.push(frame) };
   const closeContext = vi.fn(async () => {});
@@ -98,7 +109,12 @@ function fixture(contextState: AudioContextState = "running", tapKeywords = fals
   class FakeAudioContext extends EventTarget {
     state = contextState;
     // The remote stream only feeds the assistant meter.
-    createMediaStreamSource = (stream: object) => ("id" in stream ? { connect: () => {} } : source);
+    createMediaStreamSource = (stream: object) => {
+      if ("id" in stream) return { connect: () => {} };
+      if (stream === micStream) return source;
+      sources.push(makeSource());
+      return sources.at(-1)!;
+    };
     createMediaStreamDestination = () => output;
     createGain = () => opening;
     createConstantSource = () => silence;
@@ -112,13 +128,18 @@ function fixture(contextState: AudioContextState = "running", tapKeywords = fals
       contexts.push(this);
     }
   }
-  const audio = Object.assign(new EventTarget(), {
-    autoplay: false,
-    srcObject: null,
-    play: vi.fn(async () => {}),
-    pause: vi.fn(),
-    remove: vi.fn(),
-  });
+  const setSinkId = vi.fn(async (_deviceId: string) => {});
+  const audio = Object.assign(
+    new EventTarget(),
+    {
+      autoplay: false,
+      srcObject: null,
+      play: vi.fn(async () => {}),
+      pause: vi.fn(),
+      remove: vi.fn(),
+    },
+    speakerSelectable ? { setSinkId } : {},
+  );
   const devices = Object.assign(new EventTarget(), { getUserMedia: vi.fn(() => permission) });
   vi.stubGlobal("AudioContext", FakeAudioContext);
   vi.stubGlobal("document", { createElement: () => audio });
@@ -137,15 +158,19 @@ function fixture(contextState: AudioContextState = "running", tapKeywords = fals
   const connected = vi.fn();
   const transport = createBrowserVoiceTransport(
     { connected, failed },
+    // The detector taps the newest microphone source.
     tapKeywords
       ? async () => {
-          source.connect(keywordTap);
-          return () => source.disconnect(keywordTap);
+          const tapped = sources.at(-1)!;
+          tapped.connect(keywordTap);
+          return () => tapped.disconnect(keywordTap);
         }
       : undefined,
+    () => microphoneId,
   );
   const track = new Track();
   const stream = { getTracks: () => [track] };
+  const micStream = stream;
   return {
     transport,
     track,
@@ -161,6 +186,13 @@ function fixture(contextState: AudioContextState = "running", tapKeywords = fals
     failed,
     outputTrack,
     source,
+    sources,
+    captureOn,
+    setSinkId,
+    newMicrophone: () => {
+      const next = new Track();
+      return { track: next, stream: { getTracks: () => [next] } };
+    },
     sent,
     heardByKeywords,
     captureFrame,
@@ -388,5 +420,110 @@ describe("browser voice levels", () => {
     expect(f.transport.levels?.()).toEqual({ input: 0.5, output: 0.25 });
     f.transport.close();
     expect(f.transport.levels?.()).toEqual({ input: 0, output: 0 });
+  });
+});
+
+describe("browser voice audio devices", () => {
+  async function live(options: Parameters<typeof fixture>[2] = {}) {
+    const f = fixture("running", true, options);
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    return f;
+  }
+  async function switchTo(f: Awaited<ReturnType<typeof live>>, deviceId: string) {
+    const next = f.newMicrophone();
+    f.devices.getUserMedia.mockImplementationOnce(async () => next.stream);
+    await f.transport.setMicrophone(deviceId);
+    return { ...next, source: f.sources.at(-1)! };
+  }
+
+  it("swaps the microphone behind an open gate and moves the keyword tap with it", async () => {
+    const f = await live();
+    f.transport.enableMicrophone();
+    const next = await switchTo(f, "usb");
+    expect(f.devices.getUserMedia).toHaveBeenLastCalledWith({
+      audio: { deviceId: { exact: "usb" } },
+    });
+    f.captureFrame("old");
+    f.captureOn(next.source, "new");
+    expect(f.sent).toEqual(["new"]);
+    expect(f.heardByKeywords).toEqual(["new"]);
+    expect(f.track.stop).toHaveBeenCalledOnce();
+    expect(next.track.enabled).toBe(true);
+    expect(f.silence.feeds).toBe(1);
+    // The old device's loss no longer concerns the call; the new one's does.
+    f.track.dispatchEvent(new Event("ended"));
+    expect(f.failed).not.toHaveBeenCalled();
+    next.track.dispatchEvent(new Event("ended"));
+    expect(f.failed).toHaveBeenCalledOnce();
+  });
+
+  it("never opens a shut or muted gate when switching, and does nothing once closed", async () => {
+    const f = await live();
+    const connecting = await switchTo(f, "usb");
+    f.captureOn(connecting.source, "before-approval");
+    expect(connecting.track.enabled).toBe(false);
+    f.transport.enableMicrophone();
+    f.transport.setMicMuted?.(true);
+    const muted = await switchTo(f, "studio");
+    f.captureOn(muted.source, "while-muted");
+    expect(f.sent).toEqual([]);
+    expect(f.heardByKeywords).toEqual(["before-approval", "while-muted"]);
+    f.transport.setMicMuted?.(false);
+    f.captureOn(muted.source, "unmuted");
+    expect(f.sent).toEqual(["unmuted"]);
+    // Paused or stopped, the call is closed: a choice is saved for the next call, not captured.
+    f.transport.close();
+    const calls = f.devices.getUserMedia.mock.calls.length;
+    await f.transport.setMicrophone("usb");
+    expect(f.devices.getUserMedia).toHaveBeenCalledTimes(calls);
+  });
+
+  it("keeps the call on the current microphone when the new one cannot be captured", async () => {
+    const f = await live();
+    f.transport.enableMicrophone();
+    f.devices.getUserMedia.mockImplementationOnce(async () => {
+      throw new DOMException("Could not start audio source", "NotReadableError");
+    });
+    await expect(f.transport.setMicrophone("busy")).rejects.toThrow("Could not start");
+    f.captureFrame("still-old");
+    expect(f.sent).toEqual(["still-old"]);
+    expect(f.track.stop).not.toHaveBeenCalled();
+    expect(f.failed).not.toHaveBeenCalled();
+  });
+
+  it("keeps the call when another device is added or removed", async () => {
+    const f = await live();
+    f.transport.enableMicrophone();
+    f.devices.dispatchEvent(new Event("devicechange"));
+    f.captureFrame("after-change");
+    expect(f.sent).toEqual(["after-change"]);
+    expect(f.failed).not.toHaveBeenCalled();
+  });
+
+  it("captures a saved microphone, or the system default once it is gone", async () => {
+    const f = fixture("running", false, { microphoneId: "gone" });
+    f.devices.getUserMedia.mockImplementationOnce(async () => {
+      throw new DOMException("No such device", "OverconstrainedError");
+    });
+    const pending = f.transport.acquireMicrophone();
+    f.grant(f.stream);
+    await pending;
+    expect(f.devices.getUserMedia.mock.calls).toEqual([
+      [{ audio: { deviceId: { exact: "gone" } } }],
+      [{ audio: true }],
+    ]);
+  });
+
+  it("routes playback with setSinkId where supported and reports when it is not", async () => {
+    const supported = await live({ speakerSelectable: true });
+    await expect(supported.transport.setSpeaker("headphones")).resolves.toBe(true);
+    expect(supported.setSinkId).toHaveBeenCalledExactlyOnceWith("headphones");
+    supported.transport.close();
+    vi.unstubAllGlobals();
+    const unsupported = await live();
+    await expect(unsupported.transport.setSpeaker("headphones")).resolves.toBe(false);
+    expect(unsupported.setSinkId).not.toHaveBeenCalled();
   });
 });

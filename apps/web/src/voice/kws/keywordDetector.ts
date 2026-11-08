@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { captureMicrophone } from "../audioDevices";
 
 /**
  * On-device "pause voice" / "resume voice" / "confirm unpause" detection. Assets are
@@ -191,9 +192,14 @@ export function createKeywordDetector(events: {
 /**
  * The paused conversation's detector-only capture: its own microphone grant and AudioContext,
  * connected to nothing but the detector. `stop` releases both; a late grant after `stop` is
- * released at once. Any capture failure reports `failed`.
+ * released at once. Any capture failure reports `failed`. `microphone` is the call's chosen device,
+ * read at each start, so restarting picks up a new choice.
  */
-export function createLocalListening(detector: KeywordDetector, failed: () => void) {
+export function createLocalListening(
+  detector: KeywordDetector,
+  failed: () => void,
+  microphone: () => string = () => "",
+) {
   let stopCurrent: (() => void) | null = null;
   return {
     start() {
@@ -211,7 +217,7 @@ export function createLocalListening(detector: KeywordDetector, failed: () => vo
         failed();
       };
       void (async () => {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await captureMicrophone(microphone());
         // No output device: reopening a Bluetooth output can block the renderer for 10 s.
         const context = new AudioContext({ sinkId: { type: "none" } });
         let detach = () => {};

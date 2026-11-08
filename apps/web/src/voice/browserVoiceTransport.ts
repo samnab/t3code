@@ -1,10 +1,11 @@
 import type { VoiceTransport } from "@t3tools/client-runtime/realtime-voice";
+import { captureMicrophone, microphoneConstraints } from "./audioDevices";
 
 /**
  * A single peer and sink; closing also releases a microphone granted after cancellation.
  * The peer sends a Web Audio destination track. The microphone reaches it only while the gate
  * (the source → destination connection) is open, so the sender never holds the raw track.
- * `tapKeywords`, when given, also feeds the microphone to the local keyword detector.
+ * `tapKeywords` also feeds the microphone to the keyword detector; `microphoneId` ("" = default).
  */
 // Audio already in the track pipeline at gate-open predates it. With synthetic tracks, holding 8
 // quanta still leaked a 5 ms block in 8-11 of 50 trials; 12 and 24 leaked none in 50 or 100
@@ -19,13 +20,22 @@ declare global {
   }
 }
 
+export interface BrowserVoiceTransport extends VoiceTransport {
+  /** Captures `deviceId` and swaps it in behind the gate, which keeps its open, shut or muted
+   * state. Rejects, keeping the current microphone, when the device cannot be captured. */
+  setMicrophone(deviceId: string): Promise<void>;
+  /** Plays the assistant on `deviceId` ("" = system default). False where outputs can't be chosen. */
+  setSpeaker(deviceId: string): Promise<boolean>;
+}
+
 export function createBrowserVoiceTransport(
   events: {
     connected(): void;
     failed(reason: string): void;
   },
   tapKeywords?: (source: MediaStreamAudioSourceNode) => Promise<() => void>,
-): VoiceTransport {
+  microphoneId: () => string = () => "",
+): BrowserVoiceTransport {
   const peer = new RTCPeerConnection();
   const audio = document.createElement("audio");
   audio.autoplay = true;
@@ -112,6 +122,34 @@ export function createBrowserVoiceTransport(
     channel.removeEventListener("error", onChannelError);
     audio.removeEventListener("error", onAudioError);
   });
+  // Losing the microphone in use ends the call. Other devices coming and going do not.
+  let unwatchMicrophone = () => {};
+  const adoptMicrophone = (stream: MediaStream) => {
+    unwatchMicrophone();
+    microphone = stream;
+    const tracks = stream.getTracks();
+    for (const track of tracks) {
+      track.enabled = gateOpen;
+      track.addEventListener("ended", fail);
+      track.addEventListener("mute", fail);
+    }
+    unwatchMicrophone = () => {
+      for (const track of tracks) {
+        track.removeEventListener("ended", fail);
+        track.removeEventListener("mute", fail);
+      }
+    };
+  };
+  cleanups.push(() => unwatchMicrophone());
+  const tap = (source: MediaStreamAudioSourceNode) => {
+    if (tapKeywords === undefined) return;
+    // The detector reports its own failures; the call does not wait on it.
+    void tapKeywords(source).then(
+      (detach) => (closed ? detach() : cleanups.push(detach)),
+      () => {},
+    );
+  };
+  let switches = 0;
   // A muted gate is still created and connected, without the microphone. The zero source keeps it
   // live: with no active input, Chromium's destination emits no frames and the peer sends no RTP.
   const openGate = (open: NonNullable<typeof graph>) => {
@@ -130,21 +168,12 @@ export function createBrowserVoiceTransport(
   };
   return {
     async acquireMicrophone() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await captureMicrophone(microphoneId());
       if (closed) {
         for (const track of stream.getTracks()) track.stop();
         return;
       }
-      microphone = stream;
-      for (const track of stream.getTracks()) {
-        track.enabled = false;
-        track.addEventListener("ended", fail);
-        track.addEventListener("mute", fail);
-        cleanups.push(() => {
-          track.removeEventListener("ended", fail);
-          track.removeEventListener("mute", fail);
-        });
-      }
+      adoptMicrophone(stream);
       // After the grant: the constructor can block the renderer 20 s on a stalled audio service.
       // No output device: the graph only feeds the peer and meters, and reopening a Bluetooth
       // output right after the last call blocked the renderer 10 s. The starting click resumes it.
@@ -168,16 +197,37 @@ export function createBrowserVoiceTransport(
       for (const track of graph.output.stream.getAudioTracks()) {
         peer.addTrack(track, graph.output.stream);
       }
-      navigator.mediaDevices.addEventListener("devicechange", fail);
-      cleanups.push(() => navigator.mediaDevices.removeEventListener("devicechange", fail));
-      if (tapKeywords !== undefined) {
-        const source = graph.source;
-        // The detector reports its own failures; the call does not wait on it.
-        void tapKeywords(source).then(
-          (detach) => (closed ? detach() : cleanups.push(detach)),
-          () => {},
-        );
+      tap(graph.source);
+    },
+    async setMicrophone(deviceId) {
+      if (closed || graph === null) return;
+      const mine = ++switches;
+      const stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints(deviceId));
+      if (closed || graph === null || mine !== switches) {
+        for (const track of stream.getTracks()) track.stop();
+        return;
       }
+      const previous = microphone;
+      // Off the gate and the keyword tap first, so the old device sends nothing more.
+      graph.source.disconnect();
+      graph = { ...graph, source: graph.context.createMediaStreamSource(stream) };
+      adoptMicrophone(stream);
+      for (const track of previous?.getTracks() ?? []) {
+        track.enabled = false;
+        track.stop();
+      }
+      // An open, unmuted gate is replaced as on unmute: the new device's first frames are discarded.
+      if (opening !== null && !micMuted) {
+        graph.silence.disconnect(opening);
+        opening.disconnect();
+        openGate(graph);
+      }
+      tap(graph.source);
+    },
+    async setSpeaker(deviceId) {
+      if (!("setSinkId" in audio)) return false;
+      if (!closed) await audio.setSinkId(deviceId);
+      return true;
     },
     async createOffer() {
       const offer = await peer.createOffer();

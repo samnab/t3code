@@ -31,6 +31,7 @@ import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useRealtimeVoice, useRealtimeVoiceActive } from "./RealtimeVoiceProvider";
+import { VoiceAudioDevices } from "./VoiceAudioDevices";
 
 const STATUS = {
   transmitting: "Microphone audio sent to Codex",
@@ -176,6 +177,7 @@ function VoiceStrip({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
               <VoiceDetails call={call} />
             </TooltipPopup>
           </Tooltip>
+          <VoiceAudioDevices labels={STRIP_LABELS} />
           <VoiceActions call={call} labels={STRIP_LABELS} />
         </div>
       </ComposerBanner.Root>
@@ -243,6 +245,7 @@ function VoicePill({
               </div>
             )}
             <div className="flex flex-wrap items-center gap-1">
+              <VoiceAudioDevices labels="" />
               <VoiceActions call={call} labels="" />
             </div>
           </div>

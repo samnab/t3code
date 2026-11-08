@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -14,7 +15,11 @@ import { ProviderRealtimeVoiceError, type EnvironmentId, type ThreadId } from "@
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
-import { createBrowserVoiceTransport } from "../../voice/browserVoiceTransport";
+import {
+  createBrowserVoiceTransport,
+  type BrowserVoiceTransport,
+} from "../../voice/browserVoiceTransport";
+import { readAudioDevice, writeAudioDevice, type AudioDeviceKind } from "../../voice/audioDevices";
 import { createKeywordDetector, createLocalListening } from "../../voice/kws/keywordDetector";
 import {
   isVoiceShortcutCommand,
@@ -93,6 +98,15 @@ function readKeywordsEnabled(): boolean {
   }
 }
 
+/** This device's chosen microphone and speaker ("" = system default). `switching` is the device a
+ * live call is moving to; `failed` the last choice that could not be applied (the old one stays). */
+export interface VoiceAudioRouting {
+  readonly microphone: string;
+  readonly speaker: string;
+  readonly switching: string | null;
+  readonly failed: { readonly kind: AudioDeviceKind; readonly deviceId: string } | null;
+}
+
 interface VoiceContext {
   readonly snapshot: VoiceSnapshot;
   readonly start: (environmentId: EnvironmentId, threadId: ThreadId) => void;
@@ -104,6 +118,8 @@ interface VoiceContext {
   readonly toggleMute: () => void;
   readonly levels: () => VoiceLevels;
   readonly setKeywords: (enabled: boolean) => void;
+  readonly audio: VoiceAudioRouting;
+  readonly chooseAudioDevice: (kind: AudioDeviceKind, deviceId: string) => void;
   readonly returnToOwner: (owner: VoiceOwner) => void;
 }
 const Context = createContext<VoiceContext | null>(null);
@@ -121,7 +137,9 @@ export function RealtimeVoiceProvider({
   const stopProvider = useOrchestrationCommand(threadEnvironment.stopRealtimeVoice, {
     reportFailure: false,
   });
-  const [{ controller, detector }] = useState(() => {
+  const [{ controller, detector, localListening, live }] = useState(() => {
+    // The newest call's transport; a closed one ignores device changes.
+    const live: { transport: BrowserVoiceTransport | null } = { transport: null };
     // Keyword commands come only from this device's microphone. A pause acts at once; a resume
     // only arms, and the confirm phrase resumes only while armed. Detector failure pauses a live
     // call and never resumes.
@@ -133,14 +151,26 @@ export function RealtimeVoiceProvider({
       },
       failed: () => controller.localListeningFailed(),
     });
+    const localListening = createLocalListening(
+      detector,
+      () => controller.localListeningFailed(),
+      () => readAudioDevice("microphone"),
+    );
     const controller: RealtimeVoiceController = createRealtimeVoiceController({
       keywordsEnabled: readKeywordsEnabled(),
-      localListening: createLocalListening(detector, () => controller.localListeningFailed()),
-      createTransport: (events) =>
-        createBrowserVoiceTransport(
+      localListening,
+      createTransport: (events) => {
+        const transport = createBrowserVoiceTransport(
           events,
           controller.getSnapshot().keywords ? (source) => detector.attach(source) : undefined,
-        ),
+          () => readAudioDevice("microphone"),
+        );
+        live.transport = transport;
+        // A saved speaker that is gone plays on the system default; the panel shows it disconnected.
+        const speaker = readAudioDevice("speaker");
+        if (speaker !== "") void transport.setSpeaker(speaker).catch(() => {});
+        return transport;
+      },
       createOperationId: randomUUID,
       validateOwner: validateVoiceOwner,
       now: () => Date.now(),
@@ -172,8 +202,47 @@ export function RealtimeVoiceProvider({
       describeError,
       watchOwner: watchVoiceOwner,
     });
-    return { controller, detector };
+    return { controller, detector, localListening, live };
   });
+  const [audio, setAudio] = useState<VoiceAudioRouting>(() => ({
+    microphone: readAudioDevice("microphone"),
+    speaker: readAudioDevice("speaker"),
+    switching: null,
+    failed: null,
+  }));
+  const audioRequests = useRef(0);
+  // Applies at once to a live call; while paused it restarts keyword listening and the next call
+  // captures it. A failed switch restores the previous choice, which the call is still using.
+  const chooseAudioDevice = async (kind: AudioDeviceKind, deviceId: string) => {
+    const previous = readAudioDevice(kind);
+    const request = ++audioRequests.current;
+    writeAudioDevice(kind, deviceId);
+    setAudio((current) => ({
+      ...current,
+      [kind]: deviceId,
+      switching: kind === "microphone" ? deviceId : current.switching,
+      failed: null,
+    }));
+    try {
+      if (kind === "speaker") await live.transport?.setSpeaker(deviceId);
+      else {
+        const { listening } = controller.getSnapshot();
+        if (listening === "listening" || listening === "armed") localListening.start();
+        await live.transport?.setMicrophone(deviceId);
+      }
+      if (request === audioRequests.current)
+        setAudio((current) => ({ ...current, switching: null }));
+    } catch {
+      if (request !== audioRequests.current) return;
+      writeAudioDevice(kind, previous);
+      setAudio((current) => ({
+        ...current,
+        [kind]: previous,
+        switching: null,
+        failed: { kind, deviceId },
+      }));
+    }
+  };
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to the voice controller to toast when a call ends
   useEffect(() => {
@@ -271,6 +340,8 @@ export function RealtimeVoiceProvider({
           } catch {}
           controller.setKeywords(enabled);
         },
+        audio,
+        chooseAudioDevice: (kind, deviceId) => void chooseAudioDevice(kind, deviceId),
         returnToOwner,
       }}
     >
